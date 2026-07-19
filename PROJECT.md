@@ -93,14 +93,19 @@ definitions.
   and `.github/copilot-instructions.md` is a discovery marker. Set to `render` (a byte-for-byte
   `parity:render` block in `.github/copilot-instructions.md`) only if the host drives work through a
   legacy in-editor Copilot IDE; the parity check enforces the render matches `AGENTS.md`.
-- **Reviewer (second-model review of plans and PRs):** primary Reviewer is **Codex** (harness),
-  running **GPT-5.6** (model — set in Codex settings; per ADR 0024 the harness and model are named
-  separately). PRs: a `@codex review` comment on the PR. Plans: a `@codex` mention on the issue's
-  plan comment. **Precondition:** the Codex GitHub app must be installed on this repository (HC
-  browser action — a mention with no app installed fails silently; see the feedback ledger's F9).
-  **Fallback:** Copilot code review requested via the GitHub API (backing model varies and is
-  undisclosed). If neither Reviewer responds, the faithfulness backstop degrades to flagging the
-  missing review in the SOW — never to silently skipping it.
+- **Reviewer (second-model review of plans and PRs):** the **acting primary** Reviewer is
+  **Copilot** (harness), running **model varies (GPT / Claude / Gemini)** (model — Copilot's backing
+  model is variable and undisclosed; per ADR 0024 the harness and model are named separately, and
+  this declaration matches the Attribution table above). PRs: a Copilot code review requested via
+  the GitHub API. Validated in practice on PR #5.
+  **Designated primary (pending precondition):** **Codex** (harness) running **GPT-5.6** (model —
+  set in Codex settings). PRs: a `@codex review` comment on the PR; plans: a `@codex` mention on the
+  issue's plan comment. **Precondition:** the Codex GitHub app must be installed on this repository
+  (HC browser action — a mention with no app installed fails silently; see the feedback ledger's
+  F9). Once the HC installs the app and a `@codex review` returns a real review, Codex resumes as
+  primary and Copilot returns to fallback.
+  If no Reviewer responds, the faithfulness backstop degrades to flagging the missing review in the
+  SOW — never to silently skipping it.
 - **Human gates (host policy):** this is a single-user host; the baseline's two mandatory human gates
   are tuned as follows.
   - **Plan approval — auto-approved.** `devise` (and `ship`'s Plan phase) still posts the plan to the
