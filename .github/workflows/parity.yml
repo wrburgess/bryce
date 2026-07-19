@@ -1,0 +1,27 @@
+name: parity
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          # No bundler: the checker is stdlib-only (ADR 0008).
+          bundler-cache: false
+
+      # The upstream ai-config self-tests live in its test/ tree, which is deliberately not vendored
+      # into a Host App (ai-config-sync skips it) — this host runs only the checks it ships.
+      - name: Enforce-hook self-test (Layer 3 Claude fast-fail; needs jq)
+        run: bash .claude/hooks/enforce-branch-creation.test.sh
+
+      - name: Structural parity check
+        run: ruby scripts/parity_check.rb

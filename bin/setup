@@ -1,0 +1,21 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# bin/setup — minimal, business-neutral setup for the Config Bundle.
+#
+# The only baseline setup step is activating the protected-branch git hooks (issue #6 / ADR 0009): on
+# a fresh clone the hooks are inactive until core.hooksPath is set, so this must run once. A Host App
+# with its own richer bin/setup (e.g. a Rails app's `bundle install` / `db:prepare`) keeps it —
+# bin/ai-config-sync PRESERVES an existing bin/setup on re-sync (like PROJECT.md), so vendoring never
+# clobbers the host's version. When adopting the bundle, add `system! "bin/install-git-hooks"` to that
+# existing setup script.
+
+require "fileutils"
+
+APP_ROOT = File.expand_path("..", __dir__)
+
+Dir.chdir(APP_ROOT) do
+  puts "== Installing git hooks (protected-branch guard) =="
+  ok = system("bin/install-git-hooks")
+  exit(ok ? 0 : 1)
+end

@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# install-git-hooks — activate this repo's protected-branch git hooks (Layer 2, ADR 0009).
+#
+# Sets core.hooksPath to .githooks so git runs the tracked hooks on every commit/push, and regenerates
+# the derived sidecar (.githooks/protected-branches) from PROJECT.md so the guard's list stays in sync
+# with the authored source. Idempotent — safe to run any time (bin/setup runs it).
+
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HOOKS_PATH=".githooks"
+
+cd "$REPO_ROOT"
+
+# Resolve a path to absolute form when it exists on disk, else return as-is.
+abspath() { if [[ -d "$1" ]]; then (cd "$1" && pwd); else printf '%s' "$1"; fi; }
+
+# Regenerate the protected-branch sidecar from PROJECT.md (the single authored source). Only overwrite
+# when the extraction yields something — a parse miss must never blank the list (the guard would then
+# fall back to its safe default, but keeping the committed sidecar is better).
+regenerate_sidecar() {
+  if ! command -v ruby >/dev/null 2>&1; then
+    echo "Note: ruby not found; keeping existing ${HOOKS_PATH}/protected-branches."
+    return
+  fi
+  local derived
+  derived="$(ruby "${REPO_ROOT}/bin/protected-branches" --file "${REPO_ROOT}/PROJECT.md" 2>/dev/null || true)"
+  if [[ -n "$derived" ]]; then
+    printf '%s\n' "$derived" > "${REPO_ROOT}/${HOOKS_PATH}/protected-branches"
+    echo "Regenerated ${HOOKS_PATH}/protected-branches from PROJECT.md."
+  else
+    echo "Warning: could not derive protected branches from PROJECT.md; keeping existing ${HOOKS_PATH}/protected-branches."
+  fi
+}
+
+CURRENT_HOOKS_PATH="$(git config --local --get core.hooksPath || true)"
+DEFAULT_HOOKS_PATH="$(git rev-parse --git-path hooks)"   # git's built-in default
+
+# Overwrite when core.hooksPath is unset, already ours, or pointing at git's
+# DEFAULT hooks dir. That last case is the important one: a value like
+# `<repo>/.git/hooks` means "no custom hooks configured", yet it is NOT empty,
+# so a naive `-n` check would skip it forever — silently leaving this repo's
+# protected-branch hooks inactive (the exact state that lets an AC commit to a
+# protected branch). Only a GENUINELY custom path (e.g. .husky) is preserved.
+if [[ -n "$CURRENT_HOOKS_PATH" \
+   && "$CURRENT_HOOKS_PATH" != "$HOOKS_PATH" \
+   && "$(abspath "$CURRENT_HOOKS_PATH")" != "$(abspath "$DEFAULT_HOOKS_PATH")" ]]; then
+  cat <<EOF
+Skipped: core.hooksPath is set to a custom path '${CURRENT_HOOKS_PATH}'.
+To use this repository's protected-branch hooks instead, run:
+  git config --local core.hooksPath ${HOOKS_PATH}
+EOF
+  regenerate_sidecar
+  exit 0
+fi
+
+git config --local core.hooksPath "$HOOKS_PATH"
+echo "Configured core.hooksPath to '${HOOKS_PATH}'."
+regenerate_sidecar
