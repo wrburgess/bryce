@@ -79,7 +79,7 @@ mirroring `docs/overlays/ai-config-rails.md` — not pushed into the stack-neutr
 
 ## F8 — Auto-approving the plan gate silently removes `ship`'s context firebreak
 
-**Disposition: `upstream` · Status: recorded (file after F1's issue lands, or fold into ai-config#94)**
+**Disposition: `upstream` · Status: filed (constraint comment on [ai-config#94](https://github.com/wrburgess/ai-config/issues/94#issuecomment-5016880327))**
 
 `ship` fights context rot by treating its two human gates as **session boundaries**: waiting for
 plan approval naturally forced a fresh context before the implement churn. A host that sets the
@@ -94,7 +94,7 @@ Related to F1 (ai-config#94): if gate policy becomes a PROJECT.md value, this is
 
 ## F9 — The Reviewer role has no wired invocation path per tool
 
-**Disposition: `upstream` · Status: recorded**
+**Disposition: `upstream` · Status: filed ([ai-config#99](https://github.com/wrburgess/ai-config/issues/99))**
 
 The lifecycle's Reviewer role ("a different model from the AC") assumes the Reviewer can actually be
 summoned, but the baseline documents no per-tool invocation path. Field test on bryce PR #1: a
@@ -110,7 +110,7 @@ flagged SOW; Codex app installation on the repo is the HC precondition.
 
 ## F10 — Repo-centric self-references survive vendoring and mislead in a host clone
 
-**Disposition: `upstream` · Status: recorded (surfaced by Copilot's second-model review of bryce PR #1)**
+**Disposition: `upstream` · Status: filed ([ai-config#100](https://github.com/wrburgess/ai-config/issues/100); fix PR [ai-config#101](https://github.com/wrburgess/ai-config/pull/101), which also addresses #95/#97/#98)** — surfaced by Copilot's second-model review of bryce PR #1
 
 Two vendored files speak from the upstream repo's perspective and become wrong in a host: the usage
 guide's §1/§6 say "from a clone of this repo" while instructing `ruby bin/ai-config-sync` — a script
