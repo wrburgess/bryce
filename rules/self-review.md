@@ -21,6 +21,7 @@
 - [ ] The full quality gate passes locally.
 - [ ] If this is a lifecycle stage, its terminal artifact actually exists (e.g. `invoke` is not done until the PR exists — a commit is not the artifact).
 - [ ] Any `<placeholder>`-style token in text posted to the lifecycle host (issue/PR/comment body) is written host-safe (`{name}` / `NAME`) — GitHub strips angle-bracket tokens.
+- [ ] *(Bryce host extension)* If this task fought the vendored ai-config baseline — a baseline file forked, a check red out of the box, a missing procedure — the friction is recorded in [`docs/ai-config-feedback/`](../docs/ai-config-feedback/README.md) with a disposition (`upstream` / `overlay` / `host-only`).
 
 ## Anti-Patterns
 
