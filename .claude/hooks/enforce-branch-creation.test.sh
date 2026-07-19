@@ -22,8 +22,9 @@
 #
 # This guard is the per-tool accelerator; the invocation-agnostic backstop for
 # ALL commit paths (human, IDE, `--no-verify`) is the git-level pre-commit /
-# pre-push hooks in .githooks/ (bin/guard-protected-branch), covered by
-# test/guard_protected_branch.test.sh.
+# pre-push hooks in .githooks/ (bin/guard-protected-branch), covered upstream by
+# ai-config's test/guard_protected_branch.test.sh (the test/ tree is not
+# vendored into Host Apps).
 
 set -uo pipefail
 

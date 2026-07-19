@@ -14,7 +14,9 @@ lifecycle from any of the five configured agents (Claude, Codex, Copilot, Antigr
 ## 1. Vendor the baseline in
 
 Copy the baseline into your Host App — distributed by **copying files in**, no submodule/package/upstream
-tracking ([ADR 0001](../adr/0001-distribute-as-copy-in-sync-script.md)). From a clone of this repo:
+tracking ([ADR 0001](../adr/0001-distribute-as-copy-in-sync-script.md)). The `ai-config-sync` script
+lives only in the upstream [ai-config](https://github.com/wrburgess/ai-config) repo (it is never
+vendored into a Host App), so run these **from a clone of upstream ai-config**:
 
 ```bash
 # Preview what would be copied (writes nothing):
@@ -136,7 +138,8 @@ dropping a link target or rewriting content on copy would break a host silently.
 ## 6. Update / re-sync
 
 Updating is a **re-run of the sync followed by a manual merge**
-([ADR 0001](../adr/0001-distribute-as-copy-in-sync-script.md)):
+([ADR 0001](../adr/0001-distribute-as-copy-in-sync-script.md)) — again from a clone of upstream
+ai-config, since the script is not vendored:
 
 ```bash
 ruby bin/ai-config-sync /path/to/host-app
