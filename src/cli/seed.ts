@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import { loadConfig } from "../config.js";
+import { loadDotEnv } from "../env.js";
 import type { Db } from "../db/client.js";
 import { openDb } from "../db/client.js";
 import { players } from "../db/schema.js";
@@ -213,6 +214,7 @@ async function runList(deps: SeedDeps): Promise<number> {
 }
 
 export async function main(): Promise<number> {
+  loadDotEnv();
   const config = loadConfig();
   const { db, close } = openDb(config.databasePath);
   try {

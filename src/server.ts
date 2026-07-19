@@ -2,6 +2,7 @@ import { serve } from "@hono/node-server";
 import { count, desc, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { loadConfig } from "./config.js";
+import { loadDotEnv } from "./env.js";
 import type { Db } from "./db/client.js";
 import { openDb } from "./db/client.js";
 import { digestDeliveries, players, statLines } from "./db/schema.js";
@@ -41,6 +42,7 @@ export function createApp(db: Db): Hono {
 }
 
 if (isMain(import.meta.url)) {
+  loadDotEnv();
   const config = loadConfig();
   const { db } = openDb(config.databasePath);
   const app = createApp(db);

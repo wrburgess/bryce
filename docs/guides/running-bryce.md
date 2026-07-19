@@ -26,8 +26,12 @@ npm run digest
 
 ## Environment variables
 
-All configuration is environment-only; secrets never live in the repo. `loadConfig` (see
-[`src/config.ts`](../../src/config.ts)) validates on startup and fails closed on anything missing.
+All configuration is environment-only; secrets never live in the repo. Each entrypoint first loads
+`.env` from the working directory if present (native Node loader, [`src/env.ts`](../../src/env.ts));
+real environment variables always win over file values, and the launchd plists below work because
+they set `WorkingDirectory` to the repo. `loadConfig` (see
+[`src/config.ts`](../../src/config.ts)) then validates on startup and fails closed on anything
+missing.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|

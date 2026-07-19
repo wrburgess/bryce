@@ -1,8 +1,10 @@
 import { loadConfig } from "../config.js";
+import { loadDotEnv } from "../env.js";
 import { openDb } from "../db/client.js";
 import { isMain } from "./main.js";
 
 export function main(): void {
+  loadDotEnv();
   const config = loadConfig();
   const { close } = openDb(config.databasePath);
   close();

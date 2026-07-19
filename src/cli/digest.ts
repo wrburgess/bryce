@@ -1,10 +1,12 @@
 import { loadConfig } from "../config.js";
+import { loadDotEnv } from "../env.js";
 import { openDb } from "../db/client.js";
 import { runDigest } from "../jobs/digest.js";
 import { createMailer } from "../mailer/index.js";
 import { isMain } from "./main.js";
 
 export async function main(): Promise<number> {
+  loadDotEnv();
   const config = loadConfig();
   const { db, close } = openDb(config.databasePath);
   try {
