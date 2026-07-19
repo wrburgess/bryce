@@ -29,6 +29,17 @@ A Player's source-native identity: the MLB Stats API `personId`, which is stable
 every MiLB level. NCAA Players have no reliable equivalent (see *Flagged ambiguities*).
 _Avoid_: "player id" (ambiguous with the app's own primary key)
 
+**Stat Line**:
+One Player's line for one *game* in one role — batting or pitching. The digest's atomic unit;
+per-game, never per-day.
+_Avoid_: "daily stat line" (a date can hold two games), "box score" (that's the whole game's record)
+
+**Game ID**:
+The source-native identifier of a single game (the MLB Stats API `gamePk`). The NCAA adapter
+synthesizes a stable stand-in (date + opponent + game sequence) so nothing outside the adapter
+knows the difference.
+_Avoid_: "game date" (a date is not an identifier — doubleheaders)
+
 ## Relationships
 
 - A **Player** has exactly one **Level** at a time; promotion or demotion *changes* his Level, it
@@ -36,6 +47,11 @@ _Avoid_: "player id" (ambiguous with the app's own primary key)
 - A **Player**'s Level, MiLB Level, and team are refreshed automatically from the source APIs
   during the nightly fetch — the digest regroups on its own when a Player moves.
 - A **Watch List** is just the active subset of Players; there is no separate list object.
+- A **Player** produces at most two **Stat Lines** per game — one batting, one pitching (a two-way
+  player produces both).
+- One date can hold several **Stat Lines** for the same Player (doubleheaders): uniqueness is
+  Player + **Game ID** + role, never Player + date
+  ([ADR 0029](../adr/0029-stat-lines-per-game-keyed-by-game-id.md)).
 
 ## Example dialogue
 
@@ -49,3 +65,5 @@ _Avoid_: "player id" (ambiguous with the app's own primary key)
   location only, refreshed from the source, never identity.
 - NCAA player identity is unresolved by design so far: no clean numeric ID; matching may need
   school + name. To be settled when the NCAA adapter is distilled (Phase 3).
+- "daily stat line" (the handoff's table name) read as one-per-day — resolved: a **Stat Line** is
+  per-game; the *digest* is what's daily.
