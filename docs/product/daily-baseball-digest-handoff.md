@@ -4,6 +4,31 @@
 > against; decisions refined from it are captured in [`CONTEXT.md`](../../CONTEXT.md) and
 > [`docs/adr/`](../adr/) via the `distill` skill.
 
+## ⚠️ Architecture revision — 2026-07-19 (supersedes parts of the original below)
+
+Same product (daily digest of MLB/MiLB/NCAA stat lines for a personal watch list), re-scoped the
+same day in an architecture session with the HC. Where this section conflicts with the original
+handoff below, **this section wins**; the original is kept intact as the product-requirements
+record (data sources, data model starting point, digest content, and phasing intent all still
+apply).
+
+- **Stack: TypeScript on Node** — not Rails ([ADR 0025](../adr/0025-typescript-node-stack.md)).
+  Hono for HTTP, Zod for all boundary contracts, Drizzle for schema/migrations, Vitest for tests.
+- **Interface: AI/API-first, no web UI** ([ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)).
+  Primary surface is an **MCP server** (watch-list tools, stat queries, digest preview, read-only
+  SQL); a thin token-authed REST API alongside; the digest email gains an optional LLM-written
+  narrative summary. The original Phase 2 web UI is **cancelled**.
+- **Storage: SQLite (WAL) + Litestream → R2** ([ADR 0026](../adr/0026-sqlite-over-postgres.md)).
+- **Hosting: the HC's MacBook behind a Cloudflare Tunnel**, `launchd`-managed, Cloudflare Access on
+  the tunnel ([ADR 0028](../adr/0028-local-macbook-hosting-cloudflare-tunnel.md)). Jobs are
+  **self-healing, not punctual**: trailing-window fetches, covered-date-keyed digest delivery,
+  idempotent upserts.
+- **Email: provider-agnostic mailer** — default Postmark (HC's existing free Developer plan),
+  Forward Email SMTP as the alternative. The original "provider TBD" question is resolved.
+- **Revised phasing:** Phase 1 — MLB/MiLB pipeline + digest email (unchanged milestone);
+  Phase 2 — **MCP server + REST API** (replaces the web UI); Phase 3 — NCAA (unchanged);
+  a contained Python analysis annex remains a sanctioned later idea (ADR 0025).
+
 ## Overview
 
 Build a Rails application that emails me a daily digest of the previous day's stats for a personal

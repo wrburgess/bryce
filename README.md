@@ -1,16 +1,21 @@
 # Bryce — Daily Baseball Digest
 
-A single-user Rails 8 application that emails a daily digest of the previous day's stats for a
-personal watch list of baseball players across three levels: **MLB**, **MiLB** (all levels), and
-**NCAA**. Boring, conventional Rails over clever custom solutions.
+A single-user, **AI-and-API-first** application that emails a daily digest of the previous day's
+stats for a personal watch list of baseball players across three levels: **MLB**, **MiLB** (all
+levels), and **NCAA**. No web UI: the primary interface is an **MCP server**, so Claude (web,
+mobile, or CLI) is the front end.
 
 - **Product spec / handoff:** [`docs/product/daily-baseball-digest-handoff.md`](docs/product/daily-baseball-digest-handoff.md)
+  (see its 2026-07-19 architecture revision)
 - **Domain glossary & decisions:** [`CONTEXT.md`](CONTEXT.md) + [`docs/adr/`](docs/adr/)
+  (stack/storage/interface/hosting: ADRs 0025–0028)
 
 ## Stack
 
-Rails 8 · Solid Queue (+ `config/recurring.yml`) · Hotwire · Bootstrap 5 · SQLite · ActionMailer ·
-Faraday · Minitest.
+TypeScript on Node · Hono (REST API) · MCP TypeScript SDK (primary interface) · Zod (boundary
+contracts) · SQLite in WAL mode + Drizzle (+ Litestream → R2 backup) · Vitest. Hosted on the HC's
+MacBook behind a Cloudflare Tunnel with Cloudflare Access; email via Postmark (Forward Email SMTP
+as the swappable alternative).
 
 ## AI config
 

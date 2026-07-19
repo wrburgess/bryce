@@ -4,9 +4,11 @@ The **Project Config**: the one place a Host App declares its host-specific valu
 [Canonical Source](AGENTS.md) stay generic. A vendoring Host App edits the values in this file; it
 does not edit `AGENTS.md` to change them.
 
-> **Host App: Bryce** — a single-user Rails 8 application that emails a daily digest of the previous
-> day's stats for a personal watch list of baseball players (MLB, MiLB, NCAA). Solid Queue for jobs,
-> Hotwire for interactivity, Bootstrap 5 for styling, SQLite for storage, Minitest for tests.
+> **Host App: Bryce** — a single-user, AI-and-API-first application (TypeScript on Node) that emails
+> a daily digest of the previous day's stats for a personal watch list of baseball players (MLB,
+> MiLB, NCAA). MCP server as the primary interface (no web UI), thin REST API alongside, SQLite
+> (WAL + Litestream) for storage, Vitest for tests; hosted on the HC's MacBook behind a Cloudflare
+> Tunnel. Stack/storage/interface/hosting decisions: ADRs 0025–0028.
 
 > Section headings below are a contract: the parity check (`scripts/parity_check.rb`) asserts each of
 > the five `##` sections is present. Rename them and the check fails.
@@ -19,15 +21,16 @@ this table — they never hardcode a stack's commands.
 | Purpose | Command |
 |---------|---------|
 | Structural parity | `ruby scripts/parity_check.rb` |
-| Lint | `bin/rubocop` |
-| Tests | `bin/rails test` |
-| Security scan | `bin/brakeman --no-pager -q` |
-| Dependency audit | `bin/bundler-audit check --update` |
+| Typecheck | `npm run typecheck` |
+| Lint | `npm run lint` |
+| Tests | `npm test` |
+| Dependency audit | `npm audit --omit=dev` |
 
-Until the Rails application is scaffolded (Phase 1 of the digest build), the Rails rows have nothing
-to inspect and are reported `not_run` with that stated reason. A check whose command runs but has
-nothing applicable to inspect is reported `pass`/`not_run` with a stated reason — checks are **not
-applicable, not skipped**, so rigor is unchanged. The structural parity check applies from day one.
+Until the TypeScript application is scaffolded (Phase 1 of the digest build), the npm rows have
+nothing to inspect and are reported `not_run` with that stated reason. A check whose command runs
+but has nothing applicable to inspect is reported `pass`/`not_run` with a stated reason — checks are
+**not applicable, not skipped**, so rigor is unchanged. The structural parity check applies from day
+one.
 
 ## Attribution & Model Declaration
 
