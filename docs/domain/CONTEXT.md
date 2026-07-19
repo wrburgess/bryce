@@ -50,6 +50,11 @@ The daily email reporting every Stat Line not yet reported by a previous Digest,
 sent every day, even when empty (an empty Digest is proof of life).
 _Avoid_: "yesterday's stats" (a phrase, not the rule — late-arriving lines are still reported)
 
+**In Season**:
+A Player whose competition still has games left to play. An out-of-season Player drops out of the
+Digest entirely — no "no new stats" mention — and rejoins automatically when his games resume.
+_Avoid_: "active" (that's the Watch List flag; a benched or injured Player is still In Season)
+
 ## Relationships
 
 - A **Player** has exactly one **Level** at a time; promotion or demotion *changes* his Level, it
@@ -66,6 +71,8 @@ _Avoid_: "yesterday's stats" (a phrase, not the rule — late-arriving lines are
   ingestion is completeness-driven, reporting is novelty-driven
   ([ADR 0030](../adr/0030-full-season-refresh-report-once-digest.md)).
 - A correction to an already-reported **Stat Line** updates storage quietly; it is not re-announced.
+- The **Digest** lists an **In Season** Player with no new **Stat Lines** under a "No new stats"
+  tail per Level section; an out-of-season Player is omitted, not listed.
 
 ## Example dialogue
 
@@ -83,3 +90,6 @@ _Avoid_: "yesterday's stats" (a phrase, not the rule — late-arriving lines are
   per-game; the *digest* is what's daily.
 - "yesterday's stats" (the handoff's framing) read as a date-window rule — resolved: it was just a
   phrase. Capture all stats whenever available (**Refresh**); report each exactly once (**Digest**).
+- "No game" (the handoff's list label) conflated four truths — off-day, sat out (DNP), data lag,
+  season over — resolved: the list is "No new stats", shown only for **In Season** Players; data
+  lag self-heals next Digest; DNP detection (schedule cross-reference) is a deferred later idea.
