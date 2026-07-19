@@ -56,10 +56,11 @@ Digest entirely — no "no new stats" mention — and rejoins automatically when
 _Avoid_: "active" (that's the Watch List flag; a benched or injured Player is still In Season)
 
 **Offseason Sleep**:
-The system's state from the end of the World Series to MLB Opening Day: Refresh pauses and the
-daily Digest is replaced by a weekly heartbeat ("alive; N players watched; games resume ~Opening
-Day"). Spring-training games are deliberately outside the domain — no Stat Lines, no early wake.
-MCP and the API stay live; only the pipeline sleeps.
+The system's state from the end of the World Series to the **earliest opening day among watched
+levels** — NCAA opening day (mid-February) if any NCAA Player is watched, otherwise MLB Opening
+Day. Refresh pauses and the daily Digest is replaced by a weekly heartbeat ("alive; N players
+watched; games resume ~{next opening day}"). Spring-training games are deliberately outside the
+domain — no Stat Lines, no early wake. MCP and the API stay live; only the pipeline sleeps.
 _Avoid_: "shutdown", "hibernate" (history remains queryable all winter)
 
 ## Relationships
@@ -82,7 +83,8 @@ _Avoid_: "shutdown", "hibernate" (history remains queryable all winter)
   tail per Level section; an out-of-season Player is omitted, not listed.
 - While at least one Player is **In Season**, the **Digest** is daily (even when empty); during
   **Offseason Sleep** a weekly heartbeat replaces it, and the daily cadence resumes automatically
-  at MLB Opening Day ([ADR 0031](../adr/0031-offseason-sleep-world-series-to-opening-day.md)).
+  at the earliest opening day among watched levels
+  ([ADR 0031](../adr/0031-offseason-sleep-world-series-to-opening-day.md)).
 
 ## Example dialogue
 
@@ -103,6 +105,7 @@ _Avoid_: "shutdown", "hibernate" (history remains queryable all winter)
 - "No game" (the handoff's list label) conflated four truths — off-day, sat out (DNP), data lag,
   season over — resolved: the list is "No new stats", shown only for **In Season** Players; data
   lag self-heals next Digest; DNP detection (schedule cross-reference) is a deferred later idea.
-- **Offseason Sleep vs. NCAA (unresolved, Phase 3):** NCAA baseball starts mid-February — inside
-  the post-World-Series sleep window. Whether an In Season NCAA Player wakes the pipeline early is
-  decided when the NCAA adapter is distilled.
+- **Offseason Sleep vs. NCAA** — NCAA baseball starts mid-February, inside the post-World-Series
+  sleep window. Resolved: the sleep ends at the *earliest opening day among watched levels*, so a
+  watched NCAA Player wakes the pipeline for NCAA opening day; MLB/MiLB Players rejoin at MLB
+  Opening Day (spring training still excluded).
