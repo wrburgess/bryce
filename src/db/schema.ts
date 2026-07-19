@@ -1,0 +1,99 @@
+import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+
+/**
+ * Storage schema. Invariants live in the database, not just app code
+ * (rules/backend.md): the Stat Line identity key is a DB-level unique index on
+ * [player_id, game_id, stat_type] — per-game, never per-date (ADR 0029).
+ */
+
+export const players = sqliteTable("players", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  /** MLB Stats API personId — stable across MLB and every MiLB level. Null for NCAA (Phase 3). */
+  externalId: integer("external_id").unique(),
+  fullName: text("full_name").notNull(),
+  level: text("level", { enum: ["mlb", "milb", "ncaa"] }).notNull(),
+  /** Triple-A | Double-A | High-A | Single-A | Rookie — only for level = milb. */
+  milbLevel: text("milb_level"),
+  teamName: text("team_name"),
+  position: text("position"),
+  schoolName: text("school_name"),
+  active: integer("active", { mode: "boolean" }).notNull().default(true),
+  notes: text("notes"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});
+
+export const digestDeliveries = sqliteTable(
+  "digest_deliveries",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    kind: text("kind", { enum: ["digest", "heartbeat"] }).notNull(),
+    /** Host-timezone calendar date (YYYY-MM-DD) this delivery covers. */
+    dateCovered: text("date_covered").notNull(),
+    sentAt: text("sent_at"),
+    playerCount: integer("player_count").notNull().default(0),
+    statLineCount: integer("stat_line_count").notNull().default(0),
+    status: text("status", { enum: ["sent", "failed"] }).notNull(),
+    errorMessage: text("error_message"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [uniqueIndex("digest_deliveries_kind_date_uq").on(t.kind, t.dateCovered)],
+);
+
+export const statLines = sqliteTable(
+  "stat_lines",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    playerId: integer("player_id")
+      .notNull()
+      .references(() => players.id),
+    /** Source-native game identifier (MLB Stats API gamePk). */
+    gameId: integer("game_id").notNull(),
+    statType: text("stat_type", { enum: ["batting", "pitching"] }).notNull(),
+    gameDate: text("game_date").notNull(),
+    gameNumber: integer("game_number").notNull().default(1),
+    gameType: text("game_type").notNull(),
+    isHome: integer("is_home", { mode: "boolean" }),
+    opponentName: text("opponent_name"),
+    teamName: text("team_name"),
+    sportId: integer("sport_id").notNull(),
+    leagueName: text("league_name"),
+    /** The split's stat object (hits, atBats, inningsPitched, ...), verbatim. */
+    stats: text("stats", { mode: "json" }).notNull(),
+    /** The whole gameLog split, verbatim, for future re-processing. */
+    raw: text("raw", { mode: "json" }).notNull(),
+    /** Set when a Digest reports this line; a correction never clears it (ADR 0030). */
+    digestDeliveryId: integer("digest_delivery_id").references(() => digestDeliveries.id),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [
+    // ADR 0029: per-game identity — never date-keyed (doubleheaders are two games).
+    uniqueIndex("stat_lines_player_game_type_uq").on(t.playerId, t.gameId, t.statType),
+  ],
+);
+
+export const seasonCalendar = sqliteTable(
+  "season_calendar",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    sportId: integer("sport_id").notNull(),
+    season: text("season").notNull(),
+    regularSeasonStart: text("regular_season_start"),
+    regularSeasonEnd: text("regular_season_end"),
+    postSeasonStart: text("post_season_start"),
+    postSeasonEnd: text("post_season_end"),
+    springStart: text("spring_start"),
+    springEnd: text("spring_end"),
+    fetchedAt: text("fetched_at").notNull(),
+  },
+  (t) => [uniqueIndex("season_calendar_sport_season_uq").on(t.sportId, t.season)],
+);
+
+export type PlayerRow = typeof players.$inferSelect;
+export type NewPlayerRow = typeof players.$inferInsert;
+export type StatLineRow = typeof statLines.$inferSelect;
+export type NewStatLineRow = typeof statLines.$inferInsert;
+export type DigestDeliveryRow = typeof digestDeliveries.$inferSelect;
+export type SeasonCalendarRow = typeof seasonCalendar.$inferSelect;
+export type NewSeasonCalendarRow = typeof seasonCalendar.$inferInsert;
