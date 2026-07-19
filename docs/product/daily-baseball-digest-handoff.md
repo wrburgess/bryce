@@ -28,6 +28,10 @@ apply).
 - **Revised phasing:** Phase 1 — MLB/MiLB pipeline + digest email (unchanged milestone);
   Phase 2 — **MCP server + REST API** (replaces the web UI); Phase 3 — NCAA (unchanged);
   a contained Python analysis annex remains a sanctioned later idea (ADR 0025).
+- **Distill deltas (see `docs/domain/CONTEXT.md` + ADRs 0029–0030):** Stat Lines are per-game
+  (doubleheader-safe); no date windows — full-season Refresh + report-once Digest, sent daily even
+  when empty; out-of-season Players are omitted from the Digest until their games resume.
+  **Later idea added:** DNP detection via schedule cross-reference ("sat: 3rd straight game").
 
 ## Overview
 
