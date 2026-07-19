@@ -40,6 +40,16 @@ synthesizes a stable stand-in (date + opponent + game sequence) so nothing outsi
 knows the difference.
 _Avoid_: "game date" (a date is not an identifier — doubleheaders)
 
+**Refresh**:
+The recurring job that re-ingests every active Player's *complete current-season game log* and
+upserts it idempotently — no date windows; adding a Player is just his first Refresh.
+_Avoid_: "yesterday fetch", "incremental sync" (there is no window to fall out of)
+
+**Digest**:
+The daily email reporting every Stat Line not yet reported by a previous Digest, grouped by Level —
+sent every day, even when empty (an empty Digest is proof of life).
+_Avoid_: "yesterday's stats" (a phrase, not the rule — late-arriving lines are still reported)
+
 ## Relationships
 
 - A **Player** has exactly one **Level** at a time; promotion or demotion *changes* his Level, it
@@ -52,6 +62,10 @@ _Avoid_: "game date" (a date is not an identifier — doubleheaders)
 - One date can hold several **Stat Lines** for the same Player (doubleheaders): uniqueness is
   Player + **Game ID** + role, never Player + date
   ([ADR 0029](../adr/0029-stat-lines-per-game-keyed-by-game-id.md)).
+- A **Refresh** makes storage complete; a **Digest** reports each **Stat Line** exactly once —
+  ingestion is completeness-driven, reporting is novelty-driven
+  ([ADR 0030](../adr/0030-full-season-refresh-report-once-digest.md)).
+- A correction to an already-reported **Stat Line** updates storage quietly; it is not re-announced.
 
 ## Example dialogue
 
@@ -67,3 +81,5 @@ _Avoid_: "game date" (a date is not an identifier — doubleheaders)
   school + name. To be settled when the NCAA adapter is distilled (Phase 3).
 - "daily stat line" (the handoff's table name) read as one-per-day — resolved: a **Stat Line** is
   per-game; the *digest* is what's daily.
+- "yesterday's stats" (the handoff's framing) read as a date-window rule — resolved: it was just a
+  phrase. Capture all stats whenever available (**Refresh**); report each exactly once (**Digest**).
