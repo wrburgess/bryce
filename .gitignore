@@ -1,0 +1,15 @@
+# Node
+node_modules/
+dist/
+
+# Environment / secrets
+.env
+.env.local
+
+# SQLite databases
+*.db
+*.db-wal
+*.db-shm
+
+# Misc
+*.log

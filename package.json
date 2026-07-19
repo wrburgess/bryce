@@ -1,0 +1,40 @@
+{
+  "name": "bryce",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Single-user daily digest of stat lines for a personal watch list of baseball players (MLB/MiLB pipeline, Phase 1).",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "refresh": "tsx src/cli/refresh.ts",
+    "digest": "tsx src/cli/digest.ts",
+    "seed": "tsx src/cli/seed.ts",
+    "db:migrate": "tsx src/cli/migrate.ts",
+    "server": "tsx src/server.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.14.0",
+    "better-sqlite3": "^12.2.0",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.8.0",
+    "nodemailer": "^9.0.3",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.30.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.15.0",
+    "@types/nodemailer": "^7.0.0",
+    "drizzle-kit": "^0.31.1",
+    "eslint": "^9.30.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.35.0",
+    "vitest": "^3.2.0"
+  }
+}
