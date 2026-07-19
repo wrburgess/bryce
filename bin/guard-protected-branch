@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# guard-protected-branch — invocation-agnostic protected-branch guard (Layer 2, ADR 0009).
+#
+# Called by the git hooks in .githooks/ (pre-commit, pre-push, pre-merge-commit, pre-rebase). Because
+# git runs those hooks on the real operation no matter which tool (or human) triggered it, this is the
+# portable primary enforcement — the reason "all agents" holds locally.
+#
+# Only AI Contributors (ACs) are blocked; Human Contributors (HCs) can push to a protected branch
+# freely. AC detection (the agent-vs-human exemption, a Project Config concern per ADR 0009):
+#   CLAUDE_CODE          — Claude Code (Anthropic)
+#   CODEX                — Codex CLI (OpenAI)
+#   GITHUB_COPILOT_AGENT — GitHub Copilot coding agent
+# Fallback: a non-interactive shell (no TTY) is also treated as an AC, catching Gemini and any future
+# agent we have not named explicitly.
+#
+# The protected-branch list is NOT hardcoded: it is read from the sidecar .githooks/protected-branches
+# (generated from PROJECT.md by bin/install-git-hooks / bin/protected-branches). If the sidecar is
+# missing or empty we fail CLOSED to a safe default set — never fail open.
+
+IS_AC=false
+[[ -n "${CLAUDE_CODE:-}" ]] && IS_AC=true
+[[ -n "${CODEX:-}" ]] && IS_AC=true
+[[ -n "${GITHUB_COPILOT_AGENT:-}" ]] && IS_AC=true
+[[ ! -t 0 ]] && IS_AC=true
+
+if [[ "$IS_AC" == "false" ]]; then
+  exit 0
+fi
+
+ACTION="${1:-change}"
+CURRENT_BRANCH="${2:-$(git rev-parse --abbrev-ref HEAD)}"
+
+# Resolve the sidecar relative to this script (bin/ is at the repo root, so bin/../.githooks).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SIDECAR="${SCRIPT_DIR}/../.githooks/protected-branches"
+
+# Fail-closed default if the derived sidecar is absent/unreadable/empty.
+DEFAULT_PROTECTED=("main" "master" "develop")
+PROTECTED_BRANCHES=()
+if [[ -r "$SIDECAR" ]]; then
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"   # ltrim
+    line="${line%"${line##*[![:space:]]}"}"    # rtrim
+    [[ -n "$line" ]] || continue
+    [[ "$line" == \#* ]] && continue           # skip comment lines
+    PROTECTED_BRANCHES+=("$line")
+  done < "$SIDECAR"
+fi
+[[ ${#PROTECTED_BRANCHES[@]} -eq 0 ]] && PROTECTED_BRANCHES=("${DEFAULT_PROTECTED[@]}")
+
+if [[ "$CURRENT_BRANCH" == "HEAD" ]]; then
+  # Detached HEAD states are not protected by branch name.
+  exit 0
+fi
+
+for branch in "${PROTECTED_BRANCHES[@]}"; do
+  if [[ "$CURRENT_BRANCH" == "$branch" ]]; then
+    cat >&2 <<EOF
+Blocked: cannot ${ACTION} on protected branch '${CURRENT_BRANCH}'.
+
+Create and switch to a feature branch first:
+  git checkout -b feature/<short-description>
+EOF
+    exit 2
+  fi
+done
+
+exit 0
