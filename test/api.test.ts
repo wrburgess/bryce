@@ -378,6 +378,19 @@ describe("REST API", () => {
       });
       expect(res.status).toBe(404);
     });
+
+    it("400s malformed JSON without refreshing anything", async () => {
+      await insertPlayer(opened.db, { externalId: 691185 });
+
+      const res = await app().request("/api/refresh", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: "{not json",
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "invalid-input" });
+      expect(await opened.db.select().from(statLines)).toHaveLength(0);
+    });
   });
 
   it("player row updates flow through: deactivated player excluded from digest send", async () => {

@@ -108,8 +108,10 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
   });
 
   api.post("/refresh", async (c) => {
-    // An empty or absent body means "refresh everything".
-    const body = RefreshInputSchema.parse(await c.req.json().catch(() => ({})));
+    // An empty or absent body means "refresh everything"; malformed JSON is a
+    // client error (SyntaxError -> 400 via onError), never a full refresh.
+    const raw = await c.req.text();
+    const body = RefreshInputSchema.parse(raw.trim().length === 0 ? {} : JSON.parse(raw));
     if (body.personId === undefined) {
       return c.json(await runRefresh(deps));
     }

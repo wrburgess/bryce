@@ -140,8 +140,9 @@ remains queryable; only the pipeline sleeps.
 openssl rand -hex 32        # generate once, put in .env as API_TOKEN=...
 ```
 
-The server fails closed: with no `API_TOKEN` it refuses to construct the `/api` and `/mcp`
-surfaces at all. Every request to them needs `Authorization: Bearer $API_TOKEN`; a missing or
+The server fails closed: with no `API_TOKEN` it refuses to start at all — app construction
+throws, so nothing is served, including `/health`. With a token set, every request to `/api`
+and `/mcp` needs `Authorization: Bearer $API_TOKEN`; a missing or
 wrong token gets a constant 401 (the token is never echoed or logged). Treat the token like any
 secret — rotate it by editing `.env` and restarting the server (Cloudflare Access in front of the
 tunnel is the second, independent layer per
