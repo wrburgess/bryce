@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { count, desc, eq } from "drizzle-orm";
+import { count, desc, eq, sql } from "drizzle-orm";
 import { Hono } from "hono";
 import { loadConfig } from "./config.js";
 import { loadDotEnv } from "./env.js";
@@ -19,8 +19,17 @@ export function createApp(db: Db): Hono {
       await db.select({ n: count() }).from(players).where(eq(players.active, true))
     )[0];
     const statLineCount = (await db.select({ n: count() }).from(statLines))[0];
+    // A retried delivery is updated in place (sentAt moves, createdAt does not),
+    // so "last" means latest activity: sentAt when sent, createdAt for failed rows.
     const last = (
-      await db.select().from(digestDeliveries).orderBy(desc(digestDeliveries.createdAt)).limit(1)
+      await db
+        .select()
+        .from(digestDeliveries)
+        .orderBy(
+          desc(sql`coalesce(${digestDeliveries.sentAt}, ${digestDeliveries.createdAt})`),
+          desc(digestDeliveries.createdAt),
+        )
+        .limit(1)
     )[0];
     return c.json({
       ok: true,

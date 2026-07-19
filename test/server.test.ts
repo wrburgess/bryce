@@ -47,4 +47,47 @@ describe("GET /health", () => {
       sentAt: "2026-07-19T12:00:00.000Z",
     });
   });
+
+  it("reports a retried delivery as last by send time, not row creation time", async () => {
+    // Row created earlier but retried (sentAt updated in place) after the newer row's send.
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-18",
+      status: "sent",
+      sentAt: "2026-07-19T13:00:00.000Z",
+      createdAt: "2026-07-18T12:00:00.000Z",
+    });
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "sent",
+      sentAt: "2026-07-19T12:00:00.000Z",
+      createdAt: "2026-07-19T12:00:00.000Z",
+    });
+
+    const app = createApp(opened.db);
+    const body = (await (await app.request("/health")).json()) as Record<string, unknown>;
+    expect(body.lastDelivery).toMatchObject({ dateCovered: "2026-07-18" });
+  });
+
+  it("reports a fresh failed attempt (null sentAt) as last by creation time", async () => {
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-18",
+      status: "sent",
+      sentAt: "2026-07-18T12:00:00.000Z",
+      createdAt: "2026-07-18T12:00:00.000Z",
+    });
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "failed",
+      sentAt: null,
+      createdAt: "2026-07-19T12:00:00.000Z",
+    });
+
+    const app = createApp(opened.db);
+    const body = (await (await app.request("/health")).json()) as Record<string, unknown>;
+    expect(body.lastDelivery).toMatchObject({ dateCovered: "2026-07-19", status: "failed" });
+  });
 });
