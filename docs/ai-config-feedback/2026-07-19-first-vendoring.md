@@ -6,7 +6,7 @@ Evidence for all entries is the PR's two commits.
 
 ## F1 — Gate policy is fixed prose in skill bodies, not a Project Config value
 
-**Disposition: `upstream` · Status: filed**
+**Disposition: `upstream` · Status: filed ([ai-config#94](https://github.com/wrburgess/ai-config/issues/94))**
 
 The HC's host policy for Bryce is "plan approval auto-approved; merge is the only human stop." The
 baseline hardcodes "two human gates, never bypassed" as prose in **four places** — `skills/ship`,
@@ -19,7 +19,7 @@ the skills and the lifecycle standard read.
 
 ## F2 — Vendored CI workflow is red out of the box
 
-**Disposition: `upstream` · Status: filed**
+**Disposition: `upstream` · Status: filed ([ai-config#95](https://github.com/wrburgess/ai-config/issues/95))**
 
 `.github/workflows/parity.yml` runs six self-tests from `test/`, but `ai-config-sync` deliberately
 never vendors `test/`. Any host that vendors the bundle and pushes gets a failing CI run on day one.
@@ -29,7 +29,7 @@ script transform/exclude it).
 
 ## F3 — The intake pipeline is not cleanly detachable
 
-**Disposition: `upstream` · Status: filed**
+**Disposition: `upstream` · Status: filed ([ai-config#96](https://github.com/wrburgess/ai-config/issues/96))**
 
 An application host has little use for the intake pipeline, but trimming it required coordinated
 edits across `scripts/parity_check.rb` (`REQUIRED_SKILLS`), `AGENTS.md` (skill table + count),
@@ -41,7 +41,7 @@ would make the common case safe and mechanical.
 
 ## F4 — No bootstrap path for vendoring into an empty repository
 
-**Disposition: `upstream` · Status: filed**
+**Disposition: `upstream` · Status: filed ([ai-config#97](https://github.com/wrburgess/ai-config/issues/97))**
 
 Bryce was a zero-commit repository: no default branch existed, so a feature-branch push would have
 become the default branch and no PR base would exist. The workaround (empty root commit on `main`,
@@ -51,7 +51,7 @@ document the sanctioned bootstrap sequence (or `ai-config-sync` grow an `--init`
 
 ## F5 — Bundle glossary vs. host domain glossary collision
 
-**Disposition: `upstream` · Status: filed**
+**Disposition: `upstream` · Status: filed ([ai-config#98](https://github.com/wrburgess/ai-config/issues/98))**
 
 The vendored `CONTEXT.md` is the *bundle's own* vocabulary (Config Bundle, Adapter, Skill…), parked
 at the exact path where the host's `distill` sessions want to grow the *host domain* glossary. Bryce
