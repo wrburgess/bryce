@@ -1,11 +1,10 @@
-import { and, desc, eq, inArray, isNull } from "drizzle-orm";
-import type { Db } from "../db/client.js";
-import type { PlayerRow } from "../db/schema.js";
-import { digestDeliveries, players, statLines } from "../db/schema.js";
-import type { RenderLine, RenderPlayer } from "../digest/render.js";
+import { and, desc, eq, inArray } from "drizzle-orm";
+import { digestDeliveries, statLines } from "../db/schema.js";
+import { assembleDigest } from "../digest/assemble.js";
 import { renderDigest, renderHeartbeat } from "../digest/render.js";
-import { hostDate, isInSeason, sleepWindow } from "../domain/season.js";
+import { hostDate, sleepWindow } from "../domain/season.js";
 import type { Mailer } from "../mailer/types.js";
+import type { Db } from "../db/client.js";
 import { loadActivePlayers, loadCalendars } from "./refresh.js";
 
 export interface DigestDeps {
@@ -63,35 +62,14 @@ export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
     };
   }
 
-  // One join, not one query per player (rules/backend.md).
-  const unreported = await db
-    .select({ line: statLines, player: players })
-    .from(statLines)
-    .innerJoin(players, eq(statLines.playerId, players.id))
-    .where(and(isNull(statLines.digestDeliveryId), eq(players.active, true)));
-
-  const renderLines: RenderLine[] = unreported.map(({ line, player }) => ({
-    player: toRenderPlayer(player),
-    gameId: line.gameId,
-    statType: line.statType,
-    gameDate: line.gameDate,
-    gameNumber: line.gameNumber,
-    isHome: line.isHome,
-    opponentName: line.opponentName,
-    stats: asRecord(line.stats),
-  }));
-
-  // "No new stats" tail: In Season active players with no new lines ONLY —
-  // an out-of-season player is omitted entirely, not listed.
-  const playersWithLines = new Set(unreported.map(({ player }) => player.id));
-  const noNewStats: RenderPlayer[] = activePlayers
-    .filter((p) => !playersWithLines.has(p.id))
-    .filter((p) => isInSeason(p, calendars, now(), tz))
-    .map(toRenderPlayer);
-
-  const mail = renderDigest({ date: today, lines: renderLines, noNewStats });
-  const reportedIds = unreported.map(({ line }) => line.id);
-  const playerCount = playersWithLines.size;
+  // Pure assembly (src/digest/assemble.ts): what this Digest would report.
+  const assembly = await assembleDigest(db, { now, tz });
+  const mail = renderDigest({
+    date: assembly.date,
+    lines: assembly.lines,
+    noNewStats: assembly.noNewStats,
+  });
+  const { reportedIds, playerCount } = assembly;
 
   try {
     await deps.mailer.send({ to: deps.to, from: deps.from, ...mail });
@@ -261,22 +239,6 @@ async function recordDelivery(
         errorMessage: args.errorMessage,
       },
     });
-}
-
-function toRenderPlayer(player: PlayerRow): RenderPlayer {
-  return {
-    fullName: player.fullName,
-    level: player.level,
-    milbLevel: player.milbLevel,
-    teamName: player.teamName,
-  };
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  return {};
 }
 
 function errorMessage(err: unknown): string {

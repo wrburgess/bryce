@@ -18,7 +18,9 @@
     "server": "tsx src/server.ts"
   },
   "dependencies": {
+    "@hono/mcp": "^0.3.1",
     "@hono/node-server": "^1.14.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.2.0",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.8.0",

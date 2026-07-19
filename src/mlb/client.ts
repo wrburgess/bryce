@@ -75,12 +75,25 @@ export class MlbClient {
     return PeopleResponseSchema.parse(body).people;
   }
 
+  /**
+   * Person with hydrate=currentTeam, or null when the API has no such person
+   * (HTTP 404 or an empty people array — the API uses both for unknown ids).
+   */
+  async findPerson(personId: number): Promise<Person | null> {
+    let body: unknown;
+    try {
+      body = await this.request(`/people/${personId}?hydrate=currentTeam`);
+    } catch (err) {
+      if (err instanceof MlbApiError && err.status === 404) return null;
+      throw err;
+    }
+    return PeopleResponseSchema.parse(body).people[0] ?? null;
+  }
+
   /** Person with hydrate=currentTeam (without the hydrate the API omits currentTeam entirely). */
   async getPerson(personId: number): Promise<Person> {
-    const body = await this.request(`/people/${personId}?hydrate=currentTeam`);
-    const people = PeopleResponseSchema.parse(body).people;
-    const person = people[0];
-    if (person === undefined) {
+    const person = await this.findPerson(personId);
+    if (person === null) {
       throw new Error(`MLB Stats API returned no person for personId ${personId}`);
     }
     return person;

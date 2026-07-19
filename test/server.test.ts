@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { createApp } from "../src/server.js";
-import { insertDelivery, insertPlayer, insertStatLine, testDb } from "./factories.js";
+import { insertDelivery, insertPlayer, insertStatLine, testAppDeps, testDb } from "./factories.js";
 
 describe("GET /health", () => {
   let opened: OpenedDb;
@@ -15,7 +15,7 @@ describe("GET /health", () => {
   });
 
   it("reports zero counts and no delivery on an empty database", async () => {
-    const app = createApp(opened.db);
+    const app = createApp(testAppDeps(opened));
     const res = await app.request("/health");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true, players: 0, statLines: 0, lastDelivery: null });
@@ -34,7 +34,7 @@ describe("GET /health", () => {
       createdAt: "2026-07-19T12:00:00.000Z",
     });
 
-    const app = createApp(opened.db);
+    const app = createApp(testAppDeps(opened));
     const res = await app.request("/health");
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.ok).toBe(true);
@@ -65,7 +65,7 @@ describe("GET /health", () => {
       createdAt: "2026-07-19T12:00:00.000Z",
     });
 
-    const app = createApp(opened.db);
+    const app = createApp(testAppDeps(opened));
     const body = (await (await app.request("/health")).json()) as Record<string, unknown>;
     expect(body.lastDelivery).toMatchObject({ dateCovered: "2026-07-18" });
   });
@@ -86,7 +86,7 @@ describe("GET /health", () => {
       createdAt: "2026-07-19T12:00:00.000Z",
     });
 
-    const app = createApp(opened.db);
+    const app = createApp(testAppDeps(opened));
     const body = (await (await app.request("/health")).json()) as Record<string, unknown>;
     expect(body.lastDelivery).toMatchObject({ dateCovered: "2026-07-19", status: "failed" });
   });

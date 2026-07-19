@@ -1,0 +1,137 @@
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { OpenedDb } from "../src/db/client.js";
+import { digestDeliveries, statLines } from "../src/db/schema.js";
+import { assembleDigest } from "../src/digest/assemble.js";
+import { renderDigest } from "../src/digest/render.js";
+import { runDigest } from "../src/jobs/digest.js";
+import {
+  CapturingMailer,
+  MID_SEASON,
+  OFFSEASON,
+  TEST_TZ,
+  fakeClock,
+  insertCalendars2026,
+  insertPlayer,
+  insertStatLine,
+  testDb,
+} from "./factories.js";
+
+describe("assembleDigest (pure digest preview)", () => {
+  let opened: OpenedDb;
+  let clock: ReturnType<typeof fakeClock>;
+
+  const deps = () => ({ now: clock.now, tz: TEST_TZ });
+
+  beforeEach(async () => {
+    opened = testDb();
+    clock = fakeClock(MID_SEASON);
+    await insertCalendars2026(opened.db);
+  });
+
+  afterEach(() => {
+    opened.close();
+  });
+
+  it("returns exactly what runDigest would send", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-07-18",
+      stats: { hits: 2, atBats: 4, homeRuns: 1, rbi: 3 },
+    });
+    await insertPlayer(opened.db, { fullName: "Quiet Guy" }); // in-season, no lines
+
+    const assembly = await assembleDigest(opened.db, deps());
+    const previewMail = renderDigest({
+      date: assembly.date,
+      lines: assembly.lines,
+      noNewStats: assembly.noNewStats,
+    });
+
+    const mailer = new CapturingMailer();
+    const result = await runDigest({
+      db: opened.db,
+      mailer,
+      now: clock.now,
+      tz: TEST_TZ,
+      to: "hc@example.com",
+      from: "bryce@example.com",
+    });
+
+    // The sent mail IS the previewed mail, byte for byte.
+    expect(mailer.sent).toHaveLength(1);
+    expect(mailer.sent[0]?.subject).toBe(previewMail.subject);
+    expect(mailer.sent[0]?.text).toBe(previewMail.text);
+    expect(mailer.sent[0]?.html).toBe(previewMail.html);
+    expect(result.statLineCount).toBe(assembly.reportedIds.length);
+    expect(result.playerCount).toBe(assembly.playerCount);
+
+    expect(assembly.date).toBe("2026-07-19");
+    expect(previewMail.text).toContain("2026-07-18 vs Charlotte Knights: 2-4, HR, 3 RBI");
+    expect(previewMail.text).toContain("No new stats: Quiet Guy");
+  });
+
+  it("touches no delivery rows and marks no lines (db state identical before/after)", async () => {
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+
+    const linesBefore = await opened.db.select().from(statLines);
+    const deliveriesBefore = await opened.db.select().from(digestDeliveries);
+
+    const assembly = await assembleDigest(opened.db, deps());
+    expect(assembly.reportedIds).toHaveLength(1);
+
+    const linesAfter = await opened.db.select().from(statLines);
+    const deliveriesAfter = await opened.db.select().from(digestDeliveries);
+    expect(linesAfter).toEqual(linesBefore);
+    expect(deliveriesAfter).toEqual(deliveriesBefore);
+    expect(deliveriesAfter).toHaveLength(0);
+    expect(linesAfter.every((l) => l.digestDeliveryId === null)).toBe(true);
+
+    // Preview twice: still identical — reads are repeatable, nothing consumed.
+    const again = await assembleDigest(opened.db, deps());
+    expect(again.reportedIds).toEqual(assembly.reportedIds);
+  });
+
+  it("assembles empty: no lines, in-season players in the no-new-stats tail", async () => {
+    await insertPlayer(opened.db, { fullName: "Quiet Guy" });
+
+    const assembly = await assembleDigest(opened.db, deps());
+    expect(assembly.lines).toEqual([]);
+    expect(assembly.reportedIds).toEqual([]);
+    expect(assembly.playerCount).toBe(0);
+    expect(assembly.noNewStats.map((p) => p.fullName)).toEqual(["Quiet Guy"]);
+    expect(assembly.date).toBe("2026-07-19");
+  });
+
+  it("omits out-of-season and inactive players from the tail", async () => {
+    clock.set("2026-10-01T17:00:00Z"); // AAA over (09-27), MLB runs to 10-31
+    await insertPlayer(opened.db, { fullName: "Out Of Season Guy" }); // AAA
+    await insertPlayer(opened.db, {
+      fullName: "Still Playing",
+      level: "mlb",
+      milbLevel: null,
+      teamName: "Miami Marlins",
+    });
+    await insertPlayer(opened.db, { fullName: "Gone Guy", level: "mlb", milbLevel: null, active: false });
+
+    const assembly = await assembleDigest(opened.db, deps());
+    expect(assembly.noNewStats.map((p) => p.fullName)).toEqual(["Still Playing"]);
+  });
+
+  it("leaves the heartbeat path unaffected (runDigest still heartbeats in the offseason)", async () => {
+    clock.set(OFFSEASON);
+    await insertPlayer(opened.db, { fullName: "Watched One" });
+    const mailer = new CapturingMailer();
+    const result = await runDigest({
+      db: opened.db,
+      mailer,
+      now: clock.now,
+      tz: TEST_TZ,
+      to: "hc@example.com",
+      from: "bryce@example.com",
+    });
+    expect(result).toMatchObject({ kind: "heartbeat", action: "sent", playerCount: 1 });
+    expect(mailer.sent[0]?.subject).toBe("Bryce heartbeat - 2026-12-05");
+  });
+});

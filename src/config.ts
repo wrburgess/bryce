@@ -19,6 +19,8 @@ const EnvSchema = z
     DIGEST_FROM: z.string().optional(),
     MLB_API_DELAY_MS: z.coerce.number().int().nonnegative().default(500),
     SERVER_PORT: z.coerce.number().int().positive().default(3000),
+    /** Bearer token guarding /api and /mcp; whitespace-only is treated as absent. */
+    API_TOKEN: z.string().optional(),
   })
   .superRefine((env, ctx) => {
     // Fail closed: a provider that cannot actually send is a config error, not a
@@ -68,6 +70,7 @@ export interface Config {
   digestFrom: string | null;
   mlbApiDelayMs: number;
   serverPort: number;
+  apiToken: string | null;
 }
 
 const clean = (v: string | undefined): string | null => {
@@ -91,5 +94,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     digestFrom: clean(parsed.DIGEST_FROM),
     mlbApiDelayMs: parsed.MLB_API_DELAY_MS,
     serverPort: parsed.SERVER_PORT,
+    apiToken: clean(parsed.API_TOKEN),
   };
 }
