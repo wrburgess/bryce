@@ -1,50 +1,57 @@
 import { serve } from "@hono/node-server";
-import { count, desc, eq, sql } from "drizzle-orm";
+import { StreamableHTTPTransport } from "@hono/mcp";
 import { Hono } from "hono";
+import { createApiRoutes } from "./api/routes.js";
 import { loadConfig } from "./config.js";
 import { loadDotEnv } from "./env.js";
-import type { Db } from "./db/client.js";
 import { openDb } from "./db/client.js";
-import { digestDeliveries, players, statLines } from "./db/schema.js";
+import { openReadonlyDb } from "./db/readonly.js";
+import { createMailer } from "./mailer/index.js";
+import { buildMcpServer } from "./mcp/server.js";
+import { MlbClient } from "./mlb/client.js";
+import { bearerAuth } from "./server/auth.js";
+import type { ServiceDeps } from "./server/deps.js";
+import { healthSnapshot } from "./server/health.js";
 import { isMain } from "./cli/main.js";
 
 /**
- * Phase 1 HTTP stub: a single health endpoint. The REST API proper is Phase 2.
+ * Phase 2 HTTP server (ADR 0027): the MCP server at /mcp is the primary
+ * interface, a thin REST API rides at /api, and both sit behind the bearer
+ * middleware. Only /health is public. Exposed remotely through the Cloudflare
+ * Tunnel (ADR 0028).
  */
-export function createApp(db: Db): Hono {
+
+export interface AppDeps extends ServiceDeps {
+  /** Bearer token for /api and /mcp; null/blank refuses to construct (fail closed). */
+  apiToken: string | null;
+}
+
+export function createApp(deps: AppDeps): Hono {
+  const token = deps.apiToken?.trim() ?? "";
+  if (token.length === 0) {
+    throw new Error(
+      "API_TOKEN is not configured; refusing to serve /api and /mcp without authentication",
+    );
+  }
+
   const app = new Hono();
 
-  app.get("/health", async (c) => {
-    const playerCount = (
-      await db.select({ n: count() }).from(players).where(eq(players.active, true))
-    )[0];
-    const statLineCount = (await db.select({ n: count() }).from(statLines))[0];
-    // A retried delivery is updated in place (sentAt moves, createdAt does not),
-    // so "last" means latest activity: sentAt when sent, createdAt for failed rows.
-    const last = (
-      await db
-        .select()
-        .from(digestDeliveries)
-        .orderBy(
-          desc(sql`coalesce(${digestDeliveries.sentAt}, ${digestDeliveries.createdAt})`),
-          desc(digestDeliveries.createdAt),
-        )
-        .limit(1)
-    )[0];
-    return c.json({
-      ok: true,
-      players: playerCount?.n ?? 0,
-      statLines: statLineCount?.n ?? 0,
-      lastDelivery:
-        last === undefined
-          ? null
-          : {
-              kind: last.kind,
-              dateCovered: last.dateCovered,
-              status: last.status,
-              sentAt: last.sentAt,
-            },
-    });
+  app.get("/health", async (c) => c.json(await healthSnapshot(deps.db)));
+
+  const auth = bearerAuth(token);
+  app.use("/api/*", auth);
+  app.use("/mcp", auth);
+
+  app.route("/api", createApiRoutes(deps));
+
+  // Stateless Streamable HTTP: a fresh McpServer + transport per request —
+  // every tool is stateless over the injected deps, so nothing needs a session.
+  app.all("/mcp", async (c) => {
+    const server = buildMcpServer(deps);
+    const transport = new StreamableHTTPTransport({ sessionIdGenerator: undefined });
+    await server.connect(transport);
+    const res = await transport.handleRequest(c);
+    return res ?? c.body(null, 204);
   });
 
   return app;
@@ -54,7 +61,21 @@ if (isMain(import.meta.url)) {
   loadDotEnv();
   const config = loadConfig();
   const { db } = openDb(config.databasePath);
-  const app = createApp(db);
+  // openDb has just created/migrated the file, so fileMustExist is satisfied.
+  const { sqlite: readonlySqlite } = openReadonlyDb(config.databasePath);
+  const app = createApp({
+    db,
+    readonlySqlite,
+    client: new MlbClient({ delayMs: config.mlbApiDelayMs }),
+    mailer: createMailer(config),
+    now: () => new Date(),
+    tz: config.tz,
+    apiToken: config.apiToken,
+    // The console provider needs no real addresses; every other provider has
+    // fail-closed validated these in loadConfig.
+    digestTo: config.digestTo ?? "console@localhost",
+    digestFrom: config.digestFrom ?? "bryce@localhost",
+  });
   serve({ fetch: app.fetch, port: config.serverPort });
   process.stdout.write(`server listening port=${config.serverPort}\n`);
 }

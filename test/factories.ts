@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Db, OpenedDb } from "../src/db/client.js";
@@ -6,7 +7,9 @@ import { openDb } from "../src/db/client.js";
 import type { DigestDeliveryRow, PlayerRow, StatLineRow } from "../src/db/schema.js";
 import { digestDeliveries, players, seasonCalendar, statLines } from "../src/db/schema.js";
 import type { FetchLike } from "../src/mlb/client.js";
+import { MlbClient } from "../src/mlb/client.js";
 import type { MailMessage, Mailer } from "../src/mailer/types.js";
+import type { AppDeps } from "../src/server.js";
 
 /**
  * Programmatic builders (rules/testing.md: never static schema-coupled test
@@ -22,6 +25,35 @@ export function loadFixture(name: string): unknown {
 
 export function testDb(): OpenedDb {
   return openDb(":memory:");
+}
+
+export interface TempFileDb {
+  opened: OpenedDb;
+  path: string;
+  cleanup: () => void;
+}
+
+/**
+ * A migrated database in a temp FILE (not :memory:) for tests that need a
+ * second connection to the same database — e.g. the read-only handle in
+ * test/readonly.test.ts; an in-memory db cannot be shared across connections.
+ */
+export function testFileDb(): TempFileDb {
+  const dir = mkdtempSync(join(tmpdir(), "bryce-test-"));
+  const path = join(dir, "bryce.db");
+  const opened = openDb(path);
+  return {
+    opened,
+    path,
+    cleanup: () => {
+      try {
+        opened.close();
+      } catch {
+        // already closed by the test
+      }
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
 }
 
 export interface FakeClock {
@@ -348,6 +380,31 @@ export class FakeStatsApi {
     }
     throw new Error(`FakeStatsApi: unrouted url ${url}`);
   }
+}
+
+// --- App deps builder (createApp / REST / MCP tests) ------------------------
+
+export const TEST_API_TOKEN = "test-api-token-1234567890";
+
+/**
+ * Full createApp dependency bundle over an opened test db. The readonlySqlite
+ * handle reuses the writable test connection — the statement guard is what the
+ * app-level tests exercise; the genuinely read-only connection is covered by
+ * test/readonly.test.ts with a temp-file db.
+ */
+export function testAppDeps(opened: OpenedDb, overrides: Partial<AppDeps> = {}): AppDeps {
+  return {
+    db: opened.db,
+    readonlySqlite: opened.sqlite,
+    client: new MlbClient({ fetchImpl: new FakeStatsApi().fetch, delayMs: 0 }),
+    mailer: new CapturingMailer(),
+    now: fakeClock(MID_SEASON).now,
+    tz: TEST_TZ,
+    apiToken: TEST_API_TOKEN,
+    digestTo: "hc@example.com",
+    digestFrom: "bryce@example.com",
+    ...overrides,
+  };
 }
 
 // --- Mailer test double -----------------------------------------------------

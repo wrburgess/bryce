@@ -20,6 +20,7 @@ const baseConfig: Config = {
   digestFrom: "bryce@example.com",
   mlbApiDelayMs: 0,
   serverPort: 3000,
+  apiToken: null,
 };
 
 const message = {

@@ -1,4 +1,4 @@
-# Running Bryce (Phase 1 — MLB/MiLB pipeline)
+# Running Bryce (MLB/MiLB pipeline + MCP/REST server)
 
 How to run the daily pipeline on its intended host: a Mac (laptop or mini) with Node 22, launchd
 for scheduling, and optional Litestream replication + Cloudflare Tunnel exposure
@@ -42,7 +42,8 @@ missing.
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | with smtp | port `465` | SMTP relay credentials |
 | `DIGEST_TO` / `DIGEST_FROM` | unless console | — | Digest recipient and sender addresses |
 | `MLB_API_DELAY_MS` | no | `500` | Polite delay between MLB Stats API calls |
-| `SERVER_PORT` | no | `3000` | Health-check HTTP server port |
+| `SERVER_PORT` | no | `3000` | HTTP server port (`/health`, `/api`, `/mcp`) |
+| `API_TOKEN` | for `/api` + `/mcp` | — | Bearer token guarding `/api/*` and `/mcp`; without it the server refuses to start those surfaces (`/health` stays public) |
 
 ## Scheduling with launchd
 
@@ -111,7 +112,7 @@ Restore with `litestream restore -o data/bryce.db s3://bryce-backup/bryce.db`.
 
 ## Remote access: Cloudflare Tunnel
 
-The health stub (`npm run server`, [`src/server.ts`](../../src/server.ts)) binds locally; expose it
+The server (`npm run server`, [`src/server.ts`](../../src/server.ts)) binds locally; expose it
 without opening ports via a named tunnel:
 
 ```sh
@@ -121,5 +122,61 @@ cloudflared tunnel run --url http://localhost:3000 bryce
 ```
 
 `GET /health` returns `{ ok, players, statLines, lastDelivery }` — a glanceable check that the
-laptop, database, and last send are alive. The REST API proper and MCP surface are Phase 2+
-([ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)).
+laptop, database, and last send are alive. It is the only public route; everything else rides
+behind the token below.
+
+## The MCP server and REST API
+
+The primary interface ([ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)) is the **MCP
+server** at `POST https://bryce.example.com/mcp` (Streamable HTTP), with a thin **REST API** under
+`/api` for scripted clients. Both share one service layer and one Zod validation per input shape,
+and both sit behind the same bearer token. During Offseason Sleep
+([ADR 0031](../adr/0031-offseason-sleep-world-series-to-opening-day.md)) they stay live — history
+remains queryable; only the pipeline sleeps.
+
+### API_TOKEN setup
+
+```sh
+openssl rand -hex 32        # generate once, put in .env as API_TOKEN=...
+```
+
+The server fails closed: with no `API_TOKEN` it refuses to construct the `/api` and `/mcp`
+surfaces at all. Every request to them needs `Authorization: Bearer $API_TOKEN`; a missing or
+wrong token gets a constant 401 (the token is never echoed or logged). Treat the token like any
+secret — rotate it by editing `.env` and restarting the server (Cloudflare Access in front of the
+tunnel is the second, independent layer per
+[ADR 0028](../adr/0028-local-macbook-hosting-cloudflare-tunnel.md)).
+
+### Connecting a Claude client to the remote MCP endpoint
+
+The MCP tools are: `watchlist_list`, `watchlist_add`, `watchlist_deactivate`, `player_search`,
+`stat_lines`, `digest_preview`, `send_digest`, `run_refresh`, `sql_query` (read-only SQL, capped),
+and `status`.
+
+- **claude.ai / Claude mobile** — Settings -> Connectors -> Add custom connector, URL
+  `https://bryce.example.com/mcp`. When the connector setup offers an auth header, use
+  `Authorization: Bearer $API_TOKEN`.
+- **Claude Code** —
+
+  ```sh
+  claude mcp add --transport http bryce https://bryce.example.com/mcp \
+    --header "Authorization: Bearer $API_TOKEN"
+  ```
+
+Then ask in plain language — "add Konnor Griffin to my watch list", "what did my guys do this
+week?", "preview today's digest" — and the tools do the rest.
+
+### REST API routes
+
+All under `https://bryce.example.com/api` with the same bearer header, JSON in/out:
+
+| Route | Purpose |
+|---|---|
+| `GET /api/players?active=true\|false\|all` | List watch-list players |
+| `POST /api/players` `{"personId": N}` | Add a player (first Refresh runs immediately) |
+| `POST /api/players/{personId}/deactivate` | Deactivate, keeping history |
+| `GET /api/players/search?q=NAME` | Name search with team/level resolution |
+| `GET /api/stat-lines?playerId=&level=&from=&to=&limit=` | Query stored stat lines |
+| `GET /api/digest/preview` | What the next digest would report (read-only) |
+| `POST /api/digest/send` | Run the digest job now |
+| `POST /api/refresh` `{"personId": N}` (optional) | Refresh one player or everything |

@@ -1,18 +1,21 @@
-import { eq } from "drizzle-orm";
 import { loadConfig } from "../config.js";
 import { loadDotEnv } from "../env.js";
 import type { Db } from "../db/client.js";
 import { openDb } from "../db/client.js";
-import { players } from "../db/schema.js";
-import { runRefreshForPlayer } from "../jobs/refresh.js";
 import type { MlbClient } from "../mlb/client.js";
 import { MlbClient as MlbClientImpl } from "../mlb/client.js";
-import { levelForSportId } from "../mlb/levels.js";
-import type { Person } from "../mlb/schemas.js";
+import {
+  PlayerNotFoundError,
+  UnknownPersonError,
+  addPlayer,
+  deactivatePlayer,
+  listPlayers,
+} from "../watchlist/service.js";
 import { isMain } from "./main.js";
 
 /**
- * Watch-list seeding CLI. Output is deterministic, greppable, ASCII-only
+ * Watch-list seeding CLI: a thin presenter over the watch-list service
+ * (src/watchlist/service.ts). Output is deterministic, greppable, ASCII-only
  * key=value lines (rules/scripting.md); exit code is non-zero on failure.
  *
  * Subcommands:
@@ -79,53 +82,28 @@ async function runAdd(flags: Map<string, string>, deps: SeedDeps): Promise<numbe
     return 1;
   }
 
-  const person = await deps.client.getPerson(personId);
-  const existing = (
-    await deps.db.select().from(players).where(eq(players.externalId, personId))
-  )[0];
-  const nowIso = deps.now().toISOString();
+  let result;
+  try {
+    result = await addPlayer(
+      { db: deps.db, client: deps.client, now: deps.now, tz: deps.tz },
+      personId,
+    );
+  } catch (err) {
+    if (err instanceof UnknownPersonError) {
+      deps.write(`error: ${err.message}`);
+      return 1;
+    }
+    throw err;
+  }
 
-  let playerId: number;
-  if (existing !== undefined) {
-    // Duplicate add: no-op update — same Player, refreshed identity fields.
-    await deps.db
-      .update(players)
-      .set({ fullName: person.fullName, active: true, updatedAt: nowIso })
-      .where(eq(players.id, existing.id));
-    playerId = existing.id;
-    deps.write(`updated player id=${playerId} personId=${personId} name=${person.fullName}`);
+  const { player, refresh } = result;
+  if (result.action === "updated") {
+    deps.write(`updated player id=${player.id} personId=${personId} name=${player.fullName}`);
     return 0;
   }
 
-  const location = await resolveLocation(person, deps);
-  const insertedRows = await deps.db
-    .insert(players)
-    .values({
-      externalId: personId,
-      fullName: person.fullName,
-      level: location.level,
-      milbLevel: location.milbLevel,
-      teamName: location.teamName,
-      position: person.primaryPosition?.abbreviation ?? null,
-      active: true,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    })
-    .returning({ id: players.id });
-  const insertedId = insertedRows[0]?.id;
-  if (insertedId === undefined) {
-    deps.write("error: insert failed");
-    return 1;
-  }
-  playerId = insertedId;
-  deps.write(`added player id=${playerId} personId=${personId} name=${person.fullName}`);
-
-  // Adding a Player IS his first Refresh (ADR 0030) — unless the pipeline sleeps.
-  const refresh = await runRefreshForPlayer(
-    { db: deps.db, client: deps.client, now: deps.now, tz: deps.tz },
-    playerId,
-  );
-  if (refresh.skipped) {
+  deps.write(`added player id=${player.id} personId=${personId} name=${player.fullName}`);
+  if (refresh === null || refresh.skipped) {
     deps.write("refresh skipped reason=offseason-sleep");
   } else {
     deps.write(`refresh done inserted=${refresh.inserted} updated=${refresh.updated}`);
@@ -165,21 +143,6 @@ async function pickFromSearch(
   return chosen.id;
 }
 
-async function resolveLocation(
-  person: Person,
-  deps: SeedDeps,
-): Promise<{ level: "mlb" | "milb"; milbLevel: string | null; teamName: string | null }> {
-  if (person.currentTeam !== undefined) {
-    const team = await deps.client.getTeam(person.currentTeam.id);
-    const info = levelForSportId(team.sport.id);
-    if (info !== null && info.level !== "ncaa") {
-      return { level: info.level, milbLevel: info.milbLevel, teamName: team.name };
-    }
-  }
-  // No resolvable team (e.g. free agent): default to mlb; the next Refresh corrects it.
-  return { level: "mlb", milbLevel: null, teamName: null };
-}
-
 async function runDeactivate(flags: Map<string, string>, deps: SeedDeps): Promise<number> {
   const personIdFlag = flags.get("person-id");
   const personId = personIdFlag !== undefined ? Number.parseInt(personIdFlag, 10) : Number.NaN;
@@ -187,23 +150,22 @@ async function runDeactivate(flags: Map<string, string>, deps: SeedDeps): Promis
     deps.write("error: deactivate requires --person-id N");
     return 1;
   }
-  const existing = (
-    await deps.db.select().from(players).where(eq(players.externalId, personId))
-  )[0];
-  if (existing === undefined) {
-    deps.write(`error: no player with personId=${personId}`);
-    return 1;
+  let player;
+  try {
+    player = await deactivatePlayer({ db: deps.db, now: deps.now }, personId);
+  } catch (err) {
+    if (err instanceof PlayerNotFoundError) {
+      deps.write(`error: no player with personId=${personId}`);
+      return 1;
+    }
+    throw err;
   }
-  await deps.db
-    .update(players)
-    .set({ active: false, updatedAt: deps.now().toISOString() })
-    .where(eq(players.id, existing.id));
-  deps.write(`deactivated player id=${existing.id} personId=${personId} name=${existing.fullName}`);
+  deps.write(`deactivated player id=${player.id} personId=${personId} name=${player.fullName}`);
   return 0;
 }
 
 async function runList(deps: SeedDeps): Promise<number> {
-  const rows = await deps.db.select().from(players).orderBy(players.id);
+  const rows = await listPlayers(deps.db, "all");
   for (const p of rows) {
     deps.write(
       `player id=${p.id} personId=${p.externalId ?? "-"} name=${p.fullName} level=${p.level} milbLevel=${p.milbLevel ?? "-"} team=${p.teamName ?? "-"} active=${p.active}`,
