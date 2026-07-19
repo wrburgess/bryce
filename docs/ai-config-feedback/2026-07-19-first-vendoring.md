@@ -104,7 +104,9 @@ run the AC, not the HC, needs to summon the Reviewer, so the baseline should (a)
 configured agent's review-invocation mechanism and its preconditions (app installation, API
 availability), and (b) name the fallback order in PROJECT.md → *Lifecycle Host* so the faithfulness
 backstop degrades predictably instead of silently (a mention that no app receives looks identical to
-a pending review).
+a pending review). *Bryce's host answer (2026-07-19):* Reviewer declared in PROJECT.md → *Lifecycle
+Host* — primary Codex (GPT-5.6) for plans and PRs, fallback Copilot code review, degrade to a
+flagged SOW; Codex app installation on the repo is the HC precondition.
 
 ## F10 — Repo-centric self-references survive vendoring and mislead in a host clone
 

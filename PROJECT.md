@@ -42,7 +42,7 @@ the actual if they differ. Use human-readable names, never API ids.
 | Agent (harness) | Declared model | Identity email |
 |-----------------|----------------|----------------|
 | Claude Code | `Claude Fable 5` | `noreply@anthropic.com` |
-| Codex | `GPT (host sets model)` | `<host sets>` |
+| Codex | `GPT-5.6` | `<host sets>` |
 | Copilot | `model varies (GPT / Claude / Gemini)` | `<host sets>` |
 | Antigravity | `Gemini Flash (host sets model)` | `<host sets>` |
 | Grok Build | `Grok (host sets model)` | `<host sets>` |
@@ -93,6 +93,14 @@ definitions.
   and `.github/copilot-instructions.md` is a discovery marker. Set to `render` (a byte-for-byte
   `parity:render` block in `.github/copilot-instructions.md`) only if the host drives work through a
   legacy in-editor Copilot IDE; the parity check enforces the render matches `AGENTS.md`.
+- **Reviewer (second-model review of plans and PRs):** primary Reviewer is **Codex** (harness),
+  running **GPT-5.6** (model — set in Codex settings; per ADR 0024 the harness and model are named
+  separately). PRs: a `@codex review` comment on the PR. Plans: a `@codex` mention on the issue's
+  plan comment. **Precondition:** the Codex GitHub app must be installed on this repository (HC
+  browser action — a mention with no app installed fails silently; see the feedback ledger's F9).
+  **Fallback:** Copilot code review requested via the GitHub API (backing model varies and is
+  undisclosed). If neither Reviewer responds, the faithfulness backstop degrades to flagging the
+  missing review in the SOW — never to silently skipping it.
 - **Human gates (host policy):** this is a single-user host; the baseline's two mandatory human gates
   are tuned as follows.
   - **Plan approval — auto-approved.** `devise` (and `ship`'s Plan phase) still posts the plan to the
