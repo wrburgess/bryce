@@ -25,7 +25,7 @@ trimmed to the nine dev-lifecycle skills as a host Customization. Notable host p
 
 - **Human gates:** plan approval is auto-approved; the **merge gate is the one human stop**
   (`PROJECT.md` → *Lifecycle Host* → *Human gates*).
-- **Quality gate:** `ruby scripts/parity_check.rb` from day one; the Rails checks in
+- **Quality gate:** `ruby scripts/parity_check.rb` from day one; the npm checks in
   `PROJECT.md` → *Quality Checks* apply once the app is scaffolded.
 
 After cloning, activate the branch-protection guardrails once:
