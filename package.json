@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:contract": "BRYCE_TEST_ALLOW_NETWORK=1 vitest run --config vitest.config.ts test/contract/**/*.test.ts",
     "refresh": "tsx src/cli/refresh.ts",
     "digest": "tsx src/cli/digest.ts",
     "seed": "tsx src/cli/seed.ts",

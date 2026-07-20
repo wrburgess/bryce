@@ -110,10 +110,22 @@ Every other line can stay at its default. For reference, what they mean:
 npm test
 ```
 
+The default Vitest suite is **fail-closed for network egress**: unapproved `fetch`, HTTP(S), and
+socket traffic throws immediately. This keeps unit/integration tests deterministic and guarantees
+that default MLB/NCAA/Postmark/SMTP paths cannot touch live services unless a test explicitly opts
+into live network access.
+
 Expected: a Vitest run ending in `Tests  225 passed` (a few seconds). Optionally also
 `ruby scripts/parity_check.rb`, which should print `parity_check: OK`. Green here means your
 machine is fully set up. There is no "create the database" step — the first real command below
 creates and migrates `data/bryce.db` on its own.
+
+Live contract smoke tests (if/when added) are isolated from the default suite under
+`test/contract/**/*.test.ts` and require explicit opt-in:
+
+```bash
+npm run test:contract
+```
 
 ## 6. Add players to your watch list
 
