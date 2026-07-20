@@ -5,6 +5,8 @@ stats for a personal watch list of baseball players across three levels: **MLB**
 levels), and **NCAA**. No web UI: the primary interface is an **MCP server**, so Claude (web,
 mobile, or CLI) is the front end.
 
+- **Getting started (run it locally):** [`docs/guides/getting-started.md`](docs/guides/getting-started.md);
+  production ops in [`docs/guides/running-bryce.md`](docs/guides/running-bryce.md)
 - **Product spec / handoff:** [`docs/product/daily-baseball-digest-handoff.md`](docs/product/daily-baseball-digest-handoff.md)
   (see its 2026-07-19 architecture revision)
 - **Domain glossary & decisions:** [`CONTEXT.md`](CONTEXT.md) + [`docs/adr/`](docs/adr/)
