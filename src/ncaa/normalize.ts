@@ -16,6 +16,80 @@ import type { NcaaStatCategory } from "./seasons.js";
 const NCAA_GAME_TYPE = "R";
 
 /**
+ * Header → canonical stat key, per category. The digest renderer (and the MLB
+ * pipeline it was built for) reads MLB Stats API keys (`atBats`, `hits`,
+ * `inningsPitched`, …), so the adapter translates the scraped column headers
+ * here — nothing outside `src/ncaa/` knows the page's vocabulary. Headers with
+ * no mapping pass through under their page name (still queryable, ignored by
+ * the renderer).
+ */
+const BATTING_HEADER_MAP: Record<string, string> = {
+  AB: "atBats",
+  R: "runs",
+  H: "hits",
+  "2B": "doubles",
+  "3B": "triples",
+  HR: "homeRuns",
+  RBI: "rbi",
+  BB: "baseOnBalls",
+  K: "strikeOuts",
+  SO: "strikeOuts",
+  SB: "stolenBases",
+  CS: "caughtStealing",
+  HBP: "hitByPitch",
+};
+
+const PITCHING_HEADER_MAP: Record<string, string> = {
+  IP: "inningsPitched",
+  H: "hits",
+  R: "runs",
+  ER: "earnedRuns",
+  BB: "baseOnBalls",
+  SO: "strikeOuts",
+  K: "strikeOuts",
+  W: "wins",
+  L: "losses",
+  SV: "saves",
+  BF: "battersFaced",
+};
+
+/**
+ * Translate header-keyed cells into canonical stat keys with numeric values
+ * (`inningsPitched` stays a string, matching the MLB game-log shape the
+ * renderer expects). Non-numeric cells ("-", "") map to no canonical entry, so
+ * the renderer treats them as 0 rather than NaN.
+ */
+export function canonicalizeStats(
+  category: NcaaStatCategory,
+  raw: Record<string, unknown>,
+): Record<string, unknown> {
+  const map = category === "batting" ? BATTING_HEADER_MAP : PITCHING_HEADER_MAP;
+  const out: Record<string, unknown> = {};
+  for (const [header, value] of Object.entries(raw)) {
+    const canonical = map[header.toUpperCase()];
+    if (canonical === undefined) {
+      out[header] = value;
+      continue;
+    }
+    if (canonical === "inningsPitched") {
+      // Keep only numeric-looking IP ("6", "6.1"); "-"/"" get no entry, so the
+      // renderer falls back to "0.0 IP" instead of "- IP".
+      const ip = typeof value === "number" ? String(value) : value;
+      if (typeof ip === "string" && /^\d+(\.\d+)?$/.test(ip)) out[canonical] = ip;
+      continue;
+    }
+    const n =
+      typeof value === "number"
+        ? value
+        : typeof value === "string" && value.trim() !== ""
+          ? Number(value)
+          : NaN;
+    if (Number.isFinite(n)) out[canonical] = n;
+  }
+  return out;
+}
+
+/**
  * Normalize every parsed row for one player + one stat category into Stat Line
  * rows, assigning per-date game numbers (1-based) for doubleheaders.
  */
@@ -61,7 +135,7 @@ function normalizeRow(params: {
     teamName: null,
     sportId: NCAA_SPORT_ID,
     leagueName: null,
-    stats: row.stats,
+    stats: canonicalizeStats(category, row.stats),
     raw: { ...row, gameIdSource },
     createdAt: timestamp,
     updatedAt: timestamp,

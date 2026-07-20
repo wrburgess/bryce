@@ -122,6 +122,91 @@ describe("NCAA normalizer", () => {
     expect(march15.map((r) => r.gameNumber).sort()).toEqual([1, 2]);
   });
 
+  it("canonicalizes batting headers to the renderer's stat keys", () => {
+    const rows = [
+      {
+        date: "2025-03-14",
+        opponentName: "Rival",
+        isHome: true,
+        contestId: 6001,
+        result: "W",
+        stats: { AB: 4, H: 2, HR: 1, "2B": 1, "3B": 0, RBI: 3, BB: 1, K: 2, SB: 1, Pos: "SS", CS: "-" },
+      },
+    ];
+    const [line] = normalizeGameLog({ playerId: 1, seq: 42, category: "batting", rows, timestamp: "t" });
+    expect(line?.stats).toMatchObject({
+      atBats: 4,
+      hits: 2,
+      homeRuns: 1,
+      doubles: 1,
+      triples: 0,
+      rbi: 3,
+      baseOnBalls: 1,
+      strikeOuts: 2,
+      stolenBases: 1,
+    });
+    // Unmapped headers pass through under their page name; non-numeric cells
+    // produce no canonical entry (renderer reads 0, not NaN).
+    expect(line?.stats).toMatchObject({ Pos: "SS" });
+    expect(line?.stats).not.toHaveProperty("caughtStealing");
+    // The page's original header-keyed cells stay available in raw.
+    expect((line?.raw as { stats: Record<string, unknown> }).stats).toMatchObject({ AB: 4, K: 2 });
+  });
+
+  it("canonicalizes pitching headers, keeping inningsPitched a string (SO and K both map)", () => {
+    const rows = [
+      {
+        date: "2025-03-14",
+        opponentName: "Rival",
+        isHome: false,
+        contestId: 6002,
+        result: "W",
+        stats: { IP: "6.1", H: 4, ER: 2, BB: 1, SO: 8, W: 1, L: 0, SV: 0 },
+      },
+      {
+        date: "2025-03-21",
+        opponentName: "Rival",
+        isHome: false,
+        contestId: 6003,
+        result: "L",
+        stats: { IP: 7, H: 5, ER: 3, BB: 2, K: 6 },
+      },
+    ];
+    const normalized = normalizeGameLog({ playerId: 1, seq: 42, category: "pitching", rows, timestamp: "t" });
+    expect(normalized[0]?.stats).toMatchObject({
+      inningsPitched: "6.1",
+      hits: 4,
+      earnedRuns: 2,
+      baseOnBalls: 1,
+      strikeOuts: 8,
+      wins: 1,
+      losses: 0,
+      saves: 0,
+    });
+    // An integer-coerced IP cell is stringified; the K header is the SO alias.
+    expect(normalized[1]?.stats).toMatchObject({ inningsPitched: "7", strikeOuts: 6 });
+  });
+
+  it("drops non-numeric IP and empty cells instead of leaking '-' or coercing '' to 0", () => {
+    const rows = [
+      {
+        date: "2025-03-14",
+        opponentName: "Rival",
+        isHome: null,
+        contestId: 6004,
+        result: "W",
+        stats: { IP: "-", H: "", ER: "  ", BB: 1, SO: 3 },
+      },
+    ];
+    const [line] = normalizeGameLog({ playerId: 1, seq: 42, category: "pitching", rows, timestamp: "t" });
+    // "-" IP gets no entry → the renderer falls back to "0.0 IP", never "- IP".
+    expect(line?.stats).not.toHaveProperty("inningsPitched");
+    // Empty / whitespace cells get no entry (never Number("") === 0).
+    expect(line?.stats).not.toHaveProperty("hits");
+    expect(line?.stats).not.toHaveProperty("earnedRuns");
+    expect(line?.stats).toMatchObject({ baseOnBalls: 1, strikeOuts: 3 });
+  });
+
   it("uses a stable hash fallback when the contest id is missing", () => {
     const rows = [
       { date: "2025-03-14", opponentName: "Rival", isHome: true, contestId: null, result: "W", stats: { AB: 3 } },
