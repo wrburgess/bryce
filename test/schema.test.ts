@@ -239,4 +239,59 @@ describe("digest_deliveries claim columns and lock behaviour (ADR 0034)", () => 
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("adds reconciled_at as a nullable column without touching a settled row", () => {
+    // 0003 is one additive ALTER TABLE ... ADD COLUMN (ADR 0034 amendment). The
+    // host self-heals its schema at openDb with live data in it (ADR 0028), so
+    // the pre-existing row must survive byte-for-byte, and the new column must
+    // read null — "we did not reconcile this" is the correct history for every
+    // delivery that settled before the capability existed.
+    const dir = mkdtempSync(join(tmpdir(), "bryce-migrate-"));
+    const sqlite = new Database(join(dir, "bryce.db"));
+    try {
+      applyMigration(sqlite, "0000_gray_brood.sql");
+      applyMigration(sqlite, "0001_overconfident_sally_floyd.sql");
+      applyMigration(sqlite, "0002_ambiguous_vapor.sql");
+      sqlite
+        .prepare(
+          `INSERT INTO digest_deliveries
+             (kind, date_covered, sent_at, player_count, stat_line_count, status, claimed_at,
+              attempt_count, provider_message_id, error_message, created_at)
+           VALUES ('digest', '2026-07-18', '2026-07-18T17:00:00.000Z', 3, 7, 'sent',
+                   '2026-07-18T17:00:00.000Z', 2, 'pm-existing-1', NULL, '2026-07-18T17:00:00.000Z')`,
+        )
+        .run();
+
+      applyMigration(sqlite, "0003_reconciled_at.sql");
+
+      const row = sqlite.prepare("SELECT * FROM digest_deliveries").get() as Record<string, unknown>;
+      expect(row).toMatchObject({
+        kind: "digest",
+        date_covered: "2026-07-18",
+        sent_at: "2026-07-18T17:00:00.000Z",
+        player_count: 3,
+        stat_line_count: 7,
+        status: "sent",
+        claimed_at: "2026-07-18T17:00:00.000Z",
+        attempt_count: 2,
+        provider_message_id: "pm-existing-1",
+      });
+      expect(row.reconciled_at).toBeNull();
+
+      // Nullable with no default: the column carries no opinion of its own.
+      // The declared type is compared case-insensitively on purpose. This
+      // build normalizes `text` (as the migration writes it) to `TEXT` in
+      // PRAGMA table_info, but that normalization is not a documented
+      // guarantee, and the property under test is the column's TYPE and
+      // NULLABILITY — never its spelling.
+      const column = (
+        sqlite.prepare("PRAGMA table_info(digest_deliveries)").all() as Array<Record<string, unknown>>
+      ).find((c) => c.name === "reconciled_at");
+      expect(column).toMatchObject({ notnull: 0, dflt_value: null });
+      expect(String(column?.type).toUpperCase()).toBe("TEXT");
+    } finally {
+      sqlite.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

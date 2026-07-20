@@ -10,6 +10,7 @@ import {
   CapturingMailer,
   GatedMailer,
   InjectedFault,
+  LookupMailer,
   MID_SEASON,
   OFFSEASON,
   TEST_TZ,
@@ -931,6 +932,281 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
   });
 });
 
+/**
+ * Provider reconciliation on the recovery path (ADR 0034 amendment, issue #41).
+ *
+ * #40 left one window open: a run that dies between provider acceptance and the
+ * settle re-sends once its lease expires. A recovered claim now asks the
+ * provider whether that delivery key already landed — and suppresses the resend
+ * ONLY on a positive confirmation.
+ *
+ * The dangerous direction here is inverted from the rest of ADR 0034: a wrong
+ * "accepted" suppresses a REAL send, which is silent mail loss — strictly worse
+ * than the duplicate this avoids. So every ambiguous answer re-sends, and the
+ * two ways of being ambiguous are asserted separately rather than assumed.
+ */
+describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
+  let opened: OpenedDb;
+  let mailer: LookupMailer;
+  let clock: ReturnType<typeof fakeClock>;
+
+  /** MID_SEASON + 11 minutes: past the 10-minute claim lease, same Chicago date. */
+  const PAST_LEASE = "2026-07-19T17:11:00Z";
+  const RECONCILED_AT = "2026-07-19T17:11:00.000Z";
+
+  const deps = (): DigestDeps => ({
+    db: opened.db,
+    mailer,
+    now: clock.now,
+    tz: TEST_TZ,
+    to: "hc@example.com",
+    from: "bryce@example.com",
+  });
+
+  const deliveries = () => opened.db.select().from(digestDeliveries);
+  const unmarkedLines = () =>
+    opened.db.select().from(statLines).where(isNull(statLines.digestDeliveryId));
+
+  /** Crash a digest run between provider acceptance and the settle commit. */
+  async function crashAfterAcceptance(): Promise<void> {
+    const crashed = runDigest({ ...deps(), db: faultingDb(opened.db, { failAt: "before-settle" }) });
+    await expect(crashed).rejects.toBeInstanceOf(InjectedFault);
+  }
+
+  beforeEach(async () => {
+    opened = testDb();
+    mailer = new LookupMailer();
+    clock = fakeClock(MID_SEASON);
+    await insertCalendars2026(opened.db);
+  });
+
+  afterEach(() => {
+    opened.close();
+  });
+
+  it("suppresses the resend, marking NO stat lines, when the provider confirms acceptance", async () => {
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+    await crashAfterAcceptance();
+    expect(mailer.sent).toHaveLength(1);
+
+    mailer.result = { outcome: "accepted", providerMessageId: "pm-already-accepted" };
+    clock.set(PAST_LEASE);
+    const healed = await runDigest(deps());
+
+    expect(healed).toMatchObject({
+      kind: "digest",
+      action: "skipped",
+      reason: "reconciled-already-accepted",
+      statLineCount: 0,
+    });
+    // The whole point: NO second email.
+    expect(mailer.sent).toHaveLength(1);
+    // Asked about the right slot, bounded by the CRASHED attempt's claim time
+    // (17:00) — not the recovery's own claim, which overwrote it.
+    expect(mailer.lookups).toEqual([
+      { deliveryKey: "bryce:digest:2026-07-19", since: "2026-07-19T17:00:00.000Z" },
+    ]);
+
+    const rows = await deliveries();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      status: "sent",
+      attemptCount: 2,
+      sentAt: RECONCILED_AT,
+      reconciledAt: RECONCILED_AT,
+      providerMessageId: "pm-already-accepted",
+      statLineCount: 0,
+      playerCount: 0,
+    });
+    // ZERO Stat Lines marked. The crashed attempt emailed a set of lines we
+    // never recorded; marking TODAY's assembly would report lines that may
+    // never have been sent (Refresh can run in between) — silent content loss.
+    expect(await unmarkedLines()).toHaveLength(1);
+  });
+
+  it("re-sends when the provider reports the delivery key as not found", async () => {
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+    await crashAfterAcceptance();
+
+    mailer.result = { outcome: "not-found" };
+    clock.set(PAST_LEASE);
+    const healed = await runDigest(deps());
+
+    // Postmark documents no search-consistency guarantee, so a miss moments
+    // after acceptance is expected — and re-sending on it is the design.
+    expect(healed).toMatchObject({ action: "sent", reason: "recovered-stale-claim", statLineCount: 1 });
+    expect(mailer.sent).toHaveLength(2);
+    expect((await deliveries())[0]).toMatchObject({
+      status: "sent",
+      statLineCount: 1,
+      reconciledAt: null,
+    });
+    expect(await unmarkedLines()).toHaveLength(0);
+  });
+
+  it("re-sends when the lookup is unavailable — a failed lookup never suppresses", async () => {
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+    await crashAfterAcceptance();
+
+    mailer.result = { outcome: "unavailable", detail: "Postmark lookup timed out after 5000ms" };
+    clock.set(PAST_LEASE);
+    const healed = await runDigest(deps());
+
+    expect(healed).toMatchObject({ action: "sent", reason: "recovered-stale-claim", statLineCount: 1 });
+    expect(mailer.sent).toHaveLength(2);
+    expect((await deliveries())[0]).toMatchObject({ status: "sent", reconciledAt: null });
+    expect(await unmarkedLines()).toHaveLength(0);
+  });
+
+  it("re-sends without any lookup for a provider that cannot answer one (SMTP/console)", async () => {
+    const plain = new CapturingMailer();
+    // The capability is optional BY CONSTRUCTION: no method, no lookup, and the
+    // documented at-least-once behaviour is preserved exactly.
+    expect("findAccepted" in plain).toBe(false);
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+
+    const crashed = runDigest({
+      ...deps(),
+      mailer: plain,
+      db: faultingDb(opened.db, { failAt: "before-settle" }),
+    });
+    await expect(crashed).rejects.toBeInstanceOf(InjectedFault);
+    expect(plain.sent).toHaveLength(1);
+
+    clock.set(PAST_LEASE);
+    const healed = await runDigest({ ...deps(), mailer: plain });
+    expect(healed).toMatchObject({ action: "sent", reason: "recovered-stale-claim" });
+    expect(plain.sent).toHaveLength(2);
+    expect((await deliveries())[0]).toMatchObject({ status: "sent", reconciledAt: null });
+  });
+
+  it("re-sends when the lookup BREAKS ITS CONTRACT and throws", async () => {
+    // findAccepted is documented as never throwing. A provider that does anyway
+    // is still only "we do not know", and not knowing must re-send. Without
+    // this case the catch-block fail-open path is unpinned: inverting it to
+    // suppress the send fails no test, which is how a provider bug would
+    // silently become mail loss.
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+    await crashAfterAcceptance();
+
+    mailer.throwWith = new Error("postmark search exploded");
+    clock.set(PAST_LEASE);
+
+    const healed = await runDigest(deps());
+    expect(healed).toMatchObject({ action: "sent", reason: "recovered-stale-claim" });
+    expect(mailer.lookups).toHaveLength(1); // it was asked, and it blew up
+    expect(mailer.sent).toHaveLength(2); // and we re-sent anyway
+    expect((await deliveries())[0]).toMatchObject({ status: "sent", reconciledAt: null });
+    expect(await unmarkedLines()).toHaveLength(0);
+  });
+
+  it("CONTENT-LOSS GUARD: the crashed attempt's lines go out in the NEXT digest", async () => {
+    // This is the assertion that makes "mark nothing" safe rather than lossy.
+    // The reconciled delivery reports nothing, so every line stays unreported
+    // and the next digest carries it: content is DUPLICATED, never lost.
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-07-18",
+      stats: { hits: 2, atBats: 4, homeRuns: 1, rbi: 3 },
+    });
+    await crashAfterAcceptance();
+
+    mailer.result = { outcome: "accepted", providerMessageId: "pm-already-accepted" };
+    clock.set(PAST_LEASE);
+    expect((await runDigest(deps())).reason).toBe("reconciled-already-accepted");
+    expect(mailer.sent).toHaveLength(1);
+    expect(await unmarkedLines()).toHaveLength(1);
+
+    // Next day: a fresh slot, an ordinary send — and it carries the line the
+    // reconciled delivery deliberately left unmarked.
+    clock.set("2026-07-20T17:00:00Z");
+    const nextDay = await runDigest(deps());
+    expect(nextDay).toMatchObject({ action: "sent", statLineCount: 1 });
+    expect(mailer.sent).toHaveLength(2);
+    expect(mailer.sent[1]?.text).toContain("Maximo Acosta");
+    expect(mailer.sent[1]?.text).toContain(
+      "2026-07-18 vs Charlotte Knights: PA 4, H 2, BB 0, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0",
+    );
+    expect(await unmarkedLines()).toHaveLength(0);
+  });
+
+  it("never looks up on a fresh claim or a failed-row retry", async () => {
+    // Reconciliation is strictly a RECOVERY concern. A fresh claim has no
+    // crashed attempt to ask about, and a `failed` row means the provider
+    // rejected the mail — it never accepted it.
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+    mailer.result = { outcome: "accepted", providerMessageId: "pm-must-not-be-used" };
+
+    mailer.failWith = new Error("postmark down");
+    expect((await runDigest(deps())).action).toBe("failed");
+    expect(mailer.lookups).toHaveLength(0);
+
+    mailer.failWith = null;
+    const retried = await runDigest(deps());
+    expect(retried).toMatchObject({ action: "sent", reason: null });
+    expect(mailer.lookups).toHaveLength(0);
+    expect(mailer.sent).toHaveLength(1);
+    expect((await deliveries())[0]).toMatchObject({
+      status: "sent",
+      attemptCount: 2,
+      reconciledAt: null,
+      providerMessageId: null,
+    });
+  });
+
+  it("reconciles a crashed heartbeat and runs the seven-day clock from that settle", async () => {
+    clock.set(OFFSEASON); // 2026-12-05T18:00:00Z
+    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+
+    const crashed = runDigest({ ...deps(), db: faultingDb(opened.db, { failAt: "before-settle" }) });
+    await expect(crashed).rejects.toBeInstanceOf(InjectedFault);
+    expect(mailer.sent).toHaveLength(1);
+
+    mailer.result = { outcome: "accepted", providerMessageId: "pm-heartbeat-accepted" };
+    clock.set("2026-12-05T18:11:00Z"); // past the lease
+    const healed = await runDigest(deps());
+
+    expect(healed).toMatchObject({
+      kind: "heartbeat",
+      action: "skipped",
+      reason: "reconciled-already-accepted",
+    });
+    expect(mailer.sent).toHaveLength(1); // no second heartbeat
+    expect(mailer.lookups).toEqual([
+      { deliveryKey: "bryce:heartbeat:2026-12-05", since: "2026-12-05T18:00:00.000Z" },
+    ]);
+    expect((await deliveries())[0]).toMatchObject({
+      kind: "heartbeat",
+      status: "sent",
+      attemptCount: 2,
+      sentAt: "2026-12-05T18:11:00.000Z",
+      reconciledAt: "2026-12-05T18:11:00.000Z",
+    });
+
+    // The seven-day clock runs from the RECONCILED settle (18:11), not the
+    // crashed attempt (18:00) — the eleven minutes that would otherwise let the
+    // next heartbeat out early.
+    clock.set("2026-12-12T18:05:00Z");
+    const tooSoon = await runDigest(deps());
+    expect(tooSoon).toMatchObject({ action: "skipped", reason: "heartbeat-sent-within-week" });
+    expect(mailer.sent).toHaveLength(1);
+
+    clock.set("2026-12-12T18:11:00Z");
+    const due = await runDigest(deps());
+    expect(due.action).toBe("sent");
+    expect(mailer.sent).toHaveLength(2);
+    // A new slot is a FRESH claim, so it sent without consulting the provider.
+    expect(mailer.lookups).toHaveLength(1);
+  });
+});
+
 describe("claimDelivery lease boundary (ADR 0034)", () => {
   let opened: OpenedDb;
   const CLAIMED_AT = "2026-07-19T17:00:00.000Z";
@@ -1299,6 +1575,43 @@ describe("forced delivery", () => {
     const next = await runDigest(deps());
     expect(next).toMatchObject({ action: "skipped", reason: "already-sent-today" });
     expect(mailer.sent).toHaveLength(1);
+  });
+
+  it("REPLAY NEVER RECONCILES: a forced send is not suppressed by the provider lookup", async () => {
+    // Where force meets the issue-#41 reconciliation. A replay's slot HAS
+    // landed — that is its premise — so a lookup would answer "accepted" and
+    // suppress the very send the operator asked for, and settleReconciled would
+    // stamp a fresh sent_at/reconciled_at on the delivered row and zero its
+    // counts.
+    //
+    // This pins the BEHAVIOUR, not a mechanism: two things currently prevent it
+    // (the `!claim.replay` narrowing in runDigest, and `reconciled`'s early
+    // return on `!claim.recovered`, which a replay meets only because its arm has
+    // no such field). Removing either alone leaves this green; removing both
+    // turns it red. That is deliberate — the test should survive a refactor that
+    // drops the accidental one, and fail if the behaviour itself is lost.
+    const lookupMailer = new LookupMailer();
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+    await runDigest({ ...deps(), mailer: lookupMailer });
+    const before = (await deliveries())[0];
+    expect(lookupMailer.sent).toHaveLength(1);
+
+    // The provider would confirm this slot already landed, if it were asked.
+    lookupMailer.result = { outcome: "accepted", providerMessageId: "pm-already-accepted" };
+    const forced = await runDigest({ ...deps(true), mailer: lookupMailer });
+
+    // Force wins: a second mail goes out, carrying the same line.
+    expect(forced).toMatchObject({ action: "sent", reason: "forced", statLineCount: 1 });
+    expect(lookupMailer.sent).toHaveLength(2);
+
+    // The lookup was never even asked — a replay does not take the recovery path.
+    expect(lookupMailer.lookups).toEqual([]);
+
+    // And settleReconciled never ran: the delivered row is untouched.
+    expect(await deliveries()).toHaveLength(1);
+    expect((await deliveries())[0]).toEqual(before);
+    expect((await deliveries())[0]).toMatchObject({ reconciledAt: null, statLineCount: 1 });
   });
 
   // --- Heartbeat / Offseason Sleep ----------------------------------------

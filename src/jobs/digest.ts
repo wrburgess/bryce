@@ -3,10 +3,17 @@ import { digestDeliveries } from "../db/schema.js";
 import { assembleDigest } from "../digest/assemble.js";
 import { renderDigest, renderHeartbeat } from "../digest/render.js";
 import { hostDate, sleepWindow } from "../domain/season.js";
-import type { MailReceipt, Mailer } from "../mailer/types.js";
+import type { DeliveryKind } from "../db/schema.js";
+import type { LookupResult, MailReceipt, Mailer } from "../mailer/types.js";
 import type { Db } from "../db/client.js";
 import type { ClaimRefusal, ClaimResult, Tx } from "./delivery-claim.js";
-import { claimDelivery, deliveryKey, settleFailed, settleSent } from "./delivery-claim.js";
+import {
+  claimDelivery,
+  deliveryKey,
+  settleFailed,
+  settleReconciled,
+  settleSent,
+} from "./delivery-claim.js";
 import { loadActivePlayers, loadCalendars } from "./refresh.js";
 
 export interface DigestDeps {
@@ -37,6 +44,9 @@ const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** A send that took over an expired claim reports WHY it ran again (ADR 0034). */
 const RECOVERED = "recovered-stale-claim";
+
+/** A recovery the PROVIDER confirmed had already landed: settled, never re-sent. */
+const RECONCILED = "reconciled-already-accepted";
 
 /**
  * A send the operator asked for explicitly. It outranks RECOVERED as the
@@ -83,6 +93,32 @@ export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
       kind: "digest",
       action: "skipped",
       reason: claim.reason,
+      statLineCount: 0,
+      playerCount: 0,
+    };
+  }
+
+  // A recovered claim asks the provider whether the crashed attempt already
+  // landed BEFORE composing anything — the one case where a send is suppressed.
+  //
+  // A REPLAY never reconciles. The slot it replays HAS landed — that is its
+  // premise — so a lookup would answer "accepted" and suppress the very send the
+  // operator asked for, and settleReconciled WRITES: it would stamp a fresh
+  // sent_at/reconciled_at on the delivered row and reset its counts to 0, the
+  // exact degradation the replay design exists to prevent.
+  //
+  // Two things currently stop that, and only one is deliberate. This narrowing
+  // is required for the call to type-check at all (RecoveredClaim cannot accept
+  // the replay arm). Separately, `reconciled` returns early on `!claim.recovered`,
+  // which a replay satisfies only because its arm HAS no `recovered` field —
+  // accidental protection that would evaporate the day someone adds one. The
+  // explicit guard is the one to keep; the test pins the behaviour, not either
+  // mechanism.
+  if (!claim.replay && (await reconciled(deps, "digest", today, claim))) {
+    return {
+      kind: "digest",
+      action: "skipped",
+      reason: RECONCILED,
       statLineCount: 0,
       playerCount: 0,
     };
@@ -200,6 +236,18 @@ async function runHeartbeat(
     };
   }
 
+  // A replay never reconciles — see the digest path for why suppressing a
+  // forced send here would both defeat force and rewrite a delivered row.
+  if (!claim.replay && (await reconciled(deps, "heartbeat", today, claim))) {
+    return {
+      kind: "heartbeat",
+      action: "skipped",
+      reason: RECONCILED,
+      statLineCount: 0,
+      playerCount: watchedCount,
+    };
+  }
+
   const mail = renderHeartbeat({ date: today, playerCount: watchedCount, nextOpeningDay });
   let receipt: MailReceipt;
   try {
@@ -245,6 +293,62 @@ async function runHeartbeat(
     statLineCount: 0,
     playerCount: watchedCount,
   };
+}
+
+interface RecoveredClaim {
+  deliveryId: number;
+  recovered: boolean;
+  previousClaimedAt: string | null;
+}
+
+/**
+ * Reconciliation, shared by both delivery paths (ADR 0034 amendment). Returns
+ * true only when the provider POSITIVELY confirmed the crashed attempt already
+ * landed — in which case the delivery is settled `sent` here and the caller must
+ * not send.
+ *
+ * STRICTLY FAIL-OPEN. Every other path returns false and the caller sends
+ * exactly as it does today:
+ *   - a fresh claim, or a `failed`-row retry — nothing crashed, nothing to ask
+ *     about; reconciliation is strictly a recovery-path concern;
+ *   - a provider with no lookup capability (SMTP, console) — documented
+ *     at-least-once, and an absent optional method is how that is expressed;
+ *   - `not-found` (including "not indexed yet" — Postmark documents no search
+ *     consistency guarantee, so a miss right after acceptance is expected);
+ *   - `unavailable` (HTTP error, unreadable body, rejected request, timeout);
+ *   - a lookup that throws despite the contract saying it must not.
+ *
+ * The asymmetry is deliberate and inverted from the rest of ADR 0034: here the
+ * dangerous direction is a WRONG "accepted", which suppresses a real send —
+ * silent mail loss, strictly worse than the duplicate this avoids. So only a
+ * positive confirmation may ever suppress.
+ */
+async function reconciled(
+  deps: DigestDeps,
+  kind: DeliveryKind,
+  dateCovered: string,
+  claim: RecoveredClaim,
+): Promise<boolean> {
+  if (!claim.recovered) return false;
+  const lookup = deps.mailer.findAccepted;
+  if (lookup === undefined) return false;
+
+  let result: LookupResult;
+  try {
+    result = await lookup.call(deps.mailer, deliveryKey(kind, dateCovered), claim.previousClaimedAt);
+  } catch {
+    // The contract says findAccepted must not throw; a provider that does is
+    // still just "we do not know", and not knowing re-sends.
+    return false;
+  }
+  if (result.outcome !== "accepted") return false;
+
+  settleReconciled(deps.db, {
+    deliveryId: claim.deliveryId,
+    now: deps.now(),
+    providerMessageId: result.providerMessageId,
+  });
+  return true;
 }
 
 /**
