@@ -801,6 +801,38 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
     expect(await unmarkedLines()).toHaveLength(0);
   });
 
+  it("clears the previous attempt's error and provider id when re-claiming a slot", async () => {
+    // A `sending` row describes the attempt IN FLIGHT. If a re-claim left the
+    // prior attempt's failure text or provider id behind, /health would show an
+    // in-flight delivery alongside a stale error — the observability this design
+    // leans on would be lying. Asserted mid-flight, because settling would
+    // overwrite both fields anyway and hide the bug.
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "failed",
+      errorMessage: "postmark down",
+      providerMessageId: "old-provider-id",
+      attemptCount: 1,
+      statLineCount: 0,
+      playerCount: 0,
+    });
+
+    const gated = new GatedMailer();
+    const inFlight = runDigest({ ...deps(), mailer: gated });
+    await gated.waitForInFlight(1);
+
+    const claimed = (await deliveries())[0];
+    expect(claimed).toMatchObject({ status: "sending", attemptCount: 2 });
+    expect(claimed?.errorMessage).toBeNull();
+    expect(claimed?.providerMessageId).toBeNull();
+
+    gated.release();
+    await inFlight;
+  });
+
   it("heals a crashed heartbeat and restarts the seven-day clock from the NEW send", async () => {
     clock.set(OFFSEASON); // 2026-12-05T18:00:00Z
     await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });

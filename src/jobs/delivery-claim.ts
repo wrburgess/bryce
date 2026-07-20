@@ -106,7 +106,7 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
           .returning({ id: digestDeliveries.id })
           .all()[0];
         if (inserted === undefined) {
-          throw new Error("Failed to claim digest delivery");
+          throw new Error(`Failed to claim ${args.kind} delivery for ${args.dateCovered}`);
         }
         return { claimed: true, deliveryId: inserted.id, attempt: 1, recovered: false };
       }
@@ -129,9 +129,21 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
 
       // "failed" (retry after a provider rejection) or a recovered "sending" —
       // both re-take the slot and bump the attempt counter.
+      //
+      // errorMessage and providerMessageId are cleared here, not left for the
+      // settle: a `sending` row describes the attempt IN FLIGHT, so carrying the
+      // previous attempt's failure text or provider id would make the in-flight
+      // row lie to /health (the observability this whole design leans on) and
+      // would hand a future reconciliation pass a stale id to key on.
       const attempt = existing.attemptCount + 1;
       tx.update(digestDeliveries)
-        .set({ status: "sending", claimedAt: nowIso, attemptCount: attempt })
+        .set({
+          status: "sending",
+          claimedAt: nowIso,
+          attemptCount: attempt,
+          errorMessage: null,
+          providerMessageId: null,
+        })
         .where(eq(digestDeliveries.id, existing.id))
         .run();
       return { claimed: true, deliveryId: existing.id, attempt, recovered };
