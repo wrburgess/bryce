@@ -24,6 +24,7 @@ const NCAA_GAME_TYPE = "R";
  * the renderer).
  */
 const BATTING_HEADER_MAP: Record<string, string> = {
+  PA: "plateAppearances",
   AB: "atBats",
   R: "runs",
   H: "hits",
@@ -37,6 +38,8 @@ const BATTING_HEADER_MAP: Record<string, string> = {
   SB: "stolenBases",
   CS: "caughtStealing",
   HBP: "hitByPitch",
+  SF: "sacFlies",
+  SH: "sacBunts",
 };
 
 const PITCHING_HEADER_MAP: Record<string, string> = {
@@ -53,6 +56,12 @@ const PITCHING_HEADER_MAP: Record<string, string> = {
   BF: "battersFaced",
 };
 
+const FIELDING_HEADER_MAP: Record<string, string> = {
+  E: "errors",
+  // PO / A / FLD% intentionally unmapped: they pass through under their page
+  // names (still queryable, ignored by the renderer).
+};
+
 /**
  * Translate header-keyed cells into canonical stat keys with numeric values
  * (`inningsPitched` stays a string, matching the MLB game-log shape the
@@ -63,7 +72,12 @@ export function canonicalizeStats(
   category: NcaaStatCategory,
   raw: Record<string, unknown>,
 ): Record<string, unknown> {
-  const map = category === "batting" ? BATTING_HEADER_MAP : PITCHING_HEADER_MAP;
+  const map =
+    category === "batting"
+      ? BATTING_HEADER_MAP
+      : category === "pitching"
+        ? PITCHING_HEADER_MAP
+        : FIELDING_HEADER_MAP;
   const out: Record<string, unknown> = {};
   for (const [header, value] of Object.entries(raw)) {
     const canonical = map[header.toUpperCase()];
@@ -86,7 +100,33 @@ export function canonicalizeStats(
           : NaN;
     if (Number.isFinite(n)) out[canonical] = n;
   }
+  if (category === "batting" && out.plateAppearances === undefined) {
+    const pa = derivePlateAppearances(out);
+    if (pa !== null) out.plateAppearances = pa;
+  }
   return out;
+}
+
+/**
+ * Approximate PA when the page carries no PA column: AB + BB + HBP + SF + SH,
+ * summing whichever components the page does carry. An APPROXIMATION by
+ * design (ADR 0033): the page exposes no catcher's-interference column, so
+ * the value can undercount by that rare PA. A page with none of the
+ * components yields no entry (the renderer then falls back to its own
+ * AB+BB+HBP sum, i.e. 0 for an empty record).
+ */
+function derivePlateAppearances(stats: Record<string, unknown>): number | null {
+  const components = ["atBats", "baseOnBalls", "hitByPitch", "sacFlies", "sacBunts"];
+  let sum = 0;
+  let anyPresent = false;
+  for (const key of components) {
+    const v = stats[key];
+    if (typeof v === "number" && Number.isFinite(v)) {
+      sum += v;
+      anyPresent = true;
+    }
+  }
+  return anyPresent ? sum : null;
 }
 
 /**

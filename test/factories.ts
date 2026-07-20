@@ -260,7 +260,10 @@ export function makeSplit(overrides: JsonRecord = {}): JsonRecord {
   };
 }
 
-export function makeGameLogBody(group: "hitting" | "pitching", splits: JsonRecord[]): JsonRecord {
+export function makeGameLogBody(
+  group: "hitting" | "pitching" | "fielding",
+  splits: JsonRecord[],
+): JsonRecord {
   return {
     copyright: "Copyright 2026 MLB Advanced Media, L.P.",
     stats: [
@@ -526,6 +529,7 @@ function categoryForId(catId: number): NcaaStatCategory | "unknown" {
   for (const season of NCAA_SEASONS) {
     if (season.battingCategoryId === catId) return "batting";
     if (season.pitchingCategoryId === catId) return "pitching";
+    if (season.fieldingCategoryId === catId) return "fielding";
   }
   return "unknown";
 }

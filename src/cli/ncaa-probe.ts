@@ -29,8 +29,8 @@ export async function runProbe(argv: string[], deps: ProbeDeps): Promise<number>
   }
   const season = flags.get("season") ?? String(new Date().getFullYear());
   const type = (flags.get("type") ?? "batting") as NcaaStatCategory;
-  if (type !== "batting" && type !== "pitching") {
-    deps.write(`error: invalid --type ${type} (use batting or pitching)`);
+  if (type !== "batting" && type !== "pitching" && type !== "fielding") {
+    deps.write(`error: invalid --type ${type} (use batting, pitching, or fielding)`);
     return 1;
   }
 

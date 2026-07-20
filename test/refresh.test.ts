@@ -101,16 +101,63 @@ describe("runRefresh", () => {
     expect(cals.find((c) => c.sportId === 1)?.postSeasonEnd).toBe("2026-10-31");
   });
 
-  it("sweeps all 6 sportIds x both stat groups per player", async () => {
+  it("sweeps all 6 sportIds x all three stat groups per player", async () => {
     await insertPlayer(opened.db, { externalId: 691185 });
     await runRefresh(deps());
     const gameLogCalls = api.callsMatching(/stats=gameLog/);
-    expect(gameLogCalls).toHaveLength(12);
+    expect(gameLogCalls).toHaveLength(18);
     for (const sportId of [1, 11, 12, 13, 14, 16]) {
-      for (const group of ["hitting", "pitching"]) {
+      for (const group of ["hitting", "pitching", "fielding"]) {
         expect(gameLogCalls.some((u) => u.includes(`sportId=${sportId}`) && u.includes(`group=${group}`))).toBe(true);
       }
     }
+  });
+
+  it("ingests fielding game logs as fielding stat lines, idempotently", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    api.options.gameLogs = {
+      "11:hitting": makeGameLogBody("hitting", [
+        makeSplit({ game: { gamePk: 900001, gameNumber: 1 } }),
+      ]),
+      "11:fielding": makeGameLogBody("fielding", [
+        makeSplit({
+          game: { gamePk: 900001, gameNumber: 1 },
+          stat: { errors: 2, assists: 3, putOuts: 1, chances: 6 },
+        }),
+      ]),
+    };
+
+    const summary = await runRefresh(deps());
+    expect(summary.statLinesInserted).toBe(2); // one batting + one fielding row
+
+    const rows = await opened.db.select().from(statLines).where(eq(statLines.playerId, player.id));
+    const fielding = rows.find((r) => r.statType === "fielding");
+    expect(fielding?.gameId).toBe(900001);
+    expect((fielding?.stats as Record<string, unknown>).errors).toBe(2);
+    // The ADR 0029 key keeps batting and fielding as distinct rows of the same game.
+    expect(rows.filter((r) => r.gameId === 900001)).toHaveLength(2);
+
+    // Second identical run: zero inserts, both rows refreshed in place.
+    const second = await runRefresh(deps());
+    expect(second.statLinesInserted).toBe(0);
+    expect(second.statLinesUpdated).toBe(2);
+    expect(await opened.db.select().from(statLines)).toHaveLength(2);
+  });
+
+  it("tolerates an absent fielding game log exactly like an empty hitting/pitching log", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    // Only hitting is routed; fielding (and pitching) fall to the silent-empty body.
+    api.options.gameLogs = {
+      "11:hitting": makeGameLogBody("hitting", [
+        makeSplit({ game: { gamePk: 900001, gameNumber: 1 } }),
+      ]),
+    };
+
+    const summary = await runRefresh(deps());
+    expect(summary.skipped).toBe(false);
+    expect(summary.statLinesInserted).toBe(1);
+    const rows = await opened.db.select().from(statLines).where(eq(statLines.playerId, player.id));
+    expect(rows.map((r) => r.statType)).toEqual(["batting"]);
   });
 
   it("an identical second run inserts zero new rows (idempotent, ADR 0030)", async () => {
@@ -269,6 +316,11 @@ describe("runRefresh", () => {
         ],
       }),
       "2649785:pitching": makeNcaaGameLogHtml({
+        fullName: "College Guy",
+        schoolName: "LSU",
+        rows: [],
+      }),
+      "2649785:fielding": makeNcaaGameLogHtml({
         fullName: "College Guy",
         schoolName: "LSU",
         rows: [],

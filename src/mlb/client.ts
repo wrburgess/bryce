@@ -34,7 +34,7 @@ export class MlbApiError extends Error {
   }
 }
 
-export type StatGroup = "hitting" | "pitching";
+export type StatGroup = "hitting" | "pitching" | "fielding";
 
 /**
  * Thin client over the MLB Stats API. All responses are validated with Zod —

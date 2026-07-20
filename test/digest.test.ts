@@ -62,13 +62,18 @@ describe("runDigest", () => {
     expect(mailer.sent).toHaveLength(1);
     const mail = mailer.sent[0];
     expect(mail?.to).toBe("hc@example.com");
-    expect(mail?.subject).toBe("Bryce digest - 2026-07-19");
+    expect(mail?.subject).toBe("MLB Daily Tracker: Sun, July 19, 2026");
     // Never assert only success: BOTH parts carry the actual stat content.
+    // Fixed-format lines (ADR 0033): every stat always shown, zeros included.
     expect(mail?.text).toContain("Maximo Acosta");
-    expect(mail?.text).toContain("2026-07-18 vs Charlotte Knights: 2-4, HR, 3 RBI");
-    expect(mail?.text).toContain("2026-07-17 vs Charlotte Knights: 1-5, 2 K");
+    expect(mail?.text).toContain(
+      "2026-07-18 vs Charlotte Knights: PA 4, H 2, BB 0, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0",
+    );
+    expect(mail?.text).toContain(
+      "2026-07-17 vs Charlotte Knights: PA 5, H 1, BB 0, K 2, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 0",
+    );
     expect(mail?.html).toContain("Maximo Acosta");
-    expect(mail?.html).toContain("2-4, HR, 3 RBI");
+    expect(mail?.html).toContain("PA 4, H 2, BB 0, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0");
     expect(mail?.html).toContain("<h2>MiLB - Triple-A</h2>");
 
     // Lines are marked with the delivery; the delivery row records the counts.
@@ -107,7 +112,7 @@ describe("runDigest", () => {
     expect(result.action).toBe("sent");
     expect(result.statLineCount).toBe(0);
     const mail = mailer.sent[1];
-    expect(mail?.subject).toBe("Bryce digest - 2026-07-20");
+    expect(mail?.subject).toBe("MLB Daily Tracker: Mon, July 20, 2026");
     expect(mail?.text).toContain("No new stat lines today.");
     expect(mail?.text).toContain("No new stats: Maximo Acosta");
     expect(mail?.html).toContain("No new stats: Maximo Acosta");
@@ -128,7 +133,7 @@ describe("runDigest", () => {
     const result = await runDigest(deps());
     expect(result.action).toBe("sent");
     expect(result.statLineCount).toBe(1);
-    expect(mailer.sent[1]?.text).toContain("2026-07-17 vs Charlotte Knights: 3-4");
+    expect(mailer.sent[1]?.text).toContain("2026-07-17 vs Charlotte Knights: PA 4, H 3,");
   });
 
   it("groups MLB before MiLB, with MiLB subgrouped by MiLB Level", async () => {
@@ -161,7 +166,9 @@ describe("runDigest", () => {
     expect(mlbAt).toBeGreaterThanOrEqual(0);
     expect(aaaAt).toBeGreaterThan(mlbAt);
     expect(aaAt).toBeGreaterThan(aaaAt);
-    expect(text).toContain("6.0 IP, 4 H, 1 ER, 2 BB, 8 K (W)");
+    expect(text).toContain(
+      "IP 6.0, ER 1, K 8, K/9 12.0, BB 2, HA 4, HRA 0, ERA 1.50, WHIP 1.00, S 0, HLD 0, QS 1",
+    );
     const html = mailer.sent[0]?.html ?? "";
     expect(html.indexOf("<h2>MLB</h2>")).toBeLessThan(html.indexOf("<h2>MiLB - Triple-A</h2>"));
   });
@@ -248,11 +255,11 @@ describe("runDigest", () => {
     });
     await runDigest(deps());
     const text = mailer.sent[0]?.text ?? "";
-    expect(text).toContain("(Game 1): 1-3");
-    expect(text).toContain("(Game 2): 2-4");
+    expect(text).toContain("(Game 1): PA 3, H 1,");
+    expect(text).toContain("(Game 2): PA 4, H 2,");
   });
 
-  it("does not label a single game, and a two-way player's two roles get no label", async () => {
+  it("does not label a single game, and a two-way player keeps separate batting and pitching lines", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Two Way" });
     await insertStatLine(opened.db, { playerId: player.id, gameId: 880001, statType: "batting" });
     await insertStatLine(opened.db, {
@@ -262,7 +269,65 @@ describe("runDigest", () => {
       stats: { inningsPitched: "5.0", hits: 3, earnedRuns: 2, baseOnBalls: 1, strikeOuts: 6 },
     });
     await runDigest(deps());
-    expect(mailer.sent[0]?.text).not.toContain("(Game");
+    const text = mailer.sent[0]?.text ?? "";
+    expect(text).not.toContain("(Game");
+    // Both roles render, each in its own fixed format (ADR 0033).
+    expect(text).toContain("PA 4, H 2, BB 0, K 1, 2B 0, 3B 0, HR 1, RBI 3, R 1, SB 0, CS 0, E 0");
+    expect(text).toContain(
+      "IP 5.0, ER 2, K 6, K/9 10.8, BB 1, HA 3, HRA 0, ERA 3.60, WHIP 0.80, S 0, HLD 0, QS 0",
+    );
+  });
+
+  it("merges a fielding row's errors into the same game's batting line, never a third line", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Error Prone" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 880010,
+      statType: "batting",
+      gameDate: "2026-07-18",
+      stats: { hits: 1, atBats: 4, strikeOuts: 2 },
+    });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 880010,
+      statType: "fielding",
+      gameDate: "2026-07-18",
+      stats: { errors: 2, assists: 3, putOuts: 1 },
+    });
+
+    const result = await runDigest(deps());
+    const text = mailer.sent[0]?.text ?? "";
+    expect(text).toContain(
+      "2026-07-18 vs Charlotte Knights: PA 4, H 1, BB 0, K 2, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 2",
+    );
+    // Exactly ONE rendered line for the game — the fielding row never stands alone.
+    expect(text.match(/2026-07-18 vs Charlotte Knights/g)).toHaveLength(1);
+    // Both stored rows (batting + fielding) are marked reported.
+    expect(result.statLineCount).toBe(2);
+    const unmarked = await opened.db.select().from(statLines).where(isNull(statLines.digestDeliveryId));
+    expect(unmarked).toHaveLength(0);
+  });
+
+  it("renders a fielding-only game as a zeros batting line with E, and marks the fielding row", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Defensive Sub" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 880020,
+      statType: "fielding",
+      gameDate: "2026-07-18",
+      stats: { errors: 1, putOuts: 4 },
+    });
+
+    const result = await runDigest(deps());
+    const text = mailer.sent[0]?.text ?? "";
+    expect(text).toContain("Defensive Sub");
+    expect(text).toContain(
+      "2026-07-18 vs Charlotte Knights: PA 0, H 0, BB 0, K 0, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 1",
+    );
+    expect(result.statLineCount).toBe(1);
+    // No unreported fielding rows remain after the digest runs.
+    const unmarked = await opened.db.select().from(statLines).where(isNull(statLines.digestDeliveryId));
+    expect(unmarked).toHaveLength(0);
   });
 
   it("on send failure records a failed delivery, leaves lines unmarked, and the retry succeeds", async () => {

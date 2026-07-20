@@ -55,7 +55,7 @@ export const statLines = sqliteTable(
       .references(() => players.id),
     /** Source-native game identifier (MLB Stats API gamePk). */
     gameId: integer("game_id").notNull(),
-    statType: text("stat_type", { enum: ["batting", "pitching"] }).notNull(),
+    statType: text("stat_type", { enum: ["batting", "pitching", "fielding"] }).notNull(),
     gameDate: text("game_date").notNull(),
     gameNumber: integer("game_number").notNull().default(1),
     gameType: text("game_type").notNull(),

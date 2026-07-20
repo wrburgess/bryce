@@ -44,7 +44,7 @@ export interface StatLineView {
   level: "mlb" | "milb" | "ncaa";
   milbLevel: string | null;
   gameId: number;
-  statType: "batting" | "pitching";
+  statType: "batting" | "pitching" | "fielding";
   gameDate: string;
   gameNumber: number;
   gameType: string;

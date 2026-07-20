@@ -49,6 +49,15 @@ const pitchingPage = (fullName: string, schoolName: string) =>
     ],
   });
 
+const fieldingPage = (fullName: string, schoolName: string) =>
+  makeNcaaGameLogHtml({
+    fullName,
+    schoolName,
+    rows: [
+      { date: "2026-03-13", opponentName: "Georgia", isHome: true, contestId: 6001, stats: { PO: 2, A: 3, E: 1 } },
+    ],
+  });
+
 describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
   let opened: OpenedDb;
   let api: FakeStatsApi;
@@ -76,6 +85,7 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
       pages: {
         "2649785:batting": battingPage("College Guy", "LSU"),
         "2649785:pitching": pitchingPage("College Guy", "LSU"),
+        "2649785:fielding": fieldingPage("College Guy", "LSU"),
       },
     });
   });
@@ -96,21 +106,25 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
       ...overrides,
     });
 
-  it("ingests batting + pitching rows and seeds the sportId 22 calendar", async () => {
+  it("ingests batting + pitching + fielding rows and seeds the sportId 22 calendar", async () => {
     const player = await insertNcaa();
     const summary = await runRefresh(deps());
     expect(summary.skipped).toBe(false);
     expect(summary.playersRefreshed).toBe(1);
-    // 2 batting + 1 pitching game rows.
-    expect(summary.statLinesInserted).toBe(3);
+    // 2 batting + 1 pitching + 1 fielding game rows.
+    expect(summary.statLinesInserted).toBe(4);
 
     const lines = await opened.db.select().from(statLines).where(eq(statLines.playerId, player.id));
-    expect(lines).toHaveLength(3);
+    expect(lines).toHaveLength(4);
     expect(lines.every((l) => l.sportId === 22)).toBe(true);
     expect(lines.filter((l) => l.statType === "batting")).toHaveLength(2);
     expect(lines.filter((l) => l.statType === "pitching")).toHaveLength(1);
-    // The two-way game 6001 carries both a batting and a pitching line.
-    expect(lines.filter((l) => l.gameId === 6001)).toHaveLength(2);
+    expect(lines.filter((l) => l.statType === "fielding")).toHaveLength(1);
+    // The scraped E header reaches storage as the canonical errors key.
+    const fielding = lines.find((l) => l.statType === "fielding");
+    expect((fielding?.stats as Record<string, unknown>).errors).toBe(1);
+    // Game 6001 carries batting, pitching, AND fielding lines under the ADR 0029 key.
+    expect(lines.filter((l) => l.gameId === 6001)).toHaveLength(3);
 
     // The NCAA calendar row was seeded from the bundled dates.
     const cal = (
@@ -127,7 +141,7 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
 
     const second = await runRefresh(deps());
     expect(second.statLinesInserted).toBe(0);
-    expect(second.statLinesUpdated).toBe(3);
+    expect(second.statLinesUpdated).toBe(4);
     const after = await opened.db.select().from(statLines);
     expect(after).toHaveLength(before.length);
     expect(after.map((r) => r.createdAt)).toEqual(before.map((r) => r.createdAt));
@@ -156,7 +170,7 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
     ).find((l) => l.gameId === 6001 && l.statType === "batting");
     expect((line?.stats as Record<string, unknown>).homeRuns).toBe(2);
     const all = await opened.db.select().from(statLines).where(eq(statLines.playerId, player.id));
-    expect(all).toHaveLength(3); // no new row from the correction
+    expect(all).toHaveLength(4); // no new row from the correction
   });
 
   it("refreshes the school when the page shows a transfer", async () => {
@@ -166,6 +180,7 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
     ncaaApi.options.pages = {
       "2649785:batting": battingPage("College Guy", "Texas"),
       "2649785:pitching": pitchingPage("College Guy", "Texas"),
+      "2649785:fielding": fieldingPage("College Guy", "Texas"),
     };
     await runRefresh(deps());
 
@@ -239,12 +254,21 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
 
     expect(mailer.sent).toHaveLength(1);
     const text = mailer.sent[0]!.text;
-    // Regression: the scraped AB/H/HR/... headers must reach the renderer as
-    // canonical keys — a broken mapping renders "0-0" here.
+    // Regression: the scraped AB/H/HR/E headers must reach the renderer as
+    // canonical keys, PA is derived at ingest (no PA column on the page), and
+    // the game 6001 fielding row's E merges into the batting line (ADR 0033).
     expect(text).toContain("College Guy (LSU)");
-    expect(text).toContain("2-4, HR, 2 RBI");
-    expect(text).toContain("1-3");
-    expect(text).toContain("6.0 IP, 4 H, 1 ER, 2 BB, 8 K (W)");
-    expect(text).not.toContain("0-0");
+    expect(text).toContain(
+      "2026-03-13 vs Georgia: PA 4, H 2, BB 0, K 0, 2B 0, 3B 0, HR 1, RBI 2, R 0, SB 0, CS 0, E 1",
+    );
+    expect(text).toContain(
+      "2026-03-14 at Georgia: PA 3, H 1, BB 0, K 0, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 0",
+    );
+    expect(text).toContain(
+      "2026-03-13 vs Georgia: IP 6.0, ER 1, K 8, K/9 12.0, BB 2, HA 4, HRA 0, ERA 1.50, WHIP 1.00, S 0, HLD 0, QS 1",
+    );
+    // The fielding row never renders standalone: game 6001 shows exactly the
+    // merged batting line plus the pitching line.
+    expect(text.match(/2026-03-13/g)).toHaveLength(2);
   });
 });

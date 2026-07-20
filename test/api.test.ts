@@ -53,6 +53,7 @@ describe("REST API", () => {
           ],
         }),
         "2649785:pitching": makeNcaaGameLogHtml({ fullName: "College Guy", schoolName: "LSU", rows: [] }),
+        "2649785:fielding": makeNcaaGameLogHtml({ fullName: "College Guy", schoolName: "LSU", rows: [] }),
       },
     });
     api = new FakeStatsApi({
@@ -404,7 +405,7 @@ describe("REST API", () => {
       expect(body.date).toBe("2026-07-19");
       expect(body.statLineCount).toBe(1);
       expect(body.playerCount).toBe(1);
-      expect(body.mail.subject).toBe("Bryce digest - 2026-07-19");
+      expect(body.mail.subject).toBe("MLB Daily Tracker: Sun, July 19, 2026");
       expect(body.mail.text).toContain("Maximo Acosta");
 
       // Read-only: no send, no delivery row, no marking.

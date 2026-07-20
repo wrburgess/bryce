@@ -170,9 +170,11 @@ npm run digest
 
 Builds the digest of every stat line not yet reported and "sends" it — with
 `MAILER_PROVIDER=console` it prints the email (subject, HTML, and plain text) straight to your
-terminal. You should see your players' lines grouped by level, e.g. `2-4, HR, 3 RBI` for hitters
-or `6.0 IP, 2 ER, 8 K, W` for pitchers, with a "No new stats" list for in-season players who
-didn't play.
+terminal. You should see your players' lines grouped by level, in the fixed format — e.g.
+`PA 4, H 2, BB 1, K 1, 2B 0, 3B 0, HR 1, RBI 3, R 2, SB 0, CS 0, E 0` for hitters or
+`IP 6.1, ER 2, K 8, K/9 11.4, BB 1, HA 4, HRA 1, ERA 2.84, WHIP 0.79, S 0, HLD 0, QS 1` for
+pitchers (every stat always shown, zeros included; ERA/WHIP/K-9 are that game's rates only) —
+with a "No new stats" list for in-season players who didn't play.
 
 Two behaviors that surprise people, both by design:
 
@@ -193,7 +195,10 @@ npm run ncaa:probe -- --seq 2649785 --season 2025 --type batting
 
 It fetches one real stats.ncaa.org game-log page and prints the HTTP status, the player name and
 school it resolved, and how many game rows it parsed. A clean parse = NCAA support is fully
-validated. (If it fails, the fix is isolated to one file — report the output.)
+validated. (If it fails, the fix is isolated to one file — report the output.) Run it once more
+with `--type fielding`: the bundled fielding category ids follow the source's consecutive-id
+pattern but are unverified until this probe confirms them
+([ADR 0033](../adr/0033-digest-stat-set-single-game-rates-fielding.md)).
 
 ## 9. Switch to real email
 
