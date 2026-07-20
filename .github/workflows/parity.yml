@@ -23,5 +23,10 @@ jobs:
       - name: Enforce-hook self-test (Layer 3 Claude fast-fail; needs jq)
         run: bash .claude/hooks/enforce-branch-creation.test.sh
 
+      # Drives the real summon script against a fake `codex` in a temp dir, so it needs no CLI, no
+      # credentials, and no network — the script itself never touches either (issue #39).
+      - name: Reviewer-summon self-test (Reviewer wiring; offline, fake CLI)
+        run: bash scripts/summon_reviewer.test.sh
+
       - name: Structural parity check
         run: ruby scripts/parity_check.rb

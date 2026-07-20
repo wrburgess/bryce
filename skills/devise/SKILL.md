@@ -100,17 +100,42 @@ post-spike re-plan; here, state only what the spike must *learn*.)
 
 ### Next Step
 Per this host's gate policy ([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Human gates*),
-this plan is deemed approved on posting; proceeding with the implement skill (`invoke`) for the same
-issue. HC: comment on the issue to revise direction at any time.
+this plan is deemed approved on posting. Summoning the Reviewer for an independent plan critique;
+must-fix findings are folded into a revised plan before the implement skill (`invoke`) starts. HC:
+comment on the issue to revise direction at any time.
 ```
 
 Sign with the attribution footer from [`PROJECT.md`](../../PROJECT.md) → *Attribution & Model
 Declaration*, using your runtime-actual model.
 
-**Terminal artifact:** the plan posted on the issue. **In this host the plan-approval gate is
+**Then summon the Reviewer for a plan critique — the AC does this, not the HC.** With the plan
+posted, request an independent second-model critique of the plan text using the Reviewer declared in
+[`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Reviewer*, which names the mechanism, its
+invocation, and the fallback order. In this host that summon is a bundled script,
+`scripts/summon_reviewer.rb` (plan mode); read the Project Config for how to invoke it and never
+hardcode a command here.
+
+**This critique blocks the handoff to the implement skill (`invoke`).** Do not start implementing
+while it is outstanding:
+
+1. **Wait for the critique to return.** A pending critique is not a passed gate.
+2. **Classify its findings** by [`PROJECT.md`](../../PROJECT.md) → *Review Severity Framework*.
+3. **Fold every must-fix finding into a revised plan** and post the revision to the issue (the same
+   loop-back a mid-implementation discovery uses — post the revised plan, proceed). A finding you
+   disagree with is answered on the issue with the reasoning, not silently dropped.
+4. **Only then hand off** to the implement skill, against the *final* posted plan.
+
+If the summon fails, follow the *Reviewer* failure ladder in the Project Config: fall back to the
+declared fallback Reviewer, and if no Reviewer returns a critique at all, **flag the missing plan
+review** on the issue so the deliver skill (`final`) can record it in the SOW. The gate is never
+silently skipped — a critique that never arrived must never look like a critique that found nothing.
+
+**Terminal artifact:** the plan posted on the issue — with its Reviewer critique answered, and any
+must-fix finding folded into a posted revision. **In this host the plan-approval gate is
 auto-approved** ([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Human gates*): the posted plan
-is deemed approved on posting, and work proceeds without a human pause. The AC still does not write
-code without a *posted* plan — the artifact and its rigor are unchanged, only the wait is waived.
+is deemed approved on posting, and work proceeds without a human pause. That waives the *human* wait,
+not the *Reviewer* one — the AC still does not write code without a posted plan, and not while a plan
+critique is outstanding.
 
 An approved plan is **revisable direction, not a frozen contract.** Discovering mid-`invoke` that the
 plan was wrong — an assumption broke, the spike taught something the plan didn't foresee — is an

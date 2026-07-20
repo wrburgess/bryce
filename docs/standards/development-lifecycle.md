@@ -19,9 +19,12 @@ over time is which gates require external review vs. self-review; what changes a
 - **HC** — Human Contributor. Makes decisions, approves gates, owns the product.
 - **AC** — AI Contributor. Does the work, self-reviews, responds to feedback.
 - **Reviewer** — an **independent second model** that gives unbiased critique at the plan and PR
-  gates. The Host App names its reviewer tool (and wires it into CI if desired); this lifecycle only
-  requires that it is *a different model from the AC*. If no second model is reachable, the gate
-  **degrades to "stop and ask the HC"** — it is never silently dropped.
+  gates. The Host App names its reviewer tool, its invocation, and its fallback order in
+  [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Reviewer* (and wires it into CI if desired);
+  this lifecycle only requires that it is *a different model from the AC*. **The AC summons the
+  Reviewer** — that is what makes a hands-off run possible; the HC is not the courier. If no second
+  model is reachable, the gate **degrades to a flagged, visible gap** (the declared fallback, else a
+  missing-review flag carried into the SOW) — it is never silently dropped.
 
 ## The lifecycle host
 
@@ -55,8 +58,9 @@ HC where requirements are ambiguous (ask, don't guess). For any non-trivial issu
 codebase trace is offloaded to a read-only sub-agent that returns a compact **exploration-summary**
 (ADR 0005) — degrading to inline reads on tools without sub-agents.
 
-**Quality gate:** HC sends the assessment to the Reviewer (missing options, incorrect codebase
-assumptions, requirements gaps, architectural concerns).
+**Quality gate:** the AC summons the Reviewer for the assessment (missing options, incorrect codebase
+assumptions, requirements gaps, architectural concerns) per [`PROJECT.md`](../../PROJECT.md) →
+*Lifecycle Host* → *Reviewer*.
 
 **Terminal artifact:** the assessment posted on the issue. **Exit:** HC picks an option; the AC does
 not proceed without a chosen option.
@@ -75,8 +79,10 @@ files to create/modify (used to size single-agent vs. parallel work). For an exp
 is run *to learn* — its terminal artifact is the re-planned, re-approved production plan, **not a PR**;
 Implement (Stage 3) and its PR follow only once that final plan clears this gate.
 
-**Quality gate:** HC sends the plan to the Reviewer (steps too vague to implement, missing edge cases,
-patterns that don't match the codebase, unaddressed requirements).
+**Quality gate:** the AC summons the Reviewer for a plan critique (steps too vague to implement,
+missing edge cases, patterns that don't match the codebase, unaddressed requirements) per
+[`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Reviewer*. The critique **blocks the handoff to
+Implement**: must-fix findings are folded into a revised plan, posted, before any code is written.
 
 **Terminal artifact:** the plan posted on the issue. **This is gate 1 (plan approval) — auto-approved
 in this host** ([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Human gates*).
@@ -122,11 +128,14 @@ be offloaded to a read-only sub-agent that returns a **drift-report**; findings 
 adversarial ones) are classified by the [`PROJECT.md`](../../PROJECT.md) → *Review Severity Framework*.
 
 **Operates on the existing PR — it never opens one.** **Terminal artifact:** the self-review comment
-on the PR. **Exit:** self-review passes; HC is notified the PR is ready for the Reviewer.
+on the PR, with the Reviewer summoned against it. **Exit:** self-review passes, the comment is
+posted, and the AC has summoned the Reviewer (posting first, so the Reviewer confirms rather than
+corrects) per [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Reviewer*.
 
 ### Stage 5: Deliver (`final`) + review-response (`listen`)
 
-**Trigger:** HC sends the PR to the Reviewer.
+**Trigger:** the Reviewer summoned at the end of Verify has returned its findings (or its failure
+ladder has run out and the missing review is flagged for the SOW).
 
 **AC responds to Reviewer feedback (`listen`):** fetches all review threads via the lifecycle host,
 classifies each by the *Review Severity Framework*, summarizes for the HC, and — **after the HC

@@ -94,7 +94,7 @@ Related to F1 (ai-config#94): if gate policy becomes a PROJECT.md value, this is
 
 ## F9 — The Reviewer role has no wired invocation path per tool
 
-**Disposition: `upstream` · Status: filed ([ai-config#99](https://github.com/wrburgess/ai-config/issues/99))**
+**Disposition: `upstream` · Status: filed ([ai-config#99](https://github.com/wrburgess/ai-config/issues/99)); host-resolved 2026-07-20 (bryce issue #39 — local Codex CLI, see below)**
 
 The lifecycle's Reviewer role ("a different model from the AC") assumes the Reviewer can actually be
 summoned, but the baseline documents no per-tool invocation path. Field test on bryce PR #1: a
@@ -107,6 +107,23 @@ backstop degrades predictably instead of silently (a mention that no app receive
 a pending review). *Bryce's host answer (2026-07-19):* Reviewer declared in PROJECT.md → *Lifecycle
 Host* — primary Codex (GPT-5.6) for plans and PRs, fallback Copilot code review, degrade to a
 flagged SOW; Codex app installation on the repo is the HC precondition.
+
+**Host resolution (2026-07-20, issue #39):** the GitHub-app path was **abandoned** — it never cleared
+its own precondition, and installing an app is a browser action no AC can take, so "a hands-off `ship`
+run summons its own Reviewer" was unreachable through it. Bryce wired the **local Codex CLI** instead,
+behind `scripts/summon_reviewer.rb`: plans go to the CLI's `exec` subcommand with the plan text on
+stdin (`--mode plan`), PRs to its `review --base BRANCH` subcommand (`--mode work`). The script makes
+**no network call and no lifecycle-host call** — it writes the review body to a file and classifies
+the outcome; the AC posts it. That keeps credential handling out of a bundled script and makes the
+whole ladder testable offline against a fake CLI (`scripts/summon_reviewer.test.sh`). The failure
+ladder is now explicit and branchable: `ok` plus six named failures — `not_found`,
+`not_authenticated`, `exit_nonzero`, `empty_output`, `timeout`, `self_review` — and on any of the six
+the AC requests the fallback **Copilot** review via a requested-reviewer POST naming `Copilot` (the
+mechanism verified by hand on PR #38, which recorded the timeline event
+`review_requested by wrburgess -> Copilot`), degrading last to a missing-review flag in the SOW. This
+sharpens the upstream ask rather than withdrawing it: the generalizable lesson is that a Reviewer
+invocation path must not depend on a precondition the AC cannot satisfy itself, and that "summoned
+but silent" needs a *named* classification — otherwise it is indistinguishable from "pending".
 
 ## F10 — Repo-centric self-references survive vendoring and mislead in a host clone
 
