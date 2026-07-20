@@ -19,10 +19,14 @@ if (!networkEnabled) {
     blocked("https.request", describeHttpTarget(args[0]))) as typeof https.request;
   const blockedHttpsGet = ((...args: unknown[]) =>
     blocked("https.get", describeHttpTarget(args[0]))) as typeof https.get;
-  const blockedDnsLookup = ((hostname: string) => blocked("dns.lookup", hostname)) as typeof dns.lookup;
-  const blockedDnsResolve = ((hostname: string) => blocked("dns.resolve", hostname)) as typeof dns.resolve;
-  const blockedDnsResolve4 = ((hostname: string) => blocked("dns.resolve4", hostname)) as typeof dns.resolve4;
-  const blockedDnsResolve6 = ((hostname: string) => blocked("dns.resolve6", hostname)) as typeof dns.resolve6;
+  const blockedDnsLookup = ((...args: unknown[]) =>
+    blocked("dns.lookup", String(args[0] ?? "unknown-host"))) as unknown as typeof dns.lookup;
+  const blockedDnsResolve = ((...args: unknown[]) =>
+    blocked("dns.resolve", String(args[0] ?? "unknown-host"))) as unknown as typeof dns.resolve;
+  const blockedDnsResolve4 = ((...args: unknown[]) =>
+    blocked("dns.resolve4", String(args[0] ?? "unknown-host"))) as unknown as typeof dns.resolve4;
+  const blockedDnsResolve6 = ((...args: unknown[]) =>
+    blocked("dns.resolve6", String(args[0] ?? "unknown-host"))) as unknown as typeof dns.resolve6;
   const blockedNetConnect = ((...args: unknown[]) =>
     blocked("net.connect", describeSocketTarget(args[0], args[1]))) as typeof net.connect;
   const blockedNetCreateConnection = ((...args: unknown[]) =>
@@ -52,10 +56,8 @@ if (!networkEnabled) {
   net.connect = blockedNetConnect;
   net.createConnection = blockedNetCreateConnection;
   tls.connect = blockedTlsConnect;
-  net.Socket.prototype.connect = function (...args: Parameters<typeof net.Socket.prototype.connect>) {
-    const [first, second] = args as [unknown?, unknown?];
-    return blocked("net.Socket.connect", describeSocketTarget(first, second));
-  };
+  net.Socket.prototype.connect = ((...args: unknown[]) =>
+    blocked("net.Socket.connect", describeSocketTarget(args[0], args[1]))) as unknown as typeof net.Socket.prototype.connect;
 }
 
 function blockedError(path: string, target?: string): Error {
