@@ -135,23 +135,47 @@ ruby scripts/summon_reviewer.rb --mode work --base BRANCH --out OUT_FILE --ac AC
   `self_review` (the acting agent *is* Codex, so it would not be a second model).
 
   **The fallback trigger is the EXIT STATUS, not the classification list: on ANY non-zero exit the
-  AC requests a Copilot review as the fallback.** Some failures are not classifications at all — a
-  usage error (a malformed or incomplete command) and an unwritable `--out` print to stderr and exit
-  1 without a classification line, and those are among the likeliest failures in practice. A ladder
-  keyed to the named classifications alone would leave them unhandled, so the rule is the exit
-  status: `0` = review in hand, anything else = fall back. The fallback is a requested-reviewer POST
-  on the PR naming `Copilot` (the same mechanism the HC used by hand on PR #38, which recorded the
-  timeline event `review_requested by wrburgess -> Copilot`). Copilot's declared model is
-  `model varies (GPT / Claude / Gemini)`.
-  If neither Reviewer returns a review, the faithfulness backstop degrades to **flagging the missing
-  review in the SOW** — never to silently skipping it. A skipped Reviewer gate is always visible in
-  the delivered artifact.
+  AC falls back.** Some failures are not classifications at all — a usage error (a malformed or
+  incomplete command) and an unwritable `--out` print to stderr and exit 1 without a classification
+  line, and those are among the likeliest failures in practice. A ladder keyed to the named
+  classifications alone would leave them unhandled, so the rule is the exit status: `0` = review in
+  hand, anything else = fall back.
+
+  **What "fall back" means differs by gate, because the fallback mechanism is PR-scoped.**
+
+  - **Work reviews (Stage 4) — fallback: Copilot.** A requested-reviewer POST on the PR naming
+    `Copilot` (the same mechanism the HC used by hand on PR #38, which recorded the timeline event
+    `review_requested by wrburgess -> Copilot`). Copilot's declared model is
+    `model varies (GPT / Claude / Gemini)`. If Copilot returns nothing either, the gate degrades to
+    a flagged missing review in the SOW.
+  - **Plan critiques (Stage 2) — no second mechanism exists; a failed plan summon degrades straight
+    to a flag.** Copilot code review is requested *on a pull request*.
+    At the plan gate **no PR exists** yet — Stage 3 is what opens one, and Stage 3 is blocked on this
+    very critique, so the PR fallback cannot serve this gate at all. There is no
+    issue-scoped Copilot review to request, so **a failed plan summon flags the missing plan review
+    on the issue** and `final` carries that flag into the SOW. Re-running the summon is a retry, not
+    a fallback (same CLI, same model, same failure), so it is not counted as one: one retry is
+    permitted, and a second non-zero exit flags. **Do not invent a plan-gate fallback in a skill
+    body** — a gate that names a mechanism nobody can execute is worse than an honest flag, because
+    it reads as covered.
+
+  Under either gate the faithfulness backstop degrades to **flagging the missing review** — never to
+  silently skipping it. A skipped Reviewer gate is always visible in the delivered artifact.
 - **Human gates (host policy):** this is a single-user host; the baseline's two mandatory human gates
   are tuned as follows.
   - **Plan approval — auto-approved.** `devise` (and `ship`'s Plan phase) still posts the plan to the
     issue as its terminal artifact, but the posted plan is **deemed approved on posting**: work
     proceeds immediately to Implement with no human pause. A mid-implementation re-plan follows the
     same policy (post the revised plan, proceed).
+
+    **This waives the HUMAN wait, not the REVIEWER one.** They are different gates that happen to sit
+    at the same point: the plan critique above **blocks the handoff to Implement** until it is
+    answered (must-fix findings folded into a posted revision) or its ladder is exhausted (summon
+    failed, retried, and the missing plan review flagged on the issue). "Auto-approved" is never a
+    licence to start coding with a critique outstanding — every entry point into Stage 3 (`invoke`
+    directly, `ship`'s Plan → Implement step, the standard's Stage 3 trigger) states this
+    precondition, because a gate that only the skill that *runs* it knows about is one any other door
+    walks straight past.
   - **Merge — mandatory.** The one human gate. No agent ever merges; `final` posts the SOW and stops.
     The lifecycle ends with a PR ready for the HC to merge.
   - **Emergency stops are unaffected** — a failing check with no obvious fix, an ambiguous or

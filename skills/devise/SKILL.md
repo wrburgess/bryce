@@ -125,10 +125,17 @@ while it is outstanding:
    disagree with is answered on the issue with the reasoning, not silently dropped.
 4. **Only then hand off** to the implement skill, against the *final* posted plan.
 
-If the summon fails, follow the *Reviewer* failure ladder in the Project Config: fall back to the
-declared fallback Reviewer, and if no Reviewer returns a critique at all, **flag the missing plan
-review** on the issue so the deliver skill (`final`) can record it in the SOW. The gate is never
-silently skipped — a critique that never arrived must never look like a critique that found nothing.
+If the summon fails (**any non-zero exit**, not just a named classification), follow the *Reviewer*
+failure ladder in the Project Config. Read it rather than assuming: at **this** gate the ladder is
+short, because the host's fallback Reviewer is requested **on a PR** and no PR exists yet — Stage 3 is
+what opens one, and it is blocked on this critique. So a failed plan summon gets **one retry**, and if
+that also fails, **flag the missing plan review** on the issue so the deliver skill (`final`) records
+it in the SOW. Do not substitute a mechanism the host has not declared: the gate is never silently
+skipped, and it is never papered over with an invented one either — a critique that never arrived must
+never look like a critique that found nothing.
+
+Only that exhausted ladder — retried, failed, flagged — releases the handoff. A summon you have not
+run yet is not an exhausted ladder.
 
 **Terminal artifact:** the plan posted on the issue — with its Reviewer critique answered, and any
 must-fix finding folded into a posted revision. **In this host the plan-approval gate is

@@ -26,8 +26,30 @@
 #     marker a GRANDCHILD writes. The grandchild survives a kill aimed at the direct
 #     child alone, so this assertion goes red if the group kill is weakened (a
 #     marker written by the direct child would prove nothing: it dies either way).
+#     A POSITIVE CONTROL runs the same fixture with only the direct child killed and
+#     asserts the marker DOES appear — without it, "no marker" would also pass on a
+#     fixture that never writes one, which is a vacuous test.
+#   - Escalation: a descendant that IGNORES SIGTERM still dies, because the group
+#     kill waits out its grace and escalates to SIGKILL instead of returning the
+#     moment the leader is reaped. A reaped leader says nothing about its group.
 #   - Liveness: a CLI that never drains stdin cannot hang the summon, and a child
 #     exiting in the instant the deadline passes is still reaped, not discarded.
+#   - A failed summon leaves NO body — including at a REUSED --out that a previous
+#     successful summon already wrote, where a stale review reads exactly like a
+#     fresh one.
+#
+# On wall-clock sleeps (rules/testing.md: "Never insert wall-clock waits in a test").
+# Four cases here are IRREDUCIBLE: `--timeout`, the SIGTERM→SIGKILL grace, and the
+# drain cap are all elapsed-time features, and a feature that fires on elapsed time
+# cannot be proved without some elapsing. What that rule forbids is a sleep used as
+# a synchronisation guess, and every remaining sleep is sized as a MARGIN, not a
+# guess: each fixture's timer sits at least 500ms — mostly seconds — from the
+# deadline it must land after, so scheduler jitter on a loaded runner cannot flip
+# the outcome. Where a condition can be polled instead of waited on (a process
+# dying, a marker appearing) the suite polls with a bound. The one case that was a
+# guess — a 1.1s sleep against a 1s deadline plus a 250ms grace, a 150ms margin —
+# was the flake `just_late`; the grace is now 1s and the fixture sleeps 1.5s, so
+# the child's exit is centred in the window with 500ms of slack on both sides.
 #   - The documented invocation runs: the exact command lines PROJECT.md tells the
 #     AC to use are extracted from that file and executed. Both skill bodies read
 #     the invocation from PROJECT.md and never hardcode it, so a PROJECT.md command
@@ -143,6 +165,8 @@ make_fake_codex() {  # make_fake_codex <behavior> [floor-bytes]
   FAKE_LOG="$dir/invocations.log"
   FAKE_BODY="$dir/body"
   FAKE_MARKER="$dir/child-survived"
+  FAKE_STARTED="$dir/grandchild-started"
+  FAKE_PIDFILE="$dir/grandchild-pid"
   printf '%s' "$1" > "$dir/behavior"
   printf '%s' "${2:-40}" > "$dir/floor"
   # Long enough to clear the default substance floor: the default fake is a
@@ -172,22 +196,42 @@ case "$behavior" in
   # A GRANDCHILD writes the marker, and the direct child only waits on it. A kill
   # aimed at the direct child alone leaves the grandchild running, so the marker
   # still appears; only a kill of the whole process group prevents it. That is the
-  # difference the no-orphan assertion has to be able to see.
-  slow)         ( sleep 3; : > "$here/child-survived" ) & wait ;;
+  # difference the no-orphan assertion has to be able to see. 4s: the group kill
+  # lands ~2s in (1s deadline + 1s final-poll grace), so the marker's timer sits a
+  # full 2s past the kill it must not survive. It touches a `started` file the
+  # instant it exists, so a caller can WAIT for the grandchild to be running rather
+  # than guessing at process-startup latency — the guess is what flakes under load.
+  slow)         ( : > "$here/grandchild-started"; sleep 4; : > "$here/child-survived" ) & wait ;;
+  # A grandchild that IGNORES SIGTERM. The leader dies on the group TERM at once, so
+  # a kill that returns as soon as the leader is reaped never escalates and this
+  # survives; only waiting out the grace and sending SIGKILL stops it. It records
+  # its pid up front so the assertion can be "is it dead?" (pollable) rather than
+  # "did a timer fire?" (a wall-clock guess).
+  stubborn)     ruby -e 'Signal.trap("TERM","IGNORE"); File.write(ARGV[0], Process.pid); sleep 120' \
+                  "$here/grandchild-pid" & sleep 120 ;;
   # Never reads stdin, so a synchronous stdin write of more than a pipe buffer
   # would block the summon forever instead of timing out.
   ignore_stdin) sleep 30 ;;
   # Exits just PAST the deadline the test gives it: a complete review that arrives
-  # in the instant the poll loop crosses its cap.
-  just_late)    sleep 1.1; cat "$here/body" ;;
+  # in the instant the poll loop crosses its cap. Against `--timeout 1` and a 1s
+  # final-poll grace, 1.5s centres the exit in the accept window (1.0s-2.0s) with
+  # 500ms of slack on either side.
+  just_late)    sleep 1.5; cat "$here/body" ;;
   # Emits a full review, then leaves a grandchild holding stdout open. The child is
-  # reaped at once but the read never sees EOF, so the drain hits its cap with a
-  # complete review it cannot return.
-  holds_pipe)   cat "$here/body"; ( sleep 8 ) & ;;
+  # reaped at once but the read never sees EOF, so the drain hits its cap (5s) with a
+  # complete review it cannot return. The grandchild's own timer is far past that cap
+  # so it cannot expire early and close the pipe on its own; the summon's group kill
+  # is what ends it.
+  holds_pipe)   cat "$here/body"; ( sleep 30 ) & ;;
   banner)       printf '[2026-07-20] OpenAI Codex v0.51.0\n' ;;
   # Exactly $FLOOR bytes, then one byte more than that, as the floor's two sides.
   at_floor)     head -c "$(cat "$here/floor")" /dev/zero | tr '\0' 'x' ;;
   under_floor)  n="$(cat "$here/floor")"; head -c "$((n - 1))" /dev/zero | tr '\0' 'x' ;;
+  # Whitespace padding around a single token: comfortably over the floor by RAW
+  # bytes, far under it by bytes of actual review text. Emptiness is judged after a
+  # strip, so the floor must be too, or the two checks disagree about what "content"
+  # means and padding buys a pass.
+  padded)       n="$(cat "$here/floor")"; head -c "$((n + 20))" /dev/zero | tr '\0' ' '; printf 'ok' ;;
   review_fail)  echo "boom: the review command failed" >&2; exit 3 ;;
   unicode_fail) cat "$here/body" >&2; exit 4 ;;
   signaled)     echo "partial review text"; kill -TERM $$; sleep 5 ;;
@@ -284,18 +328,73 @@ make_fake_codex whitespace
 expect_status "exit 0 with whitespace-only stdout -> FAILED (empty_output)" 1 "FAILED (empty_output)" \
   ruby "$SCRIPT" --mode work --out "$TMP/blank.md" --codex-bin "$FAKE_BIN"
 
+# Waits (bounded) for a path to appear, so a fixture's progress is POLLED rather than
+# guessed at with a fixed sleep — the guess is what flakes on a loaded runner.
+await_file() {  # await_file <path> <tenths-of-a-second>
+  local path="$1" budget="$2" waited=0
+  while [ ! -e "$path" ] && [ "$waited" -lt "$budget" ]; do
+    sleep 0.1; waited=$((waited + 1))
+  done
+  [ -e "$path" ]
+}
+
+# POSITIVE CONTROL for the orphan fixture, run FIRST. "The marker is absent" is only
+# evidence if the marker can appear at all — a fixture whose grandchild silently never
+# fires would pass the no-orphan assertion while proving nothing. So: run the fake
+# directly and kill the DIRECT CHILD only. The grandchild is untouched by that and
+# must write its marker.
+make_fake_codex slow
+"$FAKE_BIN" review --base main >/dev/null 2>&1 &
+CTRL_PID=$!
+# Wait for the grandchild to EXIST before killing its parent. Sleeping a guess here
+# was the flake: under load the fake had not always forked yet, so the kill landed
+# first and no grandchild ever ran — the control then failed for a reason that had
+# nothing to do with what it tests.
+await_file "$FAKE_STARTED" 150
+report "orphan fixture control: the grandchild starts at all" $?
+kill -TERM "$CTRL_PID" 2>/dev/null
+wait "$CTRL_PID" 2>/dev/null
+await_file "$FAKE_MARKER" 150
+report "orphan fixture control: grandchild survives a kill of the direct child alone" $?
+
 make_fake_codex slow
 expect_status "child outlives --timeout -> FAILED (timeout)" 1 "FAILED (timeout)" \
   ruby "$SCRIPT" --mode work --out "$TMP/slow.md" --timeout 1 --codex-bin "$FAKE_BIN"
-# The fake's GRANDCHILD would touch the marker 3s in. Wait past that: the direct
-# child dies under any kill, so only a kill of the whole process group stops the
-# grandchild. A surviving marker means an orphan outlived the summon.
-sleep 4
+# Non-vacuity, in THIS run rather than by reference to the control above: if the
+# grandchild never started, "no marker" would be true for the wrong reason.
+[ -e "$FAKE_STARTED" ]
+report "timeout -> the fixture's grandchild did start (the marker was reachable)" $?
+# The GRANDCHILD would touch the marker 4s in; the group kill lands ~2s in. Wait past
+# the marker's timer: the direct child dies under any kill, so only a kill of the
+# whole process group stops the grandchild. A surviving marker means an orphan
+# outlived the summon.
+sleep 5
 [ ! -e "$FAKE_MARKER" ]
 report "timeout -> child process group killed, no orphan survives" $?
 
+# Escalation. The leader dies on the group SIGTERM immediately, but this grandchild
+# IGNORES SIGTERM. A kill that returns the moment the leader is reaped never reaches
+# its SIGKILL, and the grandchild outlives a summon that already reported `timeout`.
+# The assertion is "is that process gone?", polled — not "did a timer fire?".
+make_fake_codex stubborn
+expect_bounded "SIGTERM-ignoring descendant -> FAILED (timeout)" 20 1 "FAILED (timeout)" \
+  ruby "$SCRIPT" --mode work --out "$TMP/stubborn.md" --timeout 1 --codex-bin "$FAKE_BIN"
+await_file "$FAKE_PIDFILE" 30 && [ -s "$FAKE_PIDFILE" ]
+report "escalation fixture control: the SIGTERM-ignoring grandchild really started" $?
+GRANDCHILD_PID="$(cat "$FAKE_PIDFILE" 2>/dev/null)"
+ESC_WAITED=0
+while [ -n "$GRANDCHILD_PID" ] && kill -0 "$GRANDCHILD_PID" 2>/dev/null && [ "$ESC_WAITED" -lt 30 ]; do
+  sleep 0.1; ESC_WAITED=$((ESC_WAITED + 1))
+done
+[ -n "$GRANDCHILD_PID" ] && ! kill -0 "$GRANDCHILD_PID" 2>/dev/null
+report "timeout -> a descendant that ignores SIGTERM is escalated to SIGKILL" $?
+kill -KILL "$GRANDCHILD_PID" 2>/dev/null
+
 # A complete review that lands in the instant the poll loop crosses its cap must
 # be reaped, not thrown away: the deadline is a cap on waiting, not a guillotine.
+# The fixture exits 1.5s into a 1s deadline with a 1s final-poll grace — dead centre
+# of the 1.0s-2.0s accept window, 500ms clear of both edges, so this cannot be
+# decided by how loaded the runner is.
 make_fake_codex just_late
 OUT="$TMP/just-late.md"
 expect_bounded "child exits just past the deadline -> reaped, not timed out" 10 0 \
@@ -316,6 +415,13 @@ expect_bounded "stdout held open past the drain cap -> FAILED (drain_timeout)" 3
 report "drain timeout -> not misreported as empty_output" $?
 [ ! -e "$OUT" ]
 report "drain timeout -> no body file created" $?
+# The reader buffers as bytes arrive, so hitting the cap costs only what had not yet
+# been received — a review already in hand is NOT thrown away unreported. The status
+# line has to say how much arrived; a single blocking read would report zero, because
+# killing that thread discards everything it was holding.
+BODY_BYTES="$(wc -c < "$FAKE_BODY" | tr -d ' ')"
+grep -qF "$BODY_BYTES bytes of review text had been received" "$STDOUT_FILE"
+report "drain timeout -> reports the bytes that DID arrive, not a silent loss" $?
 
 # A CLI that never drains stdin must not be able to hang the summon. The payload
 # is far larger than any pipe buffer (16KB macOS / 64KB Linux), so a synchronous
@@ -359,11 +465,61 @@ make_fake_codex at_floor 41
 expect_status "body one byte over --min-bytes -> accepted" 0 "summon_reviewer: OK - work review, 41 bytes" \
   ruby "$SCRIPT" --mode work --out "$TMP/over-floor.md" --min-bytes 40 --codex-bin "$FAKE_BIN"
 
+# Emptiness and the floor must use ONE notion of content. `blank?` strips before it
+# judges, so a body of pure padding plus a token is "not empty" — and if the floor
+# counts RAW bytes, that same padding carries it over a threshold whose whole job is
+# to demand substance. 60 bytes of spaces plus "ok" is 62 raw bytes and 2 real ones.
+make_fake_codex padded 40
+expect_status "whitespace padding over the floor -> FAILED (insufficient_output)" 1 \
+  "FAILED (insufficient_output)" \
+  ruby "$SCRIPT" --mode work --out "$TMP/padded.md" --min-bytes 40 --codex-bin "$FAKE_BIN"
+grep -qF "only 2 bytes of review text" "$STDOUT_FILE"
+report "whitespace padding -> counted as 2 bytes of review text, not 62" $?
+[ ! -e "$TMP/padded.md" ]
+report "whitespace padding -> no body file created" $?
+
 # The floor is an opinion, not a law: a caller that wants the old behavior can
 # turn it off, and a short body then classifies exactly as it used to.
 make_fake_codex banner
 expect_status "--min-bytes 0 -> the floor is disabled" 0 "summon_reviewer: OK - work review" \
   ruby "$SCRIPT" --mode work --out "$TMP/nofloor.md" --min-bytes 0 --codex-bin "$FAKE_BIN"
+
+# ---------------------------------------------------------------------------
+echo "A reused --out never serves a stale review:"
+
+# --out is reused across summons — the AC points every run at the same path. A run
+# that fails AFTER an earlier success must not leave the earlier review sitting
+# there: the caller cannot tell a stale body from a fresh one, and a stale critique
+# read as this run's is the worst outcome this script has, worse than no review.
+# So the destination is cleared before the CLI is ever spawned.
+STALE_OUT="$TMP/reused.md"
+make_fake_codex ok
+expect_status "reused --out: first summon succeeds" 0 "summon_reviewer: OK - work review" \
+  ruby "$SCRIPT" --mode work --out "$STALE_OUT" --codex-bin "$FAKE_BIN"
+[ -s "$STALE_OUT" ]
+report "reused --out: the first summon really wrote a body" $?
+
+make_fake_codex review_fail
+expect_status "reused --out: second summon fails -> FAILED (exit_nonzero)" 1 "FAILED (exit_nonzero)" \
+  ruby "$SCRIPT" --mode work --out "$STALE_OUT" --codex-bin "$FAKE_BIN"
+[ ! -e "$STALE_OUT" ]
+report "a failed summon clears the previous run's body from --out" $?
+
+# The same invariant on the paths that never reach the CLI at all: a policy refusal
+# and a dead binary must not leave a stale review readable either.
+make_fake_codex ok
+run_summon ruby "$SCRIPT" --mode work --out "$STALE_OUT" --codex-bin "$FAKE_BIN"
+expect_status "reused --out: rewritten before the self-review refusal" 1 "FAILED (self_review)" \
+  ruby "$SCRIPT" --mode work --out "$STALE_OUT" --ac codex --codex-bin "$FAKE_BIN"
+[ ! -e "$STALE_OUT" ]
+report "a self-review refusal clears the previous run's body from --out" $?
+
+make_fake_codex ok
+run_summon ruby "$SCRIPT" --mode work --out "$STALE_OUT" --codex-bin "$FAKE_BIN"
+expect_status "reused --out: rewritten before a not_found failure" 1 "FAILED (not_found)" \
+  ruby "$SCRIPT" --mode work --out "$STALE_OUT" --codex-bin /nonexistent/codex
+[ ! -e "$STALE_OUT" ]
+report "a not_found failure clears the previous run's body from --out" $?
 
 echo "Failure ladder, continued:"
 
@@ -443,6 +599,44 @@ expect_status "non-ASCII --input that does not exist -> usage error" 1 "usage er
 pure_ascii_both
 report "non-ASCII --input error -> stdout AND stderr stay pure ASCII" $?
 
+# A non-ASCII byte can arrive in a flag the parser REJECTS, before the script's own
+# code runs at all. OptionParser quotes the offending argument back into its message,
+# so a raw em dash in a mistyped flag reaches stderr untouched unless the top-level
+# rescue renders it like every other message.
+expect_status "non-ASCII in a rejected flag -> usage error" 1 "usage error" \
+  ruby "$SCRIPT" --mode work --out "$TMP/uni-flag.md" "$(printf -- '--bogus\xe2\x80\x94flag')"
+pure_ascii_both
+report "non-ASCII in a rejected flag -> stderr stays pure ASCII" $?
+expect_status "non-ASCII in a rejected --timeout -> usage error" 1 "usage error" \
+  ruby "$SCRIPT" --mode work --out "$TMP/uni-timeout.md" --timeout "$(printf 'ab\xe2\x80\x94c')"
+pure_ascii_both
+report "non-ASCII in a rejected --timeout -> stderr stays pure ASCII" $?
+
+# ASCII rendering must not TRUNCATE a path. The detail cap exists to stop a chatty
+# CLI flooding the status output; applying it to --out would print a path the caller
+# cannot use while the body was written to the real, longer one — a display cap
+# silently becoming a correctness bug. A long path is ordinary in a nested worktree.
+LONG_DIR="$TMP/$(printf 'l%.0s' $(seq 1 120))"
+mkdir -p "$LONG_DIR"
+LONG_OUT="$LONG_DIR/$(printf 'n%.0s' $(seq 1 120)).md"
+make_fake_codex ok
+expect_status "very long --out -> exit 0" 0 "summon_reviewer: OK - work review" \
+  ruby "$SCRIPT" --mode work --out "$LONG_OUT" --codex-bin "$FAKE_BIN"
+grep -qF -- "-> $LONG_OUT" "$STDOUT_FILE"
+report "very long --out -> the OK line reports the WHOLE path, untruncated" $?
+[ -s "$LONG_OUT" ]
+report "very long --out -> the body really was written to that path" $?
+
+# The cap still applies where it belongs. Splitting rendering from bounding must not
+# quietly unbound the DETAIL line: a CLI that dumps 4000 bytes on one stderr line is
+# exactly what the cap is for, and it stays capped.
+make_fake_codex unicode_fail
+head -c 4000 /dev/zero | tr '\0' 'E' > "$FAKE_BODY"
+expect_status "a CLI flooding one stderr line -> FAILED (exit_nonzero)" 1 "FAILED (exit_nonzero)" \
+  ruby "$SCRIPT" --mode work --out "$TMP/flood-out.md" --codex-bin "$FAKE_BIN"
+[ "$(awk '{ if (length($0) > m) m = length($0) } END { print m }' "$STDOUT_FILE")" -le 210 ]
+report "detail lines are still bounded (the cap applies to detail, not to paths)" $?
+
 # ---------------------------------------------------------------------------
 echo "Usage and output-path errors (readable, never a backtrace):"
 
@@ -482,9 +676,32 @@ echo "The documented invocation (PROJECT.md is the only source the skills read):
 # missing a required flag they exit 1 on usage and the Reviewer gate silently
 # becomes the fallback path forever. These cases lift the literal lines out of
 # PROJECT.md, substitute the placeholders, and run them.
-doc_invocation() {  # doc_invocation <mode>  -> echoes the documented arg list
+doc_invocation() {  # doc_invocation <mode>  -> echoes the documented command line
   grep -F -- "ruby scripts/summon_reviewer.rb --mode $1 " "$PROJECT_MD" | head -1 |
     sed -e 's/^[[:space:]]*//' -e 's/`//g'
+}
+
+# Splits the DOCUMENTED command into argv FIRST, then substitutes placeholders per
+# element into an array. Substituting paths into the string and word-splitting the
+# result afterwards would let a TMPDIR containing a space silently become two
+# arguments — the command would still "run", it would just run a different one, and
+# the case would pass while proving nothing about the documented invocation. The
+# template's own tokens never contain spaces, so splitting it is safe; the values
+# substituted into it are exactly what must not be split.
+doc_argv() {  # doc_argv <mode> <PLACEHOLDER=value>...  -> sets the DOC_ARGV array
+  local mode="$1"; shift
+  local line tok pair
+  line="$(doc_invocation "$mode")"
+  DOC_ARGV=()
+  for tok in $line; do
+    case "$tok" in
+      ruby|scripts/summon_reviewer.rb) continue ;;
+    esac
+    for pair in "$@"; do
+      [ "$tok" = "${pair%%=*}" ] && tok="${pair#*=}"
+    done
+    DOC_ARGV+=("$tok")
+  done
 }
 
 if [ ! -f "$PROJECT_MD" ]; then
@@ -492,34 +709,38 @@ if [ ! -f "$PROJECT_MD" ]; then
 else
   report "PROJECT.md is readable" 0
 
+  # Deliberately a directory with a SPACE in it. A real checkout under
+  # "~/Library/Application Support" or a macOS volume name hits this, and it is the
+  # case that separates "the documented command was run" from "some argv derived
+  # from it was run".
+  DOC_DIR="$TMP/doc dir"
+  mkdir -p "$DOC_DIR"
   make_fake_codex ok
-  DOC_PLAN="$TMP/doc-plan.md"
-  DOC_OUT="$TMP/doc-review.md"
+  DOC_PLAN="$DOC_DIR/doc-plan.md"
+  DOC_OUT="$DOC_DIR/doc-review.md"
   printf '## Plan\n1. Add the widget reaper.\n' > "$DOC_PLAN"
 
   PLAN_CMD="$(doc_invocation plan)"
   [ -n "$PLAN_CMD" ]
   report "PROJECT.md documents a plan-mode invocation" $?
-  # shellcheck disable=SC2086
-  PLAN_ARGS="$(printf '%s' "$PLAN_CMD" |
-    sed -e "s#^ruby scripts/summon_reviewer.rb##" \
-        -e "s#PLAN_FILE#$DOC_PLAN#" -e "s#OUT_FILE#$DOC_OUT#" -e "s#AC_NAME#claude#")"
+  doc_argv plan "PLAN_FILE=$DOC_PLAN" "OUT_FILE=$DOC_OUT" "AC_NAME=claude"
   expect_status "PROJECT.md's plan-mode command runs (exit 0, not a usage error)" 0 \
     "summon_reviewer: OK - plan review" \
-    ruby "$SCRIPT" $PLAN_ARGS --codex-bin "$FAKE_BIN"
+    ruby "$SCRIPT" "${DOC_ARGV[@]}" --codex-bin "$FAKE_BIN"
+  [ -s "$DOC_OUT" ]
+  report "PROJECT.md's plan-mode command writes its body under a path with a space" $?
 
   make_fake_codex ok
-  DOC_OUT="$TMP/doc-review-work.md"
+  DOC_OUT="$DOC_DIR/doc-review-work.md"
   WORK_CMD="$(doc_invocation work)"
   [ -n "$WORK_CMD" ]
   report "PROJECT.md documents a work-mode invocation" $?
-  # shellcheck disable=SC2086
-  WORK_ARGS="$(printf '%s' "$WORK_CMD" |
-    sed -e "s#^ruby scripts/summon_reviewer.rb##" \
-        -e "s#OUT_FILE#$DOC_OUT#" -e "s#AC_NAME#claude#" -e "s#BRANCH#main#")"
+  doc_argv work "OUT_FILE=$DOC_OUT" "AC_NAME=claude" "BRANCH=main"
   expect_status "PROJECT.md's work-mode command runs (exit 0, not a usage error)" 0 \
     "summon_reviewer: OK - work review" \
-    ruby "$SCRIPT" $WORK_ARGS --codex-bin "$FAKE_BIN"
+    ruby "$SCRIPT" "${DOC_ARGV[@]}" --codex-bin "$FAKE_BIN"
+  [ -s "$DOC_OUT" ]
+  report "PROJECT.md's work-mode command writes its body under a path with a space" $?
 
   # The `--ac` guard only ever fires when the AC is Codex, which is exactly the
   # case an undocumented flag would leave unreachable: default `--ac claude`
@@ -550,6 +771,11 @@ echo "Standard/skill agreement (no gate claims a mechanism that does not exist):
 # these files ARE the instructions the agents execute.
 if [ -f "$LIFECYCLE_MD" ] && [ -f "$ASSESS_MD" ]; then
   STAGE1="$(awk '/^### Stage 1: Assess/{f=1} /^### Stage 2:/{f=0} f' "$LIFECYCLE_MD")"
+  # An empty extraction would make the NEGATIVE grep below pass for the wrong reason
+  # — a renamed heading, not an absent claim. Assert the slice is non-empty first, so
+  # the negative assertion is never rescued by the positive one next to it.
+  [ -n "$STAGE1" ]
+  report "Stage 1 extracts a non-empty section (the negative grep means something)" $?
   ! printf '%s\n' "$STAGE1" | grep -qiE 'the AC summons the Reviewer'
   report "Stage 1 does not claim an AC summon the script cannot perform" $?
   printf '%s\n' "$STAGE1" | grep -qiF "Reviewer"
@@ -558,13 +784,78 @@ if [ -f "$LIFECYCLE_MD" ] && [ -f "$ASSESS_MD" ]; then
   report "assess/SKILL.md still routes the assessment through the HC" $?
 
   STAGE2="$(awk '/^### Stage 2: Plan/{f=1} /^### Stage 3:/{f=0} f' "$LIFECYCLE_MD")"
+  [ -n "$STAGE2" ]
+  report "Stage 2 extracts a non-empty section" $?
   printf '%s\n' "$STAGE2" | grep -qiF "the AC summons the Reviewer"
   report "Stage 2 keeps the AC summon (plan mode exists)" $?
   STAGE4="$(awk '/^### Stage 4: Verify/{f=1} /^### Stage 5:/{f=0} f' "$LIFECYCLE_MD")"
+  [ -n "$STAGE4" ]
+  report "Stage 4 extracts a non-empty section" $?
   printf '%s\n' "$STAGE4" | grep -qiF "summoned the Reviewer"
   report "Stage 4 keeps the AC summon (work mode exists)" $?
+
+  # The plan critique BLOCKS the handoff to Implement. `devise` says so, but `devise`
+  # is not the only door into Stage 3: an agent entering through `invoke` directly, or
+  # through `ship`'s Plan->Implement step, or reading the standard's Stage 3 trigger,
+  # would start coding while the critique is still outstanding. A gate only one entry
+  # point enforces is not a gate, so EVERY downstream trigger has to carry it.
+  STAGE3="$(awk '/^### Stage 3: Implement/{f=1} /^### Stage 4:/{f=0} f' "$LIFECYCLE_MD")"
+  [ -n "$STAGE3" ]
+  report "Stage 3 extracts a non-empty section" $?
+  printf '%s\n' "$STAGE3" | grep -qiF "critique"
+  report "Stage 3's trigger requires the plan critique, not just a posted plan" $?
+  printf '%s\n' "$STAGE2" | grep -qiF "blocks the handoff"
+  report "Stage 2 states the critique blocks the handoff to Implement" $?
 else
   report "lifecycle standard and assess skill are readable" 1 "(missing file)"
+fi
+
+INVOKE_MD="$REPO_ROOT/skills/invoke/SKILL.md"
+SHIP_MD="$REPO_ROOT/skills/ship/SKILL.md"
+DEVISE_MD="$REPO_ROOT/skills/devise/SKILL.md"
+if [ -f "$INVOKE_MD" ] && [ -f "$SHIP_MD" ] && [ -f "$DEVISE_MD" ]; then
+  grep -qiF "critique" "$INVOKE_MD"
+  report "invoke/SKILL.md requires the plan critique before implementing" $?
+  # The frontmatter `description` is what a tool matches on to decide whether the
+  # skill applies, so a precondition stated only in the body is one an agent can
+  # enter past without ever reading it.
+  awk '/^description:/{print}' "$INVOKE_MD" | grep -qiF "critique"
+  report "invoke's DESCRIPTION carries the precondition (not just its body)" $?
+  grep -qiF "critique" "$SHIP_MD"
+  report "ship/SKILL.md gates Plan -> Implement on the critique" $?
+
+  # The auto-approved HUMAN gate must survive all of this: the critique is the
+  # Reviewer's wait, not the HC's, and conflating them would reintroduce a human
+  # pause this host deliberately removed.
+  grep -qiF "auto-approved" "$SHIP_MD"
+  report "ship still records the plan-approval human gate as auto-approved" $?
+  grep -qiF "auto-approved" "$INVOKE_MD"
+  report "invoke still records the plan-approval human gate as auto-approved" $?
+else
+  report "invoke, ship and devise skill bodies are readable" 1 "(missing file)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "The plan gate's fallback is real (a gate cannot name a mechanism that cannot run):"
+
+# The Copilot fallback is a requested-reviewer POST on a PR. Plan review happens at
+# Stage 2, where no PR exists yet — Stage 3 is what opens one, and Stage 3 is blocked
+# on this very critique. So the PR-based fallback CANNOT run at the plan gate, and a
+# ladder that promises it there is describing a mechanism that does not exist.
+if [ -f "$PROJECT_MD" ] && [ -f "$DEVISE_MD" ]; then
+  grep -qiE 'fallback.*(work|PR) review|(work|PR) review.*fallback' "$PROJECT_MD"
+  report "PROJECT.md scopes the PR-based fallback to work reviews" $?
+  grep -qiF "no PR exists" "$PROJECT_MD"
+  report "PROJECT.md says why the PR fallback cannot serve the plan gate" $?
+  # What a failed PLAN summon actually does, stated plainly rather than implied.
+  grep -qiE 'plan summon.*(flag|missing)' "$PROJECT_MD"
+  report "PROJECT.md states what a failed PLAN summon degrades to" $?
+  ! grep -qiE 'fall back to the declared fallback Reviewer' "$DEVISE_MD"
+  report "devise no longer promises a fallback Reviewer the plan gate cannot reach" $?
+  grep -qiF "missing plan review" "$DEVISE_MD"
+  report "devise flags the missing plan review instead" $?
+else
+  report "PROJECT.md and devise/SKILL.md are readable" 1 "(missing file)"
 fi
 
 echo

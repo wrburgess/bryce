@@ -1,6 +1,6 @@
 ---
 name: invoke
-description: Stage 3 of the development lifecycle. Execute the approved plan on a feature branch, run the host's quality checks to green, and open the PR. Use once the plan is posted and approved per the host's gate policy (PROJECT.md → Lifecycle Host → Human gates; auto-approved on posting in this host). This is the only stage that creates a PR; commit is not done — the open PR is.
+description: Stage 3 of the development lifecycle. Execute the approved plan on a feature branch, run the host's quality checks to green, and open the PR. Use once the plan is posted and approved per the host's gate policy (PROJECT.md → Lifecycle Host → Human gates; auto-approved on posting in this host) AND the Reviewer's plan critique has been answered — must-fix findings folded into a posted revision — or its failure ladder is exhausted and the missing plan review flagged. A posted plan alone is not the trigger; do not start implementing while a critique is outstanding. This is the only stage that creates a PR; commit is not done — the open PR is.
 ---
 
 <what-to-do>
@@ -19,6 +19,26 @@ Never hardcode a stack's commands, branch names, or platform verbs here.
 Implement: the spike is a Plan-stage activity ([`devise`](../../skills/devise/SKILL.md)) that opens **no**
 PR and exits at the re-plan checkpoint — `invoke` runs only once the post-spike production plan is
 re-approved, then opens the single production PR as usual.
+
+## Entry precondition: the plan critique is settled
+
+**Check this before writing a line of code, whichever door you came in through** — invoked directly,
+sequenced by [`ship`](../../skills/ship/SKILL.md), or resumed in a fresh session. A posted plan is
+**not** the trigger on its own. [`devise`](../../skills/devise/SKILL.md) summons the Reviewer for an
+independent plan critique that **blocks this handoff**, so Stage 3 begins only once one of these is
+true, verifiable on the issue:
+
+1. The critique returned and is **answered** — every must-fix finding folded into a revised plan that
+   is *posted*, and any finding disagreed with answered on the issue with the reasoning.
+2. The critique's failure ladder is **exhausted** — the summon failed, was retried, and the **missing
+   plan review is flagged** on the issue per [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* →
+   *Reviewer failure ladder* (at this gate there is no PR yet, so there is no fallback Reviewer to
+   request — the flag *is* the ladder's end).
+
+If neither holds, **stop and complete Stage 2** — do not implement against a plan whose critique is
+still outstanding, and do not treat the host's auto-approved *human* gate as covering it: that policy
+waives the HC's wait, not the Reviewer's. Implement against the **final** posted plan, which is the
+revised one whenever a critique produced a revision.
 
 </what-to-do>
 

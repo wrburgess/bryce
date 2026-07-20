@@ -31,14 +31,21 @@
 #   summon_reviewer: FAILED ({classification})        [followed by "  - detail" lines]
 # Classifications: ok | not_found | not_authenticated | exit_nonzero | empty_output |
 #                  insufficient_output | drain_timeout | timeout | self_review
-#   insufficient_output — exit 0 with output too short to be a review (a banner or a "nothing to do"
-#                         line), so a CLI that starts and immediately gives up cannot pass as a review.
+#   insufficient_output — exit 0 with output too short to be a review (a "nothing to do" line, or a
+#                         preamble and nothing else), so a CLI that starts and immediately gives up
+#                         cannot pass as a review.
 #   drain_timeout       — the review finished but its stdout could not be read to EOF (a grandchild
-#                         still holds the pipe open), so the body was discarded. Distinct from
-#                         `empty_output`: the CLI was not silent, we lost what it said.
+#                         still holds the pipe open), so the body is not accepted as the review. The
+#                         bytes that DID arrive are reported (see `drain_loss_detail`) rather than
+#                         silently dropped. Distinct from `empty_output`: the CLI was not silent, we
+#                         could not hear all of what it said.
 # Usage errors and an unwritable --out are NOT classifications: they go to stderr and exit 1. Callers
 # must therefore branch on the EXIT STATUS (any non-zero = summon failed, fall back to the secondary
 # Reviewer), using the classification only to explain which failure it was.
+#
+# --out is CLEARED before the CLI is spawned. The path is reused across summons, so a failed run must
+# not leave a previous run's review sitting there to be mistaken for this one's: no body file means no
+# review, on every failure path.
 #
 # Exit status: 0 when the review succeeded (classification `ok`); 1 for every failure.
 
@@ -82,23 +89,42 @@ class SummonReviewer
   # instant the pipes close; the cap only guards a pathological grandchild holding a pipe open.
   DRAIN_TIMEOUT = 5.0
 
+  # Bound on letting a killed reader thread unwind before its buffer is read. The reader appends as
+  # bytes arrive, so the buffer must not be read while a `Thread#kill` is still in flight.
+  KILL_JOIN_TIMEOUT = 0.5
+
+  # Bytes per read from a child's stdout/stderr. Read incrementally rather than in one blocking `read`
+  # so that hitting DRAIN_TIMEOUT costs only what had NOT yet arrived, never what had.
+  READ_CHUNK = 65_536
+
   # After the wall-clock deadline passes, wait this long and poll waitpid ONE more time before
   # concluding `timeout`. The poll loop can cross the deadline in the instant a child that has already
   # finished its review is exiting; declaring a timeout there would discard a complete review and burn
-  # the gate. A quarter second is invisible against a 900-second cap and closes that race.
-  FINAL_POLL_GRACE = 0.25
+  # the gate. This NARROWS that race, it does not close it: a child that exits within FINAL_POLL_GRACE
+  # of the deadline is kept, one that exits later is still killed. One second is invisible against a
+  # 900-second cap, and the failure it guards (throwing away a finished review) is far worse than the
+  # failure it costs (one extra second before declaring a timeout that was real).
+  FINAL_POLL_GRACE = 1.0
 
-  # Minimum bytes of stdout that can plausibly BE a review. The Codex CLI prints a workdir/model/
-  # provider preamble before it says anything, and "No changes to review." is a legitimate short exit —
-  # both are tens of bytes, while a real critique (findings, quoted text, a verdict) runs to hundreds
-  # or thousands. 200 sits in that gap: high enough that no banner or one-line bail clears it, low
-  # enough that a terse but genuine review does. Deliberately a BYTE floor, not a content heuristic —
-  # pattern-matching banners would break on every CLI release and could not be tested honestly.
-  # `--min-bytes 0` disables the floor for a caller that wants the old behavior.
+  # Minimum bytes of stdout that can plausibly BE a review. MEASURED against the real CLI on this
+  # branch: `codex review --base main` returned exit 0 with 3032 bytes after 8m26s, and its stdout
+  # carried NO preamble or banner — the output began directly with review prose. So the floor is not
+  # sized against a banner (there is none to size against); it exists because exit 0 with a near-empty
+  # stdout is indistinguishable from a review unless something checks. What it catches is the short
+  # bail — "No changes to review." and its kin, tens of bytes — and any future release that prints a
+  # preamble and nothing else. 200 is kept against that 3032-byte measurement: a real review clears it
+  # by 15x, and the plan-critique prompt below demands quoted findings plus a verdict, which cannot fit
+  # in 200 bytes. The one real tradeoff left: a genuinely terse review ("LGTM, no findings", ~58 bytes)
+  # is refused. That is the safe direction to fail — a refused terse review degrades to the flagged
+  # fallback, which is MORE review, whereas an accepted one-line bail passes the gate with none at all.
+  # Deliberately a BYTE floor, not a content heuristic — pattern-matching output would break on every
+  # CLI release and could not be tested honestly. `--min-bytes 0` disables the floor for a caller that
+  # wants the old behavior.
   DEFAULT_MIN_BYTES = 200
 
   # A detail line is context for a human, not a payload: one line, bounded, so a CLI that dumps a
-  # thousand lines of trace cannot flood the caller's status output.
+  # thousand lines of trace cannot flood the caller's status output. It bounds DETAIL LINES only —
+  # never a path or an identifier, which must be rendered whole to be usable (see `ascii` vs `bounded`).
   DETAIL_MAX = 200
 
   # The plan critique prompt. Kept ASCII and explicitly adversarial: the Reviewer's value at the plan
@@ -137,11 +163,15 @@ class SummonReviewer
     problem = usage_problem
     return usage_error(problem) if problem
 
-    # Refuse before spawning anything: a self-review is a policy failure, not a CLI failure.
-    return failed(:self_review, "acting agent is `#{ascii(@ac)}` - the Reviewer must be a different model") if self_review?
-
     write_problem = out_path_problem
     return write_error(write_problem) if write_problem
+
+    # Clear the destination before ANY failure can occur, so no failure path can leave a stale body.
+    clear_problem = clear_out
+    return write_error(clear_problem) if clear_problem
+
+    # Refuse before spawning anything: a self-review is a policy failure, not a CLI failure.
+    return failed(:self_review, "acting agent is `#{ascii(@ac)}` - the Reviewer must be a different model") if self_review?
 
     bin = resolve_bin
     return failed(:not_found, "no executable Codex CLI at `#{ascii(@codex_bin)}`") if bin.nil?
@@ -163,18 +193,19 @@ class SummonReviewer
       return failed(:drain_timeout,
                     "the Codex CLI exited but its output could not be read within " \
                     "#{DRAIN_TIMEOUT.round} seconds - a surviving child is holding the pipe open",
-                    "the review text, if any, was discarded rather than reported as an empty review")
+                    drain_loss_detail(review[:stdout]))
     when :exit_nonzero
       return failed(:exit_nonzero, exit_reason(review[:exit_code]), detail(review[:stderr]))
     end
 
     body = review[:stdout]
-    return failed(:empty_output, "the Codex CLI exited 0 but produced no review text") if blank?(body)
+    substance = substance_of(body)
+    return failed(:empty_output, "the Codex CLI exited 0 but produced no review text") if substance.empty?
 
-    if body.bytesize < @min_bytes.to_i
+    if substance.bytesize < @min_bytes.to_i
       return failed(:insufficient_output,
-                    "the Codex CLI exited 0 but produced only #{body.bytesize} bytes " \
-                    "(floor: #{@min_bytes.to_i}) - too short to be a review",
+                    "the Codex CLI exited 0 but produced only #{substance.bytesize} bytes of review " \
+                    "text (floor: #{@min_bytes.to_i}) - too short to be a review",
                     detail(body))
     end
 
@@ -218,6 +249,19 @@ class SummonReviewer
     return "#{ascii(dir)} is not writable" unless File.writable?(dir)
 
     nil
+  end
+
+  # Removes anything already at --out, BEFORE the CLI is spawned. The AC reuses one --out path across
+  # summons, so a run that fails after an earlier success would otherwise leave the PREVIOUS review
+  # sitting there, where it reads as this run's critique — the worst possible failure for this script,
+  # since a stale review looks exactly like a fresh one. "A failed summon leaves no body" has to hold
+  # against a REUSED path, not just a fresh one, so the clear happens up front rather than on each of
+  # the eight failure returns.
+  def clear_out
+    File.delete(@out) if File.exist?(@out)
+    nil
+  rescue SystemCallError, IOError => e
+    "#{ascii(@out)} could not be cleared (#{ascii(e.class.name)})"
   end
 
   # --- invocation ------------------------------------------------------------
@@ -287,8 +331,10 @@ class SummonReviewer
     end
     [in_r, out_w, err_w].each(&:close)
 
-    out_thread = Thread.new { out_r.binmode; out_r.read }
-    err_thread = Thread.new { err_r.binmode; err_r.read }
+    out_buffer = +"".b
+    err_buffer = +"".b
+    out_thread = Thread.new { read_into(out_r, out_buffer) }
+    err_thread = Thread.new { read_into(err_r, err_buffer) }
     in_thread = Thread.new { feed_stdin(in_w, stdin_data) }
 
     exited, status = wait_with_timeout(pid, timeout)
@@ -299,8 +345,8 @@ class SummonReviewer
     end
 
     in_thread.kill unless in_thread.join(DRAIN_TIMEOUT)
-    stdout, stdout_drained = drain(out_thread)
-    stderr, = drain(err_thread)
+    stdout, stdout_drained = drain(out_thread, out_buffer)
+    stderr, = drain(err_thread, err_buffer)
     # `success?`, not `exitstatus.zero?`: a child killed by a signal reports a nil exitstatus, and
     # `nil.to_i.zero?` would classify that abnormal death as a clean, empty review.
     code = status.respond_to?(:exitstatus) ? status.exitstatus : nil
@@ -310,15 +356,30 @@ class SummonReviewer
     # `empty_output` would blame a CLI that did its job.
     if ok && !stdout_drained
       # Something in the child's group outlived it holding the pipe — the same orphan the timeout path
-      # kills, arriving by a different door. Signal the group so the summon does not leave it running.
-      terminate_group(pid)
-      return { status: :drain_timeout, exit_code: code, stdout: "".b, stderr: stderr }
+      # kills, arriving by a different door. Terminate the group (leader already reaped) so the summon
+      # does not leave it running, and carry the bytes that DID arrive so the caller can report the
+      # size of what was lost instead of pretending nothing was said.
+      kill_group(pid, reap_leader: false)
+      return { status: :drain_timeout, exit_code: code, stdout: stdout, stderr: stderr }
     end
-
 
     { status: ok ? :ok : :exit_nonzero, exit_code: code, stdout: stdout, stderr: stderr }
   ensure
     [in_r, in_w, out_r, out_w, err_r, err_w].each { |io| io.close unless io.nil? || io.closed? }
+  end
+
+  # Reads `io` to EOF, appending into `buffer` as the bytes arrive. Deliberately NOT a single blocking
+  # `io.read`: that returns nothing at all if the thread is killed at the drain cap, so a review that
+  # had already been received IN FULL would be thrown away by a grandchild holding the pipe open.
+  # Appending incrementally means whatever arrived survives the cap.
+  def read_into(io, buffer)
+    io.binmode
+    loop { buffer << io.readpartial(READ_CHUNK) }
+  rescue EOFError
+    nil
+  rescue IOError, SystemCallError
+    # The pipe was torn down under the reader; what was already buffered is still valid.
+    nil
   end
 
   def feed_stdin(io, data)
@@ -345,7 +406,12 @@ class SummonReviewer
 
   # One last look after the deadline, FINAL_POLL_GRACE later. The loop above can cross the deadline in
   # the very instant a child that has already written its whole review is exiting; concluding `timeout`
-  # there would kill it and throw the review away for a few hundredths of a second.
+  # there would kill it and throw the review away over a fraction of a second.
+  #
+  # This NARROWS that race to FINAL_POLL_GRACE — it does not close it, and calling it closed would be
+  # an overclaim. Measured on this branch: a child exiting at deadline + 0.1s is kept, one exiting at
+  # deadline + 0.4s under the old quarter-second grace was still killed. The window is exactly
+  # FINAL_POLL_GRACE wide and a child that lands outside it is timed out, correctly or not.
   def final_poll(pid)
     sleep FINAL_POLL_GRACE
     return [true, $?] if Process.waitpid(pid, Process::WNOHANG)
@@ -355,37 +421,71 @@ class SummonReviewer
     [true, nil]
   end
 
-  def kill_group(pid)
-    Process.kill("-TERM", pid)
+  # Terminates the child's WHOLE process group: SIGTERM, a grace period, then SIGKILL — and it does not
+  # stop early just because the LEADER exited. A descendant that ignores SIGTERM outlives its leader, so
+  # reaping the leader proves nothing about the group; only an EMPTY GROUP does. Returning on the
+  # leader's death alone would skip the SIGKILL escalation and leave that descendant running after the
+  # summon reported a timeout — which is exactly the orphan `pgroup: true` exists to prevent.
+  # `reap_leader: false` is the drain path, where the leader is already reaped and only its survivors
+  # need telling.
+  def kill_group(pid, reap_leader: true)
+    signal_group("-TERM", pid)
+    reaped = !reap_leader
     grace = monotonic + TERM_GRACE
     until monotonic >= grace
-      return if Process.waitpid(pid, Process::WNOHANG)
+      reaped ||= reap(pid)
+      return if reaped && group_gone?(pid)
 
       sleep POLL_INTERVAL
     end
-    Process.kill("-KILL", pid)
-    Process.waitpid(pid)
-  rescue Errno::ESRCH, Errno::ECHILD
+    signal_group("-KILL", pid)
+    # SIGKILL cannot be caught or ignored, so this blocking reap returns promptly and leaves no zombie.
+    Process.waitpid(pid) unless reaped
+  rescue Errno::ECHILD
     nil
+  end
+
+  # Signals the process group led by `pid`. A group that is already gone (or was never ours to signal)
+  # is not an error — it is the outcome the caller wanted.
+  def signal_group(signal, pid)
+    Process.kill(signal, pid)
+    true
+  rescue Errno::ESRCH, Errno::EPERM
+    false
+  end
+
+  # True when NO process remains in the group. Signal 0 is a liveness probe, not a signal: it runs the
+  # existence and permission checks and delivers nothing. This is the only honest way to verify a group
+  # kill actually took — a reaped leader says nothing about its descendants.
+  def group_gone?(pid)
+    Process.kill(0, -pid)
+    false
+  rescue Errno::ESRCH
+    true
+  rescue Errno::EPERM
+    false
+  end
+
+  # Reaps the leader if it has exited, without blocking. True once it is reaped (or was never ours), so
+  # the caller can tell "leader still running" from "leader done, group not".
+  def reap(pid)
+    !Process.waitpid(pid, Process::WNOHANG).nil?
+  rescue Errno::ECHILD
+    true
   end
 
   # Returns [bytes, drained?]. `drained?` is false when the reader thread missed DRAIN_TIMEOUT — the
-  # caller needs to tell "the CLI said nothing" from "we could not hear what the CLI said".
-  # Signals the child's process group without waiting on it — the leader is already reaped here, so
-  # there is nothing left to reap; only its survivors need telling.
-  def terminate_group(pid)
-    Process.kill("-TERM", pid)
-  rescue Errno::ESRCH, Errno::EPERM
-    nil
-  end
-
-  def drain(thread)
-    return (thread.kill; ["".b, false]) unless thread.join(DRAIN_TIMEOUT)
-
-    [thread.value.to_s.b, true]
-  rescue IOError, SystemCallError
-    # The pipe was torn down under the reader; partial output is not worth crashing the run over.
-    ["".b, true]
+  # caller needs to tell "the CLI said nothing" from "we could not hear all of what the CLI said". The
+  # bytes come from the shared buffer either way, so a missed cap costs only what had not yet arrived.
+  def drain(thread, buffer)
+    drained = !thread.join(DRAIN_TIMEOUT).nil?
+    unless drained
+      thread.kill
+      # Let the killed reader unwind before the buffer is read: `Thread#kill` is asynchronous, and
+      # reading a buffer a reader may still be appending to is a data race, not a shortcut.
+      thread.join(KILL_JOIN_TIMEOUT)
+    end
+    [buffer.dup.b, drained]
   end
 
   def monotonic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -409,8 +509,23 @@ class SummonReviewer
     1
   end
 
-  # Emptiness is decided on BYTES, so a runner on a non-UTF-8 locale can never raise while classifying.
-  def blank?(bytes) = bytes.to_s.b.strip.empty?
+  # The review text with surrounding whitespace removed, in BINARY so a runner on a non-UTF-8 locale can
+  # never raise while classifying. Emptiness AND the substance floor are both decided on this, so there
+  # is ONE notion of "content": measuring emptiness after a strip but the floor before it would let
+  # ~200 bytes of padding plus a single token clear a floor whose entire job is to demand substance.
+  def substance_of(bytes) = bytes.to_s.b.strip
+
+  # What was actually in hand when the drain cap fired. The reader buffers incrementally, so a pipe held
+  # open no longer costs the bytes that DID arrive — but they are still not accepted as the review: a
+  # stream someone is holding open cannot be called finished, and a truncated critique passed off as
+  # complete is worse than a flagged failure. Reporting the count keeps the loss visible, not silent.
+  def drain_loss_detail(partial)
+    received = partial.to_s.bytesize
+    return "no review text had been received when the cap fired" if received.zero?
+
+    "#{received} bytes of review text had been received when the cap fired - not written to --out, " \
+      "because output still being held open cannot be called complete"
+  end
 
   # A child killed by a signal has no exit code — say so rather than printing "exited ".
   def exit_reason(code)
@@ -423,7 +538,7 @@ class SummonReviewer
     line = readable(stderr).split(/\r?\n/).map(&:strip).reject(&:empty?).last
     return nil if line.nil?
 
-    ascii(line)
+    bounded(line)
   end
 
   # A UTF-8 view of raw subprocess bytes that is always safe to regex/split, whatever the runner's
@@ -435,12 +550,28 @@ class SummonReviewer
     text.encode(Encoding::UTF_8, invalid: :replace, undef: :replace, replace: "?")
   end
 
+  def ascii(text) = self.class.ascii(text)
+
+  def bounded(text) = self.class.bounded(text)
+
   # ASCII-only rendering for anything bound for stdout/stderr (rules/scripting.md, ADR 0011): a Host App
   # or CI runner on a non-UTF-8 locale raises `invalid byte sequence` the moment it matches our output.
-  def ascii(text)
-    flat = text.to_s.dup.force_encoding(Encoding::BINARY).gsub(/[^\x20-\x7E]/n, "?")
-    flat = "#{flat[0, DETAIL_MAX]}..." if flat.length > DETAIL_MAX
-    flat.force_encoding(Encoding::UTF_8)
+  #
+  # Length is PRESERVED. DETAIL_MAX bounds detail lines (see `bounded`), never a path or an identifier:
+  # truncating a 250-character `--out` would print a path the caller cannot use while the file was
+  # written to the real one — a rendering cap silently becoming a correctness bug.
+  #
+  # A module function because the top-level option parsing needs it before any instance exists; the
+  # instance delegates rather than duplicating it.
+  def self.ascii(text)
+    text.to_s.dup.force_encoding(Encoding::BINARY).gsub(/[^\x20-\x7E]/n, "?").force_encoding(Encoding::UTF_8)
+  end
+
+  # ASCII-rendered AND length-bounded — for a status DETAIL line, which is context for a human, not a
+  # payload, so a CLI that dumps a thousand lines of trace cannot flood the caller's status output.
+  def self.bounded(text)
+    flat = ascii(text)
+    flat.length > DETAIL_MAX ? "#{flat[0, DETAIL_MAX]}..." : flat
   end
 end
 
@@ -470,8 +601,10 @@ if $PROGRAM_NAME == __FILE__
     parser.parse!(ARGV)
   rescue OptionParser::ParseError => e
     # OptionParser raises on an unknown flag or a bad --timeout; an uncaught raise would print a Ruby
-    # backtrace, which is not a usable error message for a caller.
-    warn "summon_reviewer: usage error - #{e.message}"
+    # backtrace, which is not a usable error message for a caller. The message quotes the offending
+    # ARGUMENT back, so it carries whatever bytes the caller typed — it goes through the same ASCII
+    # rendering as every other message, or a non-ASCII flag puts raw bytes on stderr.
+    warn "summon_reviewer: usage error - #{SummonReviewer.bounded(e.message)}"
     warn SummonReviewer::USAGE
     exit 1
   end

@@ -98,7 +98,13 @@ frozen contract** — a mid-`invoke` discovery that it was wrong loops back thro
 
 ### Stage 3: Implement (`invoke`)
 
-**Trigger:** the plan is posted (auto-approved per host gate policy).
+**Trigger:** the plan is posted (auto-approved per host gate policy) **and its Reviewer critique is
+settled** — answered, with every must-fix finding folded into a posted revision, or its failure ladder
+exhausted and the missing plan review flagged. A posted plan alone does **not** trigger Implement: the
+Stage 2 critique blocks this handoff, and the host's auto-approved plan gate waives the *human* wait,
+not the *Reviewer* one. Every door into this stage carries the precondition — `invoke`'s own entry
+check, `ship`'s Plan → Implement step, and this trigger — because a gate stated in only one of them is
+one the other two walk past.
 
 **AC does:** creates the feature branch (the branch-protection guardrails block writes on a protected
 branch — see [`PROJECT.md`](../../PROJECT.md) → *Branch & PR Policy*); implements the plan step by

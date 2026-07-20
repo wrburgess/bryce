@@ -83,10 +83,18 @@ Run the phases in order, following each phase's canonical body for its steps and
    and folding the returned `exploration-summary` into the assessment you synthesize. Post the
    assessment to the issue.
 2. **Plan** — follow [`devise`](../../skills/devise/SKILL.md) **in the orchestrator** (no offload). Post
-   the plan to the issue. **→ Gate 1 (plan approval) is auto-approved in this host** per
+   the plan to the issue, then **summon the Reviewer for the plan critique** — `devise` owns that step
+   and `ship` does not shortcut it. **→ Gate 1 (plan approval) is auto-approved in this host** per
    [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Human gates*: the posted plan is deemed
-   approved on posting — proceed immediately to Implement, no pause.
-3. **Implement** — follow [`invoke`](../../skills/invoke/SKILL.md): the orchestrator owns branch setup and
+   approved on posting, so there is **no human pause**.
+   **The Reviewer wait is a different gate and it is NOT waived.** Do not advance to step 3 while the
+   plan critique is outstanding. Advance only when it is **answered** (must-fix findings folded into a
+   posted revision) or its ladder is **exhausted** (summon failed, retried, missing plan review flagged
+   on the issue — at this gate there is no PR yet, so no fallback Reviewer can be requested). An
+   auto-approved *human* gate is not an auto-approved *review*; treating them as one starts the
+   implementation while the critique that would have redirected it is still in flight.
+3. **Implement** — follow [`invoke`](../../skills/invoke/SKILL.md), whose entry precondition is that
+   critique (re-check it here — this is one of the doors it guards): the orchestrator owns branch setup and
    all lifecycle-host I/O; the code + check + fix loop is delegated, returning a `check-result`.
    Reconcile git state, gate on `verdict`, then commit → push → open the PR.
 4. **Verify** — follow [`verify`](../../skills/verify/SKILL.md): delegate the full-diff review, consume
@@ -105,8 +113,12 @@ Run the phases in order, following each phase's canonical body for its steps and
 
 1. **Plan approval — auto-approved.** The plan is still authored with full `devise` rigor and posted
    to the issue (the terminal artifact and audit trail are unchanged), but it is deemed approved on
-   posting: `ship` proceeds straight to Implement without waiting. A mid-`invoke` re-plan follows the
-   same policy — post the revised plan, proceed.
+   posting: `ship` proceeds to Implement without waiting **for the HC**. A mid-`invoke` re-plan follows
+   the same policy — post the revised plan, proceed.
+   **What this waives is the human gate only.** The Reviewer's plan critique still blocks Plan →
+   Implement (step 2 above). The two gates coincide in position and are otherwise unrelated: one
+   protects against building the wrong thing without a human's say-so, the other against building it
+   before a second model has read the plan. Waiving the first never waives the second.
 2. **Merge — mandatory, never bypassed.** After `final` posts the SOW with a green gate and no open
    must-fix findings, `ship` stops. **`ship` never merges** — merge is the HC's.
 
