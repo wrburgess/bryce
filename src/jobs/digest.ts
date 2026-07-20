@@ -1,10 +1,12 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
-import { digestDeliveries, statLines } from "../db/schema.js";
+import { and, desc, eq } from "drizzle-orm";
+import { digestDeliveries } from "../db/schema.js";
 import { assembleDigest } from "../digest/assemble.js";
 import { renderDigest, renderHeartbeat } from "../digest/render.js";
 import { hostDate, sleepWindow } from "../domain/season.js";
-import type { Mailer } from "../mailer/types.js";
+import type { MailReceipt, Mailer } from "../mailer/types.js";
 import type { Db } from "../db/client.js";
+import type { ClaimRefusal, Tx } from "./delivery-claim.js";
+import { claimDelivery, deliveryKey, settleFailed, settleSent } from "./delivery-claim.js";
 import { loadActivePlayers, loadCalendars } from "./refresh.js";
 
 export interface DigestDeps {
@@ -26,10 +28,18 @@ export interface DigestResult {
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** A send that took over an expired claim reports WHY it ran again (ADR 0034). */
+const RECOVERED = "recovered-stale-claim";
+
 /**
  * The Digest (ADR 0030): report every Stat Line not yet reported by a previous
  * Digest — novelty-driven, no date windows — and send daily even when empty.
  * During Offseason Sleep (ADR 0031) a weekly heartbeat replaces it.
+ *
+ * Delivery runs claim -> assemble -> send -> settle (ADR 0034): the slot is
+ * reserved durably BEFORE the provider is called, so two concurrent invocations
+ * cannot both send, and a run that dies after acceptance leaves a `sending` row
+ * whose lease heals it instead of a silently missing digest.
  */
 export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
   const { db, now, tz } = deps;
@@ -42,21 +52,16 @@ export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
   }
 
   const today = hostDate(now(), tz);
-  const alreadySent = await db
-    .select({ id: digestDeliveries.id })
-    .from(digestDeliveries)
-    .where(
-      and(
-        eq(digestDeliveries.kind, "digest"),
-        eq(digestDeliveries.dateCovered, today),
-        eq(digestDeliveries.status, "sent"),
-      ),
-    );
-  if (alreadySent.length > 0) {
+  const claim = claimDelivery(db, {
+    kind: "digest",
+    dateCovered: today,
+    now: now(),
+  });
+  if (!claim.claimed) {
     return {
       kind: "digest",
       action: "skipped",
-      reason: "already-sent-today",
+      reason: claim.reason,
       statLineCount: 0,
       playerCount: 0,
     };
@@ -71,15 +76,17 @@ export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
   });
   const { reportedIds, playerCount } = assembly;
 
+  let receipt: MailReceipt;
   try {
-    await deps.mailer.send({ to: deps.to, from: deps.from, ...mail });
+    receipt = await deps.mailer.send(
+      { to: deps.to, from: deps.from, ...mail },
+      { deliveryKey: deliveryKey("digest", today) },
+    );
   } catch (err) {
-    // Send failed: record the failure, leave every line unmarked — the next
-    // run retries and nothing is lost (ADR 0030).
-    await recordDelivery(deps, {
-      kind: "digest",
-      dateCovered: today,
-      status: "failed",
+    // Send failed: settle the claim as failed, leave every line unmarked — the
+    // next run re-claims the slot, retries, and nothing is lost (ADR 0030).
+    settleFailed(db, {
+      deliveryId: claim.deliveryId,
       errorMessage: errorMessage(err),
       playerCount,
       statLineCount: reportedIds.length,
@@ -94,53 +101,30 @@ export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
   }
 
   // Send succeeded: one transaction marks the delivery and every reported line.
-  db.transaction((tx) => {
-    const delivery = tx
-      .insert(digestDeliveries)
-      .values({
-        kind: "digest",
-        dateCovered: today,
-        sentAt: now().toISOString(),
-        playerCount,
-        statLineCount: reportedIds.length,
-        status: "sent",
-        errorMessage: null,
-        createdAt: now().toISOString(),
-      })
-      .onConflictDoUpdate({
-        target: [digestDeliveries.kind, digestDeliveries.dateCovered],
-        set: {
-          sentAt: now().toISOString(),
-          playerCount,
-          statLineCount: reportedIds.length,
-          status: "sent",
-          errorMessage: null,
-        },
-      })
-      .returning({ id: digestDeliveries.id })
-      .all();
-    const deliveryId = delivery[0]?.id;
-    if (deliveryId === undefined) {
-      throw new Error("Failed to record digest delivery");
-    }
-    if (reportedIds.length > 0) {
-      tx.update(statLines)
-        .set({ digestDeliveryId: deliveryId })
-        .where(inArray(statLines.id, reportedIds))
-        .run();
-    }
+  settleSent(db, {
+    deliveryId: claim.deliveryId,
+    now: now(),
+    playerCount,
+    statLineCount: reportedIds.length,
+    providerMessageId: receipt.providerMessageId,
+    reportedIds,
   });
 
   return {
     kind: "digest",
     action: "sent",
-    reason: null,
+    reason: claim.recovered ? RECOVERED : null,
     statLineCount: reportedIds.length,
     playerCount,
   };
 }
 
-/** Weekly heartbeat during Offseason Sleep: send only if none sent in the last 7 days. */
+/**
+ * Weekly heartbeat during Offseason Sleep: send only if none sent in the last
+ * seven days. The rule is evaluated INSIDE the claim transaction — the slot key
+ * is (heartbeat, today) but the rule is time-based, so two runs on different
+ * days of one week would never collide on the unique index (ADR 0034).
+ */
 async function runHeartbeat(
   deps: DigestDeps,
   watchedCount: number,
@@ -148,32 +132,34 @@ async function runHeartbeat(
 ): Promise<DigestResult> {
   const { db, now, tz } = deps;
   const today = hostDate(now(), tz);
+  const nowMs = now().getTime();
 
-  const last = await db
-    .select()
-    .from(digestDeliveries)
-    .where(and(eq(digestDeliveries.kind, "heartbeat"), eq(digestDeliveries.status, "sent")))
-    .orderBy(desc(digestDeliveries.sentAt))
-    .limit(1);
-  const lastSentAt = last[0]?.sentAt ?? null;
-  if (lastSentAt !== null && now().getTime() - Date.parse(lastSentAt) < WEEK_MS) {
+  const claim = claimDelivery(db, {
+    kind: "heartbeat",
+    dateCovered: today,
+    now: now(),
+    precondition: (tx) => heartbeatWithinWeek(tx, nowMs),
+  });
+  if (!claim.claimed) {
     return {
       kind: "heartbeat",
       action: "skipped",
-      reason: "heartbeat-sent-within-week",
+      reason: claim.reason,
       statLineCount: 0,
       playerCount: watchedCount,
     };
   }
 
   const mail = renderHeartbeat({ date: today, playerCount: watchedCount, nextOpeningDay });
+  let receipt: MailReceipt;
   try {
-    await deps.mailer.send({ to: deps.to, from: deps.from, ...mail });
+    receipt = await deps.mailer.send(
+      { to: deps.to, from: deps.from, ...mail },
+      { deliveryKey: deliveryKey("heartbeat", today) },
+    );
   } catch (err) {
-    await recordDelivery(deps, {
-      kind: "heartbeat",
-      dateCovered: today,
-      status: "failed",
+    settleFailed(db, {
+      deliveryId: claim.deliveryId,
       errorMessage: errorMessage(err),
       playerCount: watchedCount,
       statLineCount: 0,
@@ -187,58 +173,42 @@ async function runHeartbeat(
     };
   }
 
-  await recordDelivery(deps, {
-    kind: "heartbeat",
-    dateCovered: today,
-    status: "sent",
-    errorMessage: null,
+  settleSent(db, {
+    deliveryId: claim.deliveryId,
+    now: now(),
     playerCount: watchedCount,
     statLineCount: 0,
+    providerMessageId: receipt.providerMessageId,
+    reportedIds: [],
   });
   return {
     kind: "heartbeat",
     action: "sent",
-    reason: null,
+    reason: claim.recovered ? RECOVERED : null,
     statLineCount: 0,
     playerCount: watchedCount,
   };
 }
 
-async function recordDelivery(
-  deps: DigestDeps,
-  args: {
-    kind: "digest" | "heartbeat";
-    dateCovered: string;
-    status: "sent" | "failed";
-    errorMessage: string | null;
-    playerCount: number;
-    statLineCount: number;
-  },
-): Promise<void> {
-  const nowIso = deps.now().toISOString();
-  const sentAt = args.status === "sent" ? nowIso : null;
-  await deps.db
-    .insert(digestDeliveries)
-    .values({
-      kind: args.kind,
-      dateCovered: args.dateCovered,
-      sentAt,
-      playerCount: args.playerCount,
-      statLineCount: args.statLineCount,
-      status: args.status,
-      errorMessage: args.errorMessage,
-      createdAt: nowIso,
-    })
-    .onConflictDoUpdate({
-      target: [digestDeliveries.kind, digestDeliveries.dateCovered],
-      set: {
-        sentAt,
-        playerCount: args.playerCount,
-        statLineCount: args.statLineCount,
-        status: args.status,
-        errorMessage: args.errorMessage,
-      },
-    });
+/**
+ * The rolling seven-day rule, run under the claim's write lock. Only `sent`
+ * rows count: a `sending` (in-flight or crashed) or `failed` heartbeat must
+ * never suppress the next one, or a stuck row would silence the heartbeat
+ * indefinitely — exactly the silent loss this design refuses.
+ */
+function heartbeatWithinWeek(tx: Tx, nowMs: number): ClaimRefusal | null {
+  const last = tx
+    .select()
+    .from(digestDeliveries)
+    .where(and(eq(digestDeliveries.kind, "heartbeat"), eq(digestDeliveries.status, "sent")))
+    .orderBy(desc(digestDeliveries.sentAt))
+    .limit(1)
+    .all()[0];
+  const lastSentAt = last?.sentAt ?? null;
+  if (lastSentAt !== null && nowMs - Date.parse(lastSentAt) < WEEK_MS) {
+    return "heartbeat-sent-within-week";
+  }
+  return null;
 }
 
 function errorMessage(err: unknown): string {

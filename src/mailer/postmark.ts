@@ -1,4 +1,4 @@
-import type { MailMessage, Mailer } from "./types.js";
+import type { MailContext, MailMessage, MailReceipt, Mailer } from "./types.js";
 
 const POSTMARK_URL = "https://api.postmarkapp.com/email";
 
@@ -21,7 +21,7 @@ export class PostmarkMailer implements Mailer {
     this.fetchImpl = fetchImpl;
   }
 
-  async send(message: MailMessage): Promise<void> {
+  async send(message: MailMessage, context?: MailContext): Promise<MailReceipt> {
     const res = await this.fetchImpl(POSTMARK_URL, {
       method: "POST",
       headers: {
@@ -36,11 +36,29 @@ export class PostmarkMailer implements Mailer {
         HtmlBody: message.html,
         TextBody: message.text,
         MessageStream: "outbound",
+        // Postmark echoes Metadata back on the message and in its search API,
+        // so the slot key is queryable later (ADR 0034).
+        ...(context !== undefined ? { Metadata: { deliveryKey: context.deliveryKey } } : {}),
       }),
     });
+    const body = await res.text().catch(() => "");
     if (!res.ok) {
-      const detail = await res.text().catch(() => "");
-      throw new Error(`Postmark send failed with HTTP ${res.status}: ${detail}`);
+      throw new Error(`Postmark send failed with HTTP ${res.status}: ${body}`);
     }
+    return { providerMessageId: parseMessageId(body) };
   }
+}
+
+/** Postmark's accepted-response MessageID; an empty or unparseable body is null. */
+function parseMessageId(body: string): string | null {
+  if (body === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const id = (parsed as Record<string, unknown>).MessageID;
+  return typeof id === "string" ? id : null;
 }

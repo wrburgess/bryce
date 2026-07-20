@@ -39,7 +39,23 @@ export const digestDeliveries = sqliteTable(
     sentAt: text("sent_at"),
     playerCount: integer("player_count").notNull().default(0),
     statLineCount: integer("stat_line_count").notNull().default(0),
-    status: text("status", { enum: ["sent", "failed"] }).notNull(),
+    /**
+     * Delivery state machine (ADR 0034). `sending` is a durable CLAIM on this
+     * (kind, date_covered) slot held under the unique index below; it carries a
+     * lease so a crashed run's slot heals instead of blocking forever.
+     *
+     * Every member is reachable: no speculative state is declared here, because
+     * an unwritable state still forces every consumer of DeliveryStatus (the
+     * health seam, and both surfaces it feeds) to handle a case that cannot
+     * occur.
+     */
+    status: text("status", { enum: ["sending", "sent", "failed"] }).notNull(),
+    /** When the current `sending` claim was taken — the lease clock (ADR 0034). */
+    claimedAt: text("claimed_at"),
+    /** How many times this slot has been claimed; >1 means a retry or a recovery. */
+    attemptCount: integer("attempt_count").notNull().default(0),
+    /** Provider-side id of the accepted message, when the provider returns one. */
+    providerMessageId: text("provider_message_id"),
     errorMessage: text("error_message"),
     createdAt: text("created_at").notNull(),
   },
@@ -101,5 +117,13 @@ export type NewPlayerRow = typeof players.$inferInsert;
 export type StatLineRow = typeof statLines.$inferSelect;
 export type NewStatLineRow = typeof statLines.$inferInsert;
 export type DigestDeliveryRow = typeof digestDeliveries.$inferSelect;
+/**
+ * The delivery state machine's alphabet. Exported so every surface that reports
+ * a delivery status (src/server/health.ts, and through it GET /health and the
+ * MCP `status` tool) consumes the schema's own union instead of restating it —
+ * widening the enum can never leave a surface behind (rules/backend.md).
+ */
+export type DeliveryStatus = DigestDeliveryRow["status"];
+export type DeliveryKind = DigestDeliveryRow["kind"];
 export type SeasonCalendarRow = typeof seasonCalendar.$inferSelect;
 export type NewSeasonCalendarRow = typeof seasonCalendar.$inferInsert;

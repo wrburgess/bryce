@@ -17,6 +17,7 @@ import {
   fakeClock,
   fakeNcaaClient,
   insertCalendars2026,
+  insertDelivery,
   insertPlayer,
   insertStatLine,
   makeGameLogBody,
@@ -390,5 +391,28 @@ describe("MCP server over Streamable HTTP", () => {
     const app = createApp(deps);
     const health = await (await app.request("/health")).json();
     expect(result.structuredContent).toEqual(health);
+  });
+
+  it("status reports an in-flight `sending` delivery so a stuck claim is visible", async () => {
+    // The second surface of the widened delivery state machine (ADR 0034):
+    // rules/backend.md wants every seam updated in the same change, each with
+    // its own sad-path test — this is the MCP tool's.
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "sending",
+      claimedAt: "2026-07-19T12:00:00.000Z",
+      createdAt: "2026-07-19T12:00:00.000Z",
+      attemptCount: 2,
+    });
+
+    const result = await call("status");
+    expect(result.isError).toBeFalsy();
+    expect(result.structuredContent?.lastDelivery).toEqual({
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "sending",
+      sentAt: null,
+    });
   });
 });

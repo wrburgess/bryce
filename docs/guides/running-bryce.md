@@ -49,9 +49,24 @@ missing.
 
 ## Scheduling with launchd
 
-Two jobs: Refresh (nightly, after West Coast games finish) and Digest (~5 AM Central). Both are
-safe to re-run — Refresh is idempotent (ADR 0030) and Digest never double-sends for a covered date.
-launchd runs missed jobs on wake, which is exactly what a sometimes-asleep laptop needs.
+Two jobs: Refresh (nightly, after West Coast games finish) and Digest (~5 AM Central). Refresh is
+idempotent ([ADR 0030](../adr/0030-full-season-refresh-report-once-digest.md)), so re-running it is
+free. launchd runs missed jobs on wake, which is exactly what a sometimes-asleep laptop needs.
+
+**That wake behaviour is why Digest re-entry is not theoretical.** On wake, the missed Digest job
+fires as its own process at the moment the long-lived server may be handling an MCP `send_digest`
+call or a `POST /api/digest/send` — two processes, two SQLite connections, one delivery slot. Digest
+survives that: each run takes a durable claim on its `(kind, date)` slot before the mail provider is
+called, so **only one invocation ever reaches the provider for a slot**
+([ADR 0034](../adr/0034-digest-delivery-claim-at-least-once.md); the `BEGIN IMMEDIATE` claim is what
+makes it hold across processes, and a pinned `busy_timeout` keeps a contender waiting rather than
+failing).
+
+Re-entry is safe; it is not *exactly-once*. If Bryce dies in the window between the provider
+accepting the mail and the row recording it, that acceptance is unrecoverable and the content goes
+out again — Digest is **at-least-once** across that one window, a deliberate choice over a silently
+missing digest. See *Stuck deliveries and duplicate emails* below for what that looks like and what
+to do about it.
 
 `~/Library/LaunchAgents/com.bryce.refresh.plist`:
 
@@ -126,6 +141,73 @@ cloudflared tunnel run --url http://localhost:3000 bryce
 `GET /health` returns `{ ok, players, statLines, lastDelivery }` — a glanceable check that the
 laptop, database, and last send are alive. It is the only public route; everything else rides
 behind the token below.
+
+## Stuck deliveries and duplicate emails
+
+Bryce can send the **same content twice**, in one specific situation, on purpose. Read this once so a
+duplicate email reads as a known outcome rather than a bug. The full guarantee and why it was chosen
+are in [ADR 0034](../adr/0034-digest-delivery-claim-at-least-once.md); this section is the
+operational half.
+
+The short version: every digest and heartbeat takes a **claim** on its `(kind, date)` slot — a
+`digest_deliveries` row with `status = "sending"` — before the mail provider is called. Racing
+invocations can never both mail you; the loser skips. But if Bryce dies between the provider
+accepting the mail and the row recording it, that acceptance is unrecoverable, and the content goes
+out again. A duplicate announces itself; a silently missing digest does not.
+
+**Reading `/health`.** `GET /health` (and the MCP `status` tool) reports the last delivery's status
+verbatim, including `sending`:
+
+```json
+{ "ok": true, "lastDelivery": { "kind": "digest", "dateCovered": "2026-07-19", "status": "sending", "sentAt": null } }
+```
+
+- **`sending` with a recent `claimed_at`** — a run is in flight right now. Normal; wait.
+- **`sending` older than ten minutes** — a run died. The claim's lease has expired, so it blocks
+  nothing: any further run *on that same date* reclaims the slot and sends. **No manual action is
+  needed.**
+- **A `sending` row that just stays there** — expected, and harmless. If no further run happens on
+  that date (the usual shape: the 5 AM job crashes, the next one is tomorrow), that row is never
+  reclaimed and remains as a historical artifact. Nothing is lost: the crashed run marked no Stat
+  Lines, so the next day's digest reports them anyway — the digest is novelty-driven, not
+  date-windowed ([ADR 0030](../adr/0030-full-season-refresh-report-once-digest.md)). The same is
+  true of a crashed heartbeat: a `sending` row never counts toward the seven-day rule, so the next
+  run still sends.
+- **Two emails carrying the same lines** — the crash window above. `attempt_count` on the row says
+  how many times that slot was claimed:
+
+  ```sh
+  sqlite3 data/bryce.db \
+    "SELECT kind, date_covered, status, attempt_count, claimed_at, sent_at, provider_message_id
+       FROM digest_deliveries ORDER BY id DESC LIMIT 5;"
+  ```
+
+  An `attempt_count` above 1 on a `sent` row is the fingerprint of a retry or a recovery.
+
+**If an email never arrived**, reopening the slot is not the operative step — the digest is
+novelty-driven ([ADR 0030](../adr/0030-full-season-refresh-report-once-digest.md)), so the lines it
+already reported stay marked and a bare re-run mails you an empty digest. Un-mark those lines and
+they go out with the next digest:
+
+```sh
+sqlite3 data/bryce.db <<'SQL'
+UPDATE stat_lines SET digest_delivery_id = NULL
+ WHERE digest_delivery_id = (SELECT id FROM digest_deliveries
+                              WHERE kind = 'digest' AND date_covered = '2026-07-19');
+SQL
+```
+
+Then either wait for tomorrow's scheduled run or, to send *today* when today's slot is already
+`sent`, reopen it as well — a `failed` row is re-claimable, so the next run retries it:
+
+```sh
+sqlite3 data/bryce.db \
+  "UPDATE digest_deliveries SET status = 'failed'
+     WHERE kind = 'digest' AND date_covered = '$(date +%F)';"
+npm run digest
+```
+
+Do **not** delete a delivery row — the Stat Lines it reported reference it by foreign key.
 
 ## The MCP server and REST API
 
