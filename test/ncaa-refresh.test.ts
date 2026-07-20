@@ -239,6 +239,10 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
 
   it("stops scraping after the NCAA season ends while MLB keeps the pipeline awake (#15)", async () => {
     await insertNcaa();
+    // A watched MLB player keeps the pipeline genuinely awake (not just the
+    // no-watched-openings fail-open path); externalId null → refresh skips him
+    // with zero Stats API calls, so no MLB fixtures are needed.
+    await insertPlayer(opened.db, { fullName: "Awake Anchor", level: "mlb", externalId: null });
     await insertCalendars2026(opened.db); // MLB in season through the fall — pipeline awake
     // Bundled 2026 NCAA end is 2026-06-22; grace runs through 2026-06-29.
     clock.set("2026-08-15T17:00:00Z");
@@ -252,6 +256,9 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
 
   it("keeps scraping through the post-season grace window, then stops at its boundary", async () => {
     await insertNcaa();
+    // Same awake-anchor as above: a watched MLB player (skipped by refresh via
+    // null externalId) keeps the pipeline awake on its own merits.
+    await insertPlayer(opened.db, { fullName: "Awake Anchor", level: "mlb", externalId: null });
     await insertCalendars2026(opened.db);
 
     // Last grace day (end 2026-06-22 + 7): still fetching for late corrections.
