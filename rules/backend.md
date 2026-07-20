@@ -11,6 +11,7 @@
 - **Thin controllers.** Keep controller actions to request/response orchestration; put domain logic in domain models, shared modules, or dedicated service/domain objects.
 - **Authorize every non-public action** with the host's authorization layer — deny by default, never hardcode role checks inline.
 - **Enforce invariants in the database too.** Pair model validations with DB-level constraints (`NOT NULL`, unique indexes, foreign keys); a validation is not a guarantee under concurrency.
+- **Thread every new error type through every surface's error seam.** When you introduce a typed error, update each surface's mapping in the same change — the API error handler's status mapping, any RPC/tool layer's known-error set, and every service-layer catch that classifies errors — and add a sad-path test per surface. A seam that doesn't know the type mishandles it silently: a crash, a wrong status code, or a misleading classification. *(Host case study: `docs/rules/backend-postmortems.md`.)*
 
 ## Anti-Patterns
 
