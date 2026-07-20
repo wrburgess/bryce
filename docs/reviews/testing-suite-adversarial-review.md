@@ -14,9 +14,10 @@ evidence, not the conclusion.
 
 The conclusion is more qualified: the suite gives strong confidence in pure baseball rules,
 single-process service behavior, storage keys, rendering, authorization, and REST/MCP happy and
-known-error paths. It does not yet justify the product's strongest operational claims. A digest can
-be sent twice if invocations overlap or the process dies after the provider accepts the message but
-before SQLite records it. One player's refresh failure aborts all later players. NCAA tests prove
+known-error paths. It does not yet justify the product's strongest operational claims. A digest or
+weekly heartbeat can be sent twice if invocations overlap or the process dies after the provider
+accepts the message but before SQLite records it. A preliminary calendar-fetch failure or one
+player's refresh failure aborts all remaining refresh work. NCAA tests prove
 the implementation agrees with constructed fixtures, but not that those fixtures and opaque
 category identifiers still agree with the live unofficial source. These are three High findings.
 
@@ -50,11 +51,11 @@ Matrix and finding labels mean:
 | One Player row survives promotion/demotion; Level is mutable | `test/refresh.test.ts:220-258`; `test/watchlist.test.ts:74-149` | **Direct, strong.** The call-up test asserts one row and retained cross-level history. |
 | Watch List is the active subset; deactivation retains history | `test/watchlist.test.ts:265-408`; `test/api.test.ts:275-333,560-573`; `test/mcp.test.ts:216-274`; `test/seed.test.ts:119-137` | **Direct, strong.** Service and three interfaces assert row/history retention and digest exclusion. |
 | Stat Lines are per game and role; doubleheaders do not collide (ADR 0029) | `test/schema.test.ts:8-64`; `test/queries.test.ts:64-84`; `test/digest.test.ts:240-279`; `test/ncaa.test.ts:48-53,112-123` | **Direct, strong.** The database uniqueness key and presentation behavior are both asserted. |
-| Full current-season sweep has no date window (ADR 0030) | `test/refresh.test.ts:70-114`; `src/jobs/refresh.ts:332-370` | **Direct for one successful player.** All six MLB/MiLB sport IDs and three groups are asserted; multi-player failure continuation is missing (H2). |
+| Full current-season sweep has no date window (ADR 0030) | `test/refresh.test.ts:70-114`; `src/jobs/refresh.ts:78,106-137,332-370` | **Direct for successful calendar and player sweeps.** All six MLB/MiLB sport IDs and three groups are asserted; failure continuation across the preliminary calendar loop and the player loop is missing (H2). |
 | Re-fetch is idempotent; corrections update quietly | `test/schema.test.ts:95-139`; `test/refresh.test.ts:163-218`; `test/ncaa-refresh.test.ts:137-174` | **Direct, strong** for sequential runs. Concurrent refresh and per-player rollback are not exercised. |
 | Digest reports novelty, catches late lines, and does not re-announce corrections (ADR 0030) | `test/digest.test.ts:46-137,333-361`; `test/refresh.test.ts:187-218` | **Direct for sequential success/provider rejection.** External send and durable marking are not one atomic action (H1). |
 | Digest sends daily even when empty; In Season players get a `No new stats` tail and out-of-season players are omitted | `test/digest.test.ts:105-119,222-238`; `test/digest-preview.test.ts:126-207`; `test/season.test.ts:72-95` | **Direct, strong.** Both preview and sending paths cover the inclusion rule. |
-| Offseason Sleep pauses refresh, sends weekly heartbeat, wakes at earliest watched opening day, and excludes spring training (ADR 0031) | `test/season.test.ts:96-176`; `test/refresh.test.ts:260-287`; `test/ncaa-refresh.test.ts:193-276`; `test/digest.test.ts:377-462` | **Direct, strong.** Boundaries, NCAA wake, zero network calls, and heartbeat cadence are asserted with an injected clock. |
+| Offseason Sleep pauses refresh, sends weekly heartbeat, wakes at earliest watched opening day, and excludes spring training (ADR 0031) | `test/season.test.ts:96-176`; `test/refresh.test.ts:260-287`; `test/ncaa-refresh.test.ts:193-276`; `test/digest.test.ts:377-462` | **Direct for season boundaries and sequential cadence.** NCAA wake, zero network calls, and seven-day heartbeat timing are asserted with an injected clock; concurrent heartbeats and a crash after provider acceptance are missing (H1). |
 | NCAA identity uses unique `ncaa_player_seq`; external identity stays separate (ADR 0032) | `test/schema.test.ts:66-93`; `test/watchlist.test.ts:154-264`; `test/api.test.ts:203-304`; `test/mcp.test.ts:168-246` | **Direct, strong** for uniqueness and surface behavior. The database does not enforce the complete level/identity pairing, but internal typed services maintain it. |
 | NCAA contest ID is preferred; deterministic hash preserves no-ID doubleheaders | `test/ncaa.test.ts:78-88,287-307`; `src/ncaa/normalize.ts:136-196` | **Direct for examples.** A small property/fuzz suite could strengthen collision/boundary evidence, but this is optional polish. |
 | NCAA malformed tables fail loudly and annual lookup gaps make no requests | `test/ncaa.test.ts:61-76,372-384`; `test/ncaa-refresh.test.ts:231-276` | **Direct for constructed shapes. Weak as an independent contract** with the live site (H3). |
@@ -81,8 +82,8 @@ not upgrade its confidence label.
 | Rate math — `src/digest/rates.ts` | `test/rates.test.ts`; render/digest integration | 100 / 100 | **Direct, strong unit boundary coverage.** Property-based notation generation is optional, not a current confidence blocker. |
 | Rendering — `src/digest/render.ts` | `test/render.test.ts`; digest/preview/API/MCP tests | 99.41 / 92.59 | **Direct.** Exact text/HTML, ordering, doubleheaders, fixed stat formats, and heartbeat output are protected. |
 | Season domain — `src/domain/season.ts` | `test/season.test.ts`; refresh/digest integrations | 97.40 / 92.85 | **Direct.** Date-zone and opening/closing boundaries use injected time; no wall-clock waits. |
-| Digest job — `src/jobs/digest.ts` | `test/digest.test.ts`; API/MCP send tests | 98.97 / 92.59 | **Direct for sequential behavior; weak at external transaction seam.** Coverage does not expose overlapping sends or post-send crashes (H1). |
-| Refresh job — `src/jobs/refresh.ts` | `test/refresh.test.ts`; `test/ncaa-refresh.test.ts`; watch-list/API/MCP/seed integrations | 95.54 / 78.02 | **Direct for success, idempotency, season, and correction cases. Missing** multi-player provider/parse failure continuation and fault reporting (H2). |
+| Digest job — `src/jobs/digest.ts` | `test/digest.test.ts`; API/MCP send tests | 98.97 / 92.59 | **Direct for sequential digest and heartbeat behavior; weak at both external transaction seams.** Coverage does not expose overlapping digest/heartbeat sends or post-provider-acceptance crashes (H1). |
+| Refresh job — `src/jobs/refresh.ts` | `test/refresh.test.ts`; `test/ncaa-refresh.test.ts`; watch-list/API/MCP/seed integrations | 95.54 / 78.02 | **Direct for successful calendar/player sweeps, idempotency, season, and correction cases. Missing** continuation and fault reporting for a failed sequential `getSeason` call before player iteration and for multi-player provider/parse failures (H2). |
 | Mailer selection/protocols — `src/mailer/index.ts`, `src/mailer/console.ts`, `src/mailer/postmark.ts`, `src/mailer/smtp.ts`, `src/mailer/types.ts` | `test/mailer.test.ts`; digest tests use `CapturingMailer` | 93.10 / 83.33; 100 / 100; 100 / 100; 73.91 / 100; type-only | **Direct contract doubles.** Exact Postmark request and SMTP message shape/error propagation are asserted; default Nodemailer construction and live provider acceptance are not. Live delivery need not run in every PR, but a controlled smoke belongs in operations (M2). |
 | MCP server — `src/mcp/server.ts` | `test/mcp.test.ts` over Streamable HTTP | 98.68 / 91.22 | **Direct.** Tool inventory, structured results/errors, state changes, SQL, preview, status, and auth are covered. Rejection parity is not systematic (M3). |
 | MLB/MiLB client contract — `src/mlb/client.ts`, `src/mlb/schemas.ts`, `src/mlb/levels.ts`, `src/mlb/gameTypes.ts` | `test/mlb-client.test.ts` with captured MLB payloads; `test/refresh.test.ts` | 92.85 / 80.64; 100 / 100; 100 / 100; 100 / 100 | **Direct and independently grounded.** Captured payloads, malformed responses, required `sportId`, all level mappings, delays, and game-type allowlist are covered. There is no scheduled fixture refresh, a Medium-term contract-maintenance concern rather than a current High gap. |
@@ -105,7 +106,7 @@ mapped to evidence or explicitly marked missing/weak.
 There are no Critical findings under `PROJECT.md`: this review did not demonstrate data loss, a
 security hole, a protected-branch/auth invariant break, or an application that cannot operate.
 
-### H1 — High: digest “never double-sends” is not protected across concurrency or a post-send crash
+### H1 — High: digest and heartbeat delivery are not protected across concurrency or a post-send crash
 
 **Demonstrated evidence.** `src/jobs/digest.ts:45-63` performs a read-before-send check,
 `src/jobs/digest.ts:74-75` sends externally, and only afterward does
@@ -114,28 +115,42 @@ security hole, a protected-branch/auth invariant break, or an application that c
 email. `test/digest.test.ts:95-103` covers sequential re-entry, while
 `test/digest.test.ts:333-360` covers provider rejection before acceptance. Neither overlaps two
 calls nor injects failure after provider acceptance. `src/mcp/server.ts:200-218` nevertheless
-describes the tool as “Never double-sends for a covered date.”
+describes the tool as “Never double-sends for a covered date.” The weekly path has the same seam:
+`src/jobs/digest.ts:152-167` reads the most recent sent heartbeat, `src/jobs/digest.ts:169-171`
+sends externally, and `src/jobs/digest.ts:190-197` records success afterward. Heartbeat tests at
+`test/digest.test.ts:377-462` cover sequential cadence and provider rejection, but not overlapping
+calls or failure after the provider accepts the heartbeat.
 
 **Inferred failure mode and impact.** A launchd run overlapping a manual REST/MCP send can let both
 calls pass the initial query and send two emails. A process/SQLite failure after Postmark or SMTP
 accepts the message but before the transaction commits leaves the lines unmarked, so retry sends
-them again. This violates a named product invariant and produces duplicate user-visible reports.
+them again. Two heartbeat calls can likewise both observe no send within the last week and send, or
+a post-acceptance crash can leave no heartbeat record and make the retry send again. These failures
+produce duplicate user-visible digests or offseason heartbeats and overstate the delivery guarantee.
 
 **Concrete improvement.** Define the actual delivery guarantee, then implement a durable delivery
 state machine/reservation plus a provider idempotency strategy where supported (or explicitly adopt
 at-least-once delivery with duplicate observability). Serialize same-date claims in SQLite and make
 stale in-flight recovery deliberate. Do not claim atomic exactly-once behavior across SQLite and an
-external provider without a protocol that supplies it.
+external provider without a protocol that supplies it. Apply the same claim/reservation semantics
+to the daily digest key and the heartbeat's rolling seven-day cadence.
 
-**Regression expectation.** A gated mailer test must start two same-date calls concurrently and
-prove only one reaches `send`. Fault-injection tests must exercise failure immediately before send,
+**Regression expectation.** Gated mailer tests must start two same-date digest calls and two
+heartbeat-eligible calls concurrently and prove only one call in each pair reaches `send`.
+Fault-injection tests for both delivery kinds must exercise failure immediately before send,
 provider rejection, provider acceptance followed by persistence failure, and stale-reservation
-recovery, asserting mail count, delivery state, and stat-line marking each time.
+recovery. Assert mail count and delivery state for both paths, plus stat-line marking for digests and
+seven-day eligibility for heartbeats.
 
-### H2 — High: one refresh fault prevents every later watched player from refreshing
+### H2 — High: a calendar or player refresh fault aborts all remaining refresh work
 
-**Demonstrated evidence.** `src/jobs/refresh.ts:81-90` awaits each player in a loop without a
-per-player error boundary. An exception from identity lookup or any one of the 18 MLB/MiLB log calls
+**Demonstrated evidence.** Before player iteration, `src/jobs/refresh.ts:78` awaits
+`refreshCalendars`; its loop at `src/jobs/refresh.ts:106-137` awaits six sequential `getSeason`
+calls without a per-sport error boundary. One rejected season request therefore prevents later
+sport calendars and every player refresh. `test/refresh.test.ts:70-114` proves only a successful
+calendar sweep. After that preflight, `src/jobs/refresh.ts:81-90` awaits each player in a loop
+without a per-player error boundary. An exception from identity lookup or any one of the 18
+MLB/MiLB log calls
 at `src/jobs/refresh.ts:313-357`, or from any NCAA category at `src/jobs/refresh.ts:263-270`, exits
 the whole job. MLB identity is updated at `src/jobs/refresh.ts:313-330` before all log calls have
 succeeded, while stat rows are not upserted until `src/jobs/refresh.ts:370`; the failure has no
@@ -144,20 +159,27 @@ idempotency, correction, filtering, and sleep, but has no three-player case with
 API/MCP upstream-error tests exercise a requested NCAA player, not continuation of the scheduled
 whole-watch-list job.
 
-**Inferred failure mode and impact.** One transient API error, malformed payload, or NCAA markup
-shift leaves every later player stale for that run. Earlier players may already be updated, the
-failing MLB player's identity may change without its stats, and the summary that would identify
-partial completion is never returned. Ordering therefore determines who gets fresh data.
+**Inferred failure mode and impact.** One transient MLB season endpoint error can stop the run
+before any player is touched and leave later sport calendars stale. A later identity, game-log,
+NCAA HTTP, or markup failure leaves every later player stale. Earlier calendars or players may
+already be updated, the failing MLB player's identity may change without its stats, and the summary
+that would identify partial completion is never returned. Calendar and player ordering therefore
+determine which state is fresh.
 
-**Concrete improvement.** Make the whole-watch-list orchestrator isolate failures per player,
-continue later players, and return/persist a structured success/failure summary that makes the job
-exit non-zero or otherwise alert on partial failure. Define per-player atomicity for identity plus
-stat updates; avoid silently presenting a partial mutation as a completed player refresh.
+**Concrete improvement.** Make the whole-watch-list orchestrator collect failures across both
+phases: isolate each sport's calendar request and each player's refresh, continue safe later work,
+and return/persist a structured success/failure summary that makes the job exit non-zero or
+otherwise alerts on partial failure. Define when cached calendar data permits player ingestion to
+continue after a calendar fetch fails, and define per-player atomicity for identity plus stat
+updates. Never silently present either partial phase as a fully completed refresh.
 
-**Regression expectation.** With three players, force the middle player's identity call, an
-intermediate game-log call, and an NCAA category parse to fail in separate cases. Assert the first
-and third players refresh, the failed player obeys the chosen atomicity rule, exact failure metadata
-is surfaced, a later retry heals it, and duplicate rows/report markers are unchanged.
+**Regression expectation.** First force the first, middle, and last sequential `getSeason` calls to
+fail in separate cases; assert later calendar attempts occur, player ingestion follows the defined
+cached-calendar policy, and the failed sport is reported precisely. Then, with three players, force
+the middle player's identity call, an intermediate game-log call, and an NCAA category parse to
+fail in separate cases. Assert the first and third players refresh, the failed player obeys the
+chosen atomicity rule, all phase failures are surfaced, a later retry heals them, and duplicate
+rows/report markers are unchanged.
 
 ### H3 — High: NCAA tests are not independent evidence of the live scrape contract
 
@@ -324,8 +346,8 @@ the behavior that changed because test names are specific and fixtures are local
 
 Failure injection exists for provider rejection, malformed payload/table, unknown identities,
 unsupported seasons, SQL abuse, and auth. It stops short of the failure windows that matter most:
-concurrency, crash after external acceptance, multi-player partial failure, migration upgrade, and
-restore. No LLM-generated behavior exists in the current production modules, so an LLM eval is not
+digest/heartbeat concurrency, crash after external acceptance, calendar/player partial refresh,
+migration upgrade, and restore. No LLM-generated behavior exists in the current production modules, so an LLM eval is not
 applicable.
 
 ## Testing efficiency assessment
@@ -383,17 +405,18 @@ The successful matched V8 run included all production files, including unimporte
 
 The highest-value information is not the total: the four actual scheduled/maintenance entrypoints
 were 0%, server bootstrap was 66.66%, and refresh branch coverage was 78.02%. Conversely, 98.97%
-line coverage on the digest job did not protect the send/persist distributed failure window. This is
+line coverage on the digest job did not protect the digest or heartbeat send/persist distributed
+failure windows. This is
 why the future gate should follow H1-H3 risk, not choose a round global target first.
 
 ## Prioritized future strategy
 
 ### Confidence gains — do first
 
-1. **Close H1:** define and test digest delivery semantics under simultaneous invocation and every
-   send/persist failure window.
-2. **Close H2:** isolate per-player refresh faults, surface partial failure, and test recovery with a
-   failing player in the middle of the watch list.
+1. **Close H1:** define and test digest and heartbeat delivery semantics under simultaneous
+   invocation and every send/persist failure window.
+2. **Close H2:** isolate calendar-fetch and per-player refresh faults, surface partial failure, and
+   test recovery across both the preliminary calendar loop and the watch list.
 3. **Close H3:** replace circular NCAA contract evidence with sanitized live captures,
    category-specific semantic validation, and a polite host probe tied to annual IDs.
 4. **Close M1 and M3:** mechanically block accidental network access and introduce a compact shared
@@ -418,8 +441,8 @@ Each High and substantial Medium finding should become one bounded leaf issue:
 
 | Candidate title | Severity | Required test outcome |
 |---|---|---|
-| Make digest delivery concurrency- and crash-aware | High | Concurrent and fault-injection matrix proves the documented delivery guarantee and durable recovery. |
-| Continue whole-watch-list refresh after per-player failures | High | Three-player failure cases prove later players refresh, partial failure is observable, and retry heals safely. |
+| Make digest and heartbeat delivery concurrency- and crash-aware | High | Concurrent and fault-injection cases for both delivery kinds prove the documented guarantee and durable recovery. |
+| Continue refresh after calendar and per-player failures | High | Sequential calendar and three-player failure cases prove later work continues safely, partial failure is observable, and retry heals. |
 | Establish an independent live NCAA scrape contract | High | Sanitized real captures and a host probe validate category IDs/headers/non-zero values end to end. |
 | Enforce zero network egress in the default test suite | Medium | Canary tests prove all default provider/client network paths are rejected before egress. |
 | Add production entrypoint and SQLite recovery smokes | Medium | Subprocess, migration-upgrade, WAL, checked config, and disposable restore checks cover actual operations. |
