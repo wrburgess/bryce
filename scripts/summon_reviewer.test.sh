@@ -73,7 +73,17 @@ ASSESS_MD="$REPO_ROOT/skills/assess/SKILL.md"
 command -v ruby >/dev/null 2>&1 || { echo "tests require ruby"; exit 1; }
 [ -f "$SCRIPT" ] || { echo "missing script under test: $SCRIPT"; exit 1; }
 
-TMP="$(mktemp -d)"
+# `mktemp -d` FAILS on an invalid or unwritable TMPDIR, and this suite deliberately does NOT run under
+# `set -e` (most cases assert on non-zero exits). So an unchecked assignment would leave TMP empty and
+# every "$TMP/..." below would become a ROOT-level path — "/fake1", "/reused.md" — which the suite
+# creates, chmods and finally `rm -rf`s. Under a privileged CI or container user that is real damage to
+# files this suite has no business touching. Refuse to start unless a real directory came back, and
+# install the cleanup trap only AFTER that holds, so the trap can never fire on an empty TMP.
+TMP="$(mktemp -d)" || TMP=""
+if [ -z "$TMP" ] || [ ! -d "$TMP" ]; then
+  echo "cannot create a temp dir for the suite (check TMPDIR); refusing to run against root-level paths" >&2
+  exit 1
+fi
 trap 'chmod -R u+rwx "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 
 PASS=0; FAIL=0
@@ -613,6 +623,22 @@ usage_error_clears "a negative --min-bytes clears a reused --out" \
 # the same non-zero exit, and the invariant does not get to depend on which one you took.
 usage_error_clears "an unknown flag clears a reused --out" \
   --mode work --out "$STALE_OUT" --nonsense
+# ...and it does not get to depend on ARGUMENT ORDER either. OptionParser consumes left to right and
+# raises on the first bad token, so with the bad flag FIRST it never reaches --out and the recovery
+# scan is the only thing that knows where the stale body is. Both orders, and both spellings of the
+# flag, or the invariant holds for exactly the one command line the earlier case happened to use.
+usage_error_clears "an unknown flag BEFORE --out still clears the reused --out" \
+  --mode work --nonsense --out "$STALE_OUT"
+usage_error_clears "an unknown flag before --out=FILE still clears the reused --out" \
+  --mode work --nonsense --out="$STALE_OUT"
+# A `--out` sitting in VALUE position is a value, not a destination. `--ac --out X` gives --ac the
+# string "--out"; X is then a stray argument naming nothing, so there is nothing to clear and the
+# scan must not go delete X on the strength of having seen the characters `--out`.
+VALUE_POS_VICTIM="$TMP/not-a-destination.md"
+printf 'not the summon output\n' > "$VALUE_POS_VICTIM"
+run_summon ruby "$SCRIPT" --ac --out "$VALUE_POS_VICTIM" --nonsense
+[ "$RUN_EXIT" = "1" ] && [ -e "$VALUE_POS_VICTIM" ]
+report "a --out in value position is not treated as a destination to clear" $?
 
 # ---------------------------------------------------------------------------
 echo "--out must not alias --input (the clear would destroy the plan):"
@@ -677,6 +703,18 @@ expect_status "--input is a symlink to --out -> usage error" 1 "usage error" \
   ruby "$SCRIPT" --mode plan --input "$ALIAS_LINK" --out "$ALIAS_PLAN" --codex-bin "$FAKE_BIN"
 alias_plan_intact
 report "reverse symlink alias -> the input file survives unmodified" $?
+
+# The refusal must survive the PARSE-ERROR path too. With the bad flag first, OptionParser reaches
+# neither --out nor --input, so the recovery scan supplies both — and a scan that recovered only the
+# destination would hand the clear a path with no input to compare it against, deleting the plan on
+# exactly the command line the aliasing guard exists to refuse. Recovering the PAIR is what keeps
+# this red.
+reseed_alias
+run_summon ruby "$SCRIPT" --mode plan --nonsense --input "$ALIAS_PLAN" --out "$ALIAS_PLAN"
+[ "$RUN_EXIT" = "1" ]
+report "aliased --out after a rejected flag -> still exits 1" $?
+alias_plan_intact
+report "aliased --out after a rejected flag -> the input file survives unmodified" $?
 
 # The check must not over-reach: two DIFFERENT files in one directory are the normal case, and a
 # symlink that points somewhere ELSE is not an alias at all.
@@ -1012,6 +1050,13 @@ if [ -f "$LIFECYCLE_MD" ] && [ -f "$ASSESS_MD" ]; then
   report "Stage 3's trigger requires the plan critique, not just a posted plan" $?
   printf '%s\n' "$STAGE2" | grep -qiF "blocks the handoff"
   report "Stage 2 states the critique blocks the handoff to Implement" $?
+  # ...and it has to be SCOPED, or it breaks the compressed workflows this same standard
+  # documents. "Assess -> Implement -> Deliver" and "Implement -> Deliver" omit Plan, so
+  # they produce no critique and no missing-review flag — an unconditional precondition
+  # sends those runs back to a Stage 2 they were never meant to enter, and they can then
+  # never reach Implement at all.
+  printf '%s\n' "$STAGE3" | grep -qiF "compress"
+  report "Stage 3's trigger scopes the precondition to workflows that run Plan" $?
 else
   report "lifecycle standard and assess skill are readable" 1 "(missing file)"
 fi
@@ -1037,8 +1082,35 @@ if [ -f "$INVOKE_MD" ] && [ -f "$SHIP_MD" ] && [ -f "$DEVISE_MD" ]; then
   report "ship still records the plan-approval human gate as auto-approved" $?
   grep -qiF "auto-approved" "$INVOKE_MD"
   report "invoke still records the plan-approval human gate as auto-approved" $?
+
+  # The same scoping the standard's Stage 3 trigger carries. All three doors were written
+  # together and drift together: a precondition scoped in one and unconditional in the
+  # other two still strands the compressed workflows through those two doors.
+  grep -qiF "compress" "$INVOKE_MD"
+  report "invoke scopes the precondition to workflows that run Plan" $?
+  grep -qiF "compress" "$SHIP_MD"
+  report "ship states how the precondition applies to its full-lifecycle sequence" $?
 else
   report "invoke, ship and devise skill bodies are readable" 1 "(missing file)"
+fi
+
+# AGENTS.md is the ALWAYS-RESIDENT canonical surface every tool loads, and rules/skills.md
+# records that Copilot does not follow links out to a deep doc. So a gate stated only in
+# docs/standards/ or in a skill body is one an agent reading the canonical surface alone
+# never sees: it reads "work proceeds without waiting", enters Implement before the
+# critique, and bypasses the gate entirely. The summary has to carry the precondition
+# itself — while still recording the human gate as auto-approved, which is a different gate.
+AGENTS_MD="$REPO_ROOT/AGENTS.md"
+if [ -f "$AGENTS_MD" ]; then
+  AGENTS_LIFECYCLE="$(awk '/^## Development lifecycle/{f=1} /^## Skills/{f=0} f' "$AGENTS_MD")"
+  [ -n "$AGENTS_LIFECYCLE" ]
+  report "AGENTS.md extracts a non-empty Development lifecycle section" $?
+  printf '%s\n' "$AGENTS_LIFECYCLE" | grep -qiF "critique"
+  report "AGENTS.md's lifecycle summary carries the Reviewer precondition" $?
+  printf '%s\n' "$AGENTS_LIFECYCLE" | grep -qiF "auto-approved"
+  report "AGENTS.md still records plan approval as auto-approved" $?
+else
+  report "AGENTS.md is readable" 1 "(missing $AGENTS_MD)"
 fi
 
 # ---------------------------------------------------------------------------

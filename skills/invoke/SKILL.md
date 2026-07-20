@@ -1,6 +1,6 @@
 ---
 name: invoke
-description: Stage 3 of the development lifecycle. Execute the approved plan on a feature branch, run the host's quality checks to green, and open the PR. Use once the plan is posted and approved per the host's gate policy (PROJECT.md → Lifecycle Host → Human gates; auto-approved on posting in this host) AND the Reviewer's plan critique has been answered — must-fix findings folded into a posted revision — or its failure ladder is exhausted and the missing plan review flagged. A posted plan alone is not the trigger; do not start implementing while a critique is outstanding. This is the only stage that creates a PR; commit is not done — the open PR is.
+description: Stage 3 of the development lifecycle. Execute the approved plan on a feature branch, run the host's quality checks to green, and open the PR. Use once the plan is posted and approved per the host's gate policy (PROJECT.md → Lifecycle Host → Human gates; auto-approved on posting in this host) AND the Reviewer's plan critique has been answered — must-fix findings folded into a posted revision — or its failure ladder is exhausted and the missing plan review flagged. A posted plan alone is not the trigger; do not start implementing while a critique is outstanding. That precondition binds every workflow that runs Plan; an HC-elected compressed workflow that omits Plan has no critique to settle. This is the only stage that creates a PR; commit is not done — the open PR is.
 ---
 
 <what-to-do>
@@ -39,6 +39,16 @@ If neither holds, **stop and complete Stage 2** — do not implement against a p
 still outstanding, and do not treat the host's auto-approved *human* gate as covering it: that policy
 waives the HC's wait, not the Reviewer's. Implement against the **final** posted plan, which is the
 revised one whenever a critique produced a revision.
+
+**Scope — this binds every workflow that runs Stage 2, and only those.** It is a Stage 2 gate, so it
+applies to the full lifecycle and to every compressed variant that keeps Plan. In an **HC-elected**
+compressed workflow that omits Plan altogether — `Assess → Implement → Deliver` for a trivial fix,
+`Implement → Deliver` for a documentation-only change
+([the standard](../../docs/standards/development-lifecycle.md) → *When to skip or compress stages*) —
+no plan is written, so no critique exists and there is nothing to settle: the precondition does not
+apply, and "stop and complete Stage 2" would strand a workflow the HC is entitled to elect. This is
+not an escape hatch the AC can open for itself: **the HC decides when to compress; the AC does not
+self-select a compressed workflow**, so the only way past this gate is a compression the HC asked for.
 
 </what-to-do>
 

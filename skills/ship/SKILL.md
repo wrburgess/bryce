@@ -94,9 +94,12 @@ Run the phases in order, following each phase's canonical body for its steps and
    auto-approved *human* gate is not an auto-approved *review*; treating them as one starts the
    implementation while the critique that would have redirected it is still in flight.
 3. **Implement** — follow [`invoke`](../../skills/invoke/SKILL.md), whose entry precondition is that
-   critique (re-check it here — this is one of the doors it guards): the orchestrator owns branch setup and
-   all lifecycle-host I/O; the code + check + fix loop is delegated, returning a `check-result`.
-   Reconcile git state, gate on `verdict`, then commit → push → open the PR.
+   critique (re-check it here — this is one of the doors it guards). `ship` runs the **full** lifecycle
+   and always executes Plan at step 2, so the precondition always binds on this path; the HC-elected
+   compressed workflows that omit Plan — and with it the critique — sit outside `ship`'s sequence, so
+   this step never has cause to waive it. The orchestrator owns branch setup and all lifecycle-host
+   I/O; the code + check + fix loop is delegated, returning a `check-result`. Reconcile git state, gate
+   on `verdict`, then commit → push → open the PR.
 4. **Verify** — follow [`verify`](../../skills/verify/SKILL.md): delegate the full-diff review, consume
    the `drift-report`, classify findings by severity, post the self-review on the PR.
 5. **Review response** — follow [`listen`](../../skills/listen/SKILL.md): delegate the fetch-and-fix churn

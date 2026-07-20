@@ -62,7 +62,11 @@ The lifecycle is issue/PR-shaped: **Assess → Plan → Implement → Verify →
 review-response step. `assess`/`devise` post to an issue; `invoke` opens a PR; `verify`/`listen`/`final`
 operate on that PR. The **merge** gate is mandatory and never bypassed; the **plan-approval** gate is
 **auto-approved** in this host per its gate policy ([`PROJECT.md`](PROJECT.md) → *Lifecycle Host* →
-*Human gates*) — the plan is still posted to the issue, but work proceeds without waiting.
+*Human gates*) — the plan is still posted to the issue, and work proceeds without waiting **for the
+HC**. That waives the *human* wait only: wherever a Plan stage runs, the Reviewer's plan critique
+**blocks Implement** until it is answered (must-fix findings folded into a posted revision) or its
+failure ladder is exhausted and the missing review flagged. An HC-elected compressed workflow with no
+Plan stage has no critique to settle. Never start coding on a posted plan alone.
 GitHub is the default lifecycle host, set in `PROJECT.md` and remappable
 ([ADR 0006](docs/adr/0006-baseline-skill-set-and-github-default-lifecycle-host.md)). The full stage
 spec — stages, roles, gates, and terminal artifacts — is

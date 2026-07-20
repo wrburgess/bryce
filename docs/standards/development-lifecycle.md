@@ -104,7 +104,10 @@ exhausted and the missing plan review flagged. A posted plan alone does **not** 
 Stage 2 critique blocks this handoff, and the host's auto-approved plan gate waives the *human* wait,
 not the *Reviewer* one. Every door into this stage carries the precondition — `invoke`'s own entry
 check, `ship`'s Plan → Implement step, and this trigger — because a gate stated in only one of them is
-one the other two walk past.
+one the other two walk past. It is a **Stage 2** gate, so it binds every workflow that *runs* Stage 2
+and only those: in an HC-elected compressed workflow that omits Plan (see *When to skip or compress
+stages* below) no plan is written, so no critique exists and there is nothing to settle. That is not a
+compression the AC may elect for itself — the rule under that table stands.
 
 **AC does:** creates the feature branch (the branch-protection guardrails block writes on a protected
 branch — see [`PROJECT.md`](../../PROJECT.md) → *Branch & PR Policy*); implements the plan step by
@@ -189,6 +192,10 @@ weaken or bypass it ([ADR 0020](../adr/0020-right-size-plan-revisable-direction.
 | Documentation-only change | Implement → Deliver |
 
 **The HC decides when to compress. The AC does not self-select a compressed workflow.**
+
+Where a compressed workflow omits Plan, Stage 3's plan-critique precondition has nothing to settle and
+does not apply; where it keeps Plan, the precondition binds in full. Skipping Plan is the HC's call, so
+this is never a route the AC can take around the Reviewer.
 
 ## Automated / streamlined track (`ship`)
 

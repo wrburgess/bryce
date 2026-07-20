@@ -136,6 +136,13 @@ class SummonReviewer
   # never a path or an identifier, which must be rendered whole to be usable (see `ascii` vs `bounded`).
   DETAIL_MAX = 200
 
+  # Every long flag the option parser below defines, ALL of which take a value. Used only by
+  # `recover_path_options` to walk a rejected command line the way OptionParser would have.
+  # KEEP IN SYNC with the `opts.on` block at the bottom of this file — a flag missing from this list
+  # only makes the recovery more conservative (its value is re-examined as if it were a flag), never
+  # more destructive, so drift degrades toward doing nothing rather than toward deleting the wrong file.
+  VALUE_FLAGS = %w[--mode --input --base --out --codex-bin --timeout --ac --min-bytes].freeze
+
   # The plan critique prompt. Kept ASCII and explicitly adversarial: the Reviewer's value at the plan
   # gate is finding what the plan MISSES, so a prompt that invites a summary wastes the gate.
   PLAN_CRITIQUE_PROMPT = <<~PROMPT
@@ -715,6 +722,43 @@ class SummonReviewer
     flat = ascii(text)
     flat.length > DETAIL_MAX ? "#{flat[0, DETAIL_MAX]}..." : flat
   end
+
+  # Recovers `--out` and `--input` from a command line OptionParser REFUSED, so `clear_stale_out` has
+  # something to work with. OptionParser consumes left to right and raises on the first bad token, so
+  # `--mode work --nonsense --out reused.md` never reaches --out: the parsed options carry no
+  # destination, the clear no-ops, and the previous run's review survives a non-zero exit — the exact
+  # stale body the clear exists to prevent. Order of arguments must not decide whether an invariant
+  # holds, so the destination is recovered by walking the ORIGINAL argv independently of the parser.
+  #
+  # BOTH paths are recovered, never --out alone: the aliasing guard (`out_aliases_input`) reads
+  # --input, and recovering a destination without the input that might alias it would hand the clear a
+  # path it must refuse to delete. Recovering the pair keeps that refusal intact on this path too.
+  #
+  # This walks the argv the way OptionParser does rather than grepping for the flag: every flag above
+  # takes a value, so a `--flag VALUE` pair is stepped over as a unit and a `--out` sitting in VALUE
+  # position (`--ac --out`) is read as the value it is, not as a destination to delete. `--` ends
+  # option parsing. Where a malformed line leaves the destination genuinely ambiguous this returns
+  # nothing and the clear no-ops: failing to delete a path the caller never clearly named is the safe
+  # direction, deleting one they did not is not.
+  def self.recover_path_options(argv)
+    found = {}
+    index = 0
+    while index < argv.length
+      token = argv[index].to_s
+      break if token == "--"
+
+      flag, separator, inline = token.partition("=")
+      unless VALUE_FLAGS.include?(flag)
+        index += 1
+        next
+      end
+
+      value = separator.empty? ? argv[index + 1] : inline
+      found[flag] = value if %w[--out --input].include?(flag) && !value.nil?
+      index += separator.empty? ? 2 : 1
+    end
+    found
+  end
 end
 
 if $PROGRAM_NAME == __FILE__
@@ -739,6 +783,10 @@ if $PROGRAM_NAME == __FILE__
     end
   end
 
+  # `parse!` MUTATES ARGV as it consumes it, so the original is captured before the parse rather than
+  # read back from the wreckage afterwards.
+  original_argv = ARGV.dup
+
   begin
     parser.parse!(ARGV)
   rescue OptionParser::ParseError => e
@@ -746,6 +794,13 @@ if $PROGRAM_NAME == __FILE__
     # backtrace, which is not a usable error message for a caller. The message quotes the offending
     # ARGUMENT back, so it carries whatever bytes the caller typed — it goes through the same ASCII
     # rendering as every other message, or a non-ASCII flag puts raw bytes on stderr.
+    #
+    # Fill in only what the parser never reached (`||=`): anything it DID consume is authoritative,
+    # so this can add a destination to clear but can never redirect the clear at a different path
+    # than the parse already established.
+    recovered = SummonReviewer.recover_path_options(original_argv)
+    options[:out] ||= recovered["--out"]
+    options[:input] ||= recovered["--input"]
     SummonReviewer.new(**options).clear_stale_out
     warn "summon_reviewer: usage error - #{SummonReviewer.bounded(e.message)}"
     warn SummonReviewer::USAGE
