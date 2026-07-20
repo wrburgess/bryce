@@ -88,14 +88,13 @@ export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
     };
   }
 
-  // Pure assembly (src/digest/assemble.ts): what this Digest would report. The
-  // claim's id widens the novelty predicate, which only matters for a replay —
-  // an ordinary claim's row has no lines stamped with it yet, so the predicate
-  // collapses back to "unreported only" and a forced-but-eligible run is
-  // byte-for-byte an ordinary one. The two arms name the id differently on
-  // purpose (see ClaimResult): a replay's is the delivery it REPLAYS, never a
-  // claim, and the compiler will not let the two be confused.
-  const includeDeliveryId = claim.replay ? claim.replayOfDeliveryId : claim.deliveryId;
+  // Pure assembly (src/digest/assemble.ts): what this Digest would report.
+  // ONLY a replay widens the novelty predicate. An ordinary claim's row can
+  // never have lines stamped with it — settleSent is the sole writer of
+  // digest_delivery_id and a `sent` row is never re-claimed — so passing its id
+  // would add an OR branch that provably matches nothing, and would read as
+  // though an ordinary run might re-include reported lines when it cannot.
+  const includeDeliveryId = claim.replay ? claim.replayOfDeliveryId : null;
   const assembly = await assembleDigest(db, { now, tz, includeDeliveryId });
   const mail = renderDigest({
     date: assembly.date,
