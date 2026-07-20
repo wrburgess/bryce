@@ -7,18 +7,23 @@ import { renderDigest } from "../digest/render.js";
 import { runDigest } from "../jobs/digest.js";
 import { runRefresh, runRefreshForPlayer } from "../jobs/refresh.js";
 import { MlbApiError } from "../mlb/client.js";
+import { NcaaApiError, UnsupportedNcaaSeasonError } from "../ncaa/client.js";
 import { queryStatLines } from "../queries/statLines.js";
 import type { ServiceDeps } from "../server/deps.js";
 import {
   PlayerNotFoundError,
+  UnknownNcaaPlayerError,
   UnknownPersonError,
+  addNcaaPlayer,
   addPlayer,
   deactivatePlayer,
   listPlayers,
   searchPlayers,
 } from "../watchlist/service.js";
 import {
+  AddNcaaPlayerInputSchema,
   AddPlayerInputSchema,
+  NcaaPlayerSeqSchema,
   PersonIdSchema,
   PlayerSearchInputSchema,
   PlayersListInputSchema,
@@ -38,11 +43,21 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     if (err instanceof ZodError) {
       return c.json({ error: "invalid-input", issues: err.issues }, 400);
     }
-    if (err instanceof UnknownPersonError || err instanceof PlayerNotFoundError) {
+    if (
+      err instanceof UnknownPersonError ||
+      err instanceof UnknownNcaaPlayerError ||
+      err instanceof PlayerNotFoundError
+    ) {
       return c.json({ error: err.message }, 404);
     }
-    if (err instanceof MlbApiError) {
+    if (err instanceof MlbApiError || err instanceof NcaaApiError) {
+      // Upstream (MLB Stats API / stats.ncaa.org) failure: a bad gateway.
       return c.json({ error: err.message }, 502);
+    }
+    if (err instanceof UnsupportedNcaaSeasonError) {
+      // A bundled-data gap on OUR side (src/ncaa/seasons.ts needs its annual
+      // update), not an upstream failure — unavailable until the table grows.
+      return c.json({ error: err.message }, 503);
     }
     if (err instanceof SyntaxError) {
       // Malformed JSON body — a client error, not a server one.
@@ -61,6 +76,18 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     const body = AddPlayerInputSchema.parse(await c.req.json());
     const result = await addPlayer(deps, body.personId);
     return c.json(result, result.action === "added" ? 201 : 200);
+  });
+
+  api.post("/players/ncaa", async (c) => {
+    const body = AddNcaaPlayerInputSchema.parse(await c.req.json());
+    const result = await addNcaaPlayer(deps, body.ncaaPlayerSeq);
+    return c.json(result, result.action === "added" ? 201 : 200);
+  });
+
+  api.post("/players/ncaa/:seq/deactivate", async (c) => {
+    const ncaaPlayerSeq = NcaaPlayerSeqSchema.parse(c.req.param("seq"));
+    const player = await deactivatePlayer(deps, { ncaaPlayerSeq });
+    return c.json({ player });
   });
 
   api.post("/players/:id/deactivate", async (c) => {
@@ -112,14 +139,18 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     // client error (SyntaxError -> 400 via onError), never a full refresh.
     const raw = await c.req.text();
     const body = RefreshInputSchema.parse(raw.trim().length === 0 ? {} : JSON.parse(raw));
-    if (body.personId === undefined) {
+    if (body.personId === undefined && body.ncaaPlayerSeq === undefined) {
       return c.json(await runRefresh(deps));
     }
-    const player = (
-      await deps.db.select().from(players).where(eq(players.externalId, body.personId))
-    )[0];
+    const where =
+      body.ncaaPlayerSeq !== undefined
+        ? eq(players.ncaaPlayerSeq, body.ncaaPlayerSeq)
+        : eq(players.externalId, body.personId!);
+    const player = (await deps.db.select().from(players).where(where))[0];
     if (player === undefined) {
-      throw new PlayerNotFoundError(body.personId);
+      throw new PlayerNotFoundError(
+        body.ncaaPlayerSeq !== undefined ? { ncaaPlayerSeq: body.ncaaPlayerSeq } : body.personId!,
+      );
     }
     return c.json(await runRefreshForPlayer(deps, player.id));
   });

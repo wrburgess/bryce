@@ -166,6 +166,52 @@ describe("runDigest", () => {
     expect(html.indexOf("<h2>MLB</h2>")).toBeLessThan(html.indexOf("<h2>MiLB - Triple-A</h2>"));
   });
 
+  it("groups MLB then MiLB then NCAA, labeling NCAA players with their school", async () => {
+    const mlb = await insertPlayer(opened.db, {
+      fullName: "Paul Skenes",
+      level: "mlb",
+      milbLevel: null,
+      teamName: "Pittsburgh Pirates",
+    });
+    const aaa = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const ncaa = await insertPlayer(opened.db, {
+      externalId: null,
+      ncaaPlayerSeq: 2649785,
+      fullName: "College Guy",
+      level: "ncaa",
+      milbLevel: null,
+      teamName: null,
+      schoolName: "LSU",
+    });
+    await insertStatLine(opened.db, {
+      playerId: mlb.id,
+      statType: "pitching",
+      sportId: 1,
+      stats: { inningsPitched: "6.0", hits: 4, earnedRuns: 1, baseOnBalls: 2, strikeOuts: 8, wins: 1 },
+    });
+    await insertStatLine(opened.db, { playerId: aaa.id });
+    await insertStatLine(opened.db, {
+      playerId: ncaa.id,
+      sportId: 22,
+      opponentName: "Georgia",
+      stats: { hits: 2, atBats: 4, homeRuns: 1, rbi: 3 },
+    });
+
+    await runDigest(deps());
+    const text = mailer.sent[0]?.text ?? "";
+    const mlbAt = text.indexOf("MLB");
+    const aaaAt = text.indexOf("MiLB - Triple-A");
+    const ncaaAt = text.indexOf("NCAA");
+    expect(mlbAt).toBeGreaterThanOrEqual(0);
+    expect(aaaAt).toBeGreaterThan(mlbAt);
+    expect(ncaaAt).toBeGreaterThan(aaaAt);
+    // NCAA players are labeled with their school where a team would appear.
+    expect(text).toContain("College Guy (LSU)");
+    const html = mailer.sent[0]?.html ?? "";
+    expect(html).toContain("<h2>NCAA</h2>");
+    expect(html).toContain("College Guy (LSU)");
+  });
+
   it("omits an out-of-season player entirely from the No new stats tail", async () => {
     // AAA season ended 2026-09-27; MLB runs to 10-31.
     clock.set("2026-10-01T17:00:00Z");

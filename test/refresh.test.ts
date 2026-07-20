@@ -6,15 +6,18 @@ import type { RefreshDeps } from "../src/jobs/refresh.js";
 import { runRefresh } from "../src/jobs/refresh.js";
 import { MlbClient } from "../src/mlb/client.js";
 import {
+  FakeNcaaApi,
   FakeStatsApi,
   MID_SEASON,
   TEST_TZ,
   fakeClock,
+  fakeNcaaClient,
   insertCalendars2026,
   insertDelivery,
   insertPlayer,
   makeGameLogBody,
   makeMlbTeam,
+  makeNcaaGameLogHtml,
   makePerson,
   makeSeasonBody,
   makeSplit,
@@ -25,11 +28,13 @@ import {
 describe("runRefresh", () => {
   let opened: OpenedDb;
   let api: FakeStatsApi;
+  let ncaaApi: FakeNcaaApi;
   let clock: ReturnType<typeof fakeClock>;
 
   const deps = (): RefreshDeps => ({
     db: opened.db,
     client: new MlbClient({ fetchImpl: api.fetch, delayMs: 0 }),
+    ncaaClient: fakeNcaaClient(ncaaApi),
     now: clock.now,
     tz: TEST_TZ,
   });
@@ -55,6 +60,7 @@ describe("runRefresh", () => {
       seasons: seasonBodies(),
       gameLogs: {},
     });
+    ncaaApi = new FakeNcaaApi();
   });
 
   afterEach(() => {
@@ -233,17 +239,52 @@ describe("runRefresh", () => {
     expect(api.calls).toHaveLength(0);
   });
 
-  it("skips inactive players and players without an externalId", async () => {
+  it("ingests NCAA players, skips inactive and non-NCAA null-externalId players", async () => {
+    // NCAA baseball is In Season in March (opens 2026-02-13).
+    clock.set("2026-03-15T17:00:00Z");
+    // Inactive MLB player: never loaded.
     await insertPlayer(opened.db, { externalId: 691185, active: false });
+    // Defensive: an active non-NCAA row with no externalId is still skipped.
     await insertPlayer(opened.db, {
       externalId: null,
+      level: "mlb",
+      milbLevel: null,
+      fullName: "Orphan Guy",
+    });
+    // Active NCAA player: now ingested via the NCAA path (was previously skipped).
+    const ncaa = await insertPlayer(opened.db, {
+      externalId: null,
+      ncaaPlayerSeq: 2649785,
       level: "ncaa",
       milbLevel: null,
       fullName: "College Guy",
       schoolName: "LSU",
     });
+    ncaaApi.options.pages = {
+      "2649785:batting": makeNcaaGameLogHtml({
+        fullName: "College Guy",
+        schoolName: "LSU",
+        rows: [
+          { date: "2026-03-14", opponentName: "Florida", isHome: true, contestId: 5001, stats: { AB: 4, H: 2, HR: 1, RBI: 3 } },
+        ],
+      }),
+      "2649785:pitching": makeNcaaGameLogHtml({
+        fullName: "College Guy",
+        schoolName: "LSU",
+        rows: [],
+      }),
+    };
+
     const summary = await runRefresh(deps());
-    expect(summary.playersRefreshed).toBe(0);
+    // Only the NCAA player is refreshed; MLB identity fetches never happen.
+    expect(summary.playersRefreshed).toBe(1);
+    expect(summary.statLinesInserted).toBe(1);
     expect(api.callsMatching(/\/people\/\d+\?/)).toHaveLength(0);
+
+    const lines = await opened.db.select().from(statLines).where(eq(statLines.playerId, ncaa.id));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.sportId).toBe(22);
+    expect(lines[0]?.gameId).toBe(5001);
+    expect(lines[0]?.statType).toBe("batting");
   });
 });

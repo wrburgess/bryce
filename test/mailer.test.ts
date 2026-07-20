@@ -18,6 +18,7 @@ const baseConfig: Config = {
   smtpPass: null,
   digestTo: "hc@example.com",
   digestFrom: "bryce@example.com",
+  ncaaScrapeDelayMs: 3000,
   mlbApiDelayMs: 0,
   serverPort: 3000,
   apiToken: null,

@@ -26,7 +26,10 @@ _Avoid_: "roster" (a real baseball concept; using it here invites confusion)
 
 **External ID**:
 A Player's source-native identity: the MLB Stats API `personId`, which is stable across MLB and
-every MiLB level. NCAA Players have no reliable equivalent (see *Flagged ambiguities*).
+every MiLB level. NCAA Players have their own source-native identity — the stats.ncaa.org
+`stats_player_seq`, stored in a separate `players.ncaa_player_seq` column so `external_id` stays
+MLB-only and one human is still one Player row across levels
+([ADR 0032](../adr/0032-ncaa-identity-stats-player-seq-scrape-adapter.md)).
 _Avoid_: "player id" (ambiguous with the app's own primary key)
 
 **Stat Line**:
@@ -35,9 +38,11 @@ per-game, never per-day.
 _Avoid_: "daily stat line" (a date can hold two games), "box score" (that's the whole game's record)
 
 **Game ID**:
-The source-native identifier of a single game (the MLB Stats API `gamePk`). The NCAA adapter
-synthesizes a stable stand-in (date + opponent + game sequence) so nothing outside the adapter
-knows the difference.
+The source-native identifier of a single game (the MLB Stats API `gamePk`). The NCAA adapter prefers
+the source contest id (from the game-log page's box-score/contest anchor) and, when the page exposes
+none, synthesizes a stable stand-in (a deterministic hash of date + opponent + game sequence, flagged
+in `raw`) so nothing outside the adapter knows the difference
+([ADR 0032](../adr/0032-ncaa-identity-stats-player-seq-scrape-adapter.md)).
 _Avoid_: "game date" (a date is not an identifier — doubleheaders)
 
 **Refresh**:
@@ -96,8 +101,10 @@ _Avoid_: "shutdown", "hibernate" (history remains queryable all winter)
 
 - "level" was used to mean both *identity* ("the AAA guy I'm watching") and *location* — resolved:
   location only, refreshed from the source, never identity.
-- NCAA player identity is unresolved by design so far: no clean numeric ID; matching may need
-  school + name. To be settled when the NCAA adapter is distilled (Phase 3).
+- NCAA player identity — **resolved** (Phase 3,
+  [ADR 0032](../adr/0032-ncaa-identity-stats-player-seq-scrape-adapter.md)): NCAA has a clean
+  source-native id after all, the stats.ncaa.org `stats_player_seq`, stored in its own
+  `players.ncaa_player_seq` column (no school+name matching needed). `external_id` stays MLB-only.
 - "daily stat line" (the handoff's table name) read as one-per-day — resolved: a **Stat Line** is
   per-game; the *digest* is what's daily.
 - "yesterday's stats" (the handoff's framing) read as a date-window rule — resolved: it was just a

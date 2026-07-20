@@ -1,4 +1,4 @@
-# Running Bryce (MLB/MiLB pipeline + MCP/REST server)
+# Running Bryce (MLB/MiLB/NCAA pipeline + MCP/REST server)
 
 How to run the daily pipeline on its intended host: a Mac (laptop or mini) with Node 22, launchd
 for scheduling, and optional Litestream replication + Cloudflare Tunnel exposure
@@ -19,6 +19,7 @@ Seed the watch list, then run the jobs by hand once:
 
 ```sh
 npm run seed -- add --search "acosta" --pick 1   # or: add --person-id 691185
+npm run seed -- add --ncaa-seq 2649785           # NCAA player by stats_player_seq (see NCAA below)
 npm run seed -- list
 npm run refresh
 npm run digest
@@ -42,6 +43,7 @@ missing.
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | with smtp | port `465` | SMTP relay credentials |
 | `DIGEST_TO` / `DIGEST_FROM` | unless console | — | Digest recipient and sender addresses |
 | `MLB_API_DELAY_MS` | no | `500` | Polite delay between MLB Stats API calls |
+| `NCAA_SCRAPE_DELAY_MS` | no | `3000` | Polite delay between stats.ncaa.org scrape requests |
 | `SERVER_PORT` | no | `3000` | HTTP server port (`/health`, `/api`, `/mcp`) |
 | `API_TOKEN` | for `/api` + `/mcp` | — | Bearer token guarding `/api/*` and `/mcp`; without it the server refuses to start those surfaces (`/health` stays public) |
 
@@ -150,9 +152,10 @@ tunnel is the second, independent layer per
 
 ### Connecting a Claude client to the remote MCP endpoint
 
-The MCP tools are: `watchlist_list`, `watchlist_add`, `watchlist_deactivate`, `player_search`,
-`stat_lines`, `digest_preview`, `send_digest`, `run_refresh`, `sql_query` (read-only SQL, capped),
-and `status`.
+The MCP tools are: `watchlist_list`, `watchlist_add`, `watchlist_add_ncaa`, `watchlist_deactivate`,
+`player_search`, `stat_lines`, `digest_preview`, `send_digest`, `run_refresh`, `sql_query` (read-only
+SQL, capped), and `status`. `watchlist_deactivate` and `run_refresh` accept either `personId`
+(MLB/MiLB) or `ncaaPlayerSeq` (NCAA).
 
 - **claude.ai / Claude mobile** — Settings -> Connectors -> Add custom connector, URL
   `https://bryce.example.com/mcp`. When the connector setup offers an auth header, use
@@ -174,10 +177,54 @@ All under `https://bryce.example.com/api` with the same bearer header, JSON in/o
 | Route | Purpose |
 |---|---|
 | `GET /api/players?active=true\|false\|all` | List watch-list players |
-| `POST /api/players` `{"personId": N}` | Add a player (first Refresh runs immediately) |
-| `POST /api/players/{personId}/deactivate` | Deactivate, keeping history |
-| `GET /api/players/search?q=NAME` | Name search with team/level resolution |
+| `POST /api/players` `{"personId": N}` | Add an MLB/MiLB player (first Refresh runs immediately) |
+| `POST /api/players/ncaa` `{"ncaaPlayerSeq": N}` | Add an NCAA player by stats_player_seq |
+| `POST /api/players/{personId}/deactivate` | Deactivate an MLB/MiLB player, keeping history |
+| `POST /api/players/ncaa/{seq}/deactivate` | Deactivate an NCAA player, keeping history |
+| `GET /api/players/search?q=NAME` | Name search with team/level resolution (MLB/MiLB) |
 | `GET /api/stat-lines?playerId=&level=&from=&to=&limit=` | Query stored stat lines |
 | `GET /api/digest/preview` | What the next digest would report (read-only) |
 | `POST /api/digest/send` | Run the digest job now |
-| `POST /api/refresh` `{"personId": N}` (optional) | Refresh one player or everything |
+| `POST /api/refresh` `{"personId": N}` or `{"ncaaPlayerSeq": N}` (optional) | Refresh one player or everything |
+
+## NCAA players
+
+NCAA baseball has no MLB Stats API `personId`, so an NCAA Player is identified by his stats.ncaa.org
+`stats_player_seq` and its data is scraped from stats.ncaa.org through an isolated adapter
+([ADR 0032](../adr/0032-ncaa-identity-stats-player-seq-scrape-adapter.md)).
+
+**Finding a player's `stats_player_seq`:** open his player page on stats.ncaa.org — the URL is
+`https://stats.ncaa.org/players/{stats_player_seq}` (the trailing number is the seq). It also appears
+as `stats_player_seq=...` in a game-log link's query string.
+
+**Adding him** (his first Refresh runs immediately, unless the pipeline is in Offseason Sleep):
+
+```sh
+npm run seed -- add --ncaa-seq 2649785
+```
+
+- **REST:** `POST /api/players/ncaa` with `{"ncaaPlayerSeq": 2649785}`.
+- **MCP / Claude:** the `watchlist_add_ncaa` tool — or just ask "add NCAA player 2649785 to my watch
+  list". His name and school are resolved from his game-log page.
+
+**Validating the scrape on this host** — stats.ncaa.org is behind Akamai bot protection, so confirm a
+live fetch and parse from the Mac before relying on it:
+
+```sh
+npm run ncaa:probe -- --seq 2649785 --season 2025 --type batting
+```
+
+It prints the HTTP status and what the parser extracted (name, school, row count), exiting non-zero on
+any failure.
+
+**Annual season-lookup update:** stats.ncaa.org keys requests by opaque per-season ids that change
+each year. `src/ncaa/seasons.ts` bundles them (plus each season's Division-I opening/closing dates)
+per season; add a new entry each January (the file documents exactly where to read the ids off a
+player page). A season with no bundled entry is simply treated as not In Season for NCAA — logged
+loudly, never a silent gap.
+
+**Scraping posture / terms of use:** this is an unofficial scrape (there is no official NCAA stats
+API). Bryce is deliberately a polite, single-user client — a generous `NCAA_SCRAPE_DELAY_MS` between
+requests and no parallel fetching — and fails loudly rather than hammering the site. Respect
+stats.ncaa.org's terms of use; if the site blocks or rate-limits, back off rather than working around
+the protection.

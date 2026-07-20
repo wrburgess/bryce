@@ -3,26 +3,32 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { players, statLines } from "../src/db/schema.js";
 import { MlbApiError, MlbClient } from "../src/mlb/client.js";
+import { NcaaApiError, UnsupportedNcaaSeasonError } from "../src/ncaa/client.js";
 import type { WatchlistDeps } from "../src/watchlist/service.js";
 import {
   PlayerNotFoundError,
+  UnknownNcaaPlayerError,
   UnknownPersonError,
+  addNcaaPlayer,
   addPlayer,
   deactivatePlayer,
   listPlayers,
   searchPlayers,
 } from "../src/watchlist/service.js";
 import {
+  FakeNcaaApi,
   FakeStatsApi,
   MID_SEASON,
   OFFSEASON,
   TEST_TZ,
   fakeClock,
+  fakeNcaaClient,
   insertCalendars2026,
   insertPlayer,
   insertStatLine,
   makeGameLogBody,
   makeMlbTeam,
+  makeNcaaGameLogHtml,
   makePerson,
   makeSeasonBody,
   makeSplit,
@@ -33,11 +39,13 @@ import {
 describe("watch-list service", () => {
   let opened: OpenedDb;
   let api: FakeStatsApi;
+  let ncaaApi: FakeNcaaApi;
   let clock: ReturnType<typeof fakeClock>;
 
   const deps = (): WatchlistDeps => ({
     db: opened.db,
     client: new MlbClient({ fetchImpl: api.fetch, delayMs: 0 }),
+    ncaaClient: fakeNcaaClient(ncaaApi),
     now: clock.now,
     tz: TEST_TZ,
   });
@@ -56,6 +64,7 @@ describe("watch-list service", () => {
         ]),
       },
     });
+    ncaaApi = new FakeNcaaApi();
   });
 
   afterEach(() => {
@@ -142,7 +151,137 @@ describe("watch-list service", () => {
     });
   });
 
+  describe("addNcaaPlayer", () => {
+    const ncaaPages = (fullName: string, schoolName: string) => ({
+      "2649785:batting": makeNcaaGameLogHtml({
+        fullName,
+        schoolName,
+        rows: [
+          { date: "2026-03-13", opponentName: "Georgia", isHome: true, contestId: 6001, stats: { AB: 4, H: 2, HR: 1 } },
+          { date: "2026-03-14", opponentName: "Georgia", isHome: false, contestId: 6002, stats: { AB: 3, H: 1, HR: 0 } },
+        ],
+      }),
+      "2649785:pitching": makeNcaaGameLogHtml({ fullName, schoolName, rows: [] }),
+    });
+
+    it("creates the NCAA row, resolves name/school, and backfills his season", async () => {
+      clock.set("2026-03-15T17:00:00Z"); // NCAA In Season
+      ncaaApi.options.pages = ncaaPages("College Guy", "LSU");
+
+      const result = await addNcaaPlayer(deps(), 2649785);
+      expect(result.action).toBe("added");
+      expect(result.player).toMatchObject({
+        externalId: null,
+        ncaaPlayerSeq: 2649785,
+        level: "ncaa",
+        milbLevel: null,
+        teamName: null,
+        fullName: "College Guy",
+        schoolName: "LSU",
+        active: true,
+      });
+      expect(result.refresh).toEqual({ skipped: false, inserted: 2, updated: 0 });
+
+      const lines = await opened.db.select().from(statLines);
+      expect(lines).toHaveLength(2);
+      expect(lines.every((l) => l.sportId === 22)).toBe(true);
+    });
+
+    it("duplicate add is a no-op identity/school refresh, no second backfill", async () => {
+      clock.set("2026-03-15T17:00:00Z");
+      ncaaApi.options.pages = ncaaPages("College Guy", "LSU");
+      await addNcaaPlayer(deps(), 2649785);
+      const linesBefore = await opened.db.select().from(statLines);
+
+      // A transfer: the page now shows a new school.
+      ncaaApi.options.pages = ncaaPages("College Guy", "Texas");
+      const result = await addNcaaPlayer(deps(), 2649785);
+      expect(result.action).toBe("updated");
+      expect(result.refresh).toBeNull();
+      expect(result.player).toMatchObject({ schoolName: "Texas", active: true });
+
+      expect(await opened.db.select().from(players)).toHaveLength(1);
+      expect(await opened.db.select().from(statLines)).toHaveLength(linesBefore.length);
+    });
+
+    it("throws UnknownNcaaPlayerError for an unroutable seq", async () => {
+      clock.set("2026-03-15T17:00:00Z");
+      // No page registered for this seq → the client throws → typed error.
+      await expect(addNcaaPlayer(deps(), 111111)).rejects.toBeInstanceOf(UnknownNcaaPlayerError);
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+
+    it("maps an upstream HTTP 404 to UnknownNcaaPlayerError (no such player)", async () => {
+      clock.set("2026-03-15T17:00:00Z");
+      ncaaApi.options.status = 404;
+      await expect(addNcaaPlayer(deps(), 2649785)).rejects.toBeInstanceOf(UnknownNcaaPlayerError);
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+
+    it("propagates NcaaApiError on an upstream failure — NOT UnknownNcaaPlayerError", async () => {
+      clock.set("2026-03-15T17:00:00Z");
+      ncaaApi.options.status = 500;
+      const promise = addNcaaPlayer(deps(), 2649785);
+      await expect(promise).rejects.toBeInstanceOf(NcaaApiError);
+      await expect(promise).rejects.not.toBeInstanceOf(UnknownNcaaPlayerError);
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+
+    it("propagates UnsupportedNcaaSeasonError for an unbundled year, before any HTTP", async () => {
+      clock.set("2030-03-15T17:00:00Z"); // no bundled stats.ncaa.org entry for 2030
+      await expect(addNcaaPlayer(deps(), 2649785)).rejects.toBeInstanceOf(
+        UnsupportedNcaaSeasonError,
+      );
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+      expect(ncaaApi.calls).toHaveLength(0);
+    });
+
+    it("skips the first Refresh during Offseason Sleep but still records identity", async () => {
+      // In-season add first, so the NCAA calendar is cached before winter.
+      clock.set("2026-03-15T17:00:00Z");
+      ncaaApi.options.pages = {
+        ...ncaaPages("College Guy", "LSU"),
+        "2650000:batting": makeNcaaGameLogHtml({ fullName: "Winter Guy", schoolName: "Duke", rows: [] }),
+        "2650000:pitching": makeNcaaGameLogHtml({ fullName: "Winter Guy", schoolName: "Duke", rows: [] }),
+      };
+      await addNcaaPlayer(deps(), 2649785);
+
+      clock.set(OFFSEASON); // 2026-12-05, NCAA season long over
+      const result = await addNcaaPlayer(deps(), 2650000);
+      expect(result.action).toBe("added");
+      expect(result.refresh).toEqual({ skipped: true, inserted: 0, updated: 0 });
+      expect(result.player.schoolName).toBe("Duke");
+      const added = (
+        await opened.db.select().from(players).where(eq(players.ncaaPlayerSeq, 2650000))
+      )[0];
+      expect(
+        (await opened.db.select().from(statLines)).filter((l) => l.playerId === added?.id),
+      ).toHaveLength(0);
+    });
+  });
+
   describe("deactivatePlayer", () => {
+    it("deactivates an NCAA player by ncaaPlayerSeq, keeping history", async () => {
+      const ncaa = await insertPlayer(opened.db, {
+        externalId: null,
+        ncaaPlayerSeq: 2649785,
+        level: "ncaa",
+        milbLevel: null,
+        fullName: "College Guy",
+        schoolName: "LSU",
+      });
+      await insertStatLine(opened.db, { playerId: ncaa.id, sportId: 22 });
+
+      const player = await deactivatePlayer(deps(), { ncaaPlayerSeq: 2649785 });
+      expect(player.active).toBe(false);
+      expect((await opened.db.select().from(players))[0]?.active).toBe(false);
+      expect(await opened.db.select().from(statLines)).toHaveLength(1);
+
+      await expect(deactivatePlayer(deps(), { ncaaPlayerSeq: 999999 })).rejects.toBeInstanceOf(
+        PlayerNotFoundError,
+      );
+    });
+
     it("flips active off and keeps the row and his history", async () => {
       await addPlayer(deps(), 691185);
       const player = await deactivatePlayer(deps(), 691185);
@@ -176,6 +315,19 @@ describe("watch-list service", () => {
         "Active Guy",
         "Gone Guy",
       ]);
+    });
+
+    it("carries schoolName and ncaaPlayerSeq for NCAA rows", async () => {
+      await insertPlayer(opened.db, {
+        externalId: null,
+        ncaaPlayerSeq: 2649785,
+        level: "ncaa",
+        milbLevel: null,
+        fullName: "College Guy",
+        schoolName: "LSU",
+      });
+      const [row] = await listPlayers(opened.db);
+      expect(row).toMatchObject({ level: "ncaa", schoolName: "LSU", ncaaPlayerSeq: 2649785 });
     });
   });
 

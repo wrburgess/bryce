@@ -8,8 +8,14 @@ import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core
 
 export const players = sqliteTable("players", {
   id: integer("id").primaryKey({ autoIncrement: true }),
-  /** MLB Stats API personId — stable across MLB and every MiLB level. Null for NCAA (Phase 3). */
+  /** MLB Stats API personId — stable across MLB and every MiLB level. Null for NCAA (ADR 0032). */
   externalId: integer("external_id").unique(),
+  /**
+   * stats.ncaa.org stats_player_seq — the source-native NCAA identity, its own
+   * column so external_id stays MLB-only and one human is still one row across
+   * levels (ADR 0032). Null for MLB/MiLB; unique among NCAA rows.
+   */
+  ncaaPlayerSeq: integer("ncaa_player_seq").unique(),
   fullName: text("full_name").notNull(),
   level: text("level", { enum: ["mlb", "milb", "ncaa"] }).notNull(),
   /** Triple-A | Double-A | High-A | Single-A | Rookie — only for level = milb. */

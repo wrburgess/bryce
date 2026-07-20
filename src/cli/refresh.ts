@@ -3,6 +3,7 @@ import { loadDotEnv } from "../env.js";
 import { openDb } from "../db/client.js";
 import { runRefresh } from "../jobs/refresh.js";
 import { MlbClient } from "../mlb/client.js";
+import { NcaaClient } from "../ncaa/client.js";
 import { isMain } from "./main.js";
 
 export async function main(): Promise<number> {
@@ -11,7 +12,8 @@ export async function main(): Promise<number> {
   const { db, close } = openDb(config.databasePath);
   try {
     const client = new MlbClient({ delayMs: config.mlbApiDelayMs });
-    const summary = await runRefresh({ db, client, now: () => new Date(), tz: config.tz });
+    const ncaaClient = new NcaaClient({ delayMs: config.ncaaScrapeDelayMs });
+    const summary = await runRefresh({ db, client, ncaaClient, now: () => new Date(), tz: config.tz });
     if (summary.skipped) {
       process.stdout.write(`refresh skipped reason=${summary.reason}\n`);
     } else {

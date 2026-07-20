@@ -4,9 +4,13 @@ import type { Db } from "../db/client.js";
 import { openDb } from "../db/client.js";
 import type { MlbClient } from "../mlb/client.js";
 import { MlbClient as MlbClientImpl } from "../mlb/client.js";
+import type { NcaaClient } from "../ncaa/client.js";
+import { NcaaClient as NcaaClientImpl } from "../ncaa/client.js";
 import {
   PlayerNotFoundError,
+  UnknownNcaaPlayerError,
   UnknownPersonError,
+  addNcaaPlayer,
   addPlayer,
   deactivatePlayer,
   listPlayers,
@@ -20,14 +24,17 @@ import { isMain } from "./main.js";
  *
  * Subcommands:
  *   add --person-id N          add by MLB Stats API personId
+ *   add --ncaa-seq N           add an NCAA player by stats.ncaa.org stats_player_seq
  *   add --search "name" [--pick i]   search by name; --pick chooses (1-based)
  *   deactivate --person-id N   remove from the Watch List (history kept)
+ *   deactivate --ncaa-seq N    remove an NCAA player from the Watch List
  *   list                       print every player row
  */
 
 export interface SeedDeps {
   db: Db;
   client: MlbClient;
+  ncaaClient: NcaaClient;
   now: () => Date;
   tz: string;
   write: (line: string) => void;
@@ -63,6 +70,11 @@ function parseFlags(args: string[]): Map<string, string> {
 }
 
 async function runAdd(flags: Map<string, string>, deps: SeedDeps): Promise<number> {
+  const ncaaSeqFlag = flags.get("ncaa-seq");
+  if (ncaaSeqFlag !== undefined) {
+    return runAddNcaa(ncaaSeqFlag, deps);
+  }
+
   const personIdFlag = flags.get("person-id");
   const search = flags.get("search");
 
@@ -78,14 +90,14 @@ async function runAdd(flags: Map<string, string>, deps: SeedDeps): Promise<numbe
     if (picked === null) return 1;
     personId = picked;
   } else {
-    deps.write("error: add requires --person-id N or --search NAME");
+    deps.write("error: add requires --person-id N, --ncaa-seq N, or --search NAME");
     return 1;
   }
 
   let result;
   try {
     result = await addPlayer(
-      { db: deps.db, client: deps.client, now: deps.now, tz: deps.tz },
+      { db: deps.db, client: deps.client, ncaaClient: deps.ncaaClient, now: deps.now, tz: deps.tz },
       personId,
     );
   } catch (err) {
@@ -103,6 +115,42 @@ async function runAdd(flags: Map<string, string>, deps: SeedDeps): Promise<numbe
   }
 
   deps.write(`added player id=${player.id} personId=${personId} name=${player.fullName}`);
+  if (refresh === null || refresh.skipped) {
+    deps.write("refresh skipped reason=offseason-sleep");
+  } else {
+    deps.write(`refresh done inserted=${refresh.inserted} updated=${refresh.updated}`);
+  }
+  return 0;
+}
+
+async function runAddNcaa(seqFlag: string, deps: SeedDeps): Promise<number> {
+  const seq = Number.parseInt(seqFlag, 10);
+  if (!Number.isInteger(seq) || seq <= 0) {
+    deps.write(`error: invalid --ncaa-seq ${seqFlag}`);
+    return 1;
+  }
+
+  let result;
+  try {
+    result = await addNcaaPlayer(
+      { db: deps.db, client: deps.client, ncaaClient: deps.ncaaClient, now: deps.now, tz: deps.tz },
+      seq,
+    );
+  } catch (err) {
+    if (err instanceof UnknownNcaaPlayerError) {
+      deps.write(`error: ${err.message}`);
+      return 1;
+    }
+    throw err;
+  }
+
+  const { player, refresh } = result;
+  if (result.action === "updated") {
+    deps.write(`updated player id=${player.id} ncaaSeq=${seq} name=${player.fullName}`);
+    return 0;
+  }
+
+  deps.write(`added player id=${player.id} ncaaSeq=${seq} name=${player.fullName}`);
   if (refresh === null || refresh.skipped) {
     deps.write("refresh skipped reason=offseason-sleep");
   } else {
@@ -144,32 +192,53 @@ async function pickFromSearch(
 }
 
 async function runDeactivate(flags: Map<string, string>, deps: SeedDeps): Promise<number> {
+  const ncaaSeqFlag = flags.get("ncaa-seq");
   const personIdFlag = flags.get("person-id");
-  const personId = personIdFlag !== undefined ? Number.parseInt(personIdFlag, 10) : Number.NaN;
-  if (!Number.isInteger(personId) || personId <= 0) {
-    deps.write("error: deactivate requires --person-id N");
-    return 1;
+
+  let ref: number | { ncaaPlayerSeq: number };
+  let label: string;
+  if (ncaaSeqFlag !== undefined) {
+    const seq = Number.parseInt(ncaaSeqFlag, 10);
+    if (!Number.isInteger(seq) || seq <= 0) {
+      deps.write("error: deactivate requires --ncaa-seq N");
+      return 1;
+    }
+    ref = { ncaaPlayerSeq: seq };
+    label = `ncaaSeq=${seq}`;
+  } else {
+    const personId = personIdFlag !== undefined ? Number.parseInt(personIdFlag, 10) : Number.NaN;
+    if (!Number.isInteger(personId) || personId <= 0) {
+      deps.write("error: deactivate requires --person-id N or --ncaa-seq N");
+      return 1;
+    }
+    ref = personId;
+    label = `personId=${personId}`;
   }
+
   let player;
   try {
-    player = await deactivatePlayer({ db: deps.db, now: deps.now }, personId);
+    player = await deactivatePlayer({ db: deps.db, now: deps.now }, ref);
   } catch (err) {
     if (err instanceof PlayerNotFoundError) {
-      deps.write(`error: no player with personId=${personId}`);
+      deps.write(`error: ${err.message}`);
       return 1;
     }
     throw err;
   }
-  deps.write(`deactivated player id=${player.id} personId=${personId} name=${player.fullName}`);
+  deps.write(`deactivated player id=${player.id} ${label} name=${player.fullName}`);
   return 0;
 }
 
 async function runList(deps: SeedDeps): Promise<number> {
   const rows = await listPlayers(deps.db, "all");
   for (const p of rows) {
-    deps.write(
-      `player id=${p.id} personId=${p.externalId ?? "-"} name=${p.fullName} level=${p.level} milbLevel=${p.milbLevel ?? "-"} team=${p.teamName ?? "-"} active=${p.active}`,
-    );
+    const base =
+      `player id=${p.id} personId=${p.externalId ?? "-"} name=${p.fullName} ` +
+      `level=${p.level} milbLevel=${p.milbLevel ?? "-"} team=${p.teamName ?? "-"} active=${p.active}`;
+    // NCAA rows carry a school and a stats_player_seq instead of a team/personId.
+    const suffix =
+      p.level === "ncaa" ? ` school=${p.schoolName ?? "-"} ncaaSeq=${p.ncaaPlayerSeq ?? "-"}` : "";
+    deps.write(`${base}${suffix}`);
   }
   deps.write(`total=${rows.length}`);
   return 0;
@@ -181,9 +250,11 @@ export async function main(): Promise<number> {
   const { db, close } = openDb(config.databasePath);
   try {
     const client = new MlbClientImpl({ delayMs: config.mlbApiDelayMs });
+    const ncaaClient = new NcaaClientImpl({ delayMs: config.ncaaScrapeDelayMs });
     return await runSeed(process.argv.slice(2), {
       db,
       client,
+      ncaaClient,
       now: () => new Date(),
       tz: config.tz,
       write: (line) => process.stdout.write(`${line}\n`),

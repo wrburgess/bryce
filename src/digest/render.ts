@@ -12,6 +12,8 @@ export interface RenderPlayer {
   level: Level;
   milbLevel: string | null;
   teamName: string | null;
+  /** NCAA school; shown where teamName is shown for ncaa-level Players (ADR 0032). */
+  schoolName: string | null;
 }
 
 export interface RenderLine {
@@ -163,7 +165,9 @@ export function renderDigest(args: {
     textParts.push(section.title);
     htmlParts.push(`<h2>${escapeHtml(section.title)}</h2>`);
     for (const { player, lines: playerLines } of section.players) {
-      const team = player.teamName !== null ? ` (${player.teamName})` : "";
+      // NCAA Players carry a school, not a team; everyone else carries a team.
+      const affiliation = player.level === "ncaa" ? player.schoolName : player.teamName;
+      const team = affiliation !== null ? ` (${affiliation})` : "";
       textParts.push(`  ${player.fullName}${team}`);
       htmlParts.push(`<h3>${escapeHtml(`${player.fullName}${team}`)}</h3>`, "<ul>");
       for (const line of playerLines) {

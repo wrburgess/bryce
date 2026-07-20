@@ -2,10 +2,14 @@ import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { PlayerRow } from "../db/schema.js";
 import { players } from "../db/schema.js";
+import { hostDate } from "../domain/season.js";
 import { runRefreshForPlayer } from "../jobs/refresh.js";
 import type { MlbClient } from "../mlb/client.js";
 import { levelForSportId } from "../mlb/levels.js";
 import type { Person } from "../mlb/schemas.js";
+import type { NcaaClient } from "../ncaa/client.js";
+import { NcaaApiError, UnsupportedNcaaSeasonError } from "../ncaa/client.js";
+import { parseGameLogPage } from "../ncaa/parse.js";
 
 /**
  * Watch-list service: the one home for add/deactivate/list/search semantics,
@@ -16,9 +20,16 @@ import type { Person } from "../mlb/schemas.js";
 export interface WatchlistDeps {
   db: Db;
   client: MlbClient;
+  ncaaClient: NcaaClient;
   now: () => Date;
   tz: string;
 }
+
+/**
+ * How a caller addresses an existing watch-list Player: an MLB Stats API
+ * personId (the default numeric form) or an NCAA stats_player_seq (ADR 0032).
+ */
+export type PlayerRef = number | { ncaaPlayerSeq: number };
 
 /** The MLB Stats API has no person for the requested personId. */
 export class UnknownPersonError extends Error {
@@ -31,14 +42,29 @@ export class UnknownPersonError extends Error {
   }
 }
 
-/** No watch-list row exists for the requested personId. */
-export class PlayerNotFoundError extends Error {
-  readonly personId: number;
+/** stats.ncaa.org has no resolvable player for the requested stats_player_seq. */
+export class UnknownNcaaPlayerError extends Error {
+  readonly playerSeq: number;
 
-  constructor(personId: number) {
-    super(`no player with personId=${personId}`);
+  constructor(playerSeq: number) {
+    super(`no NCAA player with ncaaPlayerSeq=${playerSeq}`);
+    this.name = "UnknownNcaaPlayerError";
+    this.playerSeq = playerSeq;
+  }
+}
+
+/** No watch-list row exists for the requested Player reference. */
+export class PlayerNotFoundError extends Error {
+  readonly ref: PlayerRef;
+
+  constructor(ref: PlayerRef) {
+    super(
+      typeof ref === "number"
+        ? `no player with personId=${ref}`
+        : `no player with ncaaPlayerSeq=${ref.ncaaPlayerSeq}`,
+    );
     this.name = "PlayerNotFoundError";
-    this.personId = personId;
+    this.ref = ref;
   }
 }
 
@@ -117,21 +143,106 @@ export async function addPlayer(deps: WatchlistDeps, personId: number): Promise<
 
   // Adding a Player IS his first Refresh (ADR 0030) — unless the pipeline sleeps.
   const refresh = await runRefreshForPlayer(
-    { db, client, now, tz: deps.tz },
+    { db, client, ncaaClient: deps.ncaaClient, now, tz: deps.tz },
     inserted.id,
   );
   return { action: "added", player: inserted, refresh };
 }
 
-/** Deactivate a Player by personId — the row and his whole history are kept. */
+/**
+ * Add an NCAA Player by stats.ncaa.org stats_player_seq (ADR 0032). Mirrors
+ * addPlayer: fetch his current-season game-log page to resolve name/school, a
+ * duplicate is a no-op identity/school refresh, and a brand-new add runs his
+ * first Refresh (Sleep-aware). Only a genuine not-found (HTTP 404 or a page
+ * with no resolvable player) becomes UnknownNcaaPlayerError; upstream failures
+ * (NcaaApiError) and an unbundled season (UnsupportedNcaaSeasonError)
+ * propagate untouched, exactly like addPlayer surfaces MlbApiError.
+ */
+export async function addNcaaPlayer(
+  deps: WatchlistDeps,
+  playerSeq: number,
+): Promise<AddPlayerResult> {
+  const { db, ncaaClient, now, tz } = deps;
+  const season = hostDate(now(), tz).slice(0, 4);
+
+  let identity: { fullName: string; schoolName: string };
+  try {
+    const html = await ncaaClient.getGameLogPage(playerSeq, season, "batting");
+    const page = parseGameLogPage(html);
+    identity = { fullName: page.fullName, schoolName: page.schoolName };
+  } catch (err) {
+    // Upstream trouble is NOT a missing player: a non-404 HTTP failure and an
+    // unbundled season propagate untouched for the callers' error seams.
+    if (err instanceof NcaaApiError && err.status !== 404) throw err;
+    if (err instanceof UnsupportedNcaaSeasonError) throw err;
+    // A genuine not-found — HTTP 404 or a page with no resolvable player —
+    // means there is no Player to add.
+    throw new UnknownNcaaPlayerError(playerSeq);
+  }
+
+  const existing = (
+    await db.select().from(players).where(eq(players.ncaaPlayerSeq, playerSeq))
+  )[0];
+  const nowIso = now().toISOString();
+
+  if (existing !== undefined) {
+    const updatedRows = await db
+      .update(players)
+      .set({
+        fullName: identity.fullName,
+        schoolName: identity.schoolName,
+        active: true,
+        updatedAt: nowIso,
+      })
+      .where(eq(players.id, existing.id))
+      .returning();
+    const updated = updatedRows[0];
+    if (updated === undefined) {
+      throw new Error(`update failed for player id ${existing.id}`);
+    }
+    return { action: "updated", player: updated, refresh: null };
+  }
+
+  const insertedRows = await db
+    .insert(players)
+    .values({
+      externalId: null,
+      ncaaPlayerSeq: playerSeq,
+      fullName: identity.fullName,
+      level: "ncaa",
+      milbLevel: null,
+      teamName: null,
+      schoolName: identity.schoolName,
+      active: true,
+      createdAt: nowIso,
+      updatedAt: nowIso,
+    })
+    .returning();
+  const inserted = insertedRows[0];
+  if (inserted === undefined) {
+    throw new Error("insert failed");
+  }
+
+  const refresh = await runRefreshForPlayer({ db, client: deps.client, ncaaClient, now, tz }, inserted.id);
+  return { action: "added", player: inserted, refresh };
+}
+
+/**
+ * Deactivate a Player by reference — an MLB personId or an NCAA
+ * stats_player_seq (ADR 0032) — the row and his whole history are kept.
+ */
 export async function deactivatePlayer(
   deps: Pick<WatchlistDeps, "db" | "now">,
-  personId: number,
+  ref: PlayerRef,
 ): Promise<PlayerRow> {
   const { db, now } = deps;
-  const existing = (await db.select().from(players).where(eq(players.externalId, personId)))[0];
+  const where =
+    typeof ref === "number"
+      ? eq(players.externalId, ref)
+      : eq(players.ncaaPlayerSeq, ref.ncaaPlayerSeq);
+  const existing = (await db.select().from(players).where(where))[0];
   if (existing === undefined) {
-    throw new PlayerNotFoundError(personId);
+    throw new PlayerNotFoundError(ref);
   }
   const updatedRows = await db
     .update(players)

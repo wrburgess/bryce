@@ -7,16 +7,19 @@ import type { AppDeps } from "../src/server.js";
 import { createApp } from "../src/server.js";
 import {
   CapturingMailer,
+  FakeNcaaApi,
   FakeStatsApi,
   MID_SEASON,
   TEST_API_TOKEN,
   TEST_TZ,
   fakeClock,
+  fakeNcaaClient,
   insertCalendars2026,
   insertPlayer,
   insertStatLine,
   makeGameLogBody,
   makeMlbTeam,
+  makeNcaaGameLogHtml,
   makePerson,
   makeSeasonBody,
   makeSplit,
@@ -31,6 +34,7 @@ const JSON_AUTH = { ...AUTH, "content-type": "application/json" };
 describe("REST API", () => {
   let opened: OpenedDb;
   let api: FakeStatsApi;
+  let ncaaApi: FakeNcaaApi;
   let mailer: CapturingMailer;
   let clock: ReturnType<typeof fakeClock>;
   let deps: AppDeps;
@@ -39,6 +43,18 @@ describe("REST API", () => {
     opened = testDb();
     clock = fakeClock(MID_SEASON);
     mailer = new CapturingMailer();
+    ncaaApi = new FakeNcaaApi({
+      pages: {
+        "2649785:batting": makeNcaaGameLogHtml({
+          fullName: "College Guy",
+          schoolName: "LSU",
+          rows: [
+            { date: "2026-03-13", opponentName: "Georgia", isHome: true, contestId: 6001, stats: { AB: 4, H: 2, HR: 1 } },
+          ],
+        }),
+        "2649785:pitching": makeNcaaGameLogHtml({ fullName: "College Guy", schoolName: "LSU", rows: [] }),
+      },
+    });
     api = new FakeStatsApi({
       person: makePerson(),
       teams: { 564: makeTeam(), 146: makeMlbTeam() },
@@ -53,6 +69,7 @@ describe("REST API", () => {
     await insertCalendars2026(opened.db);
     deps = testAppDeps(opened, {
       client: new MlbClient({ fetchImpl: api.fetch, delayMs: 0 }),
+      ncaaClient: fakeNcaaClient(ncaaApi),
       mailer,
       now: clock.now,
       tz: TEST_TZ,
@@ -179,6 +196,108 @@ describe("REST API", () => {
       expect(missing.status).toBe(404);
       expect(((await missing.json()) as { error: string }).error).toContain("424242");
       expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+  });
+
+  describe("POST /api/players/ncaa", () => {
+    it("adds an NCAA player by seq, backfills, and returns 201", async () => {
+      const res = await app().request("/api/players/ncaa", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ ncaaPlayerSeq: 2649785 }),
+      });
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as {
+        action: string;
+        player: { ncaaPlayerSeq: number; schoolName: string; level: string };
+        refresh: { inserted: number };
+      };
+      expect(body.action).toBe("added");
+      expect(body.player).toMatchObject({ ncaaPlayerSeq: 2649785, schoolName: "LSU", level: "ncaa" });
+      expect(body.refresh.inserted).toBe(1);
+
+      const rows = await opened.db.select().from(players);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ externalId: null, ncaaPlayerSeq: 2649785, schoolName: "LSU" });
+      const lines = await opened.db.select().from(statLines);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]?.sportId).toBe(22);
+    });
+
+    it("400s a missing/invalid ncaaPlayerSeq; 404s an unresolvable seq", async () => {
+      const bad = await app().request("/api/players/ncaa", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ ncaaPlayerSeq: -5 }),
+      });
+      expect(bad.status).toBe(400);
+      expect(((await bad.json()) as { error: string }).error).toBe("invalid-input");
+
+      const missing = await app().request("/api/players/ncaa", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ ncaaPlayerSeq: 999999 }),
+      });
+      expect(missing.status).toBe(404);
+      expect(((await missing.json()) as { error: string }).error).toContain("999999");
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+
+    it("502s an NCAA upstream failure — not 404, not 500 — writing no row", async () => {
+      ncaaApi.options.status = 500;
+      const res = await app().request("/api/players/ncaa", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ ncaaPlayerSeq: 2649785 }),
+      });
+      expect(res.status).toBe(502);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("stats.ncaa.org request failed with HTTP 500");
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+
+    it("503s an unbundled NCAA season (our data gap, not upstream), writing no row", async () => {
+      clock.set("2030-03-15T17:00:00Z"); // no bundled stats.ncaa.org entry for 2030
+      const res = await app().request("/api/players/ncaa", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ ncaaPlayerSeq: 2649785 }),
+      });
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("no bundled stats.ncaa.org season lookup for year 2030");
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+      expect(ncaaApi.calls).toHaveLength(0);
+    });
+  });
+
+  describe("POST /api/players/ncaa/:seq/deactivate", () => {
+    it("deactivates an NCAA player by seq, keeping history", async () => {
+      const ncaa = await insertPlayer(opened.db, {
+        externalId: null,
+        ncaaPlayerSeq: 2649785,
+        level: "ncaa",
+        milbLevel: null,
+        teamName: null,
+        fullName: "College Guy",
+        schoolName: "LSU",
+      });
+      await insertStatLine(opened.db, { playerId: ncaa.id, sportId: 22 });
+
+      const res = await app().request("/api/players/ncaa/2649785/deactivate", {
+        method: "POST",
+        headers: AUTH,
+      });
+      expect(res.status).toBe(200);
+      expect(((await res.json()) as { player: { active: boolean } }).player.active).toBe(false);
+      expect((await opened.db.select().from(players))[0]?.active).toBe(false);
+      expect(await opened.db.select().from(statLines)).toHaveLength(1);
+
+      const missing = await app().request("/api/players/ncaa/999999/deactivate", {
+        method: "POST",
+        headers: AUTH,
+      });
+      expect(missing.status).toBe(404);
     });
   });
 
@@ -377,6 +496,50 @@ describe("REST API", () => {
         body: JSON.stringify({ personId: 424242 }),
       });
       expect(res.status).toBe(404);
+    });
+
+    it("refreshes one NCAA player by ncaaPlayerSeq, upserting his season", async () => {
+      await insertPlayer(opened.db, {
+        externalId: null,
+        ncaaPlayerSeq: 2649785,
+        level: "ncaa",
+        milbLevel: null,
+        teamName: null,
+        fullName: "College Guy",
+        schoolName: "LSU",
+      });
+      const res = await app().request("/api/refresh", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ ncaaPlayerSeq: 2649785 }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ skipped: false, inserted: 1, updated: 0 });
+      const lines = await opened.db.select().from(statLines);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]?.sportId).toBe(22);
+    });
+
+    it("502s an NCAA upstream failure on refresh, ingesting nothing", async () => {
+      await insertPlayer(opened.db, {
+        externalId: null,
+        ncaaPlayerSeq: 2649785,
+        level: "ncaa",
+        milbLevel: null,
+        teamName: null,
+        fullName: "College Guy",
+        schoolName: "LSU",
+      });
+      ncaaApi.options.status = 503;
+      const res = await app().request("/api/refresh", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ ncaaPlayerSeq: 2649785 }),
+      });
+      expect(res.status).toBe(502);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("stats.ncaa.org request failed with HTTP 503");
+      expect(await opened.db.select().from(statLines)).toHaveLength(0);
     });
 
     it("400s malformed JSON without refreshing anything", async () => {

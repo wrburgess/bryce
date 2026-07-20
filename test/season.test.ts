@@ -1,8 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { OpenedDb } from "../src/db/client.js";
+import { seasonCalendar } from "../src/db/schema.js";
 import type { CalendarEntry, WatchedLevel } from "../src/domain/season.js";
 import { hostDate, isInSeason, sleepWindow } from "../src/domain/season.js";
+import type { RefreshDeps } from "../src/jobs/refresh.js";
+import { refreshNcaaCalendar } from "../src/jobs/refresh.js";
+import { MlbClient } from "../src/mlb/client.js";
 import { NCAA_SPORT_ID } from "../src/mlb/levels.js";
-import { TEST_TZ } from "./factories.js";
+import {
+  FakeNcaaApi,
+  FakeStatsApi,
+  TEST_TZ,
+  fakeClock,
+  fakeNcaaClient,
+  insertPlayer,
+  testDb,
+} from "./factories.js";
 
 /** Calendars mirroring the real captured 2026 season fixtures. */
 const MLB_2026: CalendarEntry = {
@@ -158,5 +172,65 @@ describe("sleepWindow boundaries (ADR 0031)", () => {
       TEST_TZ,
     );
     expect(withNext.nextOpeningDay).toBe("2027-03-30");
+  });
+});
+
+describe("refreshNcaaCalendar (ADR 0032)", () => {
+  let opened: OpenedDb;
+
+  const deps = (now: string): RefreshDeps => ({
+    db: opened.db,
+    client: new MlbClient({ fetchImpl: new FakeStatsApi().fetch, delayMs: 0 }),
+    ncaaClient: fakeNcaaClient(new FakeNcaaApi()),
+    now: fakeClock(now).now,
+    tz: TEST_TZ,
+  });
+
+  const ncaaRow = () =>
+    opened.db.select().from(seasonCalendar).where(eq(seasonCalendar.sportId, NCAA_SPORT_ID));
+
+  beforeEach(() => {
+    opened = testDb();
+  });
+
+  afterEach(() => {
+    opened.close();
+  });
+
+  it("upserts the sportId 22 row from bundled dates when an NCAA player is watched", async () => {
+    const ncaa = await insertPlayer(opened.db, {
+      externalId: null,
+      ncaaPlayerSeq: 2649785,
+      level: "ncaa",
+      milbLevel: null,
+      fullName: "College Guy",
+      schoolName: "LSU",
+    });
+    await refreshNcaaCalendar(deps("2026-03-15T17:00:00Z"), "2026", [ncaa]);
+
+    const rows = await ncaaRow();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.regularSeasonStart).toBe("2026-02-13");
+    expect(rows[0]?.regularSeasonEnd).toBe("2026-06-22");
+    expect(rows[0]?.postSeasonEnd).toBeNull();
+  });
+
+  it("writes no NCAA row when no NCAA player is watched", async () => {
+    const mlb = await insertPlayer(opened.db, { externalId: 691185, level: "mlb", milbLevel: null });
+    await refreshNcaaCalendar(deps("2026-03-15T17:00:00Z"), "2026", [mlb]);
+    expect(await ncaaRow()).toHaveLength(0);
+  });
+
+  it("writes no NCAA row for a season with no bundled lookup", async () => {
+    const ncaa = await insertPlayer(opened.db, {
+      externalId: null,
+      ncaaPlayerSeq: 2649785,
+      level: "ncaa",
+      milbLevel: null,
+      fullName: "College Guy",
+      schoolName: "LSU",
+    });
+    await refreshNcaaCalendar(deps("2099-03-15T17:00:00Z"), "2099", [ncaa]);
+    expect(await ncaaRow()).toHaveLength(0);
   });
 });
