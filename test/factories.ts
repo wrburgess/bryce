@@ -9,6 +9,10 @@ import { digestDeliveries, players, seasonCalendar, statLines } from "../src/db/
 import type { FetchLike } from "../src/mlb/client.js";
 import { MlbClient } from "../src/mlb/client.js";
 import type { MailMessage, Mailer } from "../src/mailer/types.js";
+import type { NcaaFetchLike } from "../src/ncaa/client.js";
+import { NcaaClient } from "../src/ncaa/client.js";
+import { NCAA_SEASONS } from "../src/ncaa/seasons.js";
+import type { NcaaStatCategory } from "../src/ncaa/seasons.js";
 import type { AppDeps } from "../src/server.js";
 
 /**
@@ -18,9 +22,15 @@ import type { AppDeps } from "../src/server.js";
  */
 
 const FIXTURES_DIR = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "mlb");
+const NCAA_FIXTURES_DIR = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "ncaa");
 
 export function loadFixture(name: string): unknown {
   return JSON.parse(readFileSync(join(FIXTURES_DIR, name), "utf8"));
+}
+
+/** Raw HTML fixture from test/fixtures/ncaa/ (constructed, faithful to the real table). */
+export function loadNcaaFixture(name: string): string {
+  return readFileSync(join(NCAA_FIXTURES_DIR, name), "utf8");
 }
 
 export function testDb(): OpenedDb {
@@ -382,6 +392,149 @@ export class FakeStatsApi {
   }
 }
 
+// --- NCAA game-log HTML builder (faithful to the reference table shape) -----
+
+export interface NcaaLogRow {
+  /** ISO date; the builder emits it as MM/DD/YYYY like the real page. */
+  date: string;
+  opponentName: string;
+  /** true = "vs" home, false = "@" away, null = neutral (no prefix). */
+  isHome?: boolean | null;
+  /** When set, the Result cell links to a box score carrying this contest id. */
+  contestId?: number | null;
+  result?: string;
+  stats: Record<string, string | number>;
+}
+
+/**
+ * Build a stats.ncaa.org game-log page (constructed, faithful to the
+ * billpetti/baseballr + collegebaseball reference table shape): a Date /
+ * Opponent / Result header, per-game stat columns, and a trailing
+ * season-totals row the parser excludes.
+ */
+export function makeNcaaGameLogHtml(args: {
+  fullName: string;
+  schoolName: string;
+  schoolTeamId?: number;
+  rows: NcaaLogRow[];
+}): string {
+  const { fullName, schoolName, schoolTeamId = 999, rows } = args;
+  const statColumns: string[] = [];
+  for (const row of rows) {
+    for (const key of Object.keys(row.stats)) {
+      if (!statColumns.includes(key)) statColumns.push(key);
+    }
+  }
+
+  const headerCells = ["Date", "Opponent", "Result", ...statColumns]
+    .map((h) => `<th>${h}</th>`)
+    .join("");
+
+  const bodyRows = rows
+    .map((row) => {
+      const [, mm, dd] = row.date.split("-");
+      const yyyy = row.date.slice(0, 4);
+      const dateCell = `<td>${mm}/${dd}/${yyyy}</td>`;
+      const prefix = row.isHome === true ? "vs " : row.isHome === false ? "@ " : "";
+      const oppCell = `<td>${prefix}<a href="/teams/1">${row.opponentName}</a></td>`;
+      const result = row.result ?? "W 5-3";
+      const resultCell =
+        row.contestId != null
+          ? `<td><a href="/contests/${row.contestId}/box_score">${result}</a></td>`
+          : `<td>${result}</td>`;
+      const statCells = statColumns
+        .map((col) => `<td>${row.stats[col] ?? ""}</td>`)
+        .join("");
+      return `<tr>${dateCell}${oppCell}${resultCell}${statCells}</tr>`;
+    })
+    .join("");
+
+  const totalsStats = statColumns.map(() => "<td>0</td>").join("");
+  const totalsRow = `<tr class="grey_heading"><td>Totals</td><td></td><td></td>${totalsStats}</tr>`;
+
+  return [
+    "<!DOCTYPE html><html><head>",
+    `<title>${fullName}</title>`,
+    "</head><body>",
+    `<div class="card"><div class="card-header">`,
+    `<a href="/teams/${schoolTeamId}">${schoolName}</a>`,
+    "</div></div>",
+    `<table class="nav"><thead><tr><th>Year</th></tr></thead><tbody><tr><td>2025</td></tr></tbody></table>`,
+    `<table id="game_by_game"><thead><tr>${headerCells}</tr></thead>`,
+    `<tbody>${bodyRows}${totalsRow}</tbody></table>`,
+    "</body></html>",
+  ].join("");
+}
+
+/**
+ * Fake stats.ncaa.org over NcaaClient's fetch. Routes game-log URLs by
+ * stats_player_seq + stat category (derived from year_stat_category_id via the
+ * bundled season table); serves builder HTML; records calls and headers; an
+ * unrouted url throws — the FakeStatsApi pattern for the NCAA adapter.
+ */
+export interface FakeNcaaOptions {
+  /** key `${seq}:${category}` → game-log HTML. */
+  pages?: Record<string, string>;
+  /** Force a non-200 status (with empty body) on every request. */
+  status?: number;
+}
+
+export class FakeNcaaApi {
+  readonly calls: string[] = [];
+  readonly headers: Array<Record<string, string>> = [];
+  options: FakeNcaaOptions;
+
+  constructor(options: FakeNcaaOptions = {}) {
+    this.options = options;
+  }
+
+  get fetch(): NcaaFetchLike {
+    return (url: string, headers: Record<string, string>) => {
+      this.calls.push(url);
+      this.headers.push(headers);
+      if (this.options.status !== undefined && this.options.status !== 200) {
+        return Promise.resolve({
+          ok: false,
+          status: this.options.status,
+          text: () => Promise.resolve(""),
+        });
+      }
+      const body = this.route(url);
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(body) });
+    };
+  }
+
+  callsMatching(pattern: RegExp): string[] {
+    return this.calls.filter((u) => pattern.test(u));
+  }
+
+  private route(url: string): string {
+    const u = new URL(url);
+    const seq = u.searchParams.get("stats_player_seq");
+    const catId = Number(u.searchParams.get("year_stat_category_id"));
+    const category = categoryForId(catId);
+    const key = `${seq}:${category}`;
+    const page = this.options.pages?.[key];
+    if (page === undefined) {
+      throw new Error(`FakeNcaaApi: unrouted url ${url}`);
+    }
+    return page;
+  }
+}
+
+function categoryForId(catId: number): NcaaStatCategory | "unknown" {
+  for (const season of NCAA_SEASONS) {
+    if (season.battingCategoryId === catId) return "batting";
+    if (season.pitchingCategoryId === catId) return "pitching";
+  }
+  return "unknown";
+}
+
+/** A NcaaClient wired to a FakeNcaaApi with zero politeness delay. */
+export function fakeNcaaClient(api: FakeNcaaApi): NcaaClient {
+  return new NcaaClient({ fetchImpl: api.fetch, delayMs: 0 });
+}
+
 // --- App deps builder (createApp / REST / MCP tests) ------------------------
 
 export const TEST_API_TOKEN = "test-api-token-1234567890";
@@ -397,6 +550,7 @@ export function testAppDeps(opened: OpenedDb, overrides: Partial<AppDeps> = {}):
     db: opened.db,
     readonlySqlite: opened.sqlite,
     client: new MlbClient({ fetchImpl: new FakeStatsApi().fetch, delayMs: 0 }),
+    ncaaClient: fakeNcaaClient(new FakeNcaaApi()),
     mailer: new CapturingMailer(),
     now: fakeClock(MID_SEASON).now,
     tz: TEST_TZ,

@@ -1,0 +1,215 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  NcaaApiError,
+  NcaaClient,
+  UnsupportedNcaaSeasonError,
+  buildGameLogUrl,
+} from "../src/ncaa/client.js";
+import { fnv1a31, normalizeGameLog } from "../src/ncaa/normalize.js";
+import { parseGameLogPage } from "../src/ncaa/parse.js";
+import { ncaaSeasonFor } from "../src/ncaa/seasons.js";
+import {
+  FakeNcaaApi,
+  fakeNcaaClient,
+  loadNcaaFixture,
+  makeNcaaGameLogHtml,
+} from "./factories.js";
+
+describe("NCAA parser (constructed fixtures, faithful to the reference table)", () => {
+  it("extracts batting rows with contest ids and header-keyed stats", () => {
+    const page = parseGameLogPage(loadNcaaFixture("gamelog_batting.html"));
+    expect(page.fullName).toBe("Wyatt Langford");
+    expect(page.schoolName).toBe("Florida");
+    // Three game rows; the season-totals row is excluded.
+    expect(page.rows).toHaveLength(3);
+
+    const first = page.rows[0];
+    expect(first?.date).toBe("2025-03-14");
+    expect(first?.opponentName).toBe("Georgia");
+    expect(first?.isHome).toBe(true);
+    expect(first?.contestId).toBe(5101);
+    expect(first?.stats).toMatchObject({ AB: 4, H: 2, HR: 1, RBI: 3 });
+  });
+
+  it("extracts pitching rows with IP kept as a string", () => {
+    const page = parseGameLogPage(loadNcaaFixture("gamelog_pitching.html"));
+    expect(page.fullName).toBe("Paul Skenes");
+    expect(page.schoolName).toBe("LSU");
+    expect(page.rows).toHaveLength(2);
+    const first = page.rows[0];
+    expect(first?.stats.IP).toBe("6.0"); // non-integer stays a string
+    expect(first?.stats).toMatchObject({ H: 4, ER: 1, SO: 8, W: 1 });
+    expect(first?.isHome).toBe(true);
+    const second = page.rows[1];
+    expect(second?.isHome).toBe(false); // "@" away
+    expect(second?.opponentName).toBe("Alabama");
+  });
+
+  it("reads a doubleheader as two rows, same date, distinct contest ids", () => {
+    const page = parseGameLogPage(loadNcaaFixture("gamelog_batting.html"));
+    const march15 = page.rows.filter((r) => r.date === "2025-03-15");
+    expect(march15).toHaveLength(2);
+    expect(new Set(march15.map((r) => r.contestId)).size).toBe(2);
+  });
+
+  it("excludes the season-totals row", () => {
+    const page = parseGameLogPage(loadNcaaFixture("gamelog_batting.html"));
+    expect(page.rows.every((r) => /^\d{4}-\d{2}-\d{2}$/.test(r.date))).toBe(true);
+    expect(page.rows.some((r) => r.opponentName === "")).toBe(false);
+  });
+
+  it("throws loudly on a malformed/shifted table (missing expected columns)", () => {
+    const broken =
+      "<html><head><title>Guy</title></head><body>" +
+      '<div class="card-header"><a href="/teams/1">School</a></div>' +
+      "<table><thead><tr><th>Foo</th><th>Bar</th></tr></thead>" +
+      "<tbody><tr><td>1</td><td>2</td></tr></tbody></table></body></html>";
+    expect(() => parseGameLogPage(broken)).toThrow(/game-log table/);
+  });
+
+  it("throws when the school cannot be extracted", () => {
+    const noSchool =
+      "<html><head><title>Guy</title></head><body>" +
+      '<table id="game_by_game"><thead><tr><th>Date</th><th>Opponent</th><th>Result</th></tr>' +
+      "</thead><tbody></tbody></table></body></html>";
+    expect(() => parseGameLogPage(noSchool)).toThrow(/school/);
+  });
+
+  it("yields a null contest id when the row has no box-score/contest anchor", () => {
+    const html = makeNcaaGameLogHtml({
+      fullName: "Zed Zero",
+      schoolName: "Tech",
+      rows: [{ date: "2025-03-14", opponentName: "Rival", isHome: true, contestId: null, stats: { AB: 3, H: 1 } }],
+    });
+    const page = parseGameLogPage(html);
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]?.contestId).toBeNull();
+    expect(page.rows[0]?.opponentName).toBe("Rival");
+  });
+});
+
+describe("NCAA normalizer", () => {
+  it("maps rows to Stat Line rows (sportId 22, statType, raw)", () => {
+    const rows = parseGameLogPage(loadNcaaFixture("gamelog_batting.html")).rows;
+    const normalized = normalizeGameLog({
+      playerId: 7,
+      seq: 2649785,
+      category: "batting",
+      rows,
+      timestamp: "2025-03-16T00:00:00.000Z",
+    });
+    expect(normalized).toHaveLength(3);
+    const first = normalized[0];
+    expect(first?.playerId).toBe(7);
+    expect(first?.sportId).toBe(22);
+    expect(first?.statType).toBe("batting");
+    expect(first?.gameId).toBe(5101); // contest id preferred
+    expect(first?.teamName).toBeNull();
+    expect(first?.leagueName).toBeNull();
+    expect((first?.raw as { gameIdSource: string }).gameIdSource).toBe("contest");
+  });
+
+  it("assigns 1-based game numbers within a date (doubleheader)", () => {
+    const rows = parseGameLogPage(loadNcaaFixture("gamelog_batting.html")).rows;
+    const normalized = normalizeGameLog({
+      playerId: 7,
+      seq: 2649785,
+      category: "batting",
+      rows,
+      timestamp: "t",
+    });
+    const march15 = normalized.filter((r) => r.gameDate === "2025-03-15");
+    expect(march15.map((r) => r.gameNumber).sort()).toEqual([1, 2]);
+  });
+
+  it("uses a stable hash fallback when the contest id is missing", () => {
+    const rows = [
+      { date: "2025-03-14", opponentName: "Rival", isHome: true, contestId: null, result: "W", stats: { AB: 3 } },
+      { date: "2025-03-14", opponentName: "Rival", isHome: true, contestId: null, result: "L", stats: { AB: 4 } },
+    ];
+    const a = normalizeGameLog({ playerId: 1, seq: 42, category: "batting", rows, timestamp: "t" });
+    const b = normalizeGameLog({ playerId: 1, seq: 42, category: "batting", rows, timestamp: "t2" });
+    // Deterministic: same input → same ids across runs.
+    expect(a.map((r) => r.gameId)).toEqual(b.map((r) => r.gameId));
+    // The two same-date games get DIFFERENT ids (row index folds into the hash).
+    expect(a[0]?.gameId).not.toBe(a[1]?.gameId);
+    expect((a[0]?.raw as { gameIdSource: string }).gameIdSource).toBe("hash");
+  });
+
+  it("fnv1a31 is deterministic and stays a positive 31-bit integer", () => {
+    const h = fnv1a31("42|2025-03-14|Rival|0");
+    expect(h).toBe(fnv1a31("42|2025-03-14|Rival|0"));
+    expect(h).toBeGreaterThan(0);
+    expect(h).toBeLessThanOrEqual(0x7fffffff);
+    expect(fnv1a31("a")).not.toBe(fnv1a31("b"));
+  });
+});
+
+describe("NCAA client", () => {
+  it("builds the legacy game_by_game URL with the season/category ids", () => {
+    const season = ncaaSeasonFor("2025");
+    expect(season).not.toBeNull();
+    const url = buildGameLogUrl({ seq: 2649785, season: season!, category: "batting" });
+    expect(url).toContain("https://stats.ncaa.org/player/game_by_game?");
+    expect(url).toContain("game_sport_year_ctl_id=16840");
+    expect(url).toContain("stats_player_seq=2649785");
+    expect(url).toContain("year_stat_category_id=15687");
+    // org_id omitted when the school is unknown.
+    expect(url).not.toContain("org_id");
+  });
+
+  it("sends the full browser header set on the request", async () => {
+    const api = new FakeNcaaApi({
+      pages: { "2649785:batting": makeNcaaGameLogHtml({ fullName: "A", schoolName: "B", rows: [] }) },
+    });
+    await fakeNcaaClient(api).getGameLogPage(2649785, "2025", "batting");
+    const sent = api.headers[0] ?? {};
+    expect(sent["User-Agent"]).toContain("Mozilla/5.0");
+    expect(sent["Accept-Language"]).toBe("en-US,en;q=0.9");
+    expect(sent["Sec-Fetch-Mode"]).toBe("navigate");
+  });
+
+  it("applies the polite delay between consecutive calls (fake clock)", async () => {
+    vi.useFakeTimers();
+    try {
+      const calls: string[] = [];
+      const client = new NcaaClient({
+        fetchImpl: (url) => {
+          calls.push(url);
+          return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve("<html></html>") });
+        },
+        delayMs: 3000,
+      });
+
+      await client.getGameLogPage(2649785, "2025", "batting").catch(() => undefined);
+      expect(calls).toHaveLength(1);
+
+      let done = false;
+      const second = client.getGameLogPage(2649785, "2025", "pitching").catch(() => undefined).then(() => {
+        done = true;
+      });
+      await vi.advanceTimersByTimeAsync(2999);
+      expect(done).toBe(false);
+      expect(calls).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await second;
+      expect(calls).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("throws NcaaApiError on a non-200 response", async () => {
+    const api = new FakeNcaaApi({ status: 403 });
+    const promise = fakeNcaaClient(api).getGameLogPage(2649785, "2025", "batting");
+    await expect(promise).rejects.toBeInstanceOf(NcaaApiError);
+    await promise.catch((err: unknown) => expect((err as NcaaApiError).status).toBe(403));
+  });
+
+  it("throws UnsupportedNcaaSeasonError for a year with no bundled lookup", async () => {
+    const api = new FakeNcaaApi();
+    await expect(
+      fakeNcaaClient(api).getGameLogPage(2649785, "2099", "batting"),
+    ).rejects.toBeInstanceOf(UnsupportedNcaaSeasonError);
+  });
+});

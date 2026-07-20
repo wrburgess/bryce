@@ -10,6 +10,7 @@ import {
   OFFSEASON,
   TEST_TZ,
   fakeClock,
+  insertCalendar,
   insertCalendars2026,
   insertPlayer,
   insertStatLine,
@@ -117,6 +118,63 @@ describe("assembleDigest (pure digest preview)", () => {
 
     const assembly = await assembleDigest(opened.db, deps());
     expect(assembly.noNewStats.map((p) => p.fullName)).toEqual(["Still Playing"]);
+  });
+
+  it("lists an In Season NCAA player with no lines in the no-new-stats tail (school shown)", async () => {
+    clock.set("2026-03-15T17:00:00Z"); // NCAA In Season (opens 2026-02-13)
+    await insertCalendar(opened.db, {
+      sportId: 22,
+      season: "2026",
+      regularSeasonStart: "2026-02-13",
+      regularSeasonEnd: "2026-06-22",
+      postSeasonStart: null,
+      postSeasonEnd: null,
+      springStart: null,
+      springEnd: null,
+    });
+    await insertPlayer(opened.db, {
+      externalId: null,
+      ncaaPlayerSeq: 2649785,
+      fullName: "College Guy",
+      level: "ncaa",
+      milbLevel: null,
+      teamName: null,
+      schoolName: "LSU",
+    });
+
+    const assembly = await assembleDigest(opened.db, deps());
+    expect(assembly.noNewStats.map((p) => p.fullName)).toEqual(["College Guy"]);
+    // The preview mail renders the school in the tail-less section; the tail itself is names only.
+    const mail = renderDigest({ date: assembly.date, lines: assembly.lines, noNewStats: assembly.noNewStats });
+    expect(mail.text).toContain("No new stats: College Guy");
+    // Preview is side-effect free.
+    expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
+  });
+
+  it("omits an out-of-season NCAA player from the tail (July, NCAA season over)", async () => {
+    // MID_SEASON is 2026-07-19; NCAA 2026 ended 2026-06-22.
+    await insertCalendar(opened.db, {
+      sportId: 22,
+      season: "2026",
+      regularSeasonStart: "2026-02-13",
+      regularSeasonEnd: "2026-06-22",
+      postSeasonStart: null,
+      postSeasonEnd: null,
+      springStart: null,
+      springEnd: null,
+    });
+    await insertPlayer(opened.db, {
+      externalId: null,
+      ncaaPlayerSeq: 2649785,
+      fullName: "College Guy",
+      level: "ncaa",
+      milbLevel: null,
+      teamName: null,
+      schoolName: "LSU",
+    });
+
+    const assembly = await assembleDigest(opened.db, deps());
+    expect(assembly.noNewStats.map((p) => p.fullName)).toEqual([]);
   });
 
   it("leaves the heartbeat path unaffected (runDigest still heartbeats in the offseason)", async () => {

@@ -14,6 +14,7 @@
     "refresh": "tsx src/cli/refresh.ts",
     "digest": "tsx src/cli/digest.ts",
     "seed": "tsx src/cli/seed.ts",
+    "ncaa:probe": "tsx src/cli/ncaa-probe.ts",
     "db:migrate": "tsx src/cli/migrate.ts",
     "server": "tsx src/server.ts"
   },
@@ -22,6 +23,7 @@
     "@hono/node-server": "^1.14.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.2.0",
+    "cheerio": "^1.2.0",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.8.0",
     "nodemailer": "^9.0.3",

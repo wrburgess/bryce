@@ -9,9 +9,31 @@ import { StatLineQuerySchema } from "../queries/statLines.js";
  */
 
 export const PersonIdSchema = z.coerce.number().int().positive();
+export const NcaaPlayerSeqSchema = z.coerce.number().int().positive();
 
 export const AddPlayerInputSchema = z.object({
   personId: PersonIdSchema,
+});
+
+export const AddNcaaPlayerInputSchema = z.object({
+  ncaaPlayerSeq: NcaaPlayerSeqSchema,
+});
+
+/** Deactivate addressing: exactly one of personId or ncaaPlayerSeq (ADR 0032). */
+export const DeactivateInputShape = {
+  personId: PersonIdSchema.optional(),
+  ncaaPlayerSeq: NcaaPlayerSeqSchema.optional(),
+};
+
+export const DeactivateInputSchema = z.object(DeactivateInputShape).superRefine((input, ctx) => {
+  const count = (input.personId !== undefined ? 1 : 0) + (input.ncaaPlayerSeq !== undefined ? 1 : 0);
+  if (count !== 1) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["personId"],
+      message: "provide exactly one of personId or ncaaPlayerSeq",
+    });
+  }
 });
 
 export const PlayersListInputSchema = z.object({
@@ -22,8 +44,20 @@ export const PlayerSearchInputSchema = z.object({
   q: z.string().trim().min(1),
 });
 
-export const RefreshInputSchema = z.object({
+/** Raw shape (exposed for MCP tool schemas); the refined schema validates the pairing. */
+export const RefreshInputShape = {
   personId: PersonIdSchema.optional(),
+  ncaaPlayerSeq: NcaaPlayerSeqSchema.optional(),
+};
+
+export const RefreshInputSchema = z.object(RefreshInputShape).superRefine((input, ctx) => {
+  if (input.personId !== undefined && input.ncaaPlayerSeq !== undefined) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["ncaaPlayerSeq"],
+      message: "provide personId or ncaaPlayerSeq, not both",
+    });
+  }
 });
 
 export const SqlQueryInputSchema = z.object({

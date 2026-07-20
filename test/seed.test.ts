@@ -6,12 +6,15 @@ import type { SeedDeps } from "../src/cli/seed.js";
 import { runSeed } from "../src/cli/seed.js";
 import { MlbClient } from "../src/mlb/client.js";
 import {
+  FakeNcaaApi,
   FakeStatsApi,
   MID_SEASON,
   TEST_TZ,
   fakeClock,
+  fakeNcaaClient,
   insertCalendars2026,
   makeGameLogBody,
+  makeNcaaGameLogHtml,
   makePerson,
   makeSeasonBody,
   makeSplit,
@@ -22,12 +25,14 @@ import {
 describe("seed CLI", () => {
   let opened: OpenedDb;
   let api: FakeStatsApi;
+  let ncaaApi: FakeNcaaApi;
   let clock: ReturnType<typeof fakeClock>;
   let output: string[];
 
   const deps = (): SeedDeps => ({
     db: opened.db,
     client: new MlbClient({ fetchImpl: api.fetch, delayMs: 0 }),
+    ncaaClient: fakeNcaaClient(ncaaApi),
     now: clock.now,
     tz: TEST_TZ,
     write: (line) => output.push(line),
@@ -37,6 +42,7 @@ describe("seed CLI", () => {
     opened = testDb();
     clock = fakeClock(MID_SEASON);
     output = [];
+    ncaaApi = new FakeNcaaApi();
     api = new FakeStatsApi({
       person: makePerson(),
       teams: { 564: makeTeam() },
@@ -158,6 +164,74 @@ describe("seed CLI", () => {
     const code = await runSeed(["add", "--search", "acosta"], deps());
     expect(code).toBe(0);
     expect((await opened.db.select().from(players))[0]?.externalId).toBe(691185);
+  });
+
+  it("add --ncaa-seq creates the NCAA player and runs his first Refresh", async () => {
+    clock.set("2026-03-15T17:00:00Z"); // NCAA In Season
+    ncaaApi.options.pages = {
+      "2649785:batting": makeNcaaGameLogHtml({
+        fullName: "College Guy",
+        schoolName: "LSU",
+        rows: [
+          { date: "2026-03-13", opponentName: "Georgia", isHome: true, contestId: 6001, stats: { AB: 4, H: 2, HR: 1 } },
+        ],
+      }),
+      "2649785:pitching": makeNcaaGameLogHtml({ fullName: "College Guy", schoolName: "LSU", rows: [] }),
+    };
+
+    const code = await runSeed(["add", "--ncaa-seq", "2649785"], deps());
+    expect(code).toBe(0);
+    const rows = await opened.db.select().from(players);
+    expect(rows[0]).toMatchObject({
+      externalId: null,
+      ncaaPlayerSeq: 2649785,
+      level: "ncaa",
+      schoolName: "LSU",
+    });
+    const lines = await opened.db.select().from(statLines);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.sportId).toBe(22);
+    expect(output[0]).toBe(`added player id=${rows[0]?.id} ncaaSeq=2649785 name=College Guy`);
+    expect(output[1]).toBe("refresh done inserted=1 updated=0");
+  });
+
+  it("add --ncaa-seq with an unresolvable seq exits non-zero", async () => {
+    clock.set("2026-03-15T17:00:00Z");
+    const code = await runSeed(["add", "--ncaa-seq", "999999"], deps());
+    expect(code).toBe(1);
+    expect(output[0]).toBe("error: no NCAA player with ncaaPlayerSeq=999999");
+    expect(await opened.db.select().from(players)).toHaveLength(0);
+  });
+
+  it("list prints the school and seq for NCAA rows, unchanged for MLB/MiLB", async () => {
+    await insertCalendars2026(opened.db);
+    await runSeed(["add", "--person-id", "691185"], deps());
+    await opened.db
+      .insert(players)
+      .values({
+        externalId: null,
+        ncaaPlayerSeq: 2649785,
+        level: "ncaa",
+        milbLevel: null,
+        teamName: null,
+        fullName: "College Guy",
+        schoolName: "LSU",
+        active: true,
+        createdAt: "2026-07-19T00:00:00.000Z",
+        updatedAt: "2026-07-19T00:00:00.000Z",
+      })
+      .run();
+    output = [];
+    const code = await runSeed(["list"], deps());
+    expect(code).toBe(0);
+    // The MLB row keeps its exact legacy format.
+    expect(output[0]).toBe(
+      "player id=1 personId=691185 name=Maximo Acosta level=milb milbLevel=Triple-A team=Jacksonville Jumbo Shrimp active=true",
+    );
+    // The NCAA row appends school and seq.
+    expect(output[1]).toBe(
+      "player id=2 personId=- name=College Guy level=ncaa milbLevel=- team=- active=true school=LSU ncaaSeq=2649785",
+    );
   });
 
   it("list prints deterministic greppable rows", async () => {

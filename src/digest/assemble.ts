@@ -76,6 +76,7 @@ export function toRenderPlayer(player: PlayerRow): RenderPlayer {
     level: player.level,
     milbLevel: player.milbLevel,
     teamName: player.teamName,
+    schoolName: player.schoolName,
   };
 }
 

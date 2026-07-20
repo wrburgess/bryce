@@ -9,6 +9,7 @@ import { openReadonlyDb } from "./db/readonly.js";
 import { createMailer } from "./mailer/index.js";
 import { buildMcpServer } from "./mcp/server.js";
 import { MlbClient } from "./mlb/client.js";
+import { NcaaClient } from "./ncaa/client.js";
 import { bearerAuth } from "./server/auth.js";
 import type { ServiceDeps } from "./server/deps.js";
 import { healthSnapshot } from "./server/health.js";
@@ -67,6 +68,7 @@ if (isMain(import.meta.url)) {
     db,
     readonlySqlite,
     client: new MlbClient({ delayMs: config.mlbApiDelayMs }),
+    ncaaClient: new NcaaClient({ delayMs: config.ncaaScrapeDelayMs }),
     mailer: createMailer(config),
     now: () => new Date(),
     tz: config.tz,

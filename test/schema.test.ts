@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { statLines } from "../src/db/schema.js";
+import { players, statLines } from "../src/db/schema.js";
 import { upsertStatLines } from "../src/jobs/refresh.js";
 import { insertDelivery, insertPlayer, insertStatLine, testDb } from "./factories.js";
 
@@ -56,6 +56,35 @@ describe("stat_lines schema invariants (ADR 0029)", () => {
       .from(statLines)
       .where(eq(statLines.playerId, player.id));
     expect(rows).toHaveLength(2);
+  });
+
+  it("rejects a duplicate ncaa_player_seq at the DATABASE level (ADR 0032)", async () => {
+    await insertPlayer(opened.db, {
+      externalId: null,
+      ncaaPlayerSeq: 2649785,
+      level: "ncaa",
+      milbLevel: null,
+      fullName: "College One",
+      schoolName: "LSU",
+    });
+    await expect(
+      insertPlayer(opened.db, {
+        externalId: null,
+        ncaaPlayerSeq: 2649785,
+        level: "ncaa",
+        milbLevel: null,
+        fullName: "College Two",
+        schoolName: "Texas",
+      }),
+    ).rejects.toThrow(/UNIQUE constraint failed/);
+  });
+
+  it("allows many MLB rows with a null ncaa_player_seq (nullable identity split)", async () => {
+    await insertPlayer(opened.db, { externalId: 691185, level: "mlb", milbLevel: null });
+    await insertPlayer(opened.db, { externalId: 660271, level: "mlb", milbLevel: null });
+    const rows = await opened.db.select().from(players);
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => r.ncaaPlayerSeq === null)).toBe(true);
   });
 
   it("upsert on conflict updates stats but preserves digest_delivery_id and created_at", async () => {

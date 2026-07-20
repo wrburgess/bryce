@@ -9,15 +9,18 @@ import type { AppDeps } from "../src/server.js";
 import { createApp } from "../src/server.js";
 import {
   CapturingMailer,
+  FakeNcaaApi,
   FakeStatsApi,
   MID_SEASON,
   TEST_API_TOKEN,
   TEST_TZ,
   fakeClock,
+  fakeNcaaClient,
   insertCalendars2026,
   insertPlayer,
   insertStatLine,
   makeGameLogBody,
+  makeNcaaGameLogHtml,
   makePerson,
   makeSeasonBody,
   makeSplit,
@@ -29,6 +32,7 @@ import {
 const ALL_TOOLS = [
   "watchlist_list",
   "watchlist_add",
+  "watchlist_add_ncaa",
   "watchlist_deactivate",
   "player_search",
   "stat_lines",
@@ -42,6 +46,7 @@ const ALL_TOOLS = [
 describe("MCP server over Streamable HTTP", () => {
   let opened: OpenedDb;
   let api: FakeStatsApi;
+  let ncaaApi: FakeNcaaApi;
   let mailer: CapturingMailer;
   let clock: ReturnType<typeof fakeClock>;
   let deps: AppDeps;
@@ -51,6 +56,18 @@ describe("MCP server over Streamable HTTP", () => {
     opened = testDb();
     clock = fakeClock(MID_SEASON);
     mailer = new CapturingMailer();
+    ncaaApi = new FakeNcaaApi({
+      pages: {
+        "2649785:batting": makeNcaaGameLogHtml({
+          fullName: "College Guy",
+          schoolName: "LSU",
+          rows: [
+            { date: "2026-03-13", opponentName: "Georgia", isHome: true, contestId: 6001, stats: { AB: 4, H: 2, HR: 1 } },
+          ],
+        }),
+        "2649785:pitching": makeNcaaGameLogHtml({ fullName: "College Guy", schoolName: "LSU", rows: [] }),
+      },
+    });
     api = new FakeStatsApi({
       person: makePerson(),
       teams: { 564: makeTeam() },
@@ -65,6 +82,7 @@ describe("MCP server over Streamable HTTP", () => {
     await insertCalendars2026(opened.db);
     deps = testAppDeps(opened, {
       client: new MlbClient({ fetchImpl: api.fetch, delayMs: 0 }),
+      ncaaClient: fakeNcaaClient(ncaaApi),
       mailer,
       now: clock.now,
       tz: TEST_TZ,
@@ -100,7 +118,7 @@ describe("MCP server over Streamable HTTP", () => {
     };
   }
 
-  it("exposes exactly the ten tools", async () => {
+  it("exposes exactly the eleven tools", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...ALL_TOOLS].sort());
     for (const tool of tools) {
@@ -144,6 +162,58 @@ describe("MCP server over Streamable HTTP", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0]?.text).toContain("no MLB person with personId=424242");
     expect(await opened.db.select().from(players)).toHaveLength(0);
+  });
+
+  it("watchlist_add_ncaa creates the NCAA player and backfills his season", async () => {
+    const result = await call("watchlist_add_ncaa", { ncaaPlayerSeq: 2649785 });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({
+      action: "added",
+      player: { ncaaPlayerSeq: 2649785, schoolName: "LSU", level: "ncaa" },
+      refresh: { skipped: false, inserted: 1 },
+    });
+    const rows = await opened.db.select().from(players);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ externalId: null, ncaaPlayerSeq: 2649785, schoolName: "LSU" });
+    expect((await opened.db.select().from(statLines))[0]?.sportId).toBe(22);
+  });
+
+  it("watchlist_add_ncaa reports an unresolvable seq as a tool error", async () => {
+    const result = await call("watchlist_add_ncaa", { ncaaPlayerSeq: 999999 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("no NCAA player with ncaaPlayerSeq=999999");
+    expect(await opened.db.select().from(players)).toHaveLength(0);
+  });
+
+  it("watchlist_deactivate and run_refresh accept NCAA addressing; list carries schoolName", async () => {
+    const ncaa = await insertPlayer(opened.db, {
+      externalId: null,
+      ncaaPlayerSeq: 2649785,
+      level: "ncaa",
+      milbLevel: null,
+      teamName: null,
+      fullName: "College Guy",
+      schoolName: "LSU",
+    });
+
+    // list carries the school and seq.
+    const listed = await call("watchlist_list");
+    const players0 = listed.structuredContent?.players as Array<Record<string, unknown>>;
+    expect(players0[0]).toMatchObject({ schoolName: "LSU", ncaaPlayerSeq: 2649785 });
+
+    // run_refresh by ncaaPlayerSeq ingests his season.
+    const refreshed = await call("run_refresh", { ncaaPlayerSeq: 2649785 });
+    expect(refreshed.structuredContent).toMatchObject({ skipped: false, inserted: 1 });
+    expect((await opened.db.select().from(statLines))[0]?.sportId).toBe(22);
+
+    // deactivate by ncaaPlayerSeq.
+    const deactivated = await call("watchlist_deactivate", { ncaaPlayerSeq: 2649785 });
+    expect((deactivated.structuredContent?.player as { active: boolean }).active).toBe(false);
+    expect((await opened.db.select().from(players)).find((p) => p.id === ncaa.id)?.active).toBe(false);
+
+    // Ambiguous / empty addressing is a tool error.
+    const bad = await call("watchlist_deactivate", { personId: 1, ncaaPlayerSeq: 2 });
+    expect(bad.isError).toBe(true);
   });
 
   it("watchlist_list respects the active filter", async () => {

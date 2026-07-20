@@ -14,23 +14,29 @@ import type { ServiceDeps } from "../server/deps.js";
 import { healthSnapshot } from "../server/health.js";
 import {
   PlayerNotFoundError,
+  UnknownNcaaPlayerError,
   UnknownPersonError,
+  addNcaaPlayer,
   addPlayer,
   deactivatePlayer,
   listPlayers,
   searchPlayers,
 } from "../watchlist/service.js";
 import {
+  AddNcaaPlayerInputSchema,
   AddPlayerInputSchema,
+  DeactivateInputSchema,
+  DeactivateInputShape,
   PlayerSearchInputSchema,
   PlayersListInputSchema,
   RefreshInputSchema,
+  RefreshInputShape,
   SqlQueryInputSchema,
   StatLineQuerySchema,
 } from "../api/schemas.js";
 
 /**
- * The MCP server — Bryce's primary interface (ADR 0027). Ten tools over the
+ * The MCP server — Bryce's primary interface (ADR 0027). Eleven tools over the
  * same service layer and Zod schemas the REST routes use; every result is
  * JSON, returned both as structuredContent and as a text part for clients
  * that read only text. Mounted at /mcp behind the bearer middleware.
@@ -52,6 +58,7 @@ function errorResult(err: unknown): CallToolResult {
     err instanceof ZodError
       ? `invalid input: ${err.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`
       : err instanceof UnknownPersonError ||
+          err instanceof UnknownNcaaPlayerError ||
           err instanceof PlayerNotFoundError ||
           err instanceof ReadonlyQueryError ||
           err instanceof MlbApiError
@@ -104,16 +111,35 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
   );
 
   server.registerTool(
-    "watchlist_deactivate",
+    "watchlist_add_ncaa",
     {
       description:
-        "Deactivate a watch-list player by personId. His row and full stat history are kept.",
-      inputSchema: AddPlayerInputSchema.shape,
+        "Add an NCAA player to the watch list by stats.ncaa.org stats_player_seq. His name and school are resolved from his game-log page, and his current season is backfilled immediately (his first Refresh) unless the pipeline is in Offseason Sleep.",
+      inputSchema: AddNcaaPlayerInputSchema.shape,
     },
     (args) =>
       guarded(async () => {
-        const input = AddPlayerInputSchema.parse(args);
-        return jsonResult({ player: await deactivatePlayer(deps, input.personId) });
+        const input = AddNcaaPlayerInputSchema.parse(args);
+        const result = await addNcaaPlayer(deps, input.ncaaPlayerSeq);
+        return jsonResult({ action: result.action, player: result.player, refresh: result.refresh });
+      }),
+  );
+
+  server.registerTool(
+    "watchlist_deactivate",
+    {
+      description:
+        "Deactivate a watch-list player by personId (MLB/MiLB) or ncaaPlayerSeq (NCAA) — exactly one. His row and full stat history are kept.",
+      inputSchema: DeactivateInputShape,
+    },
+    (args) =>
+      guarded(async () => {
+        const input = DeactivateInputSchema.parse(args);
+        const ref =
+          input.ncaaPlayerSeq !== undefined
+            ? { ncaaPlayerSeq: input.ncaaPlayerSeq }
+            : input.personId!;
+        return jsonResult({ player: await deactivatePlayer(deps, ref) });
       }),
   );
 
@@ -193,20 +219,26 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "run_refresh",
     {
       description:
-        "Run a refresh now: re-ingest the full current season for every active player, or just one player when personId is given. No-op during Offseason Sleep.",
-      inputSchema: RefreshInputSchema.shape,
+        "Run a refresh now: re-ingest the full current season for every active player, or just one player when personId (MLB/MiLB) or ncaaPlayerSeq (NCAA) is given. No-op during Offseason Sleep.",
+      inputSchema: RefreshInputShape,
     },
     (args) =>
       guarded(async () => {
         const input = RefreshInputSchema.parse(args);
-        if (input.personId === undefined) {
+        if (input.personId === undefined && input.ncaaPlayerSeq === undefined) {
           return jsonResult({ ...(await runRefresh(deps)) });
         }
-        const player = (
-          await deps.db.select().from(players).where(eq(players.externalId, input.personId))
-        )[0];
+        const where =
+          input.ncaaPlayerSeq !== undefined
+            ? eq(players.ncaaPlayerSeq, input.ncaaPlayerSeq)
+            : eq(players.externalId, input.personId!);
+        const player = (await deps.db.select().from(players).where(where))[0];
         if (player === undefined) {
-          throw new PlayerNotFoundError(input.personId);
+          throw new PlayerNotFoundError(
+            input.ncaaPlayerSeq !== undefined
+              ? { ncaaPlayerSeq: input.ncaaPlayerSeq }
+              : input.personId!,
+          );
         }
         return jsonResult({ ...(await runRefreshForPlayer(deps, player.id)) });
       }),

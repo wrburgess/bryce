@@ -6,15 +6,23 @@ import type { CalendarEntry } from "../domain/season.js";
 import { hostDate, sleepWindow } from "../domain/season.js";
 import type { MlbClient, StatGroup } from "../mlb/client.js";
 import { isIngestedGameType } from "../mlb/gameTypes.js";
-import { levelForSportId, SPORT_IDS } from "../mlb/levels.js";
+import { levelForSportId, NCAA_SPORT_ID, SPORT_IDS } from "../mlb/levels.js";
 import type { GameLogSplit } from "../mlb/schemas.js";
+import type { NcaaClient } from "../ncaa/client.js";
+import { normalizeGameLog } from "../ncaa/normalize.js";
+import { parseGameLogPage } from "../ncaa/parse.js";
+import type { NcaaStatCategory } from "../ncaa/seasons.js";
+import { ncaaSeasonFor } from "../ncaa/seasons.js";
 
 export interface RefreshDeps {
   db: Db;
   client: MlbClient;
+  ncaaClient: NcaaClient;
   now: () => Date;
   tz: string;
 }
+
+const NCAA_CATEGORIES: readonly NcaaStatCategory[] = ["batting", "pitching"];
 
 export interface RefreshSummary {
   skipped: boolean;
@@ -68,13 +76,14 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
 
   const season = currentSeason(deps);
   await refreshCalendars(deps, season);
+  await refreshNcaaCalendar(deps, season, activePlayers);
 
   let playersRefreshed = 0;
   let inserted = 0;
   let updated = 0;
   for (const player of activePlayers) {
-    if (player.level === "ncaa" || player.externalId === null) continue;
-    const result = await refreshPlayer(deps, player, season);
+    const result = await refreshOnePlayer(deps, player, season);
+    if (result === null) continue;
     playersRefreshed += 1;
     inserted += result.inserted;
     updated += result.updated;
@@ -126,6 +135,140 @@ export async function refreshCalendars(deps: RefreshDeps, season: string): Promi
         },
       });
   }
+}
+
+/**
+ * Seed the sportId 22 (NCAA) season_calendar row from the bundled dates
+ * (ADR 0032) when at least one active NCAA Player is watched. No bundled entry
+ * for the year → no row, logged loudly, and NCAA is treated as not In Season.
+ */
+export async function refreshNcaaCalendar(
+  deps: RefreshDeps,
+  season: string,
+  activePlayers: PlayerRow[],
+): Promise<void> {
+  const watchingNcaa = activePlayers.some((p) => p.level === "ncaa");
+  if (!watchingNcaa) return;
+
+  const entry = ncaaSeasonFor(season);
+  if (entry === null) {
+    process.stderr.write(
+      `refresh: no bundled NCAA season lookup for year=${season}; ` +
+        `NCAA treated as not In Season (update src/ncaa/seasons.ts)\n`,
+    );
+    return;
+  }
+
+  const fetchedAt = deps.now().toISOString();
+  await deps.db
+    .insert(seasonCalendar)
+    .values({
+      sportId: NCAA_SPORT_ID,
+      season,
+      regularSeasonStart: entry.regularSeasonStart,
+      regularSeasonEnd: entry.regularSeasonEnd,
+      postSeasonStart: null,
+      postSeasonEnd: null,
+      springStart: null,
+      springEnd: null,
+      fetchedAt,
+    })
+    .onConflictDoUpdate({
+      target: [seasonCalendar.sportId, seasonCalendar.season],
+      set: {
+        regularSeasonStart: entry.regularSeasonStart,
+        regularSeasonEnd: entry.regularSeasonEnd,
+        fetchedAt,
+      },
+    });
+}
+
+/** Dispatch one active Player to the right ingest path; null = skipped. */
+async function refreshOnePlayer(
+  deps: RefreshDeps,
+  player: PlayerRow,
+  season: string,
+): Promise<{ inserted: number; updated: number } | null> {
+  if (player.level === "ncaa") {
+    if (player.ncaaPlayerSeq === null) return null; // defensive: no identity to fetch
+    if (ncaaSeasonFor(season) === null) {
+      // No bundled season lookup: skip entirely (zero HTTP), logged by refreshNcaaCalendar.
+      return null;
+    }
+    return refreshNcaaPlayer(deps, player, season);
+  }
+  if (player.externalId === null) return null;
+  return refreshPlayer(deps, player, season);
+}
+
+/**
+ * Refresh one NCAA Player (ADR 0032): fetch his batting + pitching game-log
+ * pages for the current season, normalize, and upsert idempotently on the ADR
+ * 0029 key. Identity (name/school) is refreshed from the page — a transfer
+ * CHANGES the row, never creates a second Player. No bundled season for the
+ * year → zero HTTP, nothing ingested.
+ */
+export async function refreshNcaaPlayer(
+  deps: RefreshDeps,
+  player: PlayerRow,
+  season: string,
+): Promise<{ inserted: number; updated: number }> {
+  const { db, ncaaClient, now } = deps;
+  const seq = player.ncaaPlayerSeq;
+  if (seq === null) {
+    throw new Error(`refreshNcaaPlayer requires an ncaaPlayerSeq (player id ${player.id})`);
+  }
+  if (ncaaSeasonFor(season) === null) {
+    process.stderr.write(
+      `refresh: no bundled NCAA season lookup for year=${season}; ` +
+        `skipping NCAA player id=${player.id}\n`,
+    );
+    return { inserted: 0, updated: 0 };
+  }
+
+  const existing = await db
+    .select({ gameId: statLines.gameId, statType: statLines.statType })
+    .from(statLines)
+    .where(eq(statLines.playerId, player.id));
+  const existingKeys = new Set(existing.map((r) => `${r.gameId}:${r.statType}`));
+
+  const timestamp = now().toISOString();
+  const rows: NewStatLineRow[] = [];
+  let latestFullName: string | null = null;
+  let latestSchoolName: string | null = null;
+  for (const category of NCAA_CATEGORIES) {
+    const html = await ncaaClient.getGameLogPage(seq, season, category);
+    const page = parseGameLogPage(html);
+    latestFullName = page.fullName;
+    latestSchoolName = page.schoolName;
+    rows.push(
+      ...normalizeGameLog({ playerId: player.id, seq, category, rows: page.rows, timestamp }),
+    );
+  }
+
+  // Identity refresh: a name or school change CHANGES the one Player row.
+  const identity: Partial<typeof players.$inferInsert> = { updatedAt: timestamp };
+  if (latestFullName !== null && latestFullName !== player.fullName) {
+    identity.fullName = latestFullName;
+  }
+  if (latestSchoolName !== null && latestSchoolName !== player.schoolName) {
+    identity.schoolName = latestSchoolName;
+  }
+  await db.update(players).set(identity).where(eq(players.id, player.id));
+
+  let inserted = 0;
+  let updated = 0;
+  for (const row of rows) {
+    const key = `${row.gameId}:${row.statType}`;
+    if (existingKeys.has(key)) {
+      updated += 1;
+    } else {
+      inserted += 1;
+      existingKeys.add(key);
+    }
+  }
+  await upsertStatLines(db, rows);
+  return { inserted, updated };
 }
 
 /**
@@ -278,6 +421,14 @@ export async function runRefreshForPlayer(
     throw new Error(`No player with id ${playerId}`);
   }
   const season = currentSeason(deps);
+  if (player.level === "ncaa") {
+    await refreshNcaaCalendar(deps, season, activePlayers);
+    if (player.ncaaPlayerSeq === null) {
+      return { skipped: false, inserted: 0, updated: 0 };
+    }
+    const ncaaResult = await refreshNcaaPlayer(deps, player, season);
+    return { skipped: false, ...ncaaResult };
+  }
   await refreshCalendars(deps, season);
   const result = await refreshPlayer(deps, player, season);
   return { skipped: false, ...result };
