@@ -120,6 +120,16 @@ ruby scripts/summon_reviewer.rb --mode work --base BRANCH --out OUT_FILE --ac AC
     the AC would otherwise stage Codex reviewing its own work — the one case the guard exists for.
   - `--min-bytes N` (default 200) sets the substance floor below which stdout is not a review;
     `--timeout SECONDS` (default 900) caps the wall clock. Neither is normally passed.
+  - `PLAN_FILE` and `OUT_FILE` must be **different files**. The summon clears `OUT_FILE` before it
+    runs, so an aliased pair would delete the plan before reading it; the summon refuses that with
+    a usage error rather than losing the plan (paths are compared resolved, so a symlink or a
+    relative spelling of the same file is caught too).
+  - **The Reviewer runs read-only.** Every invocation pins the Codex sandbox to `read-only`
+    (`review` via `-c sandbox_mode="read-only"`, `exec` via `-s read-only`), overriding whatever the
+    local `config.toml` or profile allows. This matters most at the **plan** gate, which runs the
+    generic `codex exec` agent at Stage 2 — before any implementation exists — where a
+    `workspace-write` inheritance would let the Reviewer modify the repository it is reviewing. The
+    prompt is not an enforcement boundary; the sandbox flag is.
 
   The GitHub-app precondition is **gone**: the CLI runs locally against the HC's own Codex session,
   so nothing needs installing on the repository. The summon script itself makes **no network call and

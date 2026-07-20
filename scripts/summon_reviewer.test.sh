@@ -163,6 +163,10 @@ make_fake_codex() {  # make_fake_codex <behavior> [floor-bytes]
   mkdir -p "$dir"
   FAKE_BIN="$dir/codex"
   FAKE_LOG="$dir/invocations.log"
+  # The review/exec invocation's argv, ONE ARGUMENT PER LINE. $FAKE_LOG joins with spaces, which
+  # cannot distinguish one argument containing a space from two arguments — and the sandbox
+  # assertions are about what is really in argv, so they read this instead.
+  FAKE_ARGV="$dir/argv.log"
   FAKE_BODY="$dir/body"
   FAKE_MARKER="$dir/child-survived"
   FAKE_STARTED="$dir/grandchild-started"
@@ -189,6 +193,8 @@ if [ "${1:-}" = "login" ]; then
   if [ "$behavior" = "login_fail" ]; then echo "not logged in" >&2; exit 1; fi
   echo "Logged in"; exit 0
 fi
+# The review/exec argv, verbatim, one argument per line.
+printf '%s\n' "$@" > "$here/argv.log"
 case "$behavior" in
   echo_stdin)   cat ;;
   empty)        : ;;
@@ -223,6 +229,17 @@ case "$behavior" in
   # so it cannot expire early and close the pipe on its own; the summon's group kill
   # is what ends it.
   holds_pipe)   cat "$here/body"; ( sleep 30 ) & ;;
+  # A backgrounded worker that CLOSES its inherited pipes (all three streams redirected away). That
+  # is the difference from `holds_pipe`: stdout reaches EOF, both drains finish, and the leader
+  # exits 0 — a completely clean success — while this worker keeps running. Nothing about the exit
+  # status or the drains can see it; only probing the process group can. It records its pid and the
+  # leader WAITS for that record before exiting, so the assertion is never racing the fixture's own
+  # startup: by the time the summon can reap the leader, the pid is on disk.
+  survivor)     ( ruby -e 'File.write(ARGV[0], Process.pid); sleep 120' "$here/grandchild-pid" ) \
+                  >/dev/null 2>&1 </dev/null &
+                w=0
+                while [ ! -s "$here/grandchild-pid" ] && [ "$w" -lt 100 ]; do sleep 0.05; w=$((w + 1)); done
+                cat "$here/body" ;;
   banner)       printf '[2026-07-20] OpenAI Codex v0.51.0\n' ;;
   # Exactly $FLOOR bytes, then one byte more than that, as the floor's two sides.
   at_floor)     head -c "$(cat "$here/floor")" /dev/zero | tr '\0' 'x' ;;
@@ -271,8 +288,15 @@ expect_status "work mode -> exit 0, OK status line" 0 "summon_reviewer: OK - wor
   ruby "$SCRIPT" --mode work --base main --out "$OUT" --codex-bin "$FAKE_BIN"
 cmp -s "$OUT" "$FAKE_BODY"
 report "work mode -> body file is the CLI's bytes, byte-for-byte" $?
-grep -qF -- "review --base main" "$FAKE_LOG"
-report "work mode -> CLI invoked as 'review --base <branch>'" $?
+grep -qF -- "review" "$FAKE_LOG"
+report "work mode -> CLI invoked as 'review'" $?
+# The WHOLE argv, exactly. The Reviewer must not be able to write to the repository it is reviewing,
+# and that is enforced by an explicit sandbox flag, never by the prompt: without one, the CLI
+# inherits whatever `workspace-write` / `danger-full-access` the local config or profile left it.
+# `codex review` (0.144.6) has no `-s/--sandbox`, so it is pinned through `-c`.
+printf 'review\n-c\nsandbox_mode="read-only"\n--base\nmain\n' > "$TMP/expect-work-argv"
+cmp -s "$FAKE_ARGV" "$TMP/expect-work-argv"
+report "work mode -> argv pins the read-only sandbox" $?
 
 make_fake_codex echo_stdin
 PLAN="$TMP/plan.md"
@@ -282,8 +306,14 @@ expect_status "plan mode -> exit 0, OK status line" 0 "summon_reviewer: OK - pla
   ruby "$SCRIPT" --mode plan --input "$PLAN" --out "$OUT" --codex-bin "$FAKE_BIN"
 grep -qF "Add the widget reaper." "$OUT"
 report "plan mode -> plan text reached the CLI on stdin" $?
-grep -qxF "exec" "$FAKE_LOG"
+grep -qF "exec" "$FAKE_LOG"
 report "plan mode -> CLI invoked as 'exec'" $?
+# Plan mode runs the GENERIC agent, which is the more dangerous of the two: `codex exec` can run
+# side-effecting shell commands, and it runs at Stage 2, BEFORE any implementation exists. `exec`
+# does expose `-s/--sandbox`, enum-validated by the arg parser.
+printf 'exec\n-s\nread-only\n' > "$TMP/expect-plan-argv"
+cmp -s "$FAKE_ARGV" "$TMP/expect-plan-argv"
+report "plan mode -> argv pins the read-only sandbox" $?
 
 # ---------------------------------------------------------------------------
 echo "Failure ladder (each classification distinct and reachable):"
@@ -389,6 +419,30 @@ done
 [ -n "$GRANDCHILD_PID" ] && ! kill -0 "$GRANDCHILD_PID" 2>/dev/null
 report "timeout -> a descendant that ignores SIGTERM is escalated to SIGKILL" $?
 kill -KILL "$GRANDCHILD_PID" 2>/dev/null
+
+# A SUCCESSFUL run must not leak a process either. The timeout and drain paths both kill the group,
+# but a CLI that backgrounds a worker which CLOSES its inherited pipes trips neither: stdout reaches
+# EOF, both drains complete, the leader exits 0, and the summon reports a clean review with that
+# worker still running. Exit status and drained pipes cannot see it — only probing the group can, so
+# the probe has to be on every exit path, not just the two failure paths.
+make_fake_codex survivor
+OUT="$TMP/survivor.md"
+expect_bounded "backgrounded worker that closes its pipes -> still a clean exit 0" 30 0 \
+  "summon_reviewer: OK - work review" \
+  ruby "$SCRIPT" --mode work --out "$OUT" --timeout 20 --codex-bin "$FAKE_BIN"
+[ -s "$OUT" ]
+report "backgrounded worker -> the review itself is still written" $?
+# Non-vacuity: "the worker is gone" proves nothing if no worker ever ran.
+[ -s "$FAKE_PIDFILE" ]
+report "survivor fixture control: the backgrounded worker really started" $?
+SURVIVOR_PID="$(cat "$FAKE_PIDFILE" 2>/dev/null)"
+SURV_WAITED=0
+while [ -n "$SURVIVOR_PID" ] && kill -0 "$SURVIVOR_PID" 2>/dev/null && [ "$SURV_WAITED" -lt 30 ]; do
+  sleep 0.1; SURV_WAITED=$((SURV_WAITED + 1))
+done
+[ -n "$SURVIVOR_PID" ] && ! kill -0 "$SURVIVOR_PID" 2>/dev/null
+report "successful run -> a backgrounded descendant does not outlive the summon" $?
+kill -KILL "$SURVIVOR_PID" 2>/dev/null
 
 # A complete review that lands in the instant the poll loop crosses its cap must
 # be reaped, not thrown away: the deadline is a cap on waiting, not a guillotine.
@@ -520,6 +574,158 @@ expect_status "reused --out: rewritten before a not_found failure" 1 "FAILED (no
   ruby "$SCRIPT" --mode work --out "$STALE_OUT" --codex-bin /nonexistent/codex
 [ ! -e "$STALE_OUT" ]
 report "a not_found failure clears the previous run's body from --out" $?
+
+# ...and on the USAGE-error paths, which were the hole the clear-up-front fix left open. A usage
+# error exits non-zero exactly like a classified failure, so "no body means no review" has to hold
+# there too; a caller that branches on the exit status (as PROJECT.md instructs) would otherwise
+# read the PREVIOUS run's critique as this one's. These are also the likeliest failures in practice.
+usage_error_clears() {  # usage_error_clears <name> <arg...>
+  local name="$1"; shift
+  make_fake_codex ok
+  run_summon ruby "$SCRIPT" --mode work --out "$STALE_OUT" --codex-bin "$FAKE_BIN"
+  if [ ! -s "$STALE_OUT" ]; then
+    report "$name" 1 "(setup: the seeding summon wrote no body)"
+    return
+  fi
+  run_summon ruby "$SCRIPT" "$@"
+  if [ "$RUN_EXIT" = "0" ]; then
+    report "$name" 1 "(want a non-zero exit, got 0)"
+  elif [ -e "$STALE_OUT" ]; then
+    report "$name" 1 "(the previous run's body survived)"
+  else
+    report "$name" 0
+  fi
+}
+
+usage_error_clears "missing --mode clears a reused --out" \
+  --out "$STALE_OUT"
+usage_error_clears "--mode bogus clears a reused --out" \
+  --mode bogus --out "$STALE_OUT"
+usage_error_clears "plan mode without --input clears a reused --out" \
+  --mode plan --out "$STALE_OUT"
+usage_error_clears "a missing --input file clears a reused --out" \
+  --mode plan --input "$TMP/no-such-plan.md" --out "$STALE_OUT"
+usage_error_clears "--timeout 0 clears a reused --out" \
+  --mode work --timeout 0 --out "$STALE_OUT"
+usage_error_clears "a negative --min-bytes clears a reused --out" \
+  --mode work --min-bytes -1 --out "$STALE_OUT"
+# Rejected by OptionParser BEFORE the script's own validation runs at all — a different code path to
+# the same non-zero exit, and the invariant does not get to depend on which one you took.
+usage_error_clears "an unknown flag clears a reused --out" \
+  --mode work --out "$STALE_OUT" --nonsense
+
+# ---------------------------------------------------------------------------
+echo "--out must not alias --input (the clear would destroy the plan):"
+
+# The clear above runs BEFORE the plan is read. So when --out and --input name one file, the summon
+# deletes the plan it was asked to critique and then finds nothing to critique — a silent loss of
+# the input, caused by the very fix that stops stale bodies. Refused up front instead, and refused
+# BEFORE anything is cleared, or the refusal would itself do the damage.
+ALIAS_DIR="$TMP/alias"
+mkdir -p "$ALIAS_DIR"
+ALIAS_PLAN="$ALIAS_DIR/plan.md"
+ALIAS_LINK="$ALIAS_DIR/link-to-plan.md"
+printf '## Implementation Plan\n1. Add the widget reaper.\n' > "$ALIAS_PLAN"
+ALIAS_SUM="$(cksum < "$ALIAS_PLAN")"
+
+# Re-seeds the fixture before EVERY case. Without this each case inherits the wreckage of the last,
+# so a case could "fail correctly" on a revert for a reason that has nothing to do with what it
+# tests — and the symlink cases in particular have to stand on their own evidence.
+reseed_alias() {
+  rm -f "$ALIAS_PLAN" "$ALIAS_LINK"
+  printf '## Implementation Plan\n1. Add the widget reaper.\n' > "$ALIAS_PLAN"
+  ln -sf "$ALIAS_PLAN" "$ALIAS_LINK"
+}
+alias_plan_intact() {
+  [ -f "$ALIAS_PLAN" ] && [ "$(cksum < "$ALIAS_PLAN" 2>/dev/null)" = "$ALIAS_SUM" ]
+}
+
+reseed_alias
+make_fake_codex ok
+expect_status "--out identical to --input -> usage error" 1 "usage error" \
+  ruby "$SCRIPT" --mode plan --input "$ALIAS_PLAN" --out "$ALIAS_PLAN" --codex-bin "$FAKE_BIN"
+alias_plan_intact
+report "--out identical to --input -> the input file survives unmodified" $?
+[ ! -e "$FAKE_LOG" ]
+report "--out identical to --input -> the CLI is never spawned" $?
+
+# Two spellings of one path. A string compare passes this straight through to the clear, which is
+# why the check resolves both sides instead.
+reseed_alias
+run_summon bash -c 'cd "$1" && exec ruby "$2" --mode plan --input ./plan.md --out plan.md --codex-bin "$3"' \
+  _ "$ALIAS_DIR" "$SCRIPT" "$FAKE_BIN"
+[ "$RUN_EXIT" = "1" ] && printf '%s\n' "$ERR_TEXT" | grep -qF "usage error"
+report "--out './plan.md' vs --input 'plan.md' -> usage error" $?
+alias_plan_intact
+report "relative-path alias -> the input file survives unmodified" $?
+
+# A symlink is a third spelling. Here the plan itself survives a clear — `File.delete` unlinks the
+# LINK, not its target — so the evidence is the link: an aliased --out that is a symlink to the
+# input gets destroyed and then written through, which is how the plan gets overwritten in the end.
+reseed_alias
+expect_status "--out is a symlink to --input -> usage error" 1 "usage error" \
+  ruby "$SCRIPT" --mode plan --input "$ALIAS_PLAN" --out "$ALIAS_LINK" --codex-bin "$FAKE_BIN"
+[ -L "$ALIAS_LINK" ]
+report "symlink alias -> the symlink to the plan is not cleared" $?
+alias_plan_intact
+report "symlink alias -> the input file survives unmodified" $?
+
+# The mirror image: --input is the symlink, --out the real file. Same one file, so same refusal —
+# and this direction DOES delete the plan outright, because --out names it directly.
+reseed_alias
+expect_status "--input is a symlink to --out -> usage error" 1 "usage error" \
+  ruby "$SCRIPT" --mode plan --input "$ALIAS_LINK" --out "$ALIAS_PLAN" --codex-bin "$FAKE_BIN"
+alias_plan_intact
+report "reverse symlink alias -> the input file survives unmodified" $?
+
+# The check must not over-reach: two DIFFERENT files in one directory are the normal case, and a
+# symlink that points somewhere ELSE is not an alias at all.
+reseed_alias
+ALIAS_OUT="$ALIAS_DIR/review.md"
+make_fake_codex echo_stdin
+expect_status "distinct --input and --out in one directory -> still runs" 0 \
+  "summon_reviewer: OK - plan review" \
+  ruby "$SCRIPT" --mode plan --input "$ALIAS_PLAN" --out "$ALIAS_OUT" --codex-bin "$FAKE_BIN"
+[ -s "$ALIAS_OUT" ] && alias_plan_intact
+report "distinct --input and --out -> both files present, plan unmodified" $?
+
+# A symlink pointing at a DIFFERENT file must not be mistaken for an alias either — resolving both
+# sides has to sharpen the comparison, not widen it into refusing ordinary invocations.
+reseed_alias
+OTHER_LINK="$ALIAS_DIR/link-to-review.md"
+ln -sf "$ALIAS_OUT" "$OTHER_LINK"
+make_fake_codex echo_stdin
+expect_status "--out is a symlink to a DIFFERENT file -> still runs" 0 \
+  "summon_reviewer: OK - plan review" \
+  ruby "$SCRIPT" --mode plan --input "$ALIAS_PLAN" --out "$OTHER_LINK" --codex-bin "$FAKE_BIN"
+alias_plan_intact
+report "non-aliasing symlink -> the plan is untouched" $?
+
+# ---------------------------------------------------------------------------
+echo "A failed final write leaves no partial review:"
+
+# The write can die PART WAY — a full filesystem, an exceeded file-size limit — after the
+# destination already exists. A truncated critique sitting at --out under a non-zero exit is the
+# stale-body failure wearing a different hat: the caller cannot tell half a review from a whole one.
+# `ulimit -f 1` caps writes at one 512-byte block and SIGXFSZ is ignored so the write RETURNS EFBIG
+# rather than killing Ruby outright, which reproduces exactly that: creation succeeds, the write
+# does not. A non-atomic write leaves the partial at --out; an atomic one leaves nothing.
+make_fake_codex ok
+head -c 4000 /dev/zero | tr '\0' 'R' > "$FAKE_BODY"
+PARTIAL_OUT="$TMP/partial.md"
+run_summon bash -c 'ulimit -f 1; trap "" XFSZ; exec ruby "$1" --mode work --out "$2" --codex-bin "$3"' \
+  _ "$SCRIPT" "$PARTIAL_OUT" "$FAKE_BIN"
+[ "$RUN_EXIT" != "0" ]
+report "a write that fails part way -> non-zero exit" $?
+printf '%s\n' "$ERR_TEXT" | grep -qF "cannot write output"
+report "a write that fails part way -> a readable write error" $?
+! grep -qE '\.rb:[0-9]+:in' "$STDERR_FILE"
+report "a write that fails part way -> no Ruby backtrace" $?
+[ ! -e "$PARTIAL_OUT" ]
+report "a write that fails part way -> NO partial review at --out" $?
+# The temp file is an implementation detail the caller must never be left holding either.
+[ -z "$(find "$TMP" -maxdepth 1 -name '.summon_reviewer.*.tmp' 2>/dev/null)" ]
+report "a write that fails part way -> the temp file is cleaned up too" $?
 
 echo "Failure ladder, continued:"
 

@@ -43,9 +43,18 @@
 # must therefore branch on the EXIT STATUS (any non-zero = summon failed, fall back to the secondary
 # Reviewer), using the classification only to explain which failure it was.
 #
-# --out is CLEARED before the CLI is spawned. The path is reused across summons, so a failed run must
-# not leave a previous run's review sitting there to be mistaken for this one's: no body file means no
-# review, on every failure path.
+# --out is CLEARED before the CLI is spawned, INCLUDING on the usage-error paths. The path is reused
+# across summons, so a failed run must not leave a previous run's review sitting there to be mistaken
+# for this one's: no body file means no review, on every failure path. The final write is ATOMIC
+# (temp file in the same directory, then rename), so a write that dies part way leaves no truncated
+# review behind either, and a concurrent reader never sees a half-written body.
+#
+# --input and --out may NOT name the same file (compared on resolved paths, so `./p.md`, `p.md` and a
+# symlink to either collide): the clear above would destroy the plan before it is read. That is a
+# usage error, and it is refused BEFORE anything is cleared.
+#
+# Every CLI invocation is pinned to the Codex sandbox mode `read-only`, so the Reviewer cannot write
+# to the repository it is reviewing whatever the local Codex config or profile allows.
 #
 # Exit status: 0 when the review succeeded (classification `ok`); 1 for every failure.
 
@@ -160,14 +169,26 @@ class SummonReviewer
   end
 
   def run
+    # Checked FIRST, ahead of everything below that clears --out. When --out and --input name the
+    # same file, clearing the destination DELETES the plan this run was asked to critique — and the
+    # loss is silent, because the clear is precisely what makes the later read find nothing.
+    alias_problem = out_aliases_input
+    return usage_error(alias_problem) if alias_problem
+
     problem = usage_problem
-    return usage_error(problem) if problem
+    # Only meaningful once --out is known to be present and well-formed, so it is skipped when
+    # usage validation already has something to say.
+    write_problem = problem ? nil : out_path_problem
 
-    write_problem = out_path_problem
-    return write_error(write_problem) if write_problem
-
-    # Clear the destination before ANY failure can occur, so no failure path can leave a stale body.
+    # Clear the destination before ANY failure return, INCLUDING a usage error. --out is reused
+    # across summons, so a non-zero exit that leaves the previous run's review sitting there is the
+    # stale-body failure this clear exists to prevent — and a malformed command is the LIKELIEST
+    # failure in practice, not an exemption from the invariant. This is safe here only because the
+    # aliasing check above already refused the one case where clearing destroys an input.
     clear_problem = clear_out
+
+    return usage_error(problem) if problem
+    return write_error(write_problem) if write_problem
     return write_error(clear_problem) if clear_problem
 
     # Refuse before spawning anything: a self-review is a policy failure, not a CLI failure.
@@ -209,14 +230,24 @@ class SummonReviewer
                     detail(body))
     end
 
-    begin
-      File.binwrite(@out, body)
-    rescue SystemCallError, IOError => e
-      return write_error("#{ascii(@out)} (#{ascii(e.class.name)})")
-    end
+    body_problem = write_body(body)
+    return write_error(body_problem) if body_problem
 
     puts "summon_reviewer: OK - #{@mode} review, #{body.bytesize} bytes -> #{ascii(@out)}"
     0
+  end
+
+  # Clears --out after the OPTION PARSER rejected the command line, before `run` is ever reached.
+  # An unrecognised flag or an unparseable --timeout is a usage error like any other and exits
+  # non-zero the same way, so it must not leave the previous run's review readable at a reused
+  # --out either — the invariant cannot depend on which of the two validation paths caught the
+  # mistake. Subject to the SAME aliasing guard as `run`: a half-parsed command line is exactly
+  # where an aliased --out/--input pair would otherwise be destroyed for nothing. OptionParser
+  # consumes left to right, so --out may not have been seen at all, in which case this is a no-op.
+  def clear_stale_out
+    return if out_aliases_input
+
+    clear_out
   end
 
   private
@@ -240,6 +271,41 @@ class SummonReviewer
 
   def self_review? = @ac.to_s.strip.downcase == SELF_REVIEW_AC
 
+  # Refuses --input and --out naming the SAME file. `clear_out` deletes the destination before the
+  # CLI is spawned, and `stdin_for` reads the input AFTER that — so an aliased pair silently
+  # destroys the plan and then critiques nothing. Checked in EVERY mode, not just plan mode: a
+  # mode-scoped check would skip a run whose --mode is itself invalid (`--mode bogus --input p
+  # --out p`), and that run still reaches the clear.
+  #
+  # Compared on RESOLVED paths, never on the strings the caller typed: `plan.md`, `./plan.md`,
+  # `../dir/plan.md` and a symlink pointing at any of them are spellings of ONE file, and a string
+  # compare would wave three of the four straight through to the clear.
+  def out_aliases_input
+    return nil if blank?(@input) || blank?(@out)
+    return nil unless resolved_path(@input) == resolved_path(@out)
+
+    "--input and --out name the same file (#{ascii(@out)}) - refusing, because clearing --out " \
+      "would destroy the input this run was given"
+  end
+
+  # The canonical path, as far as the filesystem can answer. `File.realpath` resolves symlinks but
+  # RAISES on a path that does not exist — which --out usually does not, and a broken symlink never
+  # does. So a missing leaf falls back to a realpath'd DIRECTORY plus the literal basename (which
+  # still collapses `.`, `..` and a symlinked parent), and a missing directory to `expand_path`,
+  # which at least makes both sides absolute. Each step is strictly weaker than the one before it,
+  # so the comparison degrades rather than raising.
+  def resolved_path(path)
+    File.realpath(path)
+  rescue SystemCallError
+    begin
+      File.join(File.realpath(File.dirname(path)), File.basename(path))
+    rescue SystemCallError
+      File.expand_path(path)
+    end
+  end
+
+  def blank?(value) = value.nil? || value.to_s.empty?
+
   # Checked BEFORE the CLI is spawned: discovering the destination is unwritable after a 15-minute
   # review would throw away the review itself.
   def out_path_problem
@@ -256,21 +322,77 @@ class SummonReviewer
   # sitting there, where it reads as this run's critique — the worst possible failure for this script,
   # since a stale review looks exactly like a fresh one. "A failed summon leaves no body" has to hold
   # against a REUSED path, not just a fresh one, so the clear happens up front rather than on each of
-  # the eight failure returns.
+  # the eight failure returns — and on the USAGE-error returns too, which exit non-zero like any
+  # other failure and are the likeliest failure an operator actually hits.
+  #
+  # Guarded on a blank --out because it now runs BEFORE the usage error for a missing --out is
+  # returned; `File.exist?(nil)` would raise a TypeError where a usage message belongs.
   def clear_out
+    return nil if blank?(@out)
+
     File.delete(@out) if File.exist?(@out)
     nil
   rescue SystemCallError, IOError => e
     "#{ascii(@out)} could not be cleared (#{ascii(e.class.name)})"
   end
 
+  # Writes the review to --out ATOMICALLY: a temp file in the SAME directory (so the rename is a
+  # metadata operation on one filesystem, never a copy), then `File.rename`. Two failures close
+  # here. A write that dies PART WAY — a full filesystem, an exceeded file-size limit — used to
+  # leave a TRUNCATED review at --out under a non-zero exit, which is the stale-body failure again
+  # wearing a different hat: a caller cannot tell a half-written critique from a whole one. And a
+  # concurrent reader could observe a body mid-write. Rename makes --out go from absent to complete
+  # in one step, and the partial is discarded on the failure path, so no body still means no review.
+  #
+  # The temp name is FIXED-LENGTH (pid, not the basename): deriving it from a long --out basename
+  # would push it past NAME_MAX and fail a write that used to succeed, turning a crash-safety fix
+  # into a new failure. The pid keeps two summons sharing one directory from colliding.
+  def write_body(body)
+    tmp = File.join(File.dirname(@out), ".summon_reviewer.#{Process.pid}.tmp")
+    begin
+      File.binwrite(tmp, body)
+      File.rename(tmp, @out)
+      nil
+    rescue SystemCallError, IOError => e
+      discard(tmp)
+      "#{ascii(@out)} (#{ascii(e.class.name)})"
+    end
+  end
+
+  # Best-effort removal of the temp file on the write failure path. Deliberately silent: a failure
+  # to clean up must not mask the write failure that caused it.
+  def discard(path)
+    File.delete(path) if File.exist?(path)
+  rescue SystemCallError, IOError
+    nil
+  end
+
   # --- invocation ------------------------------------------------------------
+
+  # EVERY invocation is pinned to the CLI's read-only sandbox. The Reviewer must not be able to
+  # write to the repository it is reviewing, and the prompt cannot enforce that — prompt wording is
+  # not an enforcement boundary. Without an explicit policy both commands INHERIT whatever the local
+  # `config.toml` or profile left them, and plan mode runs the GENERIC `codex exec` agent, which
+  # under `workspace-write` or `danger-full-access` can edit the tree or run side-effecting commands
+  # BEFORE Stage 3 has written a line.
+  #
+  # Two mechanisms because the two subcommands expose different ones, verified against codex-cli
+  # 0.144.6 rather than assumed:
+  #   - `codex exec` takes `-s/--sandbox`, enum-validated by the arg parser
+  #     (`read-only | workspace-write | danger-full-access`).
+  #   - `codex review` has NO `-s` flag, so it is pinned through `-c`, which the same enum validates
+  #     at config load (a bad value errors with `unknown variant ... in sandbox_mode`).
+  # Both forms override a profile: measured with a profile setting `danger-full-access`, the run
+  # header reported `sandbox: read-only` with either flag, and `sandbox: danger-full-access` with
+  # neither. A typo cannot fail open — both mechanisms reject an unknown value loudly.
+  SANDBOX_MODE = "read-only"
+  SANDBOX_CONFIG = %(sandbox_mode="#{SANDBOX_MODE}").freeze
 
   def command_for(bin)
     if @mode == "work"
-      [bin, "review", "--base", @base]
+      [bin, "review", "-c", SANDBOX_CONFIG, "--base", @base]
     else
-      [bin, "exec"]
+      [bin, "exec", "-s", SANDBOX_MODE]
     end
   end
 
@@ -363,6 +485,13 @@ class SummonReviewer
       return { status: :drain_timeout, exit_code: code, stdout: stdout, stderr: stderr }
     end
 
+    # EVERY exit path, not just the timeout and drain paths. The leader exiting with both pipes at
+    # EOF proves only that the LEADER is done: a CLI that backgrounds a worker which closes its
+    # inherited stdout/stderr lets both drains reach EOF and the leader exit 0, so a clean success
+    # arrives here with a process still running in the group. `pgroup: true` exists to make that
+    # killable, and until now nothing on this path killed it — the summon returned OK and leaked it
+    # into the caller's session.
+    sweep_group(pid)
     { status: ok ? :ok : :exit_nonzero, exit_code: code, stdout: stdout, stderr: stderr }
   ensure
     [in_r, in_w, out_r, out_w, err_r, err_w].each { |io| io.close unless io.nil? || io.closed? }
@@ -443,6 +572,19 @@ class SummonReviewer
     Process.waitpid(pid) unless reaped
   rescue Errno::ECHILD
     nil
+  end
+
+  # Terminates whatever is STILL in the child's group once the leader has been reaped. PROBED first,
+  # so the overwhelmingly common case — an empty group — costs one signal-0 and adds no delay to a
+  # healthy review; only a group with survivors pays the TERM/grace/KILL ladder. `reap_leader:
+  # false` because the leader is already reaped by here: only its survivors need telling.
+  #
+  # The residual hazard is PID reuse — the reaped leader's pid could in principle name a different
+  # group by the time it is signalled. That window is the same one the drain path has always had,
+  # and it is bounded by how fast the OS recycles a pid through its whole space, which is not a
+  # thing that happens between a `waitpid` and the next syscall.
+  def sweep_group(pid)
+    kill_group(pid, reap_leader: false) unless group_gone?(pid)
   end
 
   # Signals the process group led by `pid`. A group that is already gone (or was never ours to signal)
@@ -604,6 +746,7 @@ if $PROGRAM_NAME == __FILE__
     # backtrace, which is not a usable error message for a caller. The message quotes the offending
     # ARGUMENT back, so it carries whatever bytes the caller typed — it goes through the same ASCII
     # rendering as every other message, or a non-ASCII flag puts raw bytes on stderr.
+    SummonReviewer.new(**options).clear_stale_out
     warn "summon_reviewer: usage error - #{SummonReviewer.bounded(e.message)}"
     warn SummonReviewer::USAGE
     exit 1
