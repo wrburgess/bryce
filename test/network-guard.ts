@@ -4,7 +4,7 @@ import https from "node:https";
 import net from "node:net";
 import tls from "node:tls";
 
-const networkEnabled = /^(1|true|yes)$/i.test(process.env.BRYCE_TEST_ALLOW_NETWORK ?? "");
+const networkEnabled = (process.env.BRYCE_TEST_ALLOW_NETWORK ?? "") === "1";
 
 if (!networkEnabled) {
   const blocked = (path: string, target?: string): never => {
