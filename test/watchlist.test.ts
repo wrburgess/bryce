@@ -162,6 +162,7 @@ describe("watch-list service", () => {
         ],
       }),
       "2649785:pitching": makeNcaaGameLogHtml({ fullName, schoolName, rows: [] }),
+      "2649785:fielding": makeNcaaGameLogHtml({ fullName, schoolName, rows: [] }),
     });
 
     it("creates the NCAA row, resolves name/school, and backfills his season", async () => {
@@ -243,6 +244,7 @@ describe("watch-list service", () => {
         ...ncaaPages("College Guy", "LSU"),
         "2650000:batting": makeNcaaGameLogHtml({ fullName: "Winter Guy", schoolName: "Duke", rows: [] }),
         "2650000:pitching": makeNcaaGameLogHtml({ fullName: "Winter Guy", schoolName: "Duke", rows: [] }),
+        "2650000:fielding": makeNcaaGameLogHtml({ fullName: "Winter Guy", schoolName: "Duke", rows: [] }),
       };
       await addNcaaPlayer(deps(), 2649785);
 

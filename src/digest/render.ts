@@ -1,10 +1,20 @@
 import type { Level } from "../mlb/levels.js";
 import { MILB_LEVEL_ORDER } from "../mlb/levels.js";
+import {
+  formatIp,
+  ipToOuts,
+  qualityStart,
+  singleGameEra,
+  singleGameK9,
+  singleGameWhip,
+} from "./rates.js";
 
 /**
  * Digest rendering: HTML + plain-text parts, single-column simple markup
  * readable in iPhone Mail. Stat Lines are per-game (ADR 0029); the
- * "Game 1"/"Game 2" doubleheader labels here are presentation only.
+ * "Game 1"/"Game 2" doubleheader labels here are presentation only. Stat text
+ * is the HC-specified fixed format (ADR 0033) — every stat always shown,
+ * zeros included, single-game rates.
  */
 
 export interface RenderPlayer {
@@ -19,6 +29,7 @@ export interface RenderPlayer {
 export interface RenderLine {
   player: RenderPlayer;
   gameId: number;
+  /** Never "fielding": fielding rows merge into batting lines at assembly (ADR 0033). */
   statType: "batting" | "pitching";
   gameDate: string;
   gameNumber: number;
@@ -38,41 +49,62 @@ const num = (stats: Record<string, unknown>, key: string): number => {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
 };
 
-const countLabel = (n: number, label: string): string => (n === 1 ? label : `${n} ${label}`);
-
+/**
+ * Fixed-format batting line (ADR 0033): every stat always shown, zeros
+ * included, in the HC-specified order. PA comes from the source when present;
+ * the AB + BB + HBP fallback is belt-and-suspenders (NCAA rows derive PA at
+ * ingest). E arrives merged from the same game's fielding row (assemble.ts).
+ */
 export function formatBattingLine(stats: Record<string, unknown>): string {
-  const parts: string[] = [`${num(stats, "hits")}-${num(stats, "atBats")}`];
-  const extras: Array<[string, string]> = [
-    ["homeRuns", "HR"],
-    ["triples", "3B"],
-    ["doubles", "2B"],
-    ["runs", "R"],
-    ["rbi", "RBI"],
-    ["stolenBases", "SB"],
-    ["baseOnBalls", "BB"],
-    ["strikeOuts", "K"],
+  const pa =
+    typeof stats.plateAppearances === "number" && Number.isFinite(stats.plateAppearances)
+      ? stats.plateAppearances
+      : num(stats, "atBats") + num(stats, "baseOnBalls") + num(stats, "hitByPitch");
+  const parts: Array<[string, number]> = [
+    ["PA", pa],
+    ["H", num(stats, "hits")],
+    ["K", num(stats, "strikeOuts")],
+    ["2B", num(stats, "doubles")],
+    ["3B", num(stats, "triples")],
+    ["HR", num(stats, "homeRuns")],
+    ["RBI", num(stats, "rbi")],
+    ["R", num(stats, "runs")],
+    ["SB", num(stats, "stolenBases")],
+    ["CS", num(stats, "caughtStealing")],
+    ["E", num(stats, "errors")],
+    ["BB", num(stats, "baseOnBalls")],
   ];
-  for (const [key, label] of extras) {
-    const n = num(stats, key);
-    if (n > 0) parts.push(countLabel(n, label));
-  }
-  return parts.join(", ");
+  return parts.map(([label, value]) => `${label} ${value}`).join(", ");
 }
 
+/**
+ * Fixed-format pitching line (ADR 0033): every stat always shown, in the
+ * HC-specified order. ERA/WHIP/K-9 are SINGLE-GAME rates (this outing only);
+ * zero or unparseable IP renders them "-". HA/HRA are hits/home runs allowed;
+ * HLD is absent from NCAA data and renders 0.
+ */
 export function formatPitchingLine(stats: Record<string, unknown>): string {
-  const ip = typeof stats.inningsPitched === "string" ? stats.inningsPitched : "0.0";
-  const parts = [
-    `${ip} IP`,
-    `${num(stats, "hits")} H`,
-    `${num(stats, "earnedRuns")} ER`,
-    `${num(stats, "baseOnBalls")} BB`,
-    `${num(stats, "strikeOuts")} K`,
+  const ip = formatIp(stats.inningsPitched);
+  const outs = ipToOuts(ip);
+  const er = num(stats, "earnedRuns");
+  const k = num(stats, "strikeOuts");
+  const bb = num(stats, "baseOnBalls");
+  const ha = num(stats, "hits");
+  const parts: Array<[string, number | string]> = [
+    ["IP", ip],
+    ["ER", er],
+    ["K", k],
+    ["K/9", singleGameK9(k, outs)],
+    ["BB", bb],
+    ["HA", ha],
+    ["HRA", num(stats, "homeRuns")],
+    ["ERA", singleGameEra(er, outs)],
+    ["WHIP", singleGameWhip(bb, ha, outs)],
+    ["S", num(stats, "saves")],
+    ["HLD", num(stats, "holds")],
+    ["QS", qualityStart(outs, er)],
   ];
-  const line = parts.join(", ");
-  if (num(stats, "wins") > 0) return `${line} (W)`;
-  if (num(stats, "losses") > 0) return `${line} (L)`;
-  if (num(stats, "saves") > 0) return `${line} (SV)`;
-  return line;
+  return parts.map(([label, value]) => `${label} ${value}`).join(", ");
 }
 
 export function escapeHtml(s: string): string {

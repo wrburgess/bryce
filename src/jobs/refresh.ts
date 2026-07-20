@@ -22,7 +22,7 @@ export interface RefreshDeps {
   tz: string;
 }
 
-const NCAA_CATEGORIES: readonly NcaaStatCategory[] = ["batting", "pitching"];
+const NCAA_CATEGORIES: readonly NcaaStatCategory[] = ["batting", "pitching", "fielding"];
 
 export interface RefreshSummary {
   skipped: boolean;
@@ -32,7 +32,7 @@ export interface RefreshSummary {
   statLinesUpdated: number;
 }
 
-const STAT_GROUPS: readonly StatGroup[] = ["hitting", "pitching"];
+const STAT_GROUPS: readonly StatGroup[] = ["hitting", "pitching", "fielding"];
 const UPSERT_CHUNK = 50;
 
 export async function loadCalendars(db: Db): Promise<CalendarEntry[]> {
@@ -202,8 +202,8 @@ async function refreshOnePlayer(
 }
 
 /**
- * Refresh one NCAA Player (ADR 0032): fetch his batting + pitching game-log
- * pages for the current season, normalize, and upsert idempotently on the ADR
+ * Refresh one NCAA Player (ADR 0032): fetch his batting + pitching + fielding
+ * game-log pages for the current season, normalize, and upsert idempotently on the ADR
  * 0029 key. Identity (name/school) is refreshed from the page — a transfer
  * CHANGES the row, never creates a second Player. No bundled season for the
  * year → zero HTTP, nothing ingested.
@@ -274,7 +274,7 @@ export async function refreshNcaaPlayer(
 /**
  * Refresh one Player: current identity/location first (a call-up CHANGES the
  * row — one Player forever, per the domain model), then the full-season game
- * log across every sportId and both stat groups.
+ * log across every sportId and every stat group (hitting, pitching, fielding).
  */
 export async function refreshPlayer(
   deps: RefreshDeps,
@@ -323,7 +323,7 @@ export async function refreshPlayer(
         group,
         season,
       });
-      const statType = group === "hitting" ? "batting" : "pitching";
+      const statType = group === "hitting" ? "batting" : group;
       for (const stat of log.stats) {
         for (const split of stat.splits) {
           if (!isIngestedGameType(split.gameType)) continue;
@@ -349,7 +349,7 @@ export async function refreshPlayer(
 
 function splitToRow(
   playerId: number,
-  statType: "batting" | "pitching",
+  statType: "batting" | "pitching" | "fielding",
   split: GameLogSplit,
   timestamp: string,
 ): NewStatLineRow {

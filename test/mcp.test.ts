@@ -66,6 +66,7 @@ describe("MCP server over Streamable HTTP", () => {
           ],
         }),
         "2649785:pitching": makeNcaaGameLogHtml({ fullName: "College Guy", schoolName: "LSU", rows: [] }),
+        "2649785:fielding": makeNcaaGameLogHtml({ fullName: "College Guy", schoolName: "LSU", rows: [] }),
       },
     });
     api = new FakeStatsApi({

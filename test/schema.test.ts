@@ -47,15 +47,20 @@ describe("stat_lines schema invariants (ADR 0029)", () => {
     expect(new Set(rows.map((r) => r.gameId)).size).toBe(2);
   });
 
-  it("allows batting AND pitching lines for the same game (two-way player)", async () => {
+  it("allows batting, pitching, AND fielding lines for the same game", async () => {
     const player = await insertPlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id, gameId: 777001, statType: "batting" });
     await insertStatLine(opened.db, { playerId: player.id, gameId: 777001, statType: "pitching" });
+    await insertStatLine(opened.db, { playerId: player.id, gameId: 777001, statType: "fielding" });
     const rows = await opened.db
       .select()
       .from(statLines)
       .where(eq(statLines.playerId, player.id));
-    expect(rows).toHaveLength(2);
+    expect(rows).toHaveLength(3);
+    // But a SECOND fielding row for the same game hits the unique key.
+    await expect(
+      insertStatLine(opened.db, { playerId: player.id, gameId: 777001, statType: "fielding" }),
+    ).rejects.toThrow(/UNIQUE constraint failed/);
   });
 
   it("rejects a duplicate ncaa_player_seq at the DATABASE level (ADR 0032)", async () => {

@@ -68,8 +68,37 @@ describe("assembleDigest (pure digest preview)", () => {
     expect(result.playerCount).toBe(assembly.playerCount);
 
     expect(assembly.date).toBe("2026-07-19");
-    expect(previewMail.text).toContain("2026-07-18 vs Charlotte Knights: 2-4, HR, 3 RBI");
+    expect(previewMail.text).toContain(
+      "2026-07-18 vs Charlotte Knights: PA 4, H 2, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0, BB 0",
+    );
     expect(previewMail.text).toContain("No new stats: Quiet Guy");
+  });
+
+  it("merges fielding rows into batting lines and still reports their ids", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Error Prone" });
+    const batting = await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 990001,
+      statType: "batting",
+      stats: { hits: 2, atBats: 4 },
+    });
+    const fielding = await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 990001,
+      statType: "fielding",
+      stats: { errors: 1 },
+    });
+
+    const assembly = await assembleDigest(opened.db, deps());
+    // One rendered line — the fielding row merged, never a standalone line.
+    expect(assembly.lines).toHaveLength(1);
+    expect(assembly.lines[0]?.statType).toBe("batting");
+    expect(assembly.lines[0]?.stats.errors).toBe(1);
+    // BOTH stored rows are earmarked for marking.
+    expect([...assembly.reportedIds].sort((a, b) => a - b)).toEqual(
+      [batting.id, fielding.id].sort((a, b) => a - b),
+    );
+    expect(assembly.playerCount).toBe(1);
   });
 
   it("touches no delivery rows and marks no lines (db state identical before/after)", async () => {

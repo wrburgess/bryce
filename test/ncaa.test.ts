@@ -207,6 +207,83 @@ describe("NCAA normalizer", () => {
     expect(line?.stats).toMatchObject({ baseOnBalls: 1, strikeOuts: 3 });
   });
 
+  it("canonicalizes fielding headers: E becomes errors, PO/A pass through", () => {
+    const rows = [
+      {
+        date: "2025-03-14",
+        opponentName: "Rival",
+        isHome: true,
+        contestId: 6005,
+        result: "W",
+        stats: { PO: 2, A: 3, E: 1, "FLD%": ".833" },
+      },
+    ];
+    const [line] = normalizeGameLog({ playerId: 1, seq: 42, category: "fielding", rows, timestamp: "t" });
+    expect(line?.statType).toBe("fielding");
+    expect(line?.stats).toMatchObject({ errors: 1, PO: 2, A: 3 });
+    expect(line?.stats).not.toHaveProperty("E");
+  });
+
+  it("derives PA from AB + BB + HBP + SF + SH when the page has no PA column", () => {
+    const rows = [
+      {
+        date: "2025-03-14",
+        opponentName: "Rival",
+        isHome: true,
+        contestId: 6006,
+        result: "W",
+        stats: { AB: 4, BB: 1, HBP: 1, SF: 1, H: 2 },
+      },
+    ];
+    const [line] = normalizeGameLog({ playerId: 1, seq: 42, category: "batting", rows, timestamp: "t" });
+    expect(line?.stats).toMatchObject({ plateAppearances: 7 });
+  });
+
+  it("derives PA from only the components present (AB + BB)", () => {
+    const rows = [
+      {
+        date: "2025-03-14",
+        opponentName: "Rival",
+        isHome: false,
+        contestId: 6007,
+        result: "L",
+        stats: { AB: 3, BB: 1, H: 1 },
+      },
+    ];
+    const [line] = normalizeGameLog({ playerId: 1, seq: 42, category: "batting", rows, timestamp: "t" });
+    expect(line?.stats).toMatchObject({ plateAppearances: 4 });
+  });
+
+  it("maps a PA header directly and never overrides it with the derived sum", () => {
+    const rows = [
+      {
+        date: "2025-03-14",
+        opponentName: "Rival",
+        isHome: true,
+        contestId: 6008,
+        result: "W",
+        stats: { PA: 5, AB: 3, BB: 1 },
+      },
+    ];
+    const [line] = normalizeGameLog({ playerId: 1, seq: 42, category: "batting", rows, timestamp: "t" });
+    expect(line?.stats).toMatchObject({ plateAppearances: 5 });
+  });
+
+  it("derives no PA when a batting row carries none of the components", () => {
+    const rows = [
+      {
+        date: "2025-03-14",
+        opponentName: "Rival",
+        isHome: true,
+        contestId: 6009,
+        result: "W",
+        stats: { Pos: "SS" },
+      },
+    ];
+    const [line] = normalizeGameLog({ playerId: 1, seq: 42, category: "batting", rows, timestamp: "t" });
+    expect(line?.stats).not.toHaveProperty("plateAppearances");
+  });
+
   it("uses a stable hash fallback when the contest id is missing", () => {
     const rows = [
       { date: "2025-03-14", opponentName: "Rival", isHome: true, contestId: null, result: "W", stats: { AB: 3 } },
@@ -241,6 +318,14 @@ describe("NCAA client", () => {
     expect(url).toContain("year_stat_category_id=15687");
     // org_id omitted when the school is unknown.
     expect(url).not.toContain("org_id");
+  });
+
+  it("builds the fielding game-log URL with the bundled fielding category id", () => {
+    const season = ncaaSeasonFor("2025");
+    expect(season).not.toBeNull();
+    const url = buildGameLogUrl({ seq: 2649785, season: season!, category: "fielding" });
+    expect(url).toContain("year_stat_category_id=15689");
+    expect(url).toContain("game_sport_year_ctl_id=16840");
   });
 
   it("sends the full browser header set on the request", async () => {
