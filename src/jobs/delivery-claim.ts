@@ -39,6 +39,13 @@ export type ClaimResult =
       attempt: number;
       /** True when this claim took over a lease that expired mid-flight. */
       recovered: boolean;
+      /**
+       * The `claimed_at` this claim OVERWROTE — null on a first claim or on a
+       * row that never carried one. Captured before the update because it is
+       * the crashed attempt's clock: a reconciliation lookup needs it as the
+       * lower bound of the provider search, and after the update it is gone.
+       */
+      previousClaimedAt: string | null;
     }
   | { claimed: false; reason: ClaimRefusal };
 
@@ -108,7 +115,13 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
         if (inserted === undefined) {
           throw new Error(`Failed to claim ${args.kind} delivery for ${args.dateCovered}`);
         }
-        return { claimed: true, deliveryId: inserted.id, attempt: 1, recovered: false };
+        return {
+          claimed: true,
+          deliveryId: inserted.id,
+          attempt: 1,
+          recovered: false,
+          previousClaimedAt: null,
+        };
       }
 
       if (existing.status === "sent") {
@@ -130,12 +143,19 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
       // "failed" (retry after a provider rejection) or a recovered "sending" —
       // both re-take the slot and bump the attempt counter.
       //
-      // errorMessage and providerMessageId are cleared here, not left for the
-      // settle: a `sending` row describes the attempt IN FLIGHT, so carrying the
-      // previous attempt's failure text or provider id would make the in-flight
-      // row lie to /health (the observability this whole design leans on) and
-      // would hand a future reconciliation pass a stale id to key on.
+      // errorMessage, providerMessageId and reconciledAt are cleared here, not
+      // left for the settle: a `sending` row describes the attempt IN FLIGHT, so
+      // carrying the previous attempt's failure text, provider id, or
+      // reconciliation stamp would make the in-flight row lie to /health (the
+      // observability this whole design leans on) and would hand the
+      // reconciliation pass a stale id to key on. A reconciled row is `sent` and
+      // so normally unreachable here — but an operator reopening a slot by hand
+      // (docs/guides/running-bryce.md) must not inherit a stamp for a lookup
+      // this attempt never made.
       const attempt = existing.attemptCount + 1;
+      // Read BEFORE the update overwrites it: the crashed attempt's clock is the
+      // only lower bound a reconciliation lookup can search from.
+      const previousClaimedAt = existing.claimedAt;
       tx.update(digestDeliveries)
         .set({
           status: "sending",
@@ -143,10 +163,11 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
           attemptCount: attempt,
           errorMessage: null,
           providerMessageId: null,
+          reconciledAt: null,
         })
         .where(eq(digestDeliveries.id, existing.id))
         .run();
-      return { claimed: true, deliveryId: existing.id, attempt, recovered };
+      return { claimed: true, deliveryId: existing.id, attempt, recovered, previousClaimedAt };
     },
     { behavior: "immediate" },
   );
@@ -196,6 +217,49 @@ export function settleSent(db: Db, args: SettleSentArgs): void {
           .where(inArray(statLines.id, args.reportedIds))
           .run();
       }
+    },
+    { behavior: "immediate" },
+  );
+}
+
+export interface SettleReconciledArgs {
+  deliveryId: number;
+  now: Date;
+  providerMessageId: string | null;
+}
+
+/**
+ * Settle a recovered claim as `sent` because the PROVIDER confirmed the crashed
+ * attempt already landed — no second email (ADR 0034 amendment).
+ *
+ * It marks NO Stat Lines, and that is the load-bearing decision. The crashed
+ * attempt emailed a set of lines we never recorded; Refresh may have run since,
+ * so today's assembly can contain lines that were never in that email. Marking
+ * those would report them as delivered when they were not — silent CONTENT
+ * loss, the exact failure this whole design refuses. Marking nothing costs a
+ * repeat of the crashed email's content in the next digest; content is
+ * duplicated, never lost.
+ *
+ * The counts are zeroed for the same reason: this run composed nothing, so it
+ * records nothing. `reconciled_at` is what lets an operator tell "we sent this"
+ * from "the provider told us it was already accepted".
+ */
+export function settleReconciled(db: Db, args: SettleReconciledArgs): void {
+  const nowIso = args.now.toISOString();
+  db.transaction(
+    (tx) => {
+      tx.update(digestDeliveries)
+        .set({
+          sentAt: nowIso,
+          reconciledAt: nowIso,
+          playerCount: 0,
+          statLineCount: 0,
+          status: "sent",
+          providerMessageId: args.providerMessageId,
+          errorMessage: null,
+        })
+        .where(eq(digestDeliveries.id, args.deliveryId))
+        .run();
     },
     { behavior: "immediate" },
   );

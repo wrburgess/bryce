@@ -4,7 +4,8 @@ import type { Config } from "../src/config.js";
 import { loadConfig } from "../src/config.js";
 import { ConsoleMailer } from "../src/mailer/console.js";
 import { createMailer } from "../src/mailer/index.js";
-import { PostmarkMailer } from "../src/mailer/postmark.js";
+import type { PostmarkFetch, PostmarkLookupFetch } from "../src/mailer/postmark.js";
+import { LOOKUP_TIMEOUT_MS, PostmarkMailer } from "../src/mailer/postmark.js";
 import { SmtpMailer } from "../src/mailer/smtp.js";
 
 const baseConfig: Config = {
@@ -127,6 +128,173 @@ describe("PostmarkMailer", () => {
     // A provider that answers with something unexpected yields no id — never a
     // thrown send, and never a fabricated id on the delivery row.
     expect(receipt.providerMessageId).toBeNull();
+  });
+});
+
+/**
+ * The reconciliation lookup (ADR 0034 amendment, issue #41). Every test here is
+ * really one assertion in two directions: `accepted` is the ONLY answer that may
+ * suppress a resend, and every other way the lookup can end — a miss, an HTTP
+ * error, a body we cannot read, a rejected request, a timeout — must resolve to
+ * "we do not know", which re-sends. A wrong `accepted` is silent mail loss,
+ * strictly worse than the duplicate this lookup exists to avoid, so the failure
+ * modes are written out one by one rather than collapsed into a single case.
+ */
+describe("PostmarkMailer reconciliation lookup (fail-open)", () => {
+  /** A send seam that must never fire: these tests only ever look messages up. */
+  const noSend: PostmarkFetch = () => Promise.reject(new Error("send must not run in a lookup test"));
+
+  function respondWith(body: string, init: { ok?: boolean; status?: number } = {}): PostmarkLookupFetch {
+    return () =>
+      Promise.resolve({
+        ok: init.ok ?? true,
+        status: init.status ?? 200,
+        text: () => Promise.resolve(body),
+      });
+  }
+
+  function lookupMailer(lookupFetch: PostmarkLookupFetch, lookupTimeoutMs?: number): PostmarkMailer {
+    return new PostmarkMailer("pm-token", noSend, {
+      lookupFetch,
+      ...(lookupTimeoutMs !== undefined ? { lookupTimeoutMs } : {}),
+    });
+  }
+
+  function found(status: string, messageId = "pm-found-1"): string {
+    return JSON.stringify({ TotalCount: 1, Messages: [{ MessageID: messageId, Status: status }] });
+  }
+
+  const EMPTY = JSON.stringify({ TotalCount: 0, Messages: [] });
+
+  it("GETs the metadata-filtered search with the token header, a date bound, and no body", async () => {
+    const calls: Array<{
+      url: string;
+      init: { method: string; headers: Record<string, string>; signal?: AbortSignal };
+    }> = [];
+    const mailer = lookupMailer((url, init) => {
+      calls.push({ url, init });
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(EMPTY) });
+    });
+
+    await mailer.findAccepted("bryce:digest:2026-07-19", "2026-07-19T17:00:00.000Z");
+
+    expect(calls).toHaveLength(1);
+    const call = calls[0];
+    expect(call?.init.method).toBe("GET");
+    expect(call?.init.headers["X-Postmark-Server-Token"]).toBe("pm-token");
+    // A GET carries no body — the whole query rides on the URL.
+    expect(call?.init).not.toHaveProperty("body");
+    const url = new URL(call?.url ?? "");
+    expect(`${url.origin}${url.pathname}`).toBe("https://api.postmarkapp.com/messages/outbound");
+    // Postmark filters on ONE metadata field at a time, which is exactly what
+    // the stable per-slot delivery key needs.
+    expect(url.searchParams.get("metadata_deliveryKey")).toBe("bryce:digest:2026-07-19");
+    // The crashed attempt's claim time, truncated to its UTC day — Postmark
+    // documents fromdate as a date, and truncating only widens the window.
+    expect(url.searchParams.get("fromdate")).toBe("2026-07-19");
+    expect(url.searchParams.get("count")).toBe("1");
+    expect(url.searchParams.get("offset")).toBe("0");
+  });
+
+  it("omits the date bound entirely when the crashed attempt carried no claim stamp", async () => {
+    const urls: string[] = [];
+    const mailer = lookupMailer((url) => {
+      urls.push(url);
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(EMPTY) });
+    });
+
+    await mailer.findAccepted("bryce:digest:2026-07-19", null);
+
+    // An unbounded search is still exact (the delivery key is the filter); a
+    // FABRICATED bound would not be, and could hide a real acceptance.
+    expect(new URL(urls[0] ?? "").searchParams.has("fromdate")).toBe(false);
+  });
+
+  it("reports accepted with the provider id for a Sent message", async () => {
+    const mailer = lookupMailer(respondWith(found("Sent", "b7bc2f4a-e38e-4336-af7d-e6c392c2f817")));
+    expect(await mailer.findAccepted("bryce:digest:2026-07-19", null)).toEqual({
+      outcome: "accepted",
+      providerMessageId: "b7bc2f4a-e38e-4336-af7d-e6c392c2f817",
+    });
+  });
+
+  it("reports accepted for a QUEUED message: Postmark has taken responsibility", async () => {
+    // Queued means the mail has not gone out yet but Postmark will send it.
+    // Re-sending on Queued would duplicate — this is why the outcome is named
+    // `accepted` and not `delivered`.
+    const mailer = lookupMailer(respondWith(found("Queued", "pm-queued-1")));
+    expect(await mailer.findAccepted("bryce:digest:2026-07-19", null)).toEqual({
+      outcome: "accepted",
+      providerMessageId: "pm-queued-1",
+    });
+    const processed = lookupMailer(respondWith(found("Processed", "pm-processed-1")));
+    expect(await processed.findAccepted("bryce:digest:2026-07-19", null)).toEqual({
+      outcome: "accepted",
+      providerMessageId: "pm-processed-1",
+    });
+  });
+
+  it("reports not-found when the search matches nothing", async () => {
+    const mailer = lookupMailer(respondWith(EMPTY));
+    expect(await mailer.findAccepted("bryce:digest:2026-07-19", null)).toEqual({
+      outcome: "not-found",
+    });
+  });
+
+  it("never reports accepted for a message the provider did not accept", async () => {
+    // A bounce is a message that exists and did NOT land: the slot is
+    // unconfirmed, so it must re-send.
+    const mailer = lookupMailer(respondWith(found("Bounced")));
+    expect(await mailer.findAccepted("bryce:digest:2026-07-19", null)).toEqual({
+      outcome: "not-found",
+    });
+  });
+
+  it("reports unavailable, carrying the status, on an HTTP error", async () => {
+    const mailer = lookupMailer(respondWith('{"Message":"server error"}', { ok: false, status: 500 }));
+    const result = await mailer.findAccepted("bryce:digest:2026-07-19", null);
+    expect(result.outcome).toBe("unavailable");
+    expect(result.outcome === "unavailable" && result.detail).toContain("500");
+  });
+
+  it("reports unavailable — never a false not-found — for an unreadable body", async () => {
+    // The distinction is the point: both re-send today, but `not-found` reads as
+    // "Postmark says it never arrived" when the truth is "we could not read the
+    // answer". Narrowing this to not-found is how a future change would start
+    // trusting garbage.
+    const mailer = lookupMailer(respondWith("not json"));
+    expect((await mailer.findAccepted("bryce:digest:2026-07-19", null)).outcome).toBe("unavailable");
+
+    const noMessages = lookupMailer(respondWith(JSON.stringify({ TotalCount: 1 })));
+    expect((await noMessages.findAccepted("bryce:digest:2026-07-19", null)).outcome).toBe(
+      "unavailable",
+    );
+  });
+
+  it("reports unavailable when the request itself is rejected", async () => {
+    const mailer = lookupMailer(() => Promise.reject(new Error("ENOTFOUND api.postmarkapp.com")));
+    const result = await mailer.findAccepted("bryce:digest:2026-07-19", null);
+    expect(result.outcome).toBe("unavailable");
+    expect(result.outcome === "unavailable" && result.detail).toContain("ENOTFOUND");
+  });
+
+  it("reports unavailable and aborts the request when the lookup exceeds its timeout", async () => {
+    // A recovery run that HANGS on the provider is worse than the duplicate it
+    // is avoiding. Timeout 0 against a never-settling request makes the race
+    // deterministic — no wall-clock sleep (rules/testing.md).
+    let signal: AbortSignal | undefined;
+    const mailer = lookupMailer((_url, init) => {
+      signal = init.signal;
+      return new Promise(() => undefined);
+    }, 0);
+
+    const result = await mailer.findAccepted("bryce:digest:2026-07-19", null);
+    expect(result.outcome).toBe("unavailable");
+    expect(result.outcome === "unavailable" && result.detail).toContain("timed out");
+    // The hung request is cancelled, not left dangling behind the answer.
+    expect(signal?.aborted).toBe(true);
+    // The shipped bound is five seconds (ADR 0034 amendment).
+    expect(LOOKUP_TIMEOUT_MS).toBe(5000);
   });
 });
 

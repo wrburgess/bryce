@@ -16,6 +16,10 @@ Delivery is now **claim → assemble → send → settle**.
 > **The crash-after-acceptance window is at-least-once.** A delivery whose provider acceptance was
 > never durably recorded is re-sent after its lease expires.
 
+> **The guarantee is unchanged by the amendment below.** Postmark deliveries now *additionally* try
+> to reconcile a recovered claim against the provider, which makes the duplicate **less likely**. It
+> is a probabilistic improvement on at-least-once, never a promotion to exactly-once.
+
 A duplicate email is an accepted, bounded, observable outcome. A silently missing digest is not.
 That asymmetry is the whole design: every branch that could hold a slot forever was written to
 release it instead, because the failure that matters here is silence, not noise.
@@ -82,12 +86,80 @@ artifact, not a blockage. Given a once-daily schedule the second shape is the co
 practice the duplicate usually arrives as *tomorrow's digest carrying today's lines* rather than as
 two identical emails.
 
-Closing the window properly needs provider-side reconciliation — asking the provider "did *this* slot
-already land?" before re-sending. This change makes that a pure addition rather than a second
+Narrowing the window needs provider-side reconciliation — asking the provider "did *this* slot
+already land?" before re-sending. This change made that a pure addition rather than a second
 refactor: `Mailer.send(message, context?)` now returns a `MailReceipt` and carries a stable
 per-slot `deliveryKey` (`bryce:digest:2026-07-19`) — Postmark as `Metadata`, SMTP as an
 `X-Bryce-Delivery-Key` header, the console mailer ignores it. `provider_message_id` is stored on the
-settled row. The lookup itself is deliberately **not** built here.
+settled row. The lookup itself was deliberately **not** built here; it is the amendment below.
+
+## Amendment (issue #41): reconciliation on the recovery path
+
+`Mailer` gained an **optional** capability:
+
+```ts
+findAccepted?(deliveryKey: string, since: string | null): Promise<LookupResult>;
+```
+
+Only a claim that **recovered an expired lease** consults it, and only when the provider implements
+it. On a positive answer the delivery settles `sent` with `reconciled_at` stamped and **no second
+email**. A fresh claim and a `failed`-row retry never look anything up: nothing crashed mid-flight,
+so there is nothing to ask about.
+
+**The reconciliation is strictly fail-open, and that direction is the whole design.** Here the
+dangerous failure is *inverted* from the rest of this ADR: a wrong "already accepted" **suppresses a
+real send**, which is silent mail loss — strictly worse than the duplicate the lookup avoids. So the
+`accepted` outcome is the only one that may suppress, and every other way a lookup can end re-sends
+exactly as before the amendment:
+
+| Lookup outcome | Cause | Result |
+|---|---|---|
+| `accepted` | Postmark reports the message as `Sent`, `Processed` or `Queued` | settle `sent`, no email |
+| `not-found` | no match, or a match Postmark did not accept (a bounce) | **re-send** |
+| `unavailable` | non-2xx, unreadable body, rejected request, timeout | **re-send** |
+| *(no capability)* | SMTP, console | **re-send** — documented at-least-once |
+
+`accepted` is deliberately **not** named `delivered`. `Queued` means Postmark has taken
+responsibility and will send, so suppressing our resend is correct for `Queued`, `Processed` and
+`Sent` alike; a name like `delivered` would invite a later "fix" narrowing it to `Sent`, which would
+reintroduce the duplicate. The lookup is bounded by a **5 s timeout** (`LOOKUP_TIMEOUT_MS`): a
+recovery run that hangs on a provider call is a worse failure than the duplicate it is avoiding.
+
+### Why this cannot close the window
+
+**Postmark documents no consistency guarantee for its message search.** A `not-found` moments after
+acceptance is therefore expected and simply re-sends. Issue #41 stated the search is "not
+read-your-writes"; that overstated what is known — the accurate claim is that the behaviour is
+*undocumented*, and undocumented is not the same as known-delayed. The correction is recorded here
+rather than silently dropped. Either way the code treats a miss as "we do not know", so the design
+holds whichever is true, and the guarantee stays **at-least-once**.
+
+### A reconciled delivery marks no Stat Lines
+
+This is the load-bearing decision, and it is asserted by a test rather than left as a comment.
+
+The crashed attempt emailed some set of lines and we never recorded which — that *is* the crash.
+Marking what `assembleDigest` produces *now* would be wrong: Refresh may have run between the crash
+and the recovery, so the current set can contain lines that were never in the sent email, and marking
+those reports them as delivered when they were not — **silent content loss**, the exact failure this
+whole design refuses.
+
+So a reconciled delivery settles with `stat_line_count = 0`, `player_count = 0`, and **marks
+nothing**. Every unreported line stays unreported and goes out in the next digest (ADR 0030 —
+novelty-driven, not date-windowed). The cost is that the crashed email's content repeats; that is
+duplicated *content*, never lost content, consistent with the governing principle: a duplicate is an
+accepted outcome, silence is not.
+
+### Scope
+
+- **Postmark only.** The capability is optional *by construction* — SMTP and the console mailer
+  simply do not implement it and keep the documented at-least-once behaviour, rather than carrying a
+  stub that throws.
+- **No new credential and no new inbound surface.** The lookup is one outbound `GET` to
+  `api.postmarkapp.com`, authorized by the same `POSTMARK_SERVER_TOKEN` the send already uses.
+- **One additive migration** (`drizzle/0003_reconciled_at.sql`): `reconciled_at text`, nullable. No
+  enum widening, so unlike `sending` there is no error seam to re-thread. Rolling the code back with
+  the column present is safe — older code never reads it.
 
 ## Operational notes
 

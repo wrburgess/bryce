@@ -155,6 +155,10 @@ invocations can never both mail you; the loser skips. But if Bryce dies between 
 accepting the mail and the row recording it, that acceptance is unrecoverable, and the content goes
 out again. A duplicate announces itself; a silently missing digest does not.
 
+On **Postmark**, a recovering run first asks Postmark whether that delivery already landed, and skips
+the resend when Postmark confirms it — so the duplicate is *less likely* than it used to be, never
+impossible (see *Reconciled deliveries* below). On SMTP and the console mailer nothing changed.
+
 **Reading `/health`.** `GET /health` (and the MCP `status` tool) reports the last delivery's status
 verbatim, including `sending`:
 
@@ -178,11 +182,33 @@ verbatim, including `sending`:
 
   ```sh
   sqlite3 data/bryce.db \
-    "SELECT kind, date_covered, status, attempt_count, claimed_at, sent_at, provider_message_id
+    "SELECT kind, date_covered, status, attempt_count, claimed_at, sent_at, provider_message_id,
+            reconciled_at
        FROM digest_deliveries ORDER BY id DESC LIMIT 5;"
   ```
 
   An `attempt_count` above 1 on a `sent` row is the fingerprint of a retry or a recovery.
+
+### Reconciled deliveries (Postmark only)
+
+When a run recovers a crashed claim on Postmark, it searches Postmark's outbound messages for that
+slot's delivery key before composing anything. If Postmark reports the message as `Sent`, `Processed`
+or `Queued`, the row settles `sent` with **`reconciled_at` stamped** and no second email goes out.
+That column is how you tell the two apart:
+
+- **`reconciled_at` null** — we mailed this delivery ourselves.
+- **`reconciled_at` set** — we did *not* mail it; Postmark told us the crashed attempt already had.
+  Such a row deliberately carries `stat_line_count = 0` and `player_count = 0`: this run composed
+  nothing, so it recorded nothing. The lines the crashed email contained stay unreported and go out
+  in the **next** digest — which is why you may still see that content once more. Content is
+  duplicated, never lost.
+
+**The lookup only ever suppresses on a positive answer.** A miss, an HTTP error, an unreadable
+response, or a lookup that takes longer than five seconds all fall back to re-sending — exactly the
+behaviour above. Postmark documents no consistency guarantee for its message search, so a miss
+moments after acceptance is expected; the duplicate you get in that case is the intended outcome, not
+a failed reconciliation. Nothing here needs manual action, and there is no new credential or setting:
+the lookup uses the same `POSTMARK_SERVER_TOKEN` as the send.
 
 **If an email never arrived**, reopening the slot is not the operative step — the digest is
 novelty-driven ([ADR 0030](../adr/0030-full-season-refresh-report-once-digest.md)), so the lines it
