@@ -120,14 +120,29 @@ from the drift-report:
 - [x] No debug code, no TODOs, no commented-out code
 - [x] PR description complete
 - [x] All quality checks pass (from PROJECT.md → Quality Checks)
+- [x] Self-review complete — summoning the Reviewer for an independent second-model review
 
-PR is ready for the Reviewer.
+Reviewer summoned; their findings will be answered on this PR.
 ```
 
 Sign with the attribution footer from [`PROJECT.md`](../../PROJECT.md) → *Attribution & Model
-Declaration*. Then notify the HC the PR is ready to send to the Reviewer; after Reviewer feedback the
-HC runs the review-response skill (`listen`) then the deliver skill (`final`).
+Declaration*.
 
-**Terminal artifact:** the self-review comment on the PR.
+**Then summon the Reviewer — the AC does this, not the HC.** With the self-review comment posted,
+request the independent second-model review of the PR using the Reviewer declared in
+[`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Reviewer*, which names the mechanism, its
+invocation, and the fallback order. In this host that summon is a bundled script,
+`scripts/summon_reviewer.rb` (work mode); read the Project Config for how to invoke it and never
+hardcode a command here. The order matters: the self-review comment is posted **first**, so the
+Reviewer reads a PR the AC has already attacked and confirms rather than corrects.
+
+If the summon fails, follow the *Reviewer* failure ladder in the Project Config: fall back to the
+declared fallback Reviewer, and if no Reviewer returns a review at all, **flag the missing review**
+so the deliver skill (`final`) records it in the SOW. The gate is never silently skipped.
+
+Once the Reviewer's findings land, run the review-response skill (`listen`), then the deliver skill
+(`final`). The HC's remaining gate is the merge.
+
+**Terminal artifact:** the self-review comment on the PR, with the Reviewer summoned against it.
 
 </output>
