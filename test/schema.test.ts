@@ -160,10 +160,14 @@ describe("digest_deliveries claim columns and lock behaviour (ADR 0034)", () => 
     }
   }
 
-  it("gives every opened connection a busy timeout, so a contended claim waits instead of throwing", () => {
-    // Claims take BEGIN IMMEDIATE write locks. Without this pragma a second
-    // PROCESS contending for the lock gets SQLITE_BUSY instantly — the
-    // concurrency fix would trade a duplicate-send bug for a crash.
+  it("pins a busy timeout on every opened connection, so a contended claim waits instead of throwing", () => {
+    // HONEST LIMITATION: this asserts the effective CONFIGURATION, not that
+    // openDb's pragma line is what produced it — better-sqlite3 already
+    // defaults busy_timeout to 5000ms, so deleting the pragma leaves this
+    // green. It still earns its place: it fails if a future driver default
+    // (or an errant `timeout` option) drops below what a contended claim
+    // needs. What it CANNOT prove is lock-contention behaviour — that needs a
+    // real second process, which the suite has no harness for (see #26).
     const memory = testDb();
     const file = testFileDb();
     try {

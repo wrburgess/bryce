@@ -32,11 +32,13 @@ export function openDb(databasePath: string): OpenedDb {
   const sqlite = new Database(databasePath);
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("foreign_keys = ON");
-  // Delivery claims take BEGIN IMMEDIATE write locks (ADR 0034). Without a busy
-  // timeout, a second PROCESS contending for the same lock throws SQLITE_BUSY
-  // instantly — the concurrency fix would trade a duplicate-send bug for a
-  // crash-under-contention bug. Five seconds is far longer than a claim holds
-  // the lock (a few statements, no network call ever runs inside it).
+  // Delivery claims take BEGIN IMMEDIATE write locks (ADR 0034), so a second
+  // PROCESS contending for one must wait rather than fail. better-sqlite3
+  // ALREADY defaults busy_timeout to 5000ms (its `timeout` constructor option),
+  // so this line pins that value rather than introducing it — it is defensive
+  // against a future driver-default change, not a behaviour change today.
+  // Five seconds is far longer than a claim holds the lock (a few statements;
+  // no network call ever runs inside one).
   sqlite.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
   const db = drizzle(sqlite, { schema });
   migrate(db, { migrationsFolder: MIGRATIONS_FOLDER });

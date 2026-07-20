@@ -58,8 +58,9 @@ fires as its own process at the moment the long-lived server may be handling an 
 call or a `POST /api/digest/send` — two processes, two SQLite connections, one delivery slot. Digest
 survives that: each run takes a durable claim on its `(kind, date)` slot before the mail provider is
 called, so **only one invocation ever reaches the provider for a slot**
-([ADR 0034](../adr/0034-digest-delivery-claim-at-least-once.md); the `BEGIN IMMEDIATE` claim and the
-`busy_timeout` pragma are what make it hold across processes).
+([ADR 0034](../adr/0034-digest-delivery-claim-at-least-once.md); the `BEGIN IMMEDIATE` claim is what
+makes it hold across processes, and a pinned `busy_timeout` keeps a contender waiting rather than
+failing).
 
 Re-entry is safe; it is not *exactly-once*. If Bryce dies in the window between the provider
 accepting the mail and the row recording it, that acceptance is unrecoverable and the content goes

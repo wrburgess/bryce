@@ -88,9 +88,17 @@ settled row. The lookup itself is deliberately **not** built here.
 
 ## Operational notes
 
-- `busy_timeout = 5000` is set on every connection (`src/db/client.ts`). Claims take write locks;
-  without a busy timeout a second *process* contending for one gets `SQLITE_BUSY` immediately, which
-  would trade a duplicate-send bug for a crash-under-contention bug.
+- `busy_timeout = 5000` is pinned on every connection (`src/db/client.ts`) so a second *process*
+  contending for a claim's write lock waits rather than failing. **This pins an existing default
+  rather than introducing one:** better-sqlite3 already applies a 5000 ms busy timeout via its
+  `timeout` constructor option, verified against the installed version. The explicit pragma is
+  defensive against a future driver-default change; deleting it is a no-op today. An earlier draft of
+  this ADR claimed the pragma prevented an immediate `SQLITE_BUSY` — that was wrong, and the
+  correction is recorded here rather than silently dropped.
+- **Lock contention is not covered by the test suite.** better-sqlite3 is synchronous, so two
+  connections in one Node process never overlap inside a transaction; the cross-connection test proves
+  the claim is *durable in the file*, not that contention resolves. Proving that needs a real second
+  process (issue #26's territory).
 - The migration (`drizzle/0002_ambiguous_vapor.sql`) is three `ALTER TABLE ... ADD COLUMN`
   statements. `status` has no CHECK constraint, so widening the enum is a TypeScript-level change;
   no existing row is rewritten.
