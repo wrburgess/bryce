@@ -22,9 +22,12 @@ release it instead, because the failure that matters here is silence, not noise.
 
 ## The state machine
 
-`digest_deliveries.status` widens from `sent | failed` to `pending | sending | sent | failed`.
-`sending` is a **durable claim** on the slot, carrying `claimed_at` (the lease clock) and
-`attempt_count`. `pending` is reserved for a future pre-claim staging step and is unused today.
+`digest_deliveries.status` widens from `sent | failed` to `sending | sent | failed`. `sending` is a
+**durable claim** on the slot, carrying `claimed_at` (the lease clock) and `attempt_count`.
+
+A speculative `pending` member was drafted and then removed: nothing could write it, and an
+unwritable state still forces every consumer of `DeliveryStatus` — the health seam and both surfaces
+it feeds — to handle a case that cannot occur. Every member here is reachable.
 
 | Row state at claim time | Decision |
 |---|---|

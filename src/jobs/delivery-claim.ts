@@ -127,8 +127,8 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
         recovered = true;
       }
 
-      // "failed" (retry after a provider rejection), "pending", or a recovered
-      // "sending" — all re-take the slot and bump the attempt counter.
+      // "failed" (retry after a provider rejection) or a recovered "sending" —
+      // both re-take the slot and bump the attempt counter.
       const attempt = existing.attemptCount + 1;
       tx.update(digestDeliveries)
         .set({ status: "sending", claimedAt: nowIso, attemptCount: attempt })

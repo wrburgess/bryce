@@ -43,9 +43,13 @@ export const digestDeliveries = sqliteTable(
      * Delivery state machine (ADR 0034). `sending` is a durable CLAIM on this
      * (kind, date_covered) slot held under the unique index below; it carries a
      * lease so a crashed run's slot heals instead of blocking forever.
-     * `pending` is reserved for a future pre-claim staging step.
+     *
+     * Every member is reachable: no speculative state is declared here, because
+     * an unwritable state still forces every consumer of DeliveryStatus (the
+     * health seam, and both surfaces it feeds) to handle a case that cannot
+     * occur.
      */
-    status: text("status", { enum: ["pending", "sending", "sent", "failed"] }).notNull(),
+    status: text("status", { enum: ["sending", "sent", "failed"] }).notNull(),
     /** When the current `sending` claim was taken — the lease clock (ADR 0034). */
     claimedAt: text("claimed_at"),
     /** How many times this slot has been claimed; >1 means a retry or a recovery. */
