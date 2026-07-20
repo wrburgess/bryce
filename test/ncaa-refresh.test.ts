@@ -2,10 +2,13 @@ import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { players, seasonCalendar, statLines } from "../src/db/schema.js";
+import type { DigestDeps } from "../src/jobs/digest.js";
+import { runDigest } from "../src/jobs/digest.js";
 import type { RefreshDeps } from "../src/jobs/refresh.js";
 import { runRefresh } from "../src/jobs/refresh.js";
 import { MlbClient } from "../src/mlb/client.js";
 import {
+  CapturingMailer,
   FakeNcaaApi,
   FakeStatsApi,
   TEST_TZ,
@@ -151,7 +154,7 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
         .from(statLines)
         .where(eq(statLines.playerId, player.id))
     ).find((l) => l.gameId === 6001 && l.statType === "batting");
-    expect((line?.stats as Record<string, unknown>).HR).toBe(2);
+    expect((line?.stats as Record<string, unknown>).homeRuns).toBe(2);
     const all = await opened.db.select().from(statLines).where(eq(statLines.playerId, player.id));
     expect(all).toHaveLength(3); // no new row from the correction
   });
@@ -217,5 +220,31 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
     expect(summary.playersRefreshed).toBe(0);
     expect(ncaaApi.calls).toHaveLength(0);
     expect(await opened.db.select().from(statLines)).toHaveLength(0);
+  });
+
+  it("digest renders ingested NCAA lines with real numbers, not zeros", async () => {
+    await insertNcaa();
+    await runRefresh(deps());
+
+    const mailer = new CapturingMailer();
+    const digestDeps: DigestDeps = {
+      db: opened.db,
+      mailer,
+      now: clock.now,
+      tz: TEST_TZ,
+      to: "hc@example.com",
+      from: "bryce@example.com",
+    };
+    await runDigest(digestDeps);
+
+    expect(mailer.sent).toHaveLength(1);
+    const text = mailer.sent[0]!.text;
+    // Regression: the scraped AB/H/HR/... headers must reach the renderer as
+    // canonical keys — a broken mapping renders "0-0" here.
+    expect(text).toContain("College Guy (LSU)");
+    expect(text).toContain("2-4, HR, 2 RBI");
+    expect(text).toContain("1-3");
+    expect(text).toContain("6.0 IP, 4 H, 1 ER, 2 BB, 8 K (W)");
+    expect(text).not.toContain("0-0");
   });
 });
