@@ -237,6 +237,37 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
     expect(await opened.db.select().from(statLines)).toHaveLength(0);
   });
 
+  it("stops scraping after the NCAA season ends while MLB keeps the pipeline awake (#15)", async () => {
+    await insertNcaa();
+    await insertCalendars2026(opened.db); // MLB in season through the fall — pipeline awake
+    // Bundled 2026 NCAA end is 2026-06-22; grace runs through 2026-06-29.
+    clock.set("2026-08-15T17:00:00Z");
+
+    const summary = await runRefresh(deps());
+    expect(summary.skipped).toBe(false); // the pipeline itself is awake
+    expect(summary.playersRefreshed).toBe(0);
+    expect(ncaaApi.calls).toHaveLength(0);
+    expect(await opened.db.select().from(statLines)).toHaveLength(0);
+  });
+
+  it("keeps scraping through the post-season grace window, then stops at its boundary", async () => {
+    await insertNcaa();
+    await insertCalendars2026(opened.db);
+
+    // Last grace day (end 2026-06-22 + 7): still fetching for late corrections.
+    clock.set("2026-06-29T17:00:00Z");
+    const inGrace = await runRefresh(deps());
+    expect(inGrace.playersRefreshed).toBe(1);
+    expect(ncaaApi.calls.length).toBeGreaterThan(0);
+
+    // One day past the grace window: zero NCAA HTTP.
+    ncaaApi.calls.length = 0;
+    clock.set("2026-06-30T17:00:00Z");
+    const pastGrace = await runRefresh(deps());
+    expect(pastGrace.playersRefreshed).toBe(0);
+    expect(ncaaApi.calls).toHaveLength(0);
+  });
+
   it("digest renders ingested NCAA lines with real numbers, not zeros", async () => {
     await insertNcaa();
     await runRefresh(deps());

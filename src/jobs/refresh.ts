@@ -184,6 +184,25 @@ export async function refreshNcaaCalendar(
 }
 
 /** Dispatch one active Player to the right ingest path; null = skipped. */
+/**
+ * Days after the bundled NCAA regular-season end during which Refresh keeps
+ * re-fetching, so late official-scorer corrections still land (ADR 0030's
+ * quiet-correction rule). Past this window the NCAA scrape is a guaranteed
+ * no-op until next season, so it is skipped with zero HTTP.
+ */
+const NCAA_POST_SEASON_GRACE_DAYS = 7;
+
+/** True once the host date is past the bundled NCAA season end + grace window. */
+export function ncaaSeasonOver(deps: Pick<RefreshDeps, "now" | "tz">, season: string): boolean {
+  const entry = ncaaSeasonFor(season);
+  if (entry === null) return false; // handled by the bundled-season guard
+  const today = hostDate(deps.now(), deps.tz);
+  const end = new Date(`${entry.regularSeasonEnd}T00:00:00Z`);
+  if (Number.isNaN(end.getTime())) return false;
+  end.setUTCDate(end.getUTCDate() + NCAA_POST_SEASON_GRACE_DAYS);
+  return today > end.toISOString().slice(0, 10);
+}
+
 async function refreshOnePlayer(
   deps: RefreshDeps,
   player: PlayerRow,
@@ -193,6 +212,11 @@ async function refreshOnePlayer(
     if (player.ncaaPlayerSeq === null) return null; // defensive: no identity to fetch
     if (ncaaSeasonFor(season) === null) {
       // No bundled season lookup: skip entirely (zero HTTP), logged by refreshNcaaCalendar.
+      return null;
+    }
+    if (ncaaSeasonOver(deps, season)) {
+      // NCAA season is over (past regular-season end + grace) while MLB keeps the
+      // pipeline awake — nothing new to scrape until next season (issue #15).
       return null;
     }
     return refreshNcaaPlayer(deps, player, season);
