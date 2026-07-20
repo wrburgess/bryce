@@ -62,18 +62,18 @@ describe("runDigest", () => {
     expect(mailer.sent).toHaveLength(1);
     const mail = mailer.sent[0];
     expect(mail?.to).toBe("hc@example.com");
-    expect(mail?.subject).toBe("Bryce digest - 2026-07-19");
+    expect(mail?.subject).toBe("MLB Daily Tracker: Sun, July 19, 2026");
     // Never assert only success: BOTH parts carry the actual stat content.
     // Fixed-format lines (ADR 0033): every stat always shown, zeros included.
     expect(mail?.text).toContain("Maximo Acosta");
     expect(mail?.text).toContain(
-      "2026-07-18 vs Charlotte Knights: PA 4, H 2, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0, BB 0",
+      "2026-07-18 vs Charlotte Knights: PA 4, H 2, BB 0, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0",
     );
     expect(mail?.text).toContain(
-      "2026-07-17 vs Charlotte Knights: PA 5, H 1, K 2, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 0, BB 0",
+      "2026-07-17 vs Charlotte Knights: PA 5, H 1, BB 0, K 2, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 0",
     );
     expect(mail?.html).toContain("Maximo Acosta");
-    expect(mail?.html).toContain("PA 4, H 2, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0, BB 0");
+    expect(mail?.html).toContain("PA 4, H 2, BB 0, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0");
     expect(mail?.html).toContain("<h2>MiLB - Triple-A</h2>");
 
     // Lines are marked with the delivery; the delivery row records the counts.
@@ -112,7 +112,7 @@ describe("runDigest", () => {
     expect(result.action).toBe("sent");
     expect(result.statLineCount).toBe(0);
     const mail = mailer.sent[1];
-    expect(mail?.subject).toBe("Bryce digest - 2026-07-20");
+    expect(mail?.subject).toBe("MLB Daily Tracker: Mon, July 20, 2026");
     expect(mail?.text).toContain("No new stat lines today.");
     expect(mail?.text).toContain("No new stats: Maximo Acosta");
     expect(mail?.html).toContain("No new stats: Maximo Acosta");
@@ -272,7 +272,7 @@ describe("runDigest", () => {
     const text = mailer.sent[0]?.text ?? "";
     expect(text).not.toContain("(Game");
     // Both roles render, each in its own fixed format (ADR 0033).
-    expect(text).toContain("PA 4, H 2, K 1, 2B 0, 3B 0, HR 1, RBI 3, R 1, SB 0, CS 0, E 0, BB 0");
+    expect(text).toContain("PA 4, H 2, BB 0, K 1, 2B 0, 3B 0, HR 1, RBI 3, R 1, SB 0, CS 0, E 0");
     expect(text).toContain(
       "IP 5.0, ER 2, K 6, K/9 10.8, BB 1, HA 3, HRA 0, ERA 3.60, WHIP 0.80, S 0, HLD 0, QS 0",
     );
@@ -298,7 +298,7 @@ describe("runDigest", () => {
     const result = await runDigest(deps());
     const text = mailer.sent[0]?.text ?? "";
     expect(text).toContain(
-      "2026-07-18 vs Charlotte Knights: PA 4, H 1, K 2, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 2, BB 0",
+      "2026-07-18 vs Charlotte Knights: PA 4, H 1, BB 0, K 2, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 2",
     );
     // Exactly ONE rendered line for the game — the fielding row never stands alone.
     expect(text.match(/2026-07-18 vs Charlotte Knights/g)).toHaveLength(1);
@@ -322,7 +322,7 @@ describe("runDigest", () => {
     const text = mailer.sent[0]?.text ?? "";
     expect(text).toContain("Defensive Sub");
     expect(text).toContain(
-      "2026-07-18 vs Charlotte Knights: PA 0, H 0, K 0, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 1, BB 0",
+      "2026-07-18 vs Charlotte Knights: PA 0, H 0, BB 0, K 0, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 1",
     );
     expect(result.statLineCount).toBe(1);
     // No unreported fielding rows remain after the digest runs.

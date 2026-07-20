@@ -69,7 +69,7 @@ describe("assembleDigest (pure digest preview)", () => {
 
     expect(assembly.date).toBe("2026-07-19");
     expect(previewMail.text).toContain(
-      "2026-07-18 vs Charlotte Knights: PA 4, H 2, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0, BB 0",
+      "2026-07-18 vs Charlotte Knights: PA 4, H 2, BB 0, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0",
     );
     expect(previewMail.text).toContain("No new stats: Quiet Guy");
   });

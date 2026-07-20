@@ -171,7 +171,7 @@ npm run digest
 Builds the digest of every stat line not yet reported and "sends" it — with
 `MAILER_PROVIDER=console` it prints the email (subject, HTML, and plain text) straight to your
 terminal. You should see your players' lines grouped by level, in the fixed format — e.g.
-`PA 4, H 2, K 1, 2B 0, 3B 0, HR 1, RBI 3, R 2, SB 0, CS 0, E 0, BB 1` for hitters or
+`PA 4, H 2, BB 1, K 1, 2B 0, 3B 0, HR 1, RBI 3, R 2, SB 0, CS 0, E 0` for hitters or
 `IP 6.1, ER 2, K 8, K/9 11.4, BB 1, HA 4, HRA 1, ERA 2.84, WHIP 0.79, S 0, HLD 0, QS 1` for
 pitchers (every stat always shown, zeros included; ERA/WHIP/K-9 are that game's rates only) —
 with a "No new stats" list for in-season players who didn't play.

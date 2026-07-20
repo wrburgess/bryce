@@ -17,12 +17,12 @@ describe("formatBattingLine (fixed HC format, ADR 0033)", () => {
       errors: 0,
       baseOnBalls: 1,
     });
-    expect(line).toBe("PA 4, H 2, K 1, 2B 0, 3B 0, HR 1, RBI 3, R 2, SB 0, CS 0, E 0, BB 1");
+    expect(line).toBe("PA 4, H 2, BB 1, K 1, 2B 0, 3B 0, HR 1, RBI 3, R 2, SB 0, CS 0, E 0");
   });
 
   it("falls back to AB + BB + HBP when plateAppearances is absent", () => {
     const line = formatBattingLine({ atBats: 4, baseOnBalls: 1, hitByPitch: 1, hits: 2 });
-    expect(line).toBe("PA 6, H 2, K 0, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 0, BB 1");
+    expect(line).toBe("PA 6, H 2, BB 1, K 0, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 0");
   });
 
   it("prefers a present plateAppearances over the fallback sum", () => {
@@ -32,13 +32,13 @@ describe("formatBattingLine (fixed HC format, ADR 0033)", () => {
 
   it("renders an all-zeros line for an empty stat record", () => {
     expect(formatBattingLine({})).toBe(
-      "PA 0, H 0, K 0, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 0, BB 0",
+      "PA 0, H 0, BB 0, K 0, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 0",
     );
   });
 
   it("treats non-numeric junk values as 0, never NaN", () => {
     const line = formatBattingLine({ hits: "2", rbi: null, plateAppearances: "4" });
-    expect(line).toBe("PA 0, H 0, K 0, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 0, BB 0");
+    expect(line).toBe("PA 0, H 0, BB 0, K 0, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 0");
   });
 });
 

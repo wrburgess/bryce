@@ -405,7 +405,7 @@ describe("REST API", () => {
       expect(body.date).toBe("2026-07-19");
       expect(body.statLineCount).toBe(1);
       expect(body.playerCount).toBe(1);
-      expect(body.mail.subject).toBe("Bryce digest - 2026-07-19");
+      expect(body.mail.subject).toBe("MLB Daily Tracker: Sun, July 19, 2026");
       expect(body.mail.text).toContain("Maximo Acosta");
 
       // Read-only: no send, no delivery row, no marking.

@@ -63,6 +63,7 @@ export function formatBattingLine(stats: Record<string, unknown>): string {
   const parts: Array<[string, number]> = [
     ["PA", pa],
     ["H", num(stats, "hits")],
+    ["BB", num(stats, "baseOnBalls")],
     ["K", num(stats, "strikeOuts")],
     ["2B", num(stats, "doubles")],
     ["3B", num(stats, "triples")],
@@ -72,7 +73,6 @@ export function formatBattingLine(stats: Record<string, unknown>): string {
     ["SB", num(stats, "stolenBases")],
     ["CS", num(stats, "caughtStealing")],
     ["E", num(stats, "errors")],
-    ["BB", num(stats, "baseOnBalls")],
   ];
   return parts.map(([label, value]) => `${label} ${value}`).join(", ");
 }
@@ -105,6 +105,19 @@ export function formatPitchingLine(stats: Record<string, unknown>): string {
     ["QS", qualityStart(outs, er)],
   ];
   return parts.map(([label, value]) => `${label} ${value}`).join(", ");
+}
+
+/** "2026-07-30" → "Thu, July 30, 2026" (HC-specified subject date style). */
+export function formatSubjectDate(isoDate: string): string {
+  const d = new Date(`${isoDate}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return isoDate;
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    weekday: "short",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(d);
 }
 
 export function escapeHtml(s: string): string {
@@ -183,7 +196,7 @@ export function renderDigest(args: {
 }): RenderedMail {
   const { date, lines, noNewStats } = args;
   const sections = buildSections(lines);
-  const subject = `Bryce digest - ${date}`;
+  const subject = `MLB Daily Tracker: ${formatSubjectDate(date)}`;
 
   const textParts: string[] = [`Bryce digest for ${date}`, ""];
   const htmlParts: string[] = [`<h1>Bryce digest for ${escapeHtml(date)}</h1>`];

@@ -316,7 +316,7 @@ describe("MCP server over Streamable HTTP", () => {
       playerCount: 1,
     });
     expect((result.structuredContent?.mail as { subject: string }).subject).toBe(
-      "Bryce digest - 2026-07-19",
+      "MLB Daily Tracker: Sun, July 19, 2026",
     );
 
     expect(mailer.sent).toHaveLength(0);

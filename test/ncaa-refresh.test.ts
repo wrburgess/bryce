@@ -259,10 +259,10 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
     // the game 6001 fielding row's E merges into the batting line (ADR 0033).
     expect(text).toContain("College Guy (LSU)");
     expect(text).toContain(
-      "2026-03-13 vs Georgia: PA 4, H 2, K 0, 2B 0, 3B 0, HR 1, RBI 2, R 0, SB 0, CS 0, E 1, BB 0",
+      "2026-03-13 vs Georgia: PA 4, H 2, BB 0, K 0, 2B 0, 3B 0, HR 1, RBI 2, R 0, SB 0, CS 0, E 1",
     );
     expect(text).toContain(
-      "2026-03-14 at Georgia: PA 3, H 1, K 0, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 0, BB 0",
+      "2026-03-14 at Georgia: PA 3, H 1, BB 0, K 0, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 0",
     );
     expect(text).toContain(
       "2026-03-13 vs Georgia: IP 6.0, ER 1, K 8, K/9 12.0, BB 2, HA 4, HRA 0, ERA 1.50, WHIP 1.00, S 0, HLD 0, QS 1",
