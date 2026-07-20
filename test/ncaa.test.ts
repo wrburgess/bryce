@@ -187,6 +187,26 @@ describe("NCAA normalizer", () => {
     expect(normalized[1]?.stats).toMatchObject({ inningsPitched: "7", strikeOuts: 6 });
   });
 
+  it("drops non-numeric IP and empty cells instead of leaking '-' or coercing '' to 0", () => {
+    const rows = [
+      {
+        date: "2025-03-14",
+        opponentName: "Rival",
+        isHome: null,
+        contestId: 6004,
+        result: "W",
+        stats: { IP: "-", H: "", ER: "  ", BB: 1, SO: 3 },
+      },
+    ];
+    const [line] = normalizeGameLog({ playerId: 1, seq: 42, category: "pitching", rows, timestamp: "t" });
+    // "-" IP gets no entry → the renderer falls back to "0.0 IP", never "- IP".
+    expect(line?.stats).not.toHaveProperty("inningsPitched");
+    // Empty / whitespace cells get no entry (never Number("") === 0).
+    expect(line?.stats).not.toHaveProperty("hits");
+    expect(line?.stats).not.toHaveProperty("earnedRuns");
+    expect(line?.stats).toMatchObject({ baseOnBalls: 1, strikeOuts: 3 });
+  });
+
   it("uses a stable hash fallback when the contest id is missing", () => {
     const rows = [
       { date: "2025-03-14", opponentName: "Rival", isHome: true, contestId: null, result: "W", stats: { AB: 3 } },

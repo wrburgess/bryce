@@ -72,10 +72,18 @@ export function canonicalizeStats(
       continue;
     }
     if (canonical === "inningsPitched") {
-      out[canonical] = typeof value === "string" ? value : String(value);
+      // Keep only numeric-looking IP ("6", "6.1"); "-"/"" get no entry, so the
+      // renderer falls back to "0.0 IP" instead of "- IP".
+      const ip = typeof value === "number" ? String(value) : value;
+      if (typeof ip === "string" && /^\d+(\.\d+)?$/.test(ip)) out[canonical] = ip;
       continue;
     }
-    const n = typeof value === "number" ? value : Number(value);
+    const n =
+      typeof value === "number"
+        ? value
+        : typeof value === "string" && value.trim() !== ""
+          ? Number(value)
+          : NaN;
     if (Number.isFinite(n)) out[canonical] = n;
   }
   return out;
