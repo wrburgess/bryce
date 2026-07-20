@@ -1275,6 +1275,534 @@ describe("claimDelivery lease boundary (ADR 0034)", () => {
   });
 });
 
+/**
+ * The force flag. One rule governs every test below:
+ *
+ *   When force is what ALLOWED the run to proceed, the run is a REPLAY — it
+ *   sends the mail and writes NOTHING. When force was not needed, the run is
+ *   ordinary and records normally.
+ *
+ * Two of these are regression tests for failures the replay design exists to
+ * make impossible, and they are labeled as such: a forced send whose mailer
+ * throws must not destroy the record of a genuinely delivered digest, and a
+ * forced heartbeat must not restart the rolling seven-day clock. Both would be
+ * silent — the operator would learn about them a day (or a week) later.
+ */
+describe("forced delivery", () => {
+  let opened: OpenedDb;
+  let mailer: CapturingMailer;
+  let clock: ReturnType<typeof fakeClock>;
+
+  const deps = (force = false): DigestDeps => ({
+    db: opened.db,
+    mailer,
+    now: clock.now,
+    tz: TEST_TZ,
+    to: "hc@example.com",
+    from: "bryce@example.com",
+    force,
+  });
+
+  const deliveries = () => opened.db.select().from(digestDeliveries);
+  const unmarkedLines = () =>
+    opened.db.select().from(statLines).where(isNull(statLines.digestDeliveryId));
+
+  beforeEach(async () => {
+    opened = testDb();
+    mailer = new CapturingMailer();
+    clock = fakeClock(MID_SEASON);
+    await insertCalendars2026(opened.db);
+  });
+
+  afterEach(() => {
+    opened.close();
+  });
+
+  // --- Claim layer ---------------------------------------------------------
+
+  it("replays a forced claim over a sent row, leaving the row byte-identical", async () => {
+    const row = await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "sent",
+      sentAt: "2026-07-19T17:00:00.000Z",
+      playerCount: 2,
+      statLineCount: 3,
+      providerMessageId: "postmark-original",
+      attemptCount: 1,
+    });
+    const before = (await deliveries())[0];
+
+    const claim = claimDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      now: new Date(MID_SEASON),
+      force: true,
+    });
+    // A replay, carrying the id of the delivery it REPLAYS so assembly can
+    // re-include the lines that delivery already reported — but holding NO
+    // claim to settle. The field is deliberately not called `deliveryId`: a
+    // settle cannot be reached from this arm even after a null check.
+    expect(claim).toEqual({ claimed: true, replay: true, replayOfDeliveryId: row.id });
+
+    // Every field: status, sentAt, counts, providerMessageId, attemptCount.
+    const after = await deliveries();
+    expect(after).toHaveLength(1);
+    expect(after[0]).toEqual(before);
+  });
+
+  it("GUARANTEE: a forced DIGEST claim against a LIVE sending lease is still refused", async () => {
+    // ADR 0034's exact mutual exclusion. Force is a statement about
+    // de-duplication bookkeeping, never about concurrency safety — overriding
+    // this would put two invocations at the mail provider for one slot.
+    // (The digest kind passes no precondition, so this case alone does not pin
+    // the BRANCH ORDER — the heartbeat pair further down does that.)
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "sending",
+      claimedAt: MID_SEASON,
+      attemptCount: 1,
+    });
+
+    expect(
+      claimDelivery(opened.db, {
+        kind: "digest",
+        dateCovered: "2026-07-19",
+        now: new Date(MID_SEASON),
+        force: true,
+      }),
+    ).toEqual({ claimed: false, reason: "claimed-by-another-run" });
+
+    // And end to end: the forced run skips without reaching the provider.
+    const result = await runDigest(deps(true));
+    expect(result).toMatchObject({ action: "skipped", reason: "claimed-by-another-run" });
+    expect(mailer.sent).toHaveLength(0);
+  });
+
+  it("treats a forced claim over an EXPIRED sending lease as ordinary recovery", async () => {
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "sending",
+      claimedAt: "2026-07-19T16:30:00.000Z", // 30 minutes ago: lease expired
+      attemptCount: 1,
+    });
+
+    // Force was not NEEDED here (an expired lease is reclaimable anyway), so
+    // the run is ordinary: a real claim, settled and recorded normally.
+    expect(
+      claimDelivery(opened.db, {
+        kind: "digest",
+        dateCovered: "2026-07-19",
+        now: new Date(MID_SEASON),
+        force: true,
+      }),
+    ).toMatchObject({ claimed: true, replay: false, attempt: 2, recovered: true });
+    expect((await deliveries())[0]).toMatchObject({ status: "sending", attemptCount: 2 });
+  });
+
+  it("treats a forced claim with no row as an ordinary first claim", async () => {
+    expect(
+      claimDelivery(opened.db, {
+        kind: "digest",
+        dateCovered: "2026-07-19",
+        now: new Date(MID_SEASON),
+        force: true,
+      }),
+    ).toMatchObject({ claimed: true, replay: false, attempt: 1, recovered: false });
+    expect((await deliveries())[0]).toMatchObject({
+      status: "sending",
+      sentAt: null,
+      attemptCount: 1,
+    });
+  });
+
+  it("treats a forced claim over a failed row as an ordinary retry re-claim", async () => {
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "failed",
+      errorMessage: "postmark down",
+      attemptCount: 1,
+    });
+
+    expect(
+      claimDelivery(opened.db, {
+        kind: "digest",
+        dateCovered: "2026-07-19",
+        now: new Date(MID_SEASON),
+        force: true,
+      }),
+    ).toMatchObject({ claimed: true, replay: false, attempt: 2, recovered: false });
+    expect((await deliveries())[0]).toMatchObject({ status: "sending", errorMessage: null });
+  });
+
+  // --- Digest job ----------------------------------------------------------
+
+  it("re-sends the same rendered stat lines after a same-day send", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-07-18",
+      stats: { hits: 2, atBats: 4, homeRuns: 1, rbi: 3 },
+    });
+
+    await runDigest(deps());
+    expect(mailer.sent).toHaveLength(1);
+
+    const forced = await runDigest(deps(true));
+    expect(forced).toMatchObject({ action: "sent", statLineCount: 1, playerCount: 1 });
+    expect(mailer.sent).toHaveLength(2);
+
+    // The CONTENT is the point: a replay that assembled "no new stats" would
+    // still report action=sent while being useless as a test send.
+    expect(mailer.sent[1]?.text).toContain(
+      "2026-07-18 vs Charlotte Knights: PA 4, H 2, BB 0, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0",
+    );
+    expect(mailer.sent[1]?.text).toBe(mailer.sent[0]?.text);
+    expect(mailer.sent[1]?.html).toBe(mailer.sent[0]?.html);
+    expect(mailer.sent[1]?.subject).toBe(mailer.sent[0]?.subject);
+  });
+
+  it("reports reason 'forced', in preference to 'recovered-stale-claim'", async () => {
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+    // An expired lease: unforced, this run reports recovered-stale-claim.
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "sending",
+      claimedAt: "2026-07-19T16:30:00.000Z",
+      attemptCount: 1,
+      statLineCount: 0,
+      playerCount: 0,
+    });
+
+    const forced = await runDigest(deps(true));
+    expect(forced).toMatchObject({ action: "sent", reason: "forced" });
+    // The recovery still HAPPENED — it is only outranked as the explanation.
+    expect((await deliveries())[0]).toMatchObject({ status: "sent", attemptCount: 2 });
+  });
+
+  it("leaves the delivery row and the stamped lines exactly as the real send left them", async () => {
+    mailer.providerMessageId = "postmark-first";
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+
+    await runDigest(deps());
+    const before = (await deliveries())[0];
+    expect(before).toMatchObject({ status: "sent", providerMessageId: "postmark-first" });
+
+    // A later instant on the same Chicago date, and a different provider id:
+    // if the replay wrote anything at all, one of these would move.
+    clock.set("2026-07-19T18:00:00Z");
+    mailer.providerMessageId = "postmark-forced";
+    expect((await runDigest(deps(true))).action).toBe("sent");
+
+    const after = await deliveries();
+    expect(after).toHaveLength(1);
+    expect(after[0]).toEqual(before); // id, status, sentAt, counts, provider id
+    const lines = await opened.db.select().from(statLines);
+    expect(lines.every((l) => l.digestDeliveryId === before?.id)).toBe(true);
+  });
+
+  it("includes genuinely new lines but leaves them UNSTAMPED for the next real digest", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-07-18",
+      stats: { hits: 2, atBats: 4 },
+    });
+    await runDigest(deps());
+
+    // A line that arrived AFTER the real send: never reported to anyone yet.
+    const fresh = await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-07-19",
+      stats: { hits: 3, atBats: 5 },
+    });
+
+    const forced = await runDigest(deps(true));
+    expect(forced).toMatchObject({ action: "sent", statLineCount: 2 });
+    expect(mailer.sent[1]?.text).toContain("2026-07-18 vs Charlotte Knights: PA 4, H 2,");
+    expect(mailer.sent[1]?.text).toContain("2026-07-19 vs Charlotte Knights: PA 5, H 3,");
+
+    // A test send consumes nothing: the new line is still unreported.
+    const unmarked = await unmarkedLines();
+    expect(unmarked).toHaveLength(1);
+    expect(unmarked[0]?.id).toBe(fresh.id);
+
+    // ...so the next SCHEDULED digest still reports it.
+    clock.set("2026-07-20T17:00:00Z");
+    const next = await runDigest(deps());
+    expect(next).toMatchObject({ action: "sent", statLineCount: 1 });
+    expect(mailer.sent[2]?.text).toContain("2026-07-19 vs Charlotte Knights: PA 5, H 3,");
+    expect(await unmarkedLines()).toHaveLength(0);
+  });
+
+  it("DATA LOSS: a forced send whose mailer throws leaves the delivered row sent", async () => {
+    // The regression this whole design exists for. If the forced run had
+    // re-claimed the sent row, settleFailed would set status='failed',
+    // sent_at=NULL — destroying the record of a genuinely delivered email — and
+    // the next scheduled run would re-claim that failed row and mail an EMPTY
+    // digest, because its lines are already stamped.
+    mailer.providerMessageId = "postmark-first";
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+    await runDigest(deps());
+    const before = (await deliveries())[0];
+
+    mailer.failWith = new Error("postmark down");
+    const forced = await runDigest(deps(true));
+    expect(forced).toMatchObject({ action: "failed", reason: "postmark down" });
+
+    const after = await deliveries();
+    expect(after).toHaveLength(1);
+    expect(after[0]).toEqual(before);
+    expect(after[0]).toMatchObject({
+      status: "sent",
+      sentAt: before?.sentAt,
+      statLineCount: 1,
+      playerCount: 1,
+      providerMessageId: "postmark-first",
+      errorMessage: null,
+    });
+    expect(await unmarkedLines()).toHaveLength(0);
+
+    // And the day is still closed: the next scheduled run does not "retry".
+    mailer.failWith = null;
+    const next = await runDigest(deps());
+    expect(next).toMatchObject({ action: "skipped", reason: "already-sent-today" });
+    expect(mailer.sent).toHaveLength(1);
+  });
+
+  it("REPLAY NEVER RECONCILES: a forced send is not suppressed by the provider lookup", async () => {
+    // Where force meets the issue-#41 reconciliation. A replay's slot HAS
+    // landed — that is its premise — so a lookup would answer "accepted" and
+    // suppress the very send the operator asked for, and settleReconciled would
+    // stamp a fresh sent_at/reconciled_at on the delivered row and zero its
+    // counts.
+    //
+    // This pins the BEHAVIOUR, not a mechanism: two things currently prevent it
+    // (the `!claim.replay` narrowing in runDigest, and `reconciled`'s early
+    // return on `!claim.recovered`, which a replay meets only because its arm has
+    // no such field). Removing either alone leaves this green; removing both
+    // turns it red. That is deliberate — the test should survive a refactor that
+    // drops the accidental one, and fail if the behaviour itself is lost.
+    const lookupMailer = new LookupMailer();
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+    await runDigest({ ...deps(), mailer: lookupMailer });
+    const before = (await deliveries())[0];
+    expect(lookupMailer.sent).toHaveLength(1);
+
+    // The provider would confirm this slot already landed, if it were asked.
+    lookupMailer.result = { outcome: "accepted", providerMessageId: "pm-already-accepted" };
+    const forced = await runDigest({ ...deps(true), mailer: lookupMailer });
+
+    // Force wins: a second mail goes out, carrying the same line.
+    expect(forced).toMatchObject({ action: "sent", reason: "forced", statLineCount: 1 });
+    expect(lookupMailer.sent).toHaveLength(2);
+
+    // The lookup was never even asked — a replay does not take the recovery path.
+    expect(lookupMailer.lookups).toEqual([]);
+
+    // And settleReconciled never ran: the delivered row is untouched.
+    expect(await deliveries()).toHaveLength(1);
+    expect((await deliveries())[0]).toEqual(before);
+    expect((await deliveries())[0]).toMatchObject({ reconciledAt: null, statLineCount: 1 });
+  });
+
+  // --- Heartbeat / Offseason Sleep ----------------------------------------
+
+  /**
+   * The live-lease/precondition BRANCH ORDER, pinned. Both tests below stage a
+   * heartbeat that is BOTH live-leased AND inside the seven-day window, so the
+   * two branches disagree about the outcome and only the order decides it:
+   *
+   *   live lease first (correct) -> refuse `claimed-by-another-run`, send nothing
+   *   precondition first (wrong) -> forced: REPLAY, which MAILS past a live claim
+   *
+   * That second outcome is two invocations at the mail provider for one slot —
+   * ADR 0034's exact mutual exclusion, broken by a testing affordance. The
+   * digest-kind guarantee test above cannot catch it: `kind: "digest"` passes no
+   * precondition, so it reaches the live-lease check under EITHER order.
+   */
+  const liveLeasedHeartbeatInsideWindow = async () => {
+    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+    // Two days ago: unforced, the rolling seven-day rule alone WOULD refuse.
+    await insertDelivery(opened.db, {
+      kind: "heartbeat",
+      dateCovered: "2026-12-03",
+      sentAt: "2026-12-03T18:00:00.000Z",
+    });
+    // ...and today's slot is held by a run that is at the provider right now.
+    await insertDelivery(opened.db, {
+      kind: "heartbeat",
+      dateCovered: "2026-12-05",
+      status: "sending",
+      claimedAt: OFFSEASON,
+      attemptCount: 1,
+    });
+  };
+
+  it("GUARANTEE: a forced HEARTBEAT never replays past a LIVE lease (branch order)", async () => {
+    clock.set(OFFSEASON); // 2026-12-05 Chicago
+    await liveLeasedHeartbeatInsideWindow();
+    const before = await deliveries();
+
+    const forced = await runDigest(deps(true));
+    expect(forced).toMatchObject({
+      kind: "heartbeat",
+      action: "skipped",
+      reason: "claimed-by-another-run",
+    });
+    // The whole point: no second invocation reached the provider.
+    expect(mailer.sent).toHaveLength(0);
+    // A refusal is not a replay: nothing was written either.
+    expect(await deliveries()).toEqual(before);
+  });
+
+  it("refuses an UNFORCED heartbeat the same way, naming the lease not the week", async () => {
+    // The unforced control for the test above. It also pins the reason STRING,
+    // which the reorder changed: this case used to report
+    // `heartbeat-sent-within-week`, and the string flows to REST, MCP and the
+    // CLI log. Both refusals skip, but they mean different things to a reader —
+    // "someone else is sending right now" is not "we already sent this week".
+    clock.set(OFFSEASON);
+    await liveLeasedHeartbeatInsideWindow();
+    const before = await deliveries();
+
+    const result = await runDigest(deps());
+    expect(result).toMatchObject({
+      kind: "heartbeat",
+      action: "skipped",
+      reason: "claimed-by-another-run",
+    });
+    expect(mailer.sent).toHaveLength(0);
+    expect(await deliveries()).toEqual(before);
+  });
+
+  it("replays a heartbeat with a NULL id when the refusal is about another slot", async () => {
+    // The replay's id is documented as the delivery whose lines it re-includes,
+    // so it must never be a row that reported none. The rolling rule reads the
+    // latest `sent` heartbeat of ANY date, so it can refuse while THIS slot's
+    // row is `failed` — an unrelated row whose id would widen the novelty
+    // predicate by an id no Stat Line carries.
+    const failedToday = await insertDelivery(opened.db, {
+      kind: "heartbeat",
+      dateCovered: "2026-12-05",
+      status: "failed",
+      errorMessage: "postmark down",
+    });
+
+    expect(
+      claimDelivery(opened.db, {
+        kind: "heartbeat",
+        dateCovered: "2026-12-05",
+        now: new Date(OFFSEASON),
+        force: true,
+        precondition: () => "heartbeat-sent-within-week",
+      }),
+    ).toEqual({ claimed: true, replay: true, replayOfDeliveryId: null });
+
+    // And the replay wrote nothing on this path either.
+    expect(await deliveries()).toEqual([failedToday]);
+  });
+
+  it("replays a heartbeat with the slot's id when that slot is already sent", async () => {
+    const sentToday = await insertDelivery(opened.db, {
+      kind: "heartbeat",
+      dateCovered: "2026-12-05",
+      status: "sent",
+      sentAt: OFFSEASON,
+    });
+
+    expect(
+      claimDelivery(opened.db, {
+        kind: "heartbeat",
+        dateCovered: "2026-12-05",
+        now: new Date(OFFSEASON),
+        force: true,
+        precondition: () => "heartbeat-sent-within-week",
+      }),
+    ).toEqual({ claimed: true, replay: true, replayOfDeliveryId: sentToday.id });
+    expect(await deliveries()).toEqual([sentToday]);
+  });
+
+  it("sends a heartbeat when forced inside the seven-day window", async () => {
+    clock.set(OFFSEASON); // 2026-12-05 Chicago
+    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+    await insertDelivery(opened.db, {
+      kind: "heartbeat",
+      dateCovered: "2026-11-29",
+      sentAt: "2026-11-29T18:00:00.000Z", // 6 days ago: unforced, this refuses
+    });
+
+    const forced = await runDigest(deps(true));
+    expect(forced).toMatchObject({ kind: "heartbeat", action: "sent", reason: "forced" });
+    expect(mailer.sent).toHaveLength(1);
+    expect(mailer.sent[0]?.subject).toBe("Bryce heartbeat - 2026-12-05");
+    expect(mailer.sent[0]?.text).toContain("alive; 1 players watched");
+  });
+
+  it("CLOCK RESET: a forced heartbeat does not move the seven-day clock", async () => {
+    // If the forced heartbeat took a fresh (heartbeat, today) slot and settled
+    // it, the rolling clock would restart from today — silencing the next REAL
+    // liveness signal for a week. That is invisible until the week of silence.
+    clock.set(OFFSEASON);
+    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+    await insertDelivery(opened.db, {
+      kind: "heartbeat",
+      dateCovered: "2026-11-29",
+      sentAt: "2026-11-29T18:00:00.000Z",
+    });
+
+    expect((await runDigest(deps(true))).action).toBe("sent");
+
+    // Nothing was written: no new slot, no new sent_at.
+    const rows = await deliveries();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ dateCovered: "2026-11-29", sentAt: "2026-11-29T18:00:00.000Z" });
+
+    // The schedule is untouched: still due seven days after the REAL heartbeat.
+    clock.set("2026-12-06T17:59:00Z"); // one minute short of seven days
+    expect(await runDigest(deps())).toMatchObject({
+      action: "skipped",
+      reason: "heartbeat-sent-within-week",
+    });
+    expect(mailer.sent).toHaveLength(1);
+
+    clock.set("2026-12-06T18:00:00Z"); // exactly seven days after the real one
+    expect(await runDigest(deps())).toMatchObject({ kind: "heartbeat", action: "sent" });
+    expect(mailer.sent).toHaveLength(2);
+  });
+
+  it("sends a HEARTBEAT when forced during sleep, never a digest", async () => {
+    // Force overrides bookkeeping, NOT the Offseason Sleep decision — a flag
+    // that mailed a digest in December would make test sends lie about
+    // production behaviour and could mask a genuine seasonal bug.
+    clock.set(OFFSEASON);
+    const player = await insertPlayer(opened.db, {
+      fullName: "Watched One",
+      level: "mlb",
+      milbLevel: null,
+    });
+    await insertStatLine(opened.db, { playerId: player.id });
+
+    const forced = await runDigest(deps(true));
+    expect(forced).toMatchObject({ kind: "heartbeat", action: "sent", statLineCount: 0 });
+    expect(mailer.sent).toHaveLength(1);
+    expect(mailer.sent[0]?.subject).toBe("Bryce heartbeat - 2026-12-05");
+    expect(mailer.sent[0]?.text).not.toContain("Charlotte Knights");
+    // No digest slot was taken, and the stat line is untouched.
+    const rows = await deliveries();
+    expect(rows.every((r) => r.kind === "heartbeat")).toBe(true);
+    expect(await unmarkedLines()).toHaveLength(1);
+  });
+});
+
 describe("digest respects host-timezone dates", () => {
   it("covers the Chicago date, not the UTC date, near midnight UTC", async () => {
     const opened = testDb();

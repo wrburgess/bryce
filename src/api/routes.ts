@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { ZodError } from "zod";
 import { players } from "../db/schema.js";
-import { assembleDigest } from "../digest/assemble.js";
+import { assembleDigest, previewDeliveryId } from "../digest/assemble.js";
 import { renderDigest } from "../digest/render.js";
 import { runDigest } from "../jobs/digest.js";
 import { runRefresh, runRefreshForPlayer } from "../jobs/refresh.js";
@@ -23,6 +23,8 @@ import {
 import {
   AddNcaaPlayerInputSchema,
   AddPlayerInputSchema,
+  DigestInputSchema,
+  DigestQueryInputSchema,
   NcaaPlayerSeqSchema,
   PersonIdSchema,
   PlayerSearchInputSchema,
@@ -106,7 +108,11 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
   });
 
   api.get("/digest/preview", async (c) => {
-    const assembly = await assembleDigest(deps.db, deps);
+    const query = DigestQueryInputSchema.parse(c.req.query());
+    const assembly = await assembleDigest(deps.db, {
+      ...deps,
+      includeDeliveryId: previewDeliveryId(deps.db, deps, query.force === "true"),
+    });
     const mail = renderDigest({
       date: assembly.date,
       lines: assembly.lines,
@@ -123,6 +129,11 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
   });
 
   api.post("/digest/send", async (c) => {
+    // An empty or absent body means "no force" — the shape POST /digest/send
+    // had before force existed, so every existing caller keeps working.
+    // Malformed JSON is a client error (SyntaxError -> 400 via onError).
+    const raw = await c.req.text();
+    const body = DigestInputSchema.parse(raw.trim().length === 0 ? {} : JSON.parse(raw));
     const result = await runDigest({
       db: deps.db,
       mailer: deps.mailer,
@@ -130,6 +141,7 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
       tz: deps.tz,
       to: deps.digestTo,
       from: deps.digestFrom,
+      force: body.force,
     });
     return c.json(result, result.action === "failed" ? 502 : 200);
   });

@@ -417,6 +417,40 @@ describe("REST API", () => {
         .where(isNull(statLines.digestDeliveryId));
       expect(unmarked).toHaveLength(1);
     });
+
+    it("forces with ?force=true, and ?force=false does NOT force", async () => {
+      // The coercion trap: under z.coerce.boolean() the STRING "false" is
+      // truthy, so ?force=false would force. The schema uses a string enum.
+      const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+      await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+      await app().request("/api/digest/send", { method: "POST", headers: AUTH });
+      const deliveriesBefore = await opened.db.select().from(digestDeliveries);
+
+      const read = async (url: string) => {
+        const res = await app().request(url, { headers: AUTH });
+        expect(res.status).toBe(200);
+        return (await res.json()) as { statLineCount: number; mail: { text: string } };
+      };
+
+      const forced = await read("/api/digest/preview?force=true");
+      expect(forced.statLineCount).toBe(1);
+      expect(forced.mail.text).toContain("Maximo Acosta");
+
+      const notForced = await read("/api/digest/preview?force=false");
+      expect(notForced.statLineCount).toBe(0);
+      expect(notForced.mail.text).toContain("No new stat lines today.");
+
+      const omitted = await read("/api/digest/preview");
+      expect(omitted.statLineCount).toBe(0);
+
+      // A junk value is rejected, never treated as truthy.
+      const bogus = await app().request("/api/digest/preview?force=maybe", { headers: AUTH });
+      expect(bogus.status).toBe(400);
+
+      // Every preview stayed read-only: one delivery row, unchanged.
+      expect(await opened.db.select().from(digestDeliveries)).toEqual(deliveriesBefore);
+      expect(mailer.sent).toHaveLength(1);
+    });
   });
 
   describe("POST /api/digest/send", () => {
@@ -444,6 +478,70 @@ describe("REST API", () => {
         .from(statLines)
         .where(isNull(statLines.digestDeliveryId));
       expect(unmarked).toHaveLength(0);
+    });
+
+    it("re-sends with {force:true} after a same-day send, recording nothing new", async () => {
+      const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+      await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+
+      const first = await app().request("/api/digest/send", { method: "POST", headers: AUTH });
+      expect(first.status).toBe(200);
+      const before = (await opened.db.select().from(digestDeliveries))[0];
+
+      const res = await app().request("/api/digest/send", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ force: true }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        kind: "digest",
+        action: "sent",
+        reason: "forced",
+        statLineCount: 1,
+      });
+
+      // The same content went out twice, and the delivery row never moved.
+      expect(mailer.sent).toHaveLength(2);
+      expect(mailer.sent[1]?.text).toContain("Maximo Acosta");
+      expect(mailer.sent[1]?.text).toBe(mailer.sent[0]?.text);
+      const after = await opened.db.select().from(digestDeliveries);
+      expect(after).toHaveLength(1);
+      expect(after[0]).toEqual(before);
+    });
+
+    it("still skips a same-day re-send with no body (the pre-force behaviour)", async () => {
+      const player = await insertPlayer(opened.db);
+      await insertStatLine(opened.db, { playerId: player.id });
+
+      await app().request("/api/digest/send", { method: "POST", headers: AUTH });
+      const res = await app().request("/api/digest/send", { method: "POST", headers: AUTH });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ action: "skipped", reason: "already-sent-today" });
+      expect(mailer.sent).toHaveLength(1);
+    });
+
+    it("400s malformed JSON and a wrong-typed force rather than sending", async () => {
+      const player = await insertPlayer(opened.db);
+      await insertStatLine(opened.db, { playerId: player.id });
+
+      const malformed = await app().request("/api/digest/send", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: '{"force":true',
+      });
+      expect(malformed.status).toBe(400);
+
+      const wrongType = await app().request("/api/digest/send", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ force: "yes" }),
+      });
+      expect(wrongType.status).toBe(400);
+
+      // Neither reached the job: no mail, no delivery row.
+      expect(mailer.sent).toHaveLength(0);
+      expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
     });
 
     it("502s when the mailer fails, recording the failed delivery", async () => {

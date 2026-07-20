@@ -1,8 +1,9 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { PlayerRow } from "../db/schema.js";
 import { players, statLines } from "../db/schema.js";
 import { hostDate, isInSeason } from "../domain/season.js";
+import { findDeliveryId } from "../jobs/delivery-claim.js";
 import { loadActivePlayers, loadCalendars } from "../jobs/refresh.js";
 import type { RenderLine, RenderPlayer } from "./render.js";
 
@@ -16,6 +17,14 @@ import type { RenderLine, RenderPlayer } from "./render.js";
 export interface AssembleDeps {
   now: () => Date;
   tz: string;
+  /**
+   * Widen the novelty predicate to ALSO include the lines already reported by
+   * this delivery — what a forced replay needs so its test email carries the
+   * same content the real send did, rather than rendering "no new stats"
+   * (ADR 0030: a successful send stamps every line it reported). Null/omitted
+   * is the ordinary predicate: unreported lines only.
+   */
+  includeDeliveryId?: number | null;
 }
 
 export interface DigestAssembly {
@@ -35,12 +44,20 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
   const calendars = await loadCalendars(db);
   const date = hostDate(now(), tz);
 
+  // Novelty (ADR 0030): unreported lines, plus — for a forced replay — the ones
+  // this delivery already reported.
+  const includeDeliveryId = deps.includeDeliveryId ?? null;
+  const novelty =
+    includeDeliveryId === null
+      ? isNull(statLines.digestDeliveryId)
+      : or(isNull(statLines.digestDeliveryId), eq(statLines.digestDeliveryId, includeDeliveryId));
+
   // One join, not one query per player (rules/backend.md).
   const unreported = await db
     .select({ line: statLines, player: players })
     .from(statLines)
     .innerJoin(players, eq(statLines.playerId, players.id))
-    .where(and(isNull(statLines.digestDeliveryId), eq(players.active, true)));
+    .where(and(novelty, eq(players.active, true)));
 
   // Fielding rows never render standalone (ADR 0033): each one's errors merge
   // into the same player+game batting line, synthesizing an all-zeros batting
@@ -106,6 +123,23 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
     reportedIds: unreported.map(({ line }) => line.id),
     playerCount: playersWithLines.size,
   };
+}
+
+/**
+ * The `includeDeliveryId` a preview should use. A forced send reads the id off
+ * its claim; a preview holds none, so it looks today's digest slot up instead
+ * (null when there is none, which is the ordinary predicate). Shared by BOTH
+ * preview surfaces (REST + MCP) so the two cannot drift — `includeDeliveryId`
+ * is optional, so a surface that forgot it would fail open and silently return
+ * an empty forced preview.
+ */
+export function previewDeliveryId(
+  db: Db,
+  deps: { now: () => Date; tz: string },
+  force: boolean,
+): number | null {
+  if (!force) return null;
+  return findDeliveryId(db, "digest", hostDate(deps.now(), deps.tz));
 }
 
 export function toRenderPlayer(player: PlayerRow): RenderPlayer {

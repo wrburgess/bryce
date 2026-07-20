@@ -23,7 +23,26 @@ npm run seed -- add --ncaa-seq 2649785           # NCAA player by stats_player_s
 npm run seed -- list
 npm run refresh
 npm run digest
+npm run digest -- --force   # test send: re-send today's digest even if it already went out
 ```
+
+`--force` overrides only the "already sent today" bookkeeping, and a forced run is a **replay**: it
+sends the mail and writes nothing at all — no delivery row is created or changed, and no Stat Line is
+marked reported. Three consequences worth knowing before you use it:
+
+- A line that arrived *after* the real send is **included** in the forced email but stays unreported,
+  so the next real digest still carries it. A test send never consumes anything.
+- It cannot jump an in-flight run: if another invocation holds a live claim on today's slot you get
+  `action=skipped reason=claimed-by-another-run`, and it clears within ten minutes on its own.
+- It does not override Offseason Sleep. **Forcing during the offseason sends a heartbeat, not a
+  digest** — that is what the system would really send that day. The forced heartbeat does not
+  restart the rolling seven-day clock, so the next real heartbeat still arrives on schedule.
+
+The same flag is available on the other two surfaces: `POST /api/digest/send` with `{"force": true}`
+(and `GET /api/digest/preview?force=true` to look without sending), or the MCP `send_digest` /
+`digest_preview` tools with `force: true`. The full design is
+[ADR 0034](../adr/0034-digest-delivery-claim-at-least-once.md) → *The force flag does not touch any
+of this*.
 
 ## Environment variables
 
@@ -291,8 +310,8 @@ All under `https://bryce.example.com/api` with the same bearer header, JSON in/o
 | `POST /api/players/ncaa/{seq}/deactivate` | Deactivate an NCAA player, keeping history |
 | `GET /api/players/search?q=NAME` | Name search with team/level resolution (MLB/MiLB) |
 | `GET /api/stat-lines?playerId=&level=&from=&to=&limit=` | Query stored stat lines |
-| `GET /api/digest/preview` | What the next digest would report (read-only) |
-| `POST /api/digest/send` | Run the digest job now |
+| `GET /api/digest/preview?force=true\|false` | What the next digest would report (read-only); `force` also shows what a forced send would carry |
+| `POST /api/digest/send` `{"force": true}` (optional) | Run the digest job now; `force` re-sends today as a replay that records nothing |
 | `POST /api/refresh` `{"personId": N}` or `{"ncaaPlayerSeq": N}` (optional) | Refresh one player or everything |
 
 ## NCAA players
