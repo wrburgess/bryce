@@ -22,7 +22,9 @@ over time is which gates require external review vs. self-review; what changes a
   gates. The Host App names its reviewer tool, its invocation, and its fallback order in
   [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Reviewer* (and wires it into CI if desired);
   this lifecycle only requires that it is *a different model from the AC*. **The AC summons the
-  Reviewer** — that is what makes a hands-off run possible; the HC is not the courier. If no second
+  Reviewer at every gate where the host declares a mechanism** — that is what makes a hands-off run
+  possible; the HC is not the courier for those. Where a host declares no mechanism for a gate, that
+  gate stays the HC's to route: a stage never claims a summon that cannot be executed. If no second
   model is reachable, the gate **degrades to a flagged, visible gap** (the declared fallback, else a
   missing-review flag carried into the SOW) — it is never silently dropped.
 
@@ -58,9 +60,11 @@ HC where requirements are ambiguous (ask, don't guess). For any non-trivial issu
 codebase trace is offloaded to a read-only sub-agent that returns a compact **exploration-summary**
 (ADR 0005) — degrading to inline reads on tools without sub-agents.
 
-**Quality gate:** the AC summons the Reviewer for the assessment (missing options, incorrect codebase
-assumptions, requirements gaps, architectural concerns) per [`PROJECT.md`](../../PROJECT.md) →
-*Lifecycle Host* → *Reviewer*.
+**Quality gate:** the assessment goes to the Reviewer (missing options, incorrect codebase
+assumptions, requirements gaps, architectural concerns). The host's summon covers the *plan* and
+*work* gates only ([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Reviewer*), so unless a host
+declares an assessment mechanism this stage is the HC's to route — the AC asks for it in its terminal
+artifact rather than claiming a summon it cannot perform.
 
 **Terminal artifact:** the assessment posted on the issue. **Exit:** HC picks an option; the AC does
 not proceed without a chosen option.

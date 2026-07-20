@@ -24,12 +24,21 @@
 #     --codex-bin PATH    the Codex CLI to summon (default: codex, resolved on PATH)
 #     --timeout SECONDS   wall-clock cap on the review (default: 900)
 #     --ac NAME           the acting agent, so a self-review can be refused (default: claude)
+#     --min-bytes N       substance floor on the review body (default: 200; 0 disables)
 #
 # Output (stdout, ASCII only — rules/scripting.md / ADR 0011), exactly two shapes:
 #   summon_reviewer: OK - {mode} review, {n} bytes -> {path}
 #   summon_reviewer: FAILED ({classification})        [followed by "  - detail" lines]
-# Classifications: ok | not_found | not_authenticated | exit_nonzero | empty_output | timeout | self_review
-# Usage errors and an unwritable --out are NOT classifications: they go to stderr and exit 1.
+# Classifications: ok | not_found | not_authenticated | exit_nonzero | empty_output |
+#                  insufficient_output | drain_timeout | timeout | self_review
+#   insufficient_output — exit 0 with output too short to be a review (a banner or a "nothing to do"
+#                         line), so a CLI that starts and immediately gives up cannot pass as a review.
+#   drain_timeout       — the review finished but its stdout could not be read to EOF (a grandchild
+#                         still holds the pipe open), so the body was discarded. Distinct from
+#                         `empty_output`: the CLI was not silent, we lost what it said.
+# Usage errors and an unwritable --out are NOT classifications: they go to stderr and exit 1. Callers
+# must therefore branch on the EXIT STATUS (any non-zero = summon failed, fall back to the secondary
+# Reviewer), using the classification only to explain which failure it was.
 #
 # Exit status: 0 when the review succeeded (classification `ok`); 1 for every failure.
 
@@ -73,6 +82,21 @@ class SummonReviewer
   # instant the pipes close; the cap only guards a pathological grandchild holding a pipe open.
   DRAIN_TIMEOUT = 5.0
 
+  # After the wall-clock deadline passes, wait this long and poll waitpid ONE more time before
+  # concluding `timeout`. The poll loop can cross the deadline in the instant a child that has already
+  # finished its review is exiting; declaring a timeout there would discard a complete review and burn
+  # the gate. A quarter second is invisible against a 900-second cap and closes that race.
+  FINAL_POLL_GRACE = 0.25
+
+  # Minimum bytes of stdout that can plausibly BE a review. The Codex CLI prints a workdir/model/
+  # provider preamble before it says anything, and "No changes to review." is a legitimate short exit —
+  # both are tens of bytes, while a real critique (findings, quoted text, a verdict) runs to hundreds
+  # or thousands. 200 sits in that gap: high enough that no banner or one-line bail clears it, low
+  # enough that a terse but genuine review does. Deliberately a BYTE floor, not a content heuristic —
+  # pattern-matching banners would break on every CLI release and could not be tested honestly.
+  # `--min-bytes 0` disables the floor for a caller that wants the old behavior.
+  DEFAULT_MIN_BYTES = 200
+
   # A detail line is context for a human, not a payload: one line, bounded, so a CLI that dumps a
   # thousand lines of trace cannot flood the caller's status output.
   DETAIL_MAX = 200
@@ -98,7 +122,7 @@ class SummonReviewer
   PROMPT
 
   def initialize(mode:, out:, input: nil, base: DEFAULT_BASE, codex_bin: DEFAULT_CODEX_BIN,
-                 timeout: DEFAULT_TIMEOUT, ac: DEFAULT_AC)
+                 timeout: DEFAULT_TIMEOUT, ac: DEFAULT_AC, min_bytes: DEFAULT_MIN_BYTES)
     @mode = mode
     @out = out
     @input = input
@@ -106,6 +130,7 @@ class SummonReviewer
     @codex_bin = codex_bin
     @timeout = timeout
     @ac = ac
+    @min_bytes = min_bytes
   end
 
   def run
@@ -134,6 +159,11 @@ class SummonReviewer
       return failed(:not_found, "cannot execute `#{ascii(bin)}`", detail(review[:stderr]))
     when :timeout
       return failed(:timeout, "no review within #{@timeout.round} seconds - child process group terminated")
+    when :drain_timeout
+      return failed(:drain_timeout,
+                    "the Codex CLI exited but its output could not be read within " \
+                    "#{DRAIN_TIMEOUT.round} seconds - a surviving child is holding the pipe open",
+                    "the review text, if any, was discarded rather than reported as an empty review")
     when :exit_nonzero
       return failed(:exit_nonzero, exit_reason(review[:exit_code]), detail(review[:stderr]))
     end
@@ -141,13 +171,20 @@ class SummonReviewer
     body = review[:stdout]
     return failed(:empty_output, "the Codex CLI exited 0 but produced no review text") if blank?(body)
 
+    if body.bytesize < @min_bytes.to_i
+      return failed(:insufficient_output,
+                    "the Codex CLI exited 0 but produced only #{body.bytesize} bytes " \
+                    "(floor: #{@min_bytes.to_i}) - too short to be a review",
+                    detail(body))
+    end
+
     begin
       File.binwrite(@out, body)
     rescue SystemCallError, IOError => e
-      return write_error("#{@out} (#{ascii(e.class.name)})")
+      return write_error("#{ascii(@out)} (#{ascii(e.class.name)})")
     end
 
-    puts "summon_reviewer: OK - #{@mode} review, #{body.bytesize} bytes -> #{@out}"
+    puts "summon_reviewer: OK - #{@mode} review, #{body.bytesize} bytes -> #{ascii(@out)}"
     0
   end
 
@@ -160,11 +197,12 @@ class SummonReviewer
     return "unknown --mode `#{ascii(@mode)}` (one of: #{MODES.join(', ')})" unless MODES.include?(@mode)
     return "missing required --out FILE" if @out.nil? || @out.to_s.empty?
     return "--timeout must be greater than zero" unless @timeout.to_f.positive?
+    return "--min-bytes must be zero or greater" if @min_bytes.to_i.negative?
 
     if @mode == "plan"
       return "--mode plan requires --input FILE (the plan text to critique)" if @input.nil? || @input.to_s.empty?
-      return "--input file not found: #{@input}" unless File.file?(@input)
-      return "--input file not readable: #{@input}" unless File.readable?(@input)
+      return "--input file not found: #{ascii(@input)}" unless File.file?(@input)
+      return "--input file not readable: #{ascii(@input)}" unless File.readable?(@input)
     end
     nil
   end
@@ -175,9 +213,9 @@ class SummonReviewer
   # review would throw away the review itself.
   def out_path_problem
     dir = File.dirname(@out)
-    return "#{dir} is not a directory" unless File.directory?(dir)
-    return "#{@out} exists but is not writable" if File.exist?(@out) && !File.writable?(@out)
-    return "#{dir} is not writable" unless File.writable?(dir)
+    return "#{ascii(dir)} is not a directory" unless File.directory?(dir)
+    return "#{ascii(@out)} exists but is not writable" if File.exist?(@out) && !File.writable?(@out)
+    return "#{ascii(dir)} is not writable" unless File.writable?(dir)
 
     nil
   end
@@ -226,12 +264,15 @@ class SummonReviewer
   def executable_file?(path) = File.file?(path) && File.executable?(path)
 
   # Runs `argv` with `stdin_data` on its stdin under a wall-clock cap, and returns
-  # { status: :ok | :exit_nonzero | :timeout, exit_code:, stdout:, stderr: }.
+  # { status: :ok | :exit_nonzero | :timeout | :drain_timeout | :spawn_failed, exit_code:, stdout:, stderr: }.
   #
   # `pgroup: true` puts the child in its own process group so a timeout can signal the WHOLE group with
   # one kill. Killing just the child would leave its grandchildren (a CLI's own workers) orphaned and
   # still running — which is why this cannot be a Timeout.timeout wrapper around a capture helper.
-  # Output is drained on threads so a chatty child cannot deadlock against a full pipe buffer.
+  # Output is drained on threads so a chatty child cannot deadlock against a full pipe buffer, and
+  # stdin is FED on a thread for the mirror-image reason: a plan payload larger than the pipe buffer
+  # (~16KB on macOS, ~64KB on Linux) blocks in `write` until the child drains it, and a CLI that never
+  # reads stdin would hang the summon forever — before the deadline is even being watched.
   def run_child(argv, stdin_data, timeout)
     in_r, in_w = IO.pipe
     out_r, out_w = IO.pipe
@@ -248,22 +289,33 @@ class SummonReviewer
 
     out_thread = Thread.new { out_r.binmode; out_r.read }
     err_thread = Thread.new { err_r.binmode; err_r.read }
-
-    feed_stdin(in_w, stdin_data)
+    in_thread = Thread.new { feed_stdin(in_w, stdin_data) }
 
     exited, status = wait_with_timeout(pid, timeout)
     unless exited
       kill_group(pid)
-      [out_thread, err_thread].each(&:kill)
+      [in_thread, out_thread, err_thread].each(&:kill)
       return { status: :timeout, exit_code: nil, stdout: "".b, stderr: "".b }
     end
 
-    stdout = drain(out_thread)
-    stderr = drain(err_thread)
+    in_thread.kill unless in_thread.join(DRAIN_TIMEOUT)
+    stdout, stdout_drained = drain(out_thread)
+    stderr, = drain(err_thread)
     # `success?`, not `exitstatus.zero?`: a child killed by a signal reports a nil exitstatus, and
     # `nil.to_i.zero?` would classify that abnormal death as a clean, empty review.
     code = status.respond_to?(:exitstatus) ? status.exitstatus : nil
     ok = status.respond_to?(:success?) && status.success?
+    # A stdout drain that timed out is NOT an empty review: the reader was still blocked on a pipe a
+    # surviving grandchild holds open, so whatever the CLI wrote is lost, not absent. Reporting that as
+    # `empty_output` would blame a CLI that did its job.
+    if ok && !stdout_drained
+      # Something in the child's group outlived it holding the pipe — the same orphan the timeout path
+      # kills, arriving by a different door. Signal the group so the summon does not leave it running.
+      terminate_group(pid)
+      return { status: :drain_timeout, exit_code: code, stdout: "".b, stderr: stderr }
+    end
+
+
     { status: ok ? :ok : :exit_nonzero, exit_code: code, stdout: stdout, stderr: stderr }
   ensure
     [in_r, in_w, out_r, out_w, err_r, err_w].each { |io| io.close unless io.nil? || io.closed? }
@@ -283,10 +335,22 @@ class SummonReviewer
     deadline = monotonic + timeout.to_f
     loop do
       return [true, $?] if Process.waitpid(pid, Process::WNOHANG)
-      return [false, nil] if monotonic >= deadline
+      return final_poll(pid) if monotonic >= deadline
 
       sleep POLL_INTERVAL
     end
+  rescue Errno::ECHILD
+    [true, nil]
+  end
+
+  # One last look after the deadline, FINAL_POLL_GRACE later. The loop above can cross the deadline in
+  # the very instant a child that has already written its whole review is exiting; concluding `timeout`
+  # there would kill it and throw the review away for a few hundredths of a second.
+  def final_poll(pid)
+    sleep FINAL_POLL_GRACE
+    return [true, $?] if Process.waitpid(pid, Process::WNOHANG)
+
+    [false, nil]
   rescue Errno::ECHILD
     [true, nil]
   end
@@ -305,13 +369,23 @@ class SummonReviewer
     nil
   end
 
-  def drain(thread)
-    return (thread.kill; "".b) unless thread.join(DRAIN_TIMEOUT)
+  # Returns [bytes, drained?]. `drained?` is false when the reader thread missed DRAIN_TIMEOUT — the
+  # caller needs to tell "the CLI said nothing" from "we could not hear what the CLI said".
+  # Signals the child's process group without waiting on it — the leader is already reaped here, so
+  # there is nothing left to reap; only its survivors need telling.
+  def terminate_group(pid)
+    Process.kill("-TERM", pid)
+  rescue Errno::ESRCH, Errno::EPERM
+    nil
+  end
 
-    thread.value.to_s.b
+  def drain(thread)
+    return (thread.kill; ["".b, false]) unless thread.join(DRAIN_TIMEOUT)
+
+    [thread.value.to_s.b, true]
   rescue IOError, SystemCallError
     # The pipe was torn down under the reader; partial output is not worth crashing the run over.
-    "".b
+    ["".b, true]
   end
 
   def monotonic = Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -374,7 +448,7 @@ if $PROGRAM_NAME == __FILE__
   options = {
     mode: nil, input: nil, base: SummonReviewer::DEFAULT_BASE, out: nil,
     codex_bin: SummonReviewer::DEFAULT_CODEX_BIN, timeout: SummonReviewer::DEFAULT_TIMEOUT,
-    ac: SummonReviewer::DEFAULT_AC
+    ac: SummonReviewer::DEFAULT_AC, min_bytes: SummonReviewer::DEFAULT_MIN_BYTES
   }
 
   parser = OptionParser.new do |opts|
@@ -386,6 +460,10 @@ if $PROGRAM_NAME == __FILE__
     opts.on("--codex-bin PATH", "Codex CLI to summon (default: #{SummonReviewer::DEFAULT_CODEX_BIN})") { |v| options[:codex_bin] = v }
     opts.on("--timeout SECONDS", Float, "wall-clock cap (default: #{SummonReviewer::DEFAULT_TIMEOUT})") { |v| options[:timeout] = v }
     opts.on("--ac NAME", "acting agent (default: #{SummonReviewer::DEFAULT_AC})") { |v| options[:ac] = v }
+    opts.on("--min-bytes N", Integer,
+            "substance floor on the review body, 0 disables (default: #{SummonReviewer::DEFAULT_MIN_BYTES})") do |v|
+      options[:min_bytes] = v
+    end
   end
 
   begin

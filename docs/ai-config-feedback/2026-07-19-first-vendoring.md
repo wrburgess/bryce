@@ -116,8 +116,14 @@ stdin (`--mode plan`), PRs to its `review --base BRANCH` subcommand (`--mode wor
 **no network call and no lifecycle-host call** — it writes the review body to a file and classifies
 the outcome; the AC posts it. That keeps credential handling out of a bundled script and makes the
 whole ladder testable offline against a fake CLI (`scripts/summon_reviewer.test.sh`). The failure
-ladder is now explicit and branchable: `ok` plus six named failures — `not_found`,
-`not_authenticated`, `exit_nonzero`, `empty_output`, `timeout`, `self_review` — and on any of the six
+ladder is now explicit and branchable: `ok` plus eight named failures — `not_found`,
+`not_authenticated`, `exit_nonzero`, `empty_output`, `insufficient_output`, `drain_timeout`,
+`timeout`, `self_review`. The fallback **trigger**, though, is the **exit status**, not the
+classification list: a usage error and an unwritable destination exit non-zero with no classification
+at all, and a ladder keyed only to the named failures would leave the likeliest operator mistakes
+unhandled — the same silent-gap shape F9 is about. `insufficient_output` closes that shape one level
+deeper: a CLI that prints its banner and stops exits **0**, so a summon that only checks for
+zero-length output reports a review that never happened. On any non-zero exit
 the AC requests the fallback **Copilot** review via a requested-reviewer POST naming `Copilot` (the
 mechanism verified by hand on PR #38, which recorded the timeline event
 `review_requested by wrburgess -> Copilot`), degrading last to a missing-review flag in the SOW. This

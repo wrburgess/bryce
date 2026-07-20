@@ -98,25 +98,51 @@ definitions.
 - **Reviewer (second-model review of plans and PRs):** the **primary** Reviewer is **Codex**
   (harness) running **GPT-5.6** (model — set in Codex settings; per ADR 0024 the harness and model
   are named separately, matching the Attribution table above). The AC summons it — not the HC —
-  through the **local Codex CLI**, wrapped by [`scripts/summon_reviewer.rb`](scripts/summon_reviewer.rb):
-  - **Plans:** `--mode plan --input FILE` — the plan text is piped to the CLI's `exec` subcommand
-    under an adversarial plan-critique prompt.
-  - **PRs / work:** `--mode work --base BRANCH` — the CLI's `review` subcommand reviews the branch's
-    diff against its base.
+  through the **local Codex CLI**, wrapped by [`scripts/summon_reviewer.rb`](scripts/summon_reviewer.rb).
+  These are the **complete, runnable** invocations — every required flag is present, and the summon
+  self-test executes these exact lines out of this file, so a command documented here that does not
+  run turns the gate red rather than silently failing in a lifecycle run:
+
+```sh
+# Plans (Stage 2) - the plan text is piped to the CLI's `exec` subcommand under an
+# adversarial plan-critique prompt.
+ruby scripts/summon_reviewer.rb --mode plan --input PLAN_FILE --out OUT_FILE --ac AC_NAME
+
+# PRs / work (Stage 4) - the CLI's `review` subcommand reviews the branch's diff against its base.
+ruby scripts/summon_reviewer.rb --mode work --base BRANCH --out OUT_FILE --ac AC_NAME
+```
+
+  - `PLAN_FILE` — the plan text to critique (plan mode only). `OUT_FILE` — where the review body is
+    written; **required in both modes**, and the summon exits 1 with a usage error without it.
+    `BRANCH` — the base to review against (default `main`).
+  - `AC_NAME` — the **acting agent** (`claude`, `codex`, …). **Always pass it.** It is the only thing
+    that makes the `self_review` refusal reachable: the default is `claude`, so a run where Codex is
+    the AC would otherwise stage Codex reviewing its own work — the one case the guard exists for.
+  - `--min-bytes N` (default 200) sets the substance floor below which stdout is not a review;
+    `--timeout SECONDS` (default 900) caps the wall clock. Neither is normally passed.
 
   The GitHub-app precondition is **gone**: the CLI runs locally against the HC's own Codex session,
   so nothing needs installing on the repository. The summon script itself makes **no network call and
   no lifecycle-host call** — it writes the review body to a file and classifies the outcome; the AC
   posts it. That keeps token handling out of the bundled script and makes every failure mode
   testable offline (`bash scripts/summon_reviewer.test.sh`).
-- **Reviewer failure ladder.** The summon classifies its outcome as `ok` or one of six failures —
+- **Reviewer failure ladder.** The summon classifies its outcome as `ok` or one of eight failures —
   `not_found` (no Codex CLI on PATH), `not_authenticated` (`login status` did not confirm a
-  session), `exit_nonzero` (the CLI failed), `empty_output` (exit 0 but no review text), `timeout`
-  (no review inside the wall-clock cap), `self_review` (the acting agent *is* Codex, so it would not
-  be a second model). **On any of the six, the AC requests a Copilot review as the fallback:** a
-  requested-reviewer POST on the PR naming `Copilot` (the same mechanism the HC used by hand on PR
-  #38, which recorded the timeline event `review_requested by wrburgess -> Copilot`). Copilot's
-  declared model is `model varies (GPT / Claude / Gemini)`.
+  session), `exit_nonzero` (the CLI failed), `empty_output` (exit 0 but no review text),
+  `insufficient_output` (exit 0 with a body below the substance floor — a banner or a one-line bail,
+  not a review), `drain_timeout` (the CLI finished but its output could not be read to EOF, so the
+  review was lost rather than absent), `timeout` (no review inside the wall-clock cap),
+  `self_review` (the acting agent *is* Codex, so it would not be a second model).
+
+  **The fallback trigger is the EXIT STATUS, not the classification list: on ANY non-zero exit the
+  AC requests a Copilot review as the fallback.** Some failures are not classifications at all — a
+  usage error (a malformed or incomplete command) and an unwritable `--out` print to stderr and exit
+  1 without a classification line, and those are among the likeliest failures in practice. A ladder
+  keyed to the named classifications alone would leave them unhandled, so the rule is the exit
+  status: `0` = review in hand, anything else = fall back. The fallback is a requested-reviewer POST
+  on the PR naming `Copilot` (the same mechanism the HC used by hand on PR #38, which recorded the
+  timeline event `review_requested by wrburgess -> Copilot`). Copilot's declared model is
+  `model varies (GPT / Claude / Gemini)`.
   If neither Reviewer returns a review, the faithfulness backstop degrades to **flagging the missing
   review in the SOW** — never to silently skipping it. A skipped Reviewer gate is always visible in
   the delivered artifact.
