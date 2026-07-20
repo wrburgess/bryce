@@ -78,18 +78,32 @@ resolves on its own.
 ```ts
 export type ClaimResult =
   | { claimed: true; replay: false; deliveryId: number; attempt: number; recovered: boolean }
-  | { claimed: true; replay: true;  deliveryId: number | null }
+  | { claimed: true; replay: true;  replayOfDeliveryId: number | null }
   | { claimed: false; reason: ClaimRefusal };
 ```
 
-The replay variant has no `attempt`, and its `deliveryId` is nullable. `runDigest` guards both
+The replay variant has no `attempt` and **no `deliveryId` field at all**. `runDigest` guards both
 settles with `if (!claim.replay)`, and TypeScript narrows `deliveryId` to `number` inside — so
 calling `settleSent`/`settleFailed` on a replay is a *type error*, not a code-review item. The rule
 "a replay writes nothing" cannot be forgotten in a later edit.
 
-`deliveryId` on a replay carries the existing row's id when there is one, purely so assembly can
-re-include the lines that row already reported. It is null when the slot has no row at all (a forced
-heartbeat on a day with no heartbeat row).
+**The rename is what makes that true.** An earlier draft gave the replay arm a nullable `deliveryId`
+and claimed the same guarantee; it did not hold, because a null check narrows it right back:
+
+```ts
+if (claim.deliveryId !== null) settleFailed(db, { deliveryId: claim.deliveryId, … }); // compiled!
+```
+
+That is the data-loss path this design exists to eliminate, reintroduced by a line that type-checks.
+A *differently named* field cannot be passed to a `deliveryId` parameter under any narrowing, so the
+barrier is structural rather than nominal.
+
+`replayOfDeliveryId` is the id of the already-`sent` delivery being replayed, purely so assembly can
+re-include the lines that delivery reported. It is null whenever there is no such delivery: no row
+for the slot (a forced heartbeat on a day with no heartbeat row), or a row that is `failed` or
+`sending` and therefore stamped no lines — which is what a heartbeat refusal sourced from a *different
+date's* `sent` row looks like. Null is the ordinary "unreported lines only" predicate, which is the
+correct answer in each of those cases.
 
 ## The heartbeat precondition is asked, not omitted
 
@@ -116,10 +130,11 @@ const novelty =
     : or(isNull(statLines.digestDeliveryId), eq(statLines.digestDeliveryId, includeDeliveryId));
 ```
 
-`runDigest` passes `claim.deliveryId` unconditionally — **the claim already returns the id**, so the
-send path needs no extra query. On an ordinary claim, no line is stamped with that id yet, so the
-predicate collapses back to `IS NULL`: force never *adds* anything to a digest that would have sent
-normally, it only removes a reason to skip.
+`runDigest` reads the id off whichever arm it holds (`claim.replay ? claim.replayOfDeliveryId :
+claim.deliveryId`) — **the claim already returns it**, so the send path needs no extra query. On an
+ordinary claim, no line is stamped with that id yet, so the predicate collapses back to `IS NULL`:
+force never *adds* anything to a digest that would have sent normally, it only removes a reason to
+skip.
 
 Everything downstream — the ADR 0033 fielding merge, the `noNewStats` tail, `playerCount`,
 `reportedIds` — derives from that single row set and follows without further change.
@@ -131,6 +146,12 @@ therefore go through one shared helper, `previewDeliveryId(db, deps, force)` in
 (exported from `src/jobs/delivery-claim.ts`, beside the state machine that owns that table). Preview
 holds no claim, so it must look the id up; sharing the helper is what keeps REST and MCP from
 drifting.
+
+`findDeliveryId` filters on `status = "sent"`. Only a settled delivery ever stamped a Stat Line, so a
+`failed` or `sending` row's id would widen the predicate by an id no line carries. That is inert
+today — `settleSent` is the sole writer of `stat_lines.digest_delivery_id` — but resting a preview's
+correctness on a fact about a different module is exactly the sort of load-bearing coincidence that
+breaks quietly later. The filter states the requirement where it is relied on, and two tests pin it.
 
 ## Line marking under replay
 
@@ -175,7 +196,7 @@ It cannot make a scheduled run skip, cannot make one send, and cannot change wha
 
 | Surface | Shape |
 |---|---|
-| CLI | `npm run digest -- --force` — an exported, pure `parseForce(argv)`; one valueless boolean, so a bare `includes`, not `seed.ts`'s flag-map parser. |
+| CLI | `npm run digest -- --force` — an exported, pure `parseForce(argv)`; one valueless boolean, so a bare `includes`, not `seed.ts`'s flag-map parser. The entrypoint is `runDigestCli(argv, deps)` with `main()` building the real deps, matching `runSeed`/`runProbe`, so the *wiring* is testable and not only the parse. |
 | MCP | `send_digest` and `digest_preview` take `DigestInputShape` (`{ force: z.boolean().default(false) }`) and re-parse with `DigestInputSchema.parse(args)` inside `guarded()`, matching `run_refresh`. |
 | REST | `POST /api/digest/send` reads an optional `{"force": true}` body via the `/refresh` raw-text pattern (absent/empty body → `{}`), so every existing no-body caller keeps working; malformed JSON is a 400, never a silent force. `GET /api/digest/preview?force=true`. |
 
@@ -216,7 +237,15 @@ wall-clock waits, no static fixtures (`rules/testing.md`). Claim coverage lives 
 **Claim layer** — forced claim over `sent` returns `replay: true` and leaves the row byte-identical
 (status, sentAt, counts, providerMessageId, attemptCount); forced claim against a **live** `sending`
 lease still refuses `claimed-by-another-run`; forced claim over an expired lease, over a `failed`
-row, and with no row at all are each ordinary (`replay: false`) claims.
+row, and with no row at all are each ordinary (`replay: false`) claims. `replayOfDeliveryId` is
+pinned on the precondition path both ways: the slot's id when that slot is `sent`, and null when it
+is `failed` (a refusal sourced from another date's row).
+
+**Branch order** — the digest kind passes no precondition, so a forced-digest live-lease test reaches
+the live-lease refusal under *either* ordering and cannot pin it. A **heartbeat** that is both
+live-leased and inside the seven-day window can: the two branches disagree, so only the order decides
+the outcome. Forced and unforced versions of that case are both asserted, and the unforced one also
+pins the `claimed-by-another-run` reason string the hoist changed.
 
 **Digest job** — a forced run after a same-day send re-sends, asserted on the **rendered stat lines
 in the mail body**; it reports `reason: "forced"` in preference to `"recovered-stale-claim"`; the
@@ -229,30 +258,41 @@ the delivery row stays `sent` with its original `sent_at` (the data-loss case ab
 heartbeat does not move the seven-day clock, so the next legitimate heartbeat fires on its original
 schedule (the clock-reset case above).
 
-**Surfaces** — forced preview matches a forced send and writes nothing; REST force via body, no-body
-unchanged, malformed JSON and wrong-typed force both 400; `?force=true` forces and `?force=false`
-does not (the coercion trap); MCP both tools accept `{force: true}` and reject a wrong-typed one;
-`parseForce` unit tests; `/health` unchanged by a forced run.
+**Surfaces** — forced preview matches a forced send and writes nothing; `previewDeliveryId` resolves
+a `sent` row and ignores a `failed` or `sending` one; REST force via body, no-body unchanged,
+malformed JSON and wrong-typed force both 400; `?force=true` forces and `?force=false` does not (the
+coercion trap); MCP both tools accept `{force: true}` and reject a wrong-typed one; `/health`
+unchanged by a forced run. On the CLI, `parseForce` is unit-tested *and* `runDigestCli(["--force"],
+deps)` is driven end to end against a `testDb` + `CapturingMailer` — a same-day re-run mails a second
+time, and the unforced control does not. Dropping `force` from the wiring used to leave the suite
+green; it no longer does.
 
 Each of these was mutation-checked against the design it rejects: re-claiming the `sent` row fails
-seven tests, omitting the heartbeat precondition fails the clock-reset test, and letting force
-override the live lease fails the guarantee test.
+seven tests, omitting the heartbeat precondition fails the clock-reset test, moving the live-lease
+refusal back below the precondition fails the heartbeat branch-order pair, giving the replay arm a
+nullable `deliveryId` lets a `settleFailed` call compile again, and dropping the `sent` filter from
+`findDeliveryId` fails both `previewDeliveryId` status tests.
 
 ## Files touched
 
-- `src/jobs/delivery-claim.ts` — `force` in `ClaimArgs`; `ClaimResult` discriminated union; replay
-  branches; live-lease refusal hoisted into its own leading branch; exported `findDeliveryId`.
+- `src/jobs/delivery-claim.ts` — `force` in `ClaimArgs`; `ClaimResult` discriminated union with the
+  replay arm's `replayOfDeliveryId`; replay branches; live-lease refusal hoisted into its own leading
+  branch; exported `findDeliveryId`, filtered to `sent`.
 - `src/jobs/digest.ts` — `force` in `DigestDeps`, threaded to both claims; both settles guarded by
   `!claim.replay`; `includeDeliveryId` passed to assembly; `reason` precedence.
 - `src/digest/assemble.ts` — `includeDeliveryId` in `AssembleDeps`; widened novelty predicate;
   `previewDeliveryId` helper shared by both preview surfaces.
 - `src/api/schemas.ts` — `DigestInputShape` / `DigestInputSchema` / `DigestQueryInputSchema`.
-- `src/api/routes.ts`, `src/mcp/server.ts`, `src/cli/digest.ts` — the three surfaces.
+- `src/api/routes.ts`, `src/mcp/server.ts` — two of the three surfaces.
+- `src/cli/digest.ts` — the third: refactored to `runDigestCli(argv, deps)` + a thin `main()`.
 - `test/digest.test.ts`, `test/digest-preview.test.ts`, `test/api.test.ts`, `test/mcp.test.ts`,
   `test/server.test.ts`, `test/cli-digest.test.ts`.
 
 ## Documentation
 
 ADR 0034 gains a short force subsection (a replay writes nothing; the guarantee is unchanged;
-force-vs-force is unguarded by design). `docs/guides/running-bryce.md` gains
+force-vs-force is unguarded by design) plus a note on the branch reorder — that it changed one
+unforced refusal *reason* from `heartbeat-sent-within-week` to `claimed-by-another-run`, and that a
+live lease now skips the precondition entirely, so preconditions must stay side-effect-free reads.
+`docs/guides/running-bryce.md` gains
 `npm run digest -- --force` and the note that forcing during the offseason sends a heartbeat.

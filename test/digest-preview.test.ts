@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { digestDeliveries, statLines } from "../src/db/schema.js";
@@ -270,6 +271,53 @@ describe("assembleDigest (pure digest preview)", () => {
     // A different slot is never picked up: yesterday's delivery is not today's.
     await insertDelivery(opened.db, { kind: "digest", dateCovered: "2026-07-18" });
     expect(previewDeliveryId(opened.db, deps(), true)).toBe(row.id);
+  });
+
+  /**
+   * Only a SETTLED delivery ever stamped a Stat Line — `settleSent` is the one
+   * writer of `stat_lines.digest_delivery_id`. A `failed` or `sending` row's id
+   * would therefore widen the forced preview's novelty predicate by an id no
+   * line carries: harmless today, but only because of a fact about a different
+   * module. These two pin the status filter so the correctness is the helper's
+   * own, not a coincidence.
+   */
+  it("previewDeliveryId ignores a FAILED row for today's slot", async () => {
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "failed",
+      errorMessage: "postmark down",
+    });
+    expect(previewDeliveryId(opened.db, deps(), true)).toBeNull();
+
+    // Positive control: the same slot, once genuinely sent, DOES resolve — so
+    // this test is about the status, not about the lookup being broken.
+    await opened.db
+      .update(digestDeliveries)
+      .set({ status: "sent", sentAt: MID_SEASON })
+      .where(eq(digestDeliveries.dateCovered, "2026-07-19"));
+    expect(previewDeliveryId(opened.db, deps(), true)).not.toBeNull();
+  });
+
+  it("previewDeliveryId ignores an in-flight SENDING row for today's slot", async () => {
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "sending",
+      claimedAt: MID_SEASON,
+    });
+    expect(previewDeliveryId(opened.db, deps(), true)).toBeNull();
+
+    // A forced preview against that in-flight row is the ordinary preview: it
+    // reports only unreported lines, and reports the same set unforced.
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const line = await insertStatLine(opened.db, { playerId: player.id });
+    const forced = await assembleDigest(opened.db, {
+      ...deps(),
+      includeDeliveryId: previewDeliveryId(opened.db, deps(), true),
+    });
+    expect(forced.reportedIds).toEqual([line.id]);
+    expect((await assembleDigest(opened.db, deps())).reportedIds).toEqual(forced.reportedIds);
   });
 
   it("leaves the heartbeat path unaffected (runDigest still heartbeats in the offseason)", async () => {

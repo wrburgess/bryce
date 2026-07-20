@@ -159,11 +159,13 @@ describe("GET /health", () => {
     expect(mailer.sent).toHaveLength(2);
 
     expect(await health()).toEqual(before);
-    // The schema invariant, asserted over every row: a claim in flight has no
-    // send time, and a forced replay never leaves a claim in flight at all.
+    // Asserted on the row itself, not just through /health: the replay held no
+    // claim, so the row was never re-taken — `attempt_count` never moved and it
+    // never passed back through `sending`. Re-claiming it would bump the count
+    // to 2 even though /health's own projection can't show that.
     const rows = await opened.db.select().from(digestDeliveries);
     expect(rows).toHaveLength(1);
-    expect(rows.every((r) => r.status !== "sending")).toBe(true);
-    expect(rows.every((r) => r.status !== "sending" || r.sentAt === null)).toBe(true);
+    expect(rows[0]).toMatchObject({ status: "sent", attemptCount: 1 });
+    expect(rows[0]?.sentAt).not.toBeNull();
   });
 });

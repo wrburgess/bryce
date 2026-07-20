@@ -72,10 +72,16 @@ only**, and it does so without writing:
   forced run that meets a live lease skips, exactly as an unforced one does.
 - **A replay takes no claim, so it settles nothing.** No delivery row is inserted or updated, no
   `attempt_count` moves, no Stat Line is marked. `ClaimResult` is a discriminated union whose replay
-  variant cannot be passed to `settleSent`/`settleFailed`, so this is a compile-time property rather
-  than a convention. In particular a forced send whose provider *rejects* the mail cannot run
-  `settleFailed` over an already-`sent` row — which would have wiped `sent_at` off a genuinely
-  delivered digest and left the next scheduled run to re-claim it and mail an empty one.
+  variant carries **no `deliveryId` field at all** — its id is named `replayOfDeliveryId` — so a
+  settle cannot be reached from that arm even after a null check, and this is a compile-time property
+  rather than a convention. (A nullable `deliveryId` would *not* have been: `if (claim.deliveryId !==
+  null) settleFailed({ deliveryId: claim.deliveryId, … })` narrows and compiles. The rename is what
+  makes the claimed guarantee true.) In particular a forced send whose provider *rejects* the mail
+  cannot run `settleFailed` over an already-`sent` row — which would have wiped `sent_at` off a
+  genuinely delivered digest and left the next scheduled run to re-claim it and mail an empty one.
+  `replayOfDeliveryId` is populated **only when the slot's row is already `sent`**, because its whole
+  purpose is to let assembly re-include the lines that delivery reported; a `failed` or `sending`
+  row stamped none, so its id would name nothing and is reported as null.
 - **The heartbeat's seven-day clock does not move.** The rolling rule is still evaluated inside the
   claim transaction on a forced run; force only turns its refusal into a replay. A forced heartbeat
   therefore never stamps a new `sent_at`, and the next real liveness signal fires on its original
@@ -88,6 +94,25 @@ only**, and it does so without writing:
 Because a replay writes nothing, it is invisible to the scheduled pipeline: the row still reads
 `sent`, so the next scheduled run refuses `already-sent-today` and reports exactly what it would have
 reported anyway.
+
+### The live-lease check was hoisted above the precondition, and that is observable
+
+Adding force required **reordering** `claimDelivery`: the live-lease refusal now runs *first*, before
+the precondition, where it previously ran after it. Without the hoist a forced heartbeat whose
+precondition refused would become a replay and mail **past a live claim** — two invocations at the
+provider for one slot, which is the guarantee itself. Two consequences, recorded rather than left to
+be rediscovered:
+
+- **An unforced refusal reason changed.** A heartbeat that is *both* live-leased *and* inside the
+  rolling seven days now reports `claimed-by-another-run` where it previously reported
+  `heartbeat-sent-within-week`. Both still skip and neither sends, but the string is not internal: it
+  is the `reason` on `DigestResult`, surfaced through the REST route, the MCP tool and the CLI's
+  stdout line. The new string is the more accurate one — another run holds the slot right now, which
+  is a different fact from "we already sent this week" — and it is pinned by a test.
+- **The precondition is no longer invoked at all when the lease is live.** It sits behind the
+  refusal, so it is never called on that path. Today's only precondition (`heartbeatWithinWeek`) is a
+  pure read, so this is invisible; a future precondition with a *side effect* would silently be
+  skipped whenever a live claim exists. Preconditions must stay side-effect-free reads.
 
 ## Why at-least-once, not at-most-once
 

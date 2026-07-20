@@ -1063,9 +1063,11 @@ describe("forced delivery", () => {
       now: new Date(MID_SEASON),
       force: true,
     });
-    // A replay, carrying the existing row's id so assembly can re-include the
-    // lines it already reported — but holding NO claim to settle.
-    expect(claim).toEqual({ claimed: true, replay: true, deliveryId: row.id });
+    // A replay, carrying the id of the delivery it REPLAYS so assembly can
+    // re-include the lines that delivery already reported — but holding NO
+    // claim to settle. The field is deliberately not called `deliveryId`: a
+    // settle cannot be reached from this arm even after a null check.
+    expect(claim).toEqual({ claimed: true, replay: true, replayOfDeliveryId: row.id });
 
     // Every field: status, sentAt, counts, providerMessageId, attemptCount.
     const after = await deliveries();
@@ -1073,10 +1075,12 @@ describe("forced delivery", () => {
     expect(after[0]).toEqual(before);
   });
 
-  it("GUARANTEE: a forced claim against a LIVE sending lease is still refused", async () => {
+  it("GUARANTEE: a forced DIGEST claim against a LIVE sending lease is still refused", async () => {
     // ADR 0034's exact mutual exclusion. Force is a statement about
     // de-duplication bookkeeping, never about concurrency safety — overriding
     // this would put two invocations at the mail provider for one slot.
+    // (The digest kind passes no precondition, so this case alone does not pin
+    // the BRANCH ORDER — the heartbeat pair further down does that.)
     await insertDelivery(opened.db, {
       kind: "digest",
       dateCovered: "2026-07-19",
@@ -1298,6 +1302,121 @@ describe("forced delivery", () => {
   });
 
   // --- Heartbeat / Offseason Sleep ----------------------------------------
+
+  /**
+   * The live-lease/precondition BRANCH ORDER, pinned. Both tests below stage a
+   * heartbeat that is BOTH live-leased AND inside the seven-day window, so the
+   * two branches disagree about the outcome and only the order decides it:
+   *
+   *   live lease first (correct) -> refuse `claimed-by-another-run`, send nothing
+   *   precondition first (wrong) -> forced: REPLAY, which MAILS past a live claim
+   *
+   * That second outcome is two invocations at the mail provider for one slot —
+   * ADR 0034's exact mutual exclusion, broken by a testing affordance. The
+   * digest-kind guarantee test above cannot catch it: `kind: "digest"` passes no
+   * precondition, so it reaches the live-lease check under EITHER order.
+   */
+  const liveLeasedHeartbeatInsideWindow = async () => {
+    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+    // Two days ago: unforced, the rolling seven-day rule alone WOULD refuse.
+    await insertDelivery(opened.db, {
+      kind: "heartbeat",
+      dateCovered: "2026-12-03",
+      sentAt: "2026-12-03T18:00:00.000Z",
+    });
+    // ...and today's slot is held by a run that is at the provider right now.
+    await insertDelivery(opened.db, {
+      kind: "heartbeat",
+      dateCovered: "2026-12-05",
+      status: "sending",
+      claimedAt: OFFSEASON,
+      attemptCount: 1,
+    });
+  };
+
+  it("GUARANTEE: a forced HEARTBEAT never replays past a LIVE lease (branch order)", async () => {
+    clock.set(OFFSEASON); // 2026-12-05 Chicago
+    await liveLeasedHeartbeatInsideWindow();
+    const before = await deliveries();
+
+    const forced = await runDigest(deps(true));
+    expect(forced).toMatchObject({
+      kind: "heartbeat",
+      action: "skipped",
+      reason: "claimed-by-another-run",
+    });
+    // The whole point: no second invocation reached the provider.
+    expect(mailer.sent).toHaveLength(0);
+    // A refusal is not a replay: nothing was written either.
+    expect(await deliveries()).toEqual(before);
+  });
+
+  it("refuses an UNFORCED heartbeat the same way, naming the lease not the week", async () => {
+    // The unforced control for the test above. It also pins the reason STRING,
+    // which the reorder changed: this case used to report
+    // `heartbeat-sent-within-week`, and the string flows to REST, MCP and the
+    // CLI log. Both refusals skip, but they mean different things to a reader —
+    // "someone else is sending right now" is not "we already sent this week".
+    clock.set(OFFSEASON);
+    await liveLeasedHeartbeatInsideWindow();
+    const before = await deliveries();
+
+    const result = await runDigest(deps());
+    expect(result).toMatchObject({
+      kind: "heartbeat",
+      action: "skipped",
+      reason: "claimed-by-another-run",
+    });
+    expect(mailer.sent).toHaveLength(0);
+    expect(await deliveries()).toEqual(before);
+  });
+
+  it("replays a heartbeat with a NULL id when the refusal is about another slot", async () => {
+    // The replay's id is documented as the delivery whose lines it re-includes,
+    // so it must never be a row that reported none. The rolling rule reads the
+    // latest `sent` heartbeat of ANY date, so it can refuse while THIS slot's
+    // row is `failed` — an unrelated row whose id would widen the novelty
+    // predicate by an id no Stat Line carries.
+    const failedToday = await insertDelivery(opened.db, {
+      kind: "heartbeat",
+      dateCovered: "2026-12-05",
+      status: "failed",
+      errorMessage: "postmark down",
+    });
+
+    expect(
+      claimDelivery(opened.db, {
+        kind: "heartbeat",
+        dateCovered: "2026-12-05",
+        now: new Date(OFFSEASON),
+        force: true,
+        precondition: () => "heartbeat-sent-within-week",
+      }),
+    ).toEqual({ claimed: true, replay: true, replayOfDeliveryId: null });
+
+    // And the replay wrote nothing on this path either.
+    expect(await deliveries()).toEqual([failedToday]);
+  });
+
+  it("replays a heartbeat with the slot's id when that slot is already sent", async () => {
+    const sentToday = await insertDelivery(opened.db, {
+      kind: "heartbeat",
+      dateCovered: "2026-12-05",
+      status: "sent",
+      sentAt: OFFSEASON,
+    });
+
+    expect(
+      claimDelivery(opened.db, {
+        kind: "heartbeat",
+        dateCovered: "2026-12-05",
+        now: new Date(OFFSEASON),
+        force: true,
+        precondition: () => "heartbeat-sent-within-week",
+      }),
+    ).toEqual({ claimed: true, replay: true, replayOfDeliveryId: sentToday.id });
+    expect(await deliveries()).toEqual([sentToday]);
+  });
 
   it("sends a heartbeat when forced inside the seven-day window", async () => {
     clock.set(OFFSEASON); // 2026-12-05 Chicago

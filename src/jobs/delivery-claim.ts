@@ -65,14 +65,21 @@ export type ClaimResult =
       recovered: boolean;
     }
   /**
-   * A forced REPLAY: send the mail, write nothing. There is no claim to settle
-   * — that is why this variant has no `attempt` and no non-null `deliveryId`
-   * guarantee, so `settleSent`/`settleFailed` cannot be called on it without a
-   * type error. `deliveryId` is the existing row for the slot when there is one
-   * (so assembly can re-include the lines it already reported), and null when
-   * there is none.
+   * A forced REPLAY: send the mail, write nothing. There is no claim to settle,
+   * and this variant is shaped so that saying otherwise does not compile: it has
+   * no `attempt`, and its id field is NAMED DIFFERENTLY (`replayOfDeliveryId`,
+   * not `deliveryId`), so `settleSent`/`settleFailed` cannot be reached from it
+   * even via a null check — a rename is a barrier a narrowing cannot cross.
+   *
+   * `replayOfDeliveryId` is the id of the already-`sent` delivery this run is
+   * replaying, so assembly can re-include the lines that delivery already
+   * reported. It is null whenever there is no such delivery — no row for the
+   * slot at all, or a row that is `failed`/`sending` and therefore stamped no
+   * lines (which happens when a heartbeat's rolling seven-day rule refused
+   * because of a `sent` row for a DIFFERENT date). Null is the ordinary
+   * "unreported lines only" predicate, which is exactly right in those cases.
    */
-  | { claimed: true; replay: true; deliveryId: number | null }
+  | { claimed: true; replay: true; replayOfDeliveryId: number | null }
   | { claimed: false; reason: ClaimRefusal };
 
 export type ClaimRefusal =
@@ -153,7 +160,14 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
       const refusal = args.precondition?.(tx) ?? null;
       if (refusal !== null) {
         if (forced) {
-          return { claimed: true, replay: true, deliveryId: existing?.id ?? null };
+          // Only an already-`sent` slot has lines to re-include. A precondition
+          // may refuse because of a row that is not this slot's at all (the
+          // heartbeat rule reads the latest `sent` heartbeat of ANY date), and
+          // this slot's own row may be `failed` or `sending` — stamped nothing,
+          // so offering its id would widen the novelty predicate by an id no
+          // line carries, and describe a replay of something never delivered.
+          const replayOf = existing?.status === "sent" ? existing.id : null;
+          return { claimed: true, replay: true, replayOfDeliveryId: replayOf };
         }
         return { claimed: false, reason: refusal };
       }
@@ -184,7 +198,7 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
           // The whole point of the replay: this row is NOT re-claimed, so its
           // status, sent_at, counts and provider id survive the forced run
           // untouched — including when the mailer then throws.
-          return { claimed: true, replay: true, deliveryId: existing.id };
+          return { claimed: true, replay: true, replayOfDeliveryId: existing.id };
         }
         return { claimed: false, reason: "already-sent-today" };
       }
@@ -219,16 +233,30 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
 }
 
 /**
- * The delivery row id for a slot, or null when none exists. The preview
- * surfaces need it to widen their novelty predicate the way a forced send does
- * (they hold no claim to read it from); it lives here, beside the state machine
- * that owns the table. Read-only, and synchronous like the rest of this module.
+ * The id of the `sent` delivery for a slot, or null when there is none. The
+ * preview surfaces need it to widen their novelty predicate the way a forced
+ * send does (they hold no claim to read it from); it lives here, beside the
+ * state machine that owns the table. Read-only, and synchronous like the rest
+ * of this module.
+ *
+ * `status = "sent"` is part of the question, not an optimization: only a
+ * settled delivery ever stamped a Stat Line, so a `failed` or `sending` row's
+ * id would widen the predicate by an id no line carries. That is inert today
+ * only because `settleSent` is the single writer of `stat_lines`
+ * `digest_delivery_id` — filtering here makes the correctness structural
+ * instead of resting on that unrelated fact staying true.
  */
 export function findDeliveryId(db: Db, kind: DeliveryKind, dateCovered: string): number | null {
   const row = db
     .select({ id: digestDeliveries.id })
     .from(digestDeliveries)
-    .where(and(eq(digestDeliveries.kind, kind), eq(digestDeliveries.dateCovered, dateCovered)))
+    .where(
+      and(
+        eq(digestDeliveries.kind, kind),
+        eq(digestDeliveries.dateCovered, dateCovered),
+        eq(digestDeliveries.status, "sent"),
+      ),
+    )
     .all()[0];
   return row?.id ?? null;
 }
