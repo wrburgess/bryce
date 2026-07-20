@@ -279,10 +279,16 @@ describe("digest_deliveries claim columns and lock behaviour (ADR 0034)", () => 
       expect(row.reconciled_at).toBeNull();
 
       // Nullable with no default: the column carries no opinion of its own.
+      // The declared type is compared case-insensitively on purpose. This
+      // build normalizes `text` (as the migration writes it) to `TEXT` in
+      // PRAGMA table_info, but that normalization is not a documented
+      // guarantee, and the property under test is the column's TYPE and
+      // NULLABILITY — never its spelling.
       const column = (
         sqlite.prepare("PRAGMA table_info(digest_deliveries)").all() as Array<Record<string, unknown>>
       ).find((c) => c.name === "reconciled_at");
-      expect(column).toMatchObject({ type: "TEXT", notnull: 0, dflt_value: null });
+      expect(column).toMatchObject({ notnull: 0, dflt_value: null });
+      expect(String(column?.type).toUpperCase()).toBe("TEXT");
     } finally {
       sqlite.close();
       rmSync(dir, { recursive: true, force: true });
