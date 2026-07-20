@@ -8,7 +8,13 @@ import type { DigestDeliveryRow, PlayerRow, StatLineRow } from "../src/db/schema
 import { digestDeliveries, players, seasonCalendar, statLines } from "../src/db/schema.js";
 import type { FetchLike } from "../src/mlb/client.js";
 import { MlbClient } from "../src/mlb/client.js";
-import type { MailContext, MailMessage, MailReceipt, Mailer } from "../src/mailer/types.js";
+import type {
+  LookupResult,
+  MailContext,
+  MailMessage,
+  MailReceipt,
+  Mailer,
+} from "../src/mailer/types.js";
 import type { NcaaFetchLike } from "../src/ncaa/client.js";
 import { NcaaClient } from "../src/ncaa/client.js";
 import { NCAA_SEASONS } from "../src/ncaa/seasons.js";
@@ -588,6 +594,32 @@ export class CapturingMailer implements Mailer {
     this.sent.push(message);
     this.contexts.push(context);
     return Promise.resolve({ providerMessageId: this.providerMessageId });
+  }
+}
+
+/**
+ * A CapturingMailer that ALSO answers the reconciliation lookup (ADR 0034
+ * amendment). CapturingMailer deliberately stays capability-free — it doubles
+ * for the providers documented as at-least-once (SMTP, console), where the
+ * absent optional method IS the documentation — so a test that wants a lookup
+ * asks for one by type rather than by flag.
+ */
+export class LookupMailer extends CapturingMailer {
+  /** Every lookup this mailer was asked, in order — including "none". */
+  readonly lookups: Array<{ deliveryKey: string; since: string | null }> = [];
+  /** What the provider answers. The default is the fail-open one: we do not know. */
+  result: LookupResult = { outcome: "not-found" };
+  /**
+   * Set to make the lookup BREAK its contract and throw. `findAccepted` is
+   * documented as never throwing, which is exactly why the job must survive one
+   * that does — a provider bug must not be able to suppress a real send.
+   */
+  throwWith: Error | null = null;
+
+  findAccepted(deliveryKey: string, since: string | null): Promise<LookupResult> {
+    this.lookups.push({ deliveryKey, since });
+    if (this.throwWith !== null) return Promise.reject(this.throwWith);
+    return Promise.resolve(this.result);
   }
 }
 

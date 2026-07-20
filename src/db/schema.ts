@@ -56,6 +56,16 @@ export const digestDeliveries = sqliteTable(
     attemptCount: integer("attempt_count").notNull().default(0),
     /** Provider-side id of the accepted message, when the provider returns one. */
     providerMessageId: text("provider_message_id"),
+    /**
+     * Set when this delivery settled `sent` because the PROVIDER confirmed the
+     * previous, crashed attempt already landed — not because this run mailed
+     * anything (ADR 0034 amendment). Null on every ordinary send. It is what
+     * makes the fail-open lookup trustworthy in practice: an operator can tell
+     * "we sent this" from "the provider told us it was already accepted", and a
+     * reconciled row's zero counts read as recorded-nothing rather than
+     * sent-nothing.
+     */
+    reconciledAt: text("reconciled_at"),
     errorMessage: text("error_message"),
     createdAt: text("created_at").notNull(),
   },

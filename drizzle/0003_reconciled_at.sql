@@ -1,0 +1,1 @@
+ALTER TABLE `digest_deliveries` ADD `reconciled_at` text;
