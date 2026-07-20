@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { players, statLines } from "../src/db/schema.js";
 import { MlbApiError, MlbClient } from "../src/mlb/client.js";
+import { NcaaApiError, UnsupportedNcaaSeasonError } from "../src/ncaa/client.js";
 import type { WatchlistDeps } from "../src/watchlist/service.js";
 import {
   PlayerNotFoundError,
@@ -208,6 +209,31 @@ describe("watch-list service", () => {
       // No page registered for this seq → the client throws → typed error.
       await expect(addNcaaPlayer(deps(), 111111)).rejects.toBeInstanceOf(UnknownNcaaPlayerError);
       expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+
+    it("maps an upstream HTTP 404 to UnknownNcaaPlayerError (no such player)", async () => {
+      clock.set("2026-03-15T17:00:00Z");
+      ncaaApi.options.status = 404;
+      await expect(addNcaaPlayer(deps(), 2649785)).rejects.toBeInstanceOf(UnknownNcaaPlayerError);
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+
+    it("propagates NcaaApiError on an upstream failure — NOT UnknownNcaaPlayerError", async () => {
+      clock.set("2026-03-15T17:00:00Z");
+      ncaaApi.options.status = 500;
+      const promise = addNcaaPlayer(deps(), 2649785);
+      await expect(promise).rejects.toBeInstanceOf(NcaaApiError);
+      await expect(promise).rejects.not.toBeInstanceOf(UnknownNcaaPlayerError);
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+
+    it("propagates UnsupportedNcaaSeasonError for an unbundled year, before any HTTP", async () => {
+      clock.set("2030-03-15T17:00:00Z"); // no bundled stats.ncaa.org entry for 2030
+      await expect(addNcaaPlayer(deps(), 2649785)).rejects.toBeInstanceOf(
+        UnsupportedNcaaSeasonError,
+      );
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+      expect(ncaaApi.calls).toHaveLength(0);
     });
 
     it("skips the first Refresh during Offseason Sleep but still records identity", async () => {

@@ -242,6 +242,33 @@ describe("REST API", () => {
       expect(((await missing.json()) as { error: string }).error).toContain("999999");
       expect(await opened.db.select().from(players)).toHaveLength(0);
     });
+
+    it("502s an NCAA upstream failure — not 404, not 500 — writing no row", async () => {
+      ncaaApi.options.status = 500;
+      const res = await app().request("/api/players/ncaa", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ ncaaPlayerSeq: 2649785 }),
+      });
+      expect(res.status).toBe(502);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("stats.ncaa.org request failed with HTTP 500");
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+
+    it("503s an unbundled NCAA season (our data gap, not upstream), writing no row", async () => {
+      clock.set("2030-03-15T17:00:00Z"); // no bundled stats.ncaa.org entry for 2030
+      const res = await app().request("/api/players/ncaa", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ ncaaPlayerSeq: 2649785 }),
+      });
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("no bundled stats.ncaa.org season lookup for year 2030");
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+      expect(ncaaApi.calls).toHaveLength(0);
+    });
   });
 
   describe("POST /api/players/ncaa/:seq/deactivate", () => {
@@ -491,6 +518,28 @@ describe("REST API", () => {
       const lines = await opened.db.select().from(statLines);
       expect(lines).toHaveLength(1);
       expect(lines[0]?.sportId).toBe(22);
+    });
+
+    it("502s an NCAA upstream failure on refresh, ingesting nothing", async () => {
+      await insertPlayer(opened.db, {
+        externalId: null,
+        ncaaPlayerSeq: 2649785,
+        level: "ncaa",
+        milbLevel: null,
+        teamName: null,
+        fullName: "College Guy",
+        schoolName: "LSU",
+      });
+      ncaaApi.options.status = 503;
+      const res = await app().request("/api/refresh", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ ncaaPlayerSeq: 2649785 }),
+      });
+      expect(res.status).toBe(502);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("stats.ncaa.org request failed with HTTP 503");
+      expect(await opened.db.select().from(statLines)).toHaveLength(0);
     });
 
     it("400s malformed JSON without refreshing anything", async () => {

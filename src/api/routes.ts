@@ -7,6 +7,7 @@ import { renderDigest } from "../digest/render.js";
 import { runDigest } from "../jobs/digest.js";
 import { runRefresh, runRefreshForPlayer } from "../jobs/refresh.js";
 import { MlbApiError } from "../mlb/client.js";
+import { NcaaApiError, UnsupportedNcaaSeasonError } from "../ncaa/client.js";
 import { queryStatLines } from "../queries/statLines.js";
 import type { ServiceDeps } from "../server/deps.js";
 import {
@@ -49,8 +50,14 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     ) {
       return c.json({ error: err.message }, 404);
     }
-    if (err instanceof MlbApiError) {
+    if (err instanceof MlbApiError || err instanceof NcaaApiError) {
+      // Upstream (MLB Stats API / stats.ncaa.org) failure: a bad gateway.
       return c.json({ error: err.message }, 502);
+    }
+    if (err instanceof UnsupportedNcaaSeasonError) {
+      // A bundled-data gap on OUR side (src/ncaa/seasons.ts needs its annual
+      // update), not an upstream failure — unavailable until the table grows.
+      return c.json({ error: err.message }, 503);
     }
     if (err instanceof SyntaxError) {
       // Malformed JSON body — a client error, not a server one.

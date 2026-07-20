@@ -9,6 +9,7 @@ import { renderDigest } from "../digest/render.js";
 import { runDigest } from "../jobs/digest.js";
 import { runRefresh, runRefreshForPlayer } from "../jobs/refresh.js";
 import { MlbApiError } from "../mlb/client.js";
+import { NcaaApiError, UnsupportedNcaaSeasonError } from "../ncaa/client.js";
 import { queryStatLines } from "../queries/statLines.js";
 import type { ServiceDeps } from "../server/deps.js";
 import { healthSnapshot } from "../server/health.js";
@@ -61,7 +62,9 @@ function errorResult(err: unknown): CallToolResult {
           err instanceof UnknownNcaaPlayerError ||
           err instanceof PlayerNotFoundError ||
           err instanceof ReadonlyQueryError ||
-          err instanceof MlbApiError
+          err instanceof MlbApiError ||
+          err instanceof NcaaApiError ||
+          err instanceof UnsupportedNcaaSeasonError
         ? err.message
         : null;
   if (known === null) throw err instanceof Error ? err : new Error(String(err));

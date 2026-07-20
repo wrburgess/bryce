@@ -8,6 +8,7 @@ import type { MlbClient } from "../mlb/client.js";
 import { levelForSportId } from "../mlb/levels.js";
 import type { Person } from "../mlb/schemas.js";
 import type { NcaaClient } from "../ncaa/client.js";
+import { NcaaApiError, UnsupportedNcaaSeasonError } from "../ncaa/client.js";
 import { parseGameLogPage } from "../ncaa/parse.js";
 
 /**
@@ -152,7 +153,10 @@ export async function addPlayer(deps: WatchlistDeps, personId: number): Promise<
  * Add an NCAA Player by stats.ncaa.org stats_player_seq (ADR 0032). Mirrors
  * addPlayer: fetch his current-season game-log page to resolve name/school, a
  * duplicate is a no-op identity/school refresh, and a brand-new add runs his
- * first Refresh (Sleep-aware). Unknown seq / unparseable page → typed error.
+ * first Refresh (Sleep-aware). Only a genuine not-found (HTTP 404 or a page
+ * with no resolvable player) becomes UnknownNcaaPlayerError; upstream failures
+ * (NcaaApiError) and an unbundled season (UnsupportedNcaaSeasonError)
+ * propagate untouched, exactly like addPlayer surfaces MlbApiError.
  */
 export async function addNcaaPlayer(
   deps: WatchlistDeps,
@@ -166,8 +170,13 @@ export async function addNcaaPlayer(
     const html = await ncaaClient.getGameLogPage(playerSeq, season, "batting");
     const page = parseGameLogPage(html);
     identity = { fullName: page.fullName, schoolName: page.schoolName };
-  } catch {
-    // Unknown seq or a page we cannot parse — either way there is no Player to add.
+  } catch (err) {
+    // Upstream trouble is NOT a missing player: a non-404 HTTP failure and an
+    // unbundled season propagate untouched for the callers' error seams.
+    if (err instanceof NcaaApiError && err.status !== 404) throw err;
+    if (err instanceof UnsupportedNcaaSeasonError) throw err;
+    // A genuine not-found — HTTP 404 or a page with no resolvable player —
+    // means there is no Player to add.
     throw new UnknownNcaaPlayerError(playerSeq);
   }
 

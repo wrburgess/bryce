@@ -185,6 +185,33 @@ describe("MCP server over Streamable HTTP", () => {
     expect(await opened.db.select().from(players)).toHaveLength(0);
   });
 
+  it("watchlist_add_ncaa reports an NCAA upstream failure as a structured tool error", async () => {
+    ncaaApi.options.status = 500;
+    const result = await call("watchlist_add_ncaa", { ncaaPlayerSeq: 2649785 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("stats.ncaa.org request failed with HTTP 500");
+    // Not misreported as a missing player, and nothing written.
+    expect(result.content[0]?.text).not.toContain("no NCAA player");
+    expect(await opened.db.select().from(players)).toHaveLength(0);
+  });
+
+  it("run_refresh reports an NCAA upstream failure as a structured tool error", async () => {
+    await insertPlayer(opened.db, {
+      externalId: null,
+      ncaaPlayerSeq: 2649785,
+      level: "ncaa",
+      milbLevel: null,
+      teamName: null,
+      fullName: "College Guy",
+      schoolName: "LSU",
+    });
+    ncaaApi.options.status = 502;
+    const result = await call("run_refresh", { ncaaPlayerSeq: 2649785 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("stats.ncaa.org request failed with HTTP 502");
+    expect(await opened.db.select().from(statLines)).toHaveLength(0);
+  });
+
   it("watchlist_deactivate and run_refresh accept NCAA addressing; list carries schoolName", async () => {
     const ncaa = await insertPlayer(opened.db, {
       externalId: null,
