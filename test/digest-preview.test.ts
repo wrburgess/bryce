@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { digestDeliveries, statLines } from "../src/db/schema.js";
-import { assembleDigest } from "../src/digest/assemble.js";
+import { assembleDigest, previewDeliveryId } from "../src/digest/assemble.js";
 import { renderDigest } from "../src/digest/render.js";
 import { runDigest } from "../src/jobs/digest.js";
 import {
@@ -12,6 +12,7 @@ import {
   fakeClock,
   insertCalendar,
   insertCalendars2026,
+  insertDelivery,
   insertPlayer,
   insertStatLine,
   testDb,
@@ -204,6 +205,71 @@ describe("assembleDigest (pure digest preview)", () => {
 
     const assembly = await assembleDigest(opened.db, deps());
     expect(assembly.noNewStats.map((p) => p.fullName)).toEqual([]);
+  });
+
+  it("a forced preview returns exactly what a forced send reports, and writes nothing", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const line = await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-07-18",
+      stats: { hits: 2, atBats: 4, homeRuns: 1, rbi: 3 },
+    });
+
+    const mailer = new CapturingMailer();
+    const sendDeps = {
+      db: opened.db,
+      mailer,
+      now: clock.now,
+      tz: TEST_TZ,
+      to: "hc@example.com",
+      from: "bryce@example.com",
+    };
+    await runDigest(sendDeps); // the real send stamps the line
+
+    // Unforced, there is nothing left to report — that is the blocker force exists for.
+    expect((await assembleDigest(opened.db, deps())).reportedIds).toEqual([]);
+
+    const linesBefore = await opened.db.select().from(statLines);
+    const deliveriesBefore = await opened.db.select().from(digestDeliveries);
+
+    const forcedPreview = await assembleDigest(opened.db, {
+      ...deps(),
+      includeDeliveryId: previewDeliveryId(opened.db, deps(), true),
+    });
+    expect(forcedPreview.reportedIds).toEqual([line.id]);
+    expect(forcedPreview.playerCount).toBe(1);
+
+    // Read-only: the preview consumed nothing and settled nothing.
+    expect(await opened.db.select().from(statLines)).toEqual(linesBefore);
+    expect(await opened.db.select().from(digestDeliveries)).toEqual(deliveriesBefore);
+
+    // And it matches the forced SEND, byte for byte.
+    const previewMail = renderDigest({
+      date: forcedPreview.date,
+      lines: forcedPreview.lines,
+      noNewStats: forcedPreview.noNewStats,
+    });
+    const forcedSend = await runDigest({ ...sendDeps, force: true });
+    expect(forcedSend).toMatchObject({ action: "sent", statLineCount: 1 });
+    expect(mailer.sent).toHaveLength(2);
+    expect(mailer.sent[1]?.subject).toBe(previewMail.subject);
+    expect(mailer.sent[1]?.text).toBe(previewMail.text);
+    expect(mailer.sent[1]?.html).toBe(previewMail.html);
+  });
+
+  it("previewDeliveryId resolves today's digest slot only when forced", async () => {
+    expect(previewDeliveryId(opened.db, deps(), true)).toBeNull(); // no row yet
+    const row = await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "sent",
+      sentAt: MID_SEASON,
+    });
+    expect(previewDeliveryId(opened.db, deps(), true)).toBe(row.id);
+    expect(previewDeliveryId(opened.db, deps(), false)).toBeNull();
+    // A different slot is never picked up: yesterday's delivery is not today's.
+    await insertDelivery(opened.db, { kind: "digest", dateCovered: "2026-07-18" });
+    expect(previewDeliveryId(opened.db, deps(), true)).toBe(row.id);
   });
 
   it("leaves the heartbeat path unaffected (runDigest still heartbeats in the offseason)", async () => {

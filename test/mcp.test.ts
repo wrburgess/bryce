@@ -345,6 +345,54 @@ describe("MCP server over Streamable HTTP", () => {
     ).toHaveLength(0);
   });
 
+  it("send_digest and digest_preview accept force, replaying without recording", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+
+    expect((await call("send_digest")).structuredContent).toMatchObject({ action: "sent" });
+    const before = (await opened.db.select().from(digestDeliveries))[0];
+
+    // Unforced, the day is closed and the preview is empty.
+    expect((await call("send_digest")).structuredContent).toMatchObject({
+      action: "skipped",
+      reason: "already-sent-today",
+    });
+    expect((await call("digest_preview")).structuredContent).toMatchObject({ statLineCount: 0 });
+
+    // Forced preview shows the delivered content back; still read-only.
+    const preview = await call("digest_preview", { force: true });
+    expect(preview.structuredContent).toMatchObject({ statLineCount: 1, playerCount: 1 });
+    expect((preview.structuredContent?.mail as { text: string }).text).toContain("Maximo Acosta");
+    expect(mailer.sent).toHaveLength(1);
+
+    // Forced send re-mails it and leaves the delivery row exactly as it was.
+    const forced = await call("send_digest", { force: true });
+    expect(forced.structuredContent).toMatchObject({
+      kind: "digest",
+      action: "sent",
+      reason: "forced",
+      statLineCount: 1,
+    });
+    expect(mailer.sent).toHaveLength(2);
+    expect(mailer.sent[1]?.text).toBe(mailer.sent[0]?.text);
+    const after = await opened.db.select().from(digestDeliveries);
+    expect(after).toHaveLength(1);
+    expect(after[0]).toEqual(before);
+  });
+
+  it("rejects a wrong-typed force on both digest tools", async () => {
+    // The tools declare force as a real boolean, so the string "yes" is an
+    // error naming the offending field — never silently coerced into a send.
+    for (const tool of ["send_digest", "digest_preview"]) {
+      const result = await call(tool, { force: "yes" });
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("force");
+      expect(result.content[0]?.text).toContain("boolean");
+    }
+    expect(mailer.sent).toHaveLength(0);
+    expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
+  });
+
   it("run_refresh refreshes one player or the whole watch list", async () => {
     await insertPlayer(opened.db, { externalId: 691185 });
 

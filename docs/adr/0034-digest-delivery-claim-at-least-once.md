@@ -57,6 +57,38 @@ would never collide on the unique index at all — the rule has to be decided un
 before it. Only `sent` rows count toward the seven days: a `sending` or `failed` heartbeat must never
 suppress the next one, or one crash would silence the liveness signal for a week.
 
+## The force flag does not touch any of this
+
+A `force` flag exists so the digest can be re-sent during testing after the day's real send
+(`docs/specs/2026-07-20-force-digest-flag-design.md`). It overrides **de-duplication bookkeeping
+only**, and it does so without writing:
+
+> When force is what allowed the run to proceed, the run is a **replay**: it sends the mail and
+> writes **nothing**. When force was not needed, the run is an ordinary run and records normally.
+
+- **The guarantee above is unchanged.** Force never overrides `claimed-by-another-run`. That refusal
+  sits in its own branch, evaluated before anything force can influence — mutual exclusion is
+  concurrency safety, not bookkeeping, and a testing affordance must not be able to reopen it. A
+  forced run that meets a live lease skips, exactly as an unforced one does.
+- **A replay takes no claim, so it settles nothing.** No delivery row is inserted or updated, no
+  `attempt_count` moves, no Stat Line is marked. `ClaimResult` is a discriminated union whose replay
+  variant cannot be passed to `settleSent`/`settleFailed`, so this is a compile-time property rather
+  than a convention. In particular a forced send whose provider *rejects* the mail cannot run
+  `settleFailed` over an already-`sent` row — which would have wiped `sent_at` off a genuinely
+  delivered digest and left the next scheduled run to re-claim it and mail an empty one.
+- **The heartbeat's seven-day clock does not move.** The rolling rule is still evaluated inside the
+  claim transaction on a forced run; force only turns its refusal into a replay. A forced heartbeat
+  therefore never stamps a new `sent_at`, and the next real liveness signal fires on its original
+  schedule.
+- **Force-vs-force is unguarded, by design.** Two concurrent forced replays both send, and the
+  operator gets two test emails. Both are operator-initiated and neither writes, so the only cost is
+  a duplicate the operator asked for; guarding it would mean giving replays a claim, reintroducing
+  the settle-path hazard above.
+
+Because a replay writes nothing, it is invisible to the scheduled pipeline: the row still reads
+`sent`, so the next scheduled run refuses `already-sent-today` and reports exactly what it would have
+reported anyway.
+
 ## Why at-least-once, not at-most-once
 
 Between "the provider accepted this mail" and "we durably recorded that it did" there is a window no

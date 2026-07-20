@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { ZodError } from "zod";
 import { players } from "../db/schema.js";
 import { runReadonlyQuery, ReadonlyQueryError } from "../db/readonly.js";
-import { assembleDigest } from "../digest/assemble.js";
+import { assembleDigest, previewDeliveryId } from "../digest/assemble.js";
 import { renderDigest } from "../digest/render.js";
 import { runDigest } from "../jobs/digest.js";
 import { runRefresh, runRefreshForPlayer } from "../jobs/refresh.js";
@@ -28,6 +28,8 @@ import {
   AddPlayerInputSchema,
   DeactivateInputSchema,
   DeactivateInputShape,
+  DigestInputSchema,
+  DigestInputShape,
   PlayerSearchInputSchema,
   PlayersListInputSchema,
   RefreshInputSchema,
@@ -175,12 +177,16 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "digest_preview",
     {
       description:
-        "Preview what the next digest would report (unreported stat lines plus the in-season no-new-stats tail). Read-only: sends nothing, marks nothing.",
-      inputSchema: {},
+        "Preview what the next digest would report (unreported stat lines plus the in-season no-new-stats tail). Read-only: sends nothing, marks nothing. force (default false) shows what a forced send would report — today's digest slot re-included even though its lines were already reported. Preview never claims and never sends, so force here cannot disturb an in-flight claim, and it does not override the Offseason Sleep decision.",
+      inputSchema: DigestInputShape,
     },
-    () =>
+    (args) =>
       guarded(async () => {
-        const assembly = await assembleDigest(deps.db, deps);
+        const input = DigestInputSchema.parse(args);
+        const assembly = await assembleDigest(deps.db, {
+          ...deps,
+          includeDeliveryId: previewDeliveryId(deps.db, deps, input.force),
+        });
         const mail = renderDigest({
           date: assembly.date,
           lines: assembly.lines,
@@ -201,11 +207,12 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "send_digest",
     {
       description:
-        "Run the digest job now: send the digest email (or offseason heartbeat) and mark reported lines. Never double-sends for a covered date.",
-      inputSchema: {},
+        "Run the digest job now: send the digest email (or offseason heartbeat) and mark reported lines. Never double-sends for a covered date. force (default false) is a TEST send: it overrides only the already-sent-today guard and the heartbeat's weekly rule, re-sending today's content as a replay that records nothing (no delivery row is written or changed, and no stat line is marked). It does NOT override an in-flight claim held by another run — that still returns claimed-by-another-run — and it does NOT override the Offseason Sleep decision, so forcing during the offseason sends a heartbeat, never a digest.",
+      inputSchema: DigestInputShape,
     },
-    () =>
+    (args) =>
       guarded(async () => {
+        const input = DigestInputSchema.parse(args);
         const result = await runDigest({
           db: deps.db,
           mailer: deps.mailer,
@@ -213,6 +220,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
           tz: deps.tz,
           to: deps.digestTo,
           from: deps.digestFrom,
+          force: input.force,
         });
         return jsonResult({ ...result });
       }),

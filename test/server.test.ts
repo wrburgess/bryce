@@ -1,7 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
+import { digestDeliveries } from "../src/db/schema.js";
 import { createApp } from "../src/server.js";
-import { insertDelivery, insertPlayer, insertStatLine, testAppDeps, testDb } from "./factories.js";
+import {
+  CapturingMailer,
+  MID_SEASON,
+  TEST_API_TOKEN,
+  TEST_TZ,
+  fakeClock,
+  insertCalendars2026,
+  insertDelivery,
+  insertPlayer,
+  insertStatLine,
+  testAppDeps,
+  testDb,
+} from "./factories.js";
 
 describe("GET /health", () => {
   let opened: OpenedDb;
@@ -116,5 +129,41 @@ describe("GET /health", () => {
         sentAt: null,
       },
     });
+  });
+
+  it("is unchanged by a forced send: the delivery still reads sent, with its own sentAt", async () => {
+    // /health is the operator's whole view of delivery state (ADR 0034). A test
+    // send that could make it report `sending`, `failed`, or a moved sentAt
+    // would turn the one honest signal into a lie.
+    const mailer = new CapturingMailer();
+    const clock = fakeClock(MID_SEASON);
+    await insertCalendars2026(opened.db);
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+
+    const app = createApp(testAppDeps(opened, { mailer, now: clock.now, tz: TEST_TZ }));
+    const AUTH = { Authorization: `Bearer ${TEST_API_TOKEN}` };
+    const health = async () =>
+      (await (await app.request("/health")).json()) as Record<string, unknown>;
+
+    await app.request("/api/digest/send", { method: "POST", headers: AUTH });
+    const before = await health();
+    expect(before.lastDelivery).toMatchObject({ kind: "digest", status: "sent" });
+
+    const forced = await app.request("/api/digest/send", {
+      method: "POST",
+      headers: { ...AUTH, "content-type": "application/json" },
+      body: JSON.stringify({ force: true }),
+    });
+    expect(forced.status).toBe(200);
+    expect(mailer.sent).toHaveLength(2);
+
+    expect(await health()).toEqual(before);
+    // The schema invariant, asserted over every row: a claim in flight has no
+    // send time, and a forced replay never leaves a claim in flight at all.
+    const rows = await opened.db.select().from(digestDeliveries);
+    expect(rows).toHaveLength(1);
+    expect(rows.every((r) => r.status !== "sending")).toBe(true);
+    expect(rows.every((r) => r.status !== "sending" || r.sentAt === null)).toBe(true);
   });
 });
