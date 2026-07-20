@@ -90,4 +90,31 @@ describe("GET /health", () => {
     const body = (await (await app.request("/health")).json()) as Record<string, unknown>;
     expect(body.lastDelivery).toMatchObject({ dateCovered: "2026-07-19", status: "failed" });
   });
+
+  it("surfaces an in-flight `sending` claim instead of hiding or mislabeling it", async () => {
+    // A stuck claim is exactly what an operator needs to SEE (ADR 0034). The
+    // snapshot's status type is the schema's own union, so a widened state
+    // machine can never leave this surface reporting a lie (rules/backend.md).
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "sending",
+      claimedAt: "2026-07-19T12:00:00.000Z",
+      createdAt: "2026-07-19T12:00:00.000Z",
+      attemptCount: 2,
+    });
+
+    const app = createApp(testAppDeps(opened));
+    const res = await app.request("/health");
+    expect(res.status).toBe(200);
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({
+      ok: true,
+      lastDelivery: {
+        kind: "digest",
+        dateCovered: "2026-07-19",
+        status: "sending",
+        sentAt: null,
+      },
+    });
+  });
 });

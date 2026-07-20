@@ -1,9 +1,15 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { players, statLines } from "../src/db/schema.js";
+import { BUSY_TIMEOUT_MS } from "../src/db/client.js";
+import { digestDeliveries, players, statLines } from "../src/db/schema.js";
 import { upsertStatLines } from "../src/jobs/refresh.js";
-import { insertDelivery, insertPlayer, insertStatLine, testDb } from "./factories.js";
+import { insertDelivery, insertPlayer, insertStatLine, testDb, testFileDb } from "./factories.js";
 
 describe("stat_lines schema invariants (ADR 0029)", () => {
   let opened: OpenedDb;
@@ -135,5 +141,98 @@ describe("stat_lines schema invariants (ADR 0029)", () => {
     expect(row?.digestDeliveryId).toBe(delivery.id); // correction stays quiet (ADR 0030)
     expect(row?.createdAt).toBe("2026-07-01T00:00:00.000Z");
     expect(row?.updatedAt).toBe("2026-07-02T00:00:00.000Z");
+  });
+});
+
+/**
+ * The delivery claim's storage contract (ADR 0034). The claim is only as good
+ * as the columns and the lock behaviour underneath it, so both are asserted
+ * against a REAL opened database, not against the schema definition.
+ */
+describe("digest_deliveries claim columns and lock behaviour (ADR 0034)", () => {
+  const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "drizzle");
+
+  function applyMigration(sqlite: Database.Database, file: string): void {
+    const sql = readFileSync(join(MIGRATIONS_DIR, file), "utf8");
+    for (const statement of sql.split("--> statement-breakpoint")) {
+      const trimmed = statement.trim();
+      if (trimmed !== "") sqlite.exec(trimmed);
+    }
+  }
+
+  it("gives every opened connection a busy timeout, so a contended claim waits instead of throwing", () => {
+    // Claims take BEGIN IMMEDIATE write locks. Without this pragma a second
+    // PROCESS contending for the lock gets SQLITE_BUSY instantly — the
+    // concurrency fix would trade a duplicate-send bug for a crash.
+    const memory = testDb();
+    const file = testFileDb();
+    try {
+      expect(memory.sqlite.pragma("busy_timeout", { simple: true })).toBe(BUSY_TIMEOUT_MS);
+      expect(file.opened.sqlite.pragma("busy_timeout", { simple: true })).toBe(BUSY_TIMEOUT_MS);
+      expect(BUSY_TIMEOUT_MS).toBeGreaterThan(0);
+    } finally {
+      memory.close();
+      file.cleanup();
+    }
+  });
+
+  it("defaults a delivery to attempt_count 0 with no claim and no provider id", async () => {
+    const opened = testDb();
+    try {
+      await opened.db.insert(digestDeliveries).values({
+        kind: "digest",
+        dateCovered: "2026-07-19",
+        status: "sent",
+        sentAt: "2026-07-19T17:00:00.000Z",
+        createdAt: "2026-07-19T17:00:00.000Z",
+      });
+      const row = (await opened.db.select().from(digestDeliveries))[0];
+      expect(row).toMatchObject({
+        attemptCount: 0,
+        claimedAt: null,
+        providerMessageId: null,
+      });
+    } finally {
+      opened.close();
+    }
+  });
+
+  it("migrates a database already holding a sent delivery without rewriting the row", () => {
+    // The 0002 migration is three ALTER TABLE ... ADD COLUMN statements: an
+    // existing `sent` row must survive the widened status enum untouched, since
+    // the host self-heals its schema at openDb (ADR 0028) with live data in it.
+    const dir = mkdtempSync(join(tmpdir(), "bryce-migrate-"));
+    const sqlite = new Database(join(dir, "bryce.db"));
+    try {
+      applyMigration(sqlite, "0000_gray_brood.sql");
+      applyMigration(sqlite, "0001_overconfident_sally_floyd.sql");
+      sqlite
+        .prepare(
+          `INSERT INTO digest_deliveries
+             (kind, date_covered, sent_at, player_count, stat_line_count, status, error_message, created_at)
+           VALUES ('digest', '2026-07-18', '2026-07-18T17:00:00.000Z', 3, 7, 'sent', NULL, '2026-07-18T17:00:00.000Z')`,
+        )
+        .run();
+
+      applyMigration(sqlite, "0002_ambiguous_vapor.sql");
+
+      const row = sqlite.prepare("SELECT * FROM digest_deliveries").get() as Record<string, unknown>;
+      expect(row).toMatchObject({
+        kind: "digest",
+        date_covered: "2026-07-18",
+        sent_at: "2026-07-18T17:00:00.000Z",
+        player_count: 3,
+        stat_line_count: 7,
+        status: "sent",
+        created_at: "2026-07-18T17:00:00.000Z",
+      });
+      // The new columns land with their documented defaults on the old row.
+      expect(row.claimed_at).toBeNull();
+      expect(row.attempt_count).toBe(0);
+      expect(row.provider_message_id).toBeNull();
+    } finally {
+      sqlite.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

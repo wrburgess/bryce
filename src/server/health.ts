@@ -1,10 +1,18 @@
 import { count, desc, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
+import type { DeliveryKind, DeliveryStatus } from "../db/schema.js";
 import { digestDeliveries, players, statLines } from "../db/schema.js";
 
 /**
  * Health snapshot shared by the public GET /health route and the MCP `status`
  * tool — one shape, one query path.
+ *
+ * `kind`/`status` come from the schema's own unions, never restated here: the
+ * delivery state machine gained `sending` in ADR 0034, and a hand-copied
+ * `"sent" | "failed"` would have shipped a type lie that only surfaces once a
+ * claim is in flight (rules/backend.md — thread every new state through every
+ * surface's seam in the same change). A stuck claim is meant to be VISIBLE
+ * here, which is precisely why the status must not be narrowed.
  */
 
 export interface HealthSnapshot {
@@ -12,9 +20,9 @@ export interface HealthSnapshot {
   players: number;
   statLines: number;
   lastDelivery: {
-    kind: "digest" | "heartbeat";
+    kind: DeliveryKind;
     dateCovered: string;
-    status: "sent" | "failed";
+    status: DeliveryStatus;
     sentAt: string | null;
   } | null;
 }

@@ -92,6 +92,42 @@ describe("PostmarkMailer", () => {
     );
     await expect(mailer.send(message)).rejects.toThrow(/422.*bad from/);
   });
+
+  it("carries the delivery key as Metadata and returns Postmark's MessageID", async () => {
+    const bodies: string[] = [];
+    const mailer = new PostmarkMailer("pm-token", (_url, init) => {
+      bodies.push(init.body);
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({ To: "hc@example.com", MessageID: "b7bc2f4a-e38e-4336-af7d-e6c392c2f817", ErrorCode: 0 }),
+          ),
+      });
+    });
+
+    const receipt = await mailer.send(message, { deliveryKey: "bryce:digest:2026-07-19" });
+    // The slot key rides on the message, so a future reconciliation can ask
+    // Postmark whether THIS slot ever landed (ADR 0034).
+    const body = JSON.parse(bodies[0] ?? "{}") as Record<string, unknown>;
+    expect(body.Metadata).toEqual({ deliveryKey: "bryce:digest:2026-07-19" });
+    expect(receipt.providerMessageId).toBe("b7bc2f4a-e38e-4336-af7d-e6c392c2f817");
+  });
+
+  it("sends no Metadata without a context, and reports a null id for an unparseable body", async () => {
+    const bodies: string[] = [];
+    const mailer = new PostmarkMailer("pm-token", (_url, init) => {
+      bodies.push(init.body);
+      return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve("not json") });
+    });
+
+    const receipt = await mailer.send(message);
+    expect(JSON.parse(bodies[0] ?? "{}")).not.toHaveProperty("Metadata");
+    // A provider that answers with something unexpected yields no id — never a
+    // thrown send, and never a fabricated id on the delivery row.
+    expect(receipt.providerMessageId).toBeNull();
+  });
 });
 
 describe("SmtpMailer", () => {
@@ -125,6 +161,27 @@ describe("SmtpMailer", () => {
     }));
     await expect(mailer.send(message)).rejects.toThrow("connection refused");
   });
+
+  it("returns nodemailer's messageId and rides the delivery key as a header", async () => {
+    const sent: Array<Record<string, unknown>> = [];
+    const mailer = new SmtpMailer({ host: "smtp.example.com", port: 465, user: "u", pass: "p" }, () => ({
+      sendMail: (mail: unknown) => {
+        sent.push(mail as Record<string, unknown>);
+        return Promise.resolve({ messageId: "<abc@smtp.example.com>" });
+      },
+    }));
+
+    const receipt = await mailer.send(message, { deliveryKey: "bryce:heartbeat:2026-12-05" });
+    expect(receipt.providerMessageId).toBe("<abc@smtp.example.com>");
+    expect(sent[0]?.headers).toEqual({ "X-Bryce-Delivery-Key": "bryce:heartbeat:2026-12-05" });
+  });
+
+  it("reports a null id when the transport returns no messageId", async () => {
+    const mailer = new SmtpMailer({ host: "smtp.example.com", port: 465, user: "u", pass: "p" }, () => ({
+      sendMail: () => Promise.resolve({}),
+    }));
+    expect(await mailer.send(message)).toEqual({ providerMessageId: null });
+  });
 });
 
 describe("ConsoleMailer", () => {
@@ -135,6 +192,15 @@ describe("ConsoleMailer", () => {
     expect(mailer.sent).toHaveLength(1);
     expect(lines[0]).toBe("mail to=hc@example.com from=bryce@example.com subject=MLB Daily Tracker: Sun, July 19, 2026");
     expect(lines[1]).toContain("2-4, HR");
+  });
+
+  it("captures the delivery context and returns a null-id receipt", async () => {
+    const mailer = new ConsoleMailer(() => undefined);
+    // The receipt contract holds for EVERY provider, including one with no
+    // provider at all — the caller never has to special-case a mailer.
+    const receipt = await mailer.send(message, { deliveryKey: "bryce:digest:2026-07-19" });
+    expect(receipt).toEqual({ providerMessageId: null });
+    expect(mailer.contexts[0]).toEqual({ deliveryKey: "bryce:digest:2026-07-19" });
   });
 });
 

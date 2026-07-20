@@ -8,7 +8,7 @@ import type { DigestDeliveryRow, PlayerRow, StatLineRow } from "../src/db/schema
 import { digestDeliveries, players, seasonCalendar, statLines } from "../src/db/schema.js";
 import type { FetchLike } from "../src/mlb/client.js";
 import { MlbClient } from "../src/mlb/client.js";
-import type { MailMessage, Mailer } from "../src/mailer/types.js";
+import type { MailContext, MailMessage, MailReceipt, Mailer } from "../src/mailer/types.js";
 import type { NcaaFetchLike } from "../src/ncaa/client.js";
 import { NcaaClient } from "../src/ncaa/client.js";
 import { NCAA_SEASONS } from "../src/ncaa/seasons.js";
@@ -162,21 +162,30 @@ export async function insertStatLine(
   return row;
 }
 
+/**
+ * A delivery row. Defaults describe a completed `sent` digest; pass
+ * `status: "sending"` with a `claimedAt` to construct the durable aftermath of
+ * a crashed run directly (ADR 0034) — a non-`sent` status drops the default
+ * sentAt so the row is never a contradiction.
+ */
 export async function insertDelivery(
   db: Db,
   overrides: Partial<typeof digestDeliveries.$inferInsert> = {},
 ): Promise<DigestDeliveryRow> {
+  const status = overrides.status ?? "sent";
   const rows = await db
     .insert(digestDeliveries)
     .values({
       kind: "digest",
       dateCovered: "2026-07-18",
-      sentAt: "2026-07-18T17:00:00.000Z",
+      sentAt: status === "sent" ? "2026-07-18T17:00:00.000Z" : null,
       playerCount: 1,
       statLineCount: 1,
-      status: "sent",
+      // Any row that exists is the residue of at least one attempt.
+      attemptCount: 1,
       createdAt: "2026-07-18T17:00:00.000Z",
       ...overrides,
+      status,
     })
     .returning();
   const row = rows[0];
@@ -569,11 +578,173 @@ export function testAppDeps(opened: OpenedDb, overrides: Partial<AppDeps> = {}):
 
 export class CapturingMailer implements Mailer {
   readonly sent: MailMessage[] = [];
+  /** The MailContext handed alongside each captured message (ADR 0034). */
+  readonly contexts: Array<MailContext | undefined> = [];
   failWith: Error | null = null;
+  providerMessageId: string | null = null;
 
-  send(message: MailMessage): Promise<void> {
+  send(message: MailMessage, context?: MailContext): Promise<MailReceipt> {
     if (this.failWith !== null) return Promise.reject(this.failWith);
     this.sent.push(message);
-    return Promise.resolve();
+    this.contexts.push(context);
+    return Promise.resolve({ providerMessageId: this.providerMessageId });
   }
+}
+
+/**
+ * A Mailer that PARKS every send on a promise released on demand — the explicit
+ * barrier the concurrency tests synchronize on. Never a timer: rules/testing.md
+ * forbids wall-clock waits, and a sleep would only make the race probable, not
+ * deterministic.
+ *
+ * `attempts` records a message the instant it reaches the "provider";
+ * `sent` records it only once the provider acknowledges (release). The gap
+ * between them is exactly the crash-after-acceptance window (ADR 0034).
+ */
+export class GatedMailer implements Mailer {
+  readonly attempts: MailMessage[] = [];
+  readonly sent: MailMessage[] = [];
+  readonly contexts: Array<MailContext | undefined> = [];
+  failWith: Error | null = null;
+  providerMessageId: string | null = "pm-message-1";
+
+  private parked: Array<() => void> = [];
+  private waiters: Array<{ n: number; resolve: () => void }> = [];
+
+  send(message: MailMessage, context?: MailContext): Promise<MailReceipt> {
+    this.attempts.push(message);
+    return new Promise<MailReceipt>((resolve, reject) => {
+      this.parked.push(() => {
+        if (this.failWith !== null) {
+          reject(this.failWith);
+          return;
+        }
+        this.sent.push(message);
+        this.contexts.push(context);
+        resolve({ providerMessageId: this.providerMessageId });
+      });
+      this.settleWaiters();
+    });
+  }
+
+  /** How many sends are currently parked at the barrier. */
+  get inFlight(): number {
+    return this.parked.length;
+  }
+
+  /** Resolves once at least `n` sends are parked — the barrier, not a sleep. */
+  waitForInFlight(n: number): Promise<void> {
+    if (this.parked.length >= n) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      this.waiters.push({ n, resolve });
+    });
+  }
+
+  /** Release every parked send (rejecting them all when failWith is set). */
+  release(): void {
+    const toRun = this.parked;
+    this.parked = [];
+    for (const run of toRun) run();
+  }
+
+  private settleWaiters(): void {
+    this.waiters = this.waiters.filter((w) => {
+      if (this.parked.length >= w.n) {
+        w.resolve();
+        return false;
+      }
+      return true;
+    });
+  }
+}
+
+// --- Fault injection over the database (crash-window tests) -----------------
+
+/** Marks a deliberately injected fault so a test never mistakes it for a real bug. */
+export class InjectedFault extends Error {
+  constructor(where: string) {
+    super(`injected fault: ${where}`);
+    this.name = "InjectedFault";
+  }
+}
+
+export interface FaultOptions {
+  /**
+   * Where the process "dies":
+   * - `before-settle` — the settle transaction never starts (death right after
+   *   provider acceptance);
+   * - `after-delivery-update` — inside the transaction, after the delivery row
+   *   was updated and before the Stat Lines are marked;
+   * - `after-line-update` — inside the transaction, after both statements ran
+   *   but before COMMIT.
+   */
+  failAt: "before-settle" | "after-delivery-update" | "after-line-update";
+  /**
+   * Transactions to let through untouched first. Every runDigest invocation
+   * opens exactly two: the claim, then the settle — so the default of 1 targets
+   * the settle.
+   */
+  passThrough?: number;
+}
+
+type TransactionFn = (fn: (tx: unknown) => unknown, config?: unknown) => unknown;
+
+/**
+ * A Proxy over the drizzle Db that injects a crash into the settle transaction,
+ * so the tests can assert what SQLite durably left behind — the only honest way
+ * to prove "a crash mid-persist rolls the whole settle back".
+ */
+export function faultingDb(db: Db, options: FaultOptions): Db {
+  const passThrough = options.passThrough ?? 1;
+  let transactions = 0;
+
+  return new Proxy(db, {
+    get(target, prop) {
+      // No receiver: a getter must never run with the proxy as `this`.
+      const value: unknown = Reflect.get(target, prop);
+      if (prop !== "transaction") {
+        // Bind to the real target: drizzle's methods must never see the proxy
+        // as `this`, or internal state lookups go through this trap.
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      const realTransaction = (value as TransactionFn).bind(target);
+      return (fn: (tx: unknown) => unknown, config?: unknown): unknown => {
+        transactions += 1;
+        if (transactions <= passThrough) return realTransaction(fn, config);
+        if (options.failAt === "before-settle") {
+          throw new InjectedFault("process died before the settle transaction");
+        }
+        return realTransaction((tx: unknown) => {
+          const result = fn(faultingTx(tx, options.failAt));
+          if (options.failAt === "after-line-update") {
+            throw new InjectedFault("process died after marking stat lines, before COMMIT");
+          }
+          return result;
+        }, config);
+      };
+    },
+  }) as Db;
+}
+
+/** Counts `update` calls inside the settle txn so a fault can land between them. */
+function faultingTx(tx: unknown, failAt: FaultOptions["failAt"]): unknown {
+  let updates = 0;
+  return new Proxy(tx as object, {
+    get(target, prop) {
+      // No receiver: a getter must never run with the proxy as `this`.
+      const value: unknown = Reflect.get(target, prop);
+      if (prop !== "update") {
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      const realUpdate = (value as (...args: unknown[]) => unknown).bind(target);
+      return (...args: unknown[]): unknown => {
+        updates += 1;
+        // Statement 1 updates digest_deliveries, statement 2 marks stat_lines.
+        if (failAt === "after-delivery-update" && updates === 2) {
+          throw new InjectedFault("process died after the delivery update");
+        }
+        return realUpdate(...args);
+      };
+    },
+  });
 }
