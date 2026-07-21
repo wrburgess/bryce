@@ -187,15 +187,16 @@ verbatim, including `sending`:
 
 - **`sending` with a recent `claimed_at`** — a run is in flight right now. Normal; wait.
 - **`sending` older than ten minutes** — a run died. The claim's lease has expired, so it blocks
-  nothing: any further run *on that same date* reclaims the slot and sends. **No manual action is
-  needed.**
-- **A `sending` row that just stays there** — expected, and harmless. If no further run happens on
-  that date (the usual shape: the 5 AM job crashes, the next one is tomorrow), that row is never
-  reclaimed and remains as a historical artifact. Nothing is lost: the crashed run marked no Stat
-  Lines, so the next day's digest reports them anyway — the digest is novelty-driven, not
-  date-windowed ([ADR 0030](../adr/0030-full-season-refresh-report-once-digest.md)). The same is
-  true of a crashed heartbeat: a `sending` row never counts toward the seven-day rule, so the next
-  run still sends.
+  nothing, and the **next daily run recovers it even after the date has rolled**: each run first
+  reconciles or re-sends the oldest orphaned prior-date slot before composing today's
+  ([ADR 0035](../adr/0035-window-selected-digest.md)). **No manual action is needed.**
+- **A `sending` or `failed` row for a past date** — a crashed or failed run. It is recovered on the
+  next daily run: the slot is reconciled against the provider (if the crashed attempt actually
+  landed, it is settled `sent` and not re-sent) or re-sent with that day's window. Recovery is
+  bounded to one slot per run, so a multi-day backlog drains a day at a time. The stat content was
+  never lost regardless — a window recomputes from the game log, so those games also appear in every
+  `7d`/`ytd` report. What recovery restores is the daily *notification*. A crashed heartbeat is the
+  same: a `sending` row never counts toward the seven-day rule, so the next run still sends.
 - **Two emails carrying the same lines** — the crash window above. `attempt_count` on the row says
   how many times that slot was claimed:
 
@@ -229,21 +230,13 @@ moments after acceptance is expected; the duplicate you get in that case is the 
 a failed reconciliation. Nothing here needs manual action, and there is no new credential or setting:
 the lookup uses the same `POSTMARK_SERVER_TOKEN` as the send.
 
-**If an email never arrived**, reopening the slot is not the operative step — the digest is
-novelty-driven ([ADR 0030](../adr/0030-full-season-refresh-report-once-digest.md)), so the lines it
-already reported stay marked and a bare re-run mails you an empty digest. Un-mark those lines and
-they go out with the next digest:
+**If an email never arrived**, there is nothing to un-mark: a digest consumes nothing and stamps no
+Stat Lines ([ADR 0035](../adr/0035-window-selected-digest.md)), so a re-run always reports the same
+content the failed one would have. Usually you do nothing — the **next daily run recovers the failed
+slot automatically**, across the date boundary, reconciling or re-sending it.
 
-```sh
-sqlite3 data/bryce.db <<'SQL'
-UPDATE stat_lines SET digest_delivery_id = NULL
- WHERE digest_delivery_id = (SELECT id FROM digest_deliveries
-                              WHERE kind = 'digest' AND date_covered = '2026-07-19');
-SQL
-```
-
-Then either wait for tomorrow's scheduled run or, to send *today* when today's slot is already
-`sent`, reopen it as well — a `failed` row is re-claimable, so the next run retries it:
+To force it out **now** rather than wait for the next scheduled run, reopen the slot and re-run. A
+`failed` row is re-claimable; an already-`sent` slot can be reopened by setting it `failed`:
 
 ```sh
 sqlite3 data/bryce.db \
@@ -252,7 +245,17 @@ sqlite3 data/bryce.db \
 npm run digest
 ```
 
-Do **not** delete a delivery row — the Stat Lines it reported reference it by foreign key.
+To re-send a specific **past** day directly, ask for that content as an on-demand report instead —
+it takes no slot and is always safe to repeat:
+
+```sh
+npm run digest -- --window 1d   # today's daily; --window 7d, 14d, 21d, ytd for wider views
+```
+
+Do **not** delete a delivery row by hand: the recovery pass keys off it, and deleting a `sent` row
+would let its date be re-sent as a duplicate. There is no longer any `stat_lines.digest_delivery_id`
+column — it was dropped with the move to window selection, so any older instruction to update it no
+longer applies.
 
 ## The MCP server and REST API
 

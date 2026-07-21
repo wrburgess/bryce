@@ -116,9 +116,13 @@ start inserting duplicates.
 transposed from comma-joined prose into table columns. Fielding still merges into the batting row as
 an error count and never renders standalone.
 
-**ADR 0030's ingestion half.** Refresh still re-ingests every active Player's complete current-season
-game log on every run, with no date windows anywhere in ingestion. Only the *reporting* half of that
-ADR is superseded here.
+**ADR 0030's ingestion half.** Refresh still performs a full-season, no-window sweep of the current
+season's game log — no date windows anywhere in ingestion. Only the *reporting* half of that ADR is
+superseded here. "On every run" carries the established exceptions, unchanged by this branch:
+Offseason Sleep skips the whole job (ADR 0031), a player whose source identity cannot be resolved is
+skipped, and NCAA ingestion stops after its bundled seven-day post-season grace. The
+correction-mitigation argument above depends only on ingestion continuing to run and recompute while
+a season is live, which those exceptions do not disturb.
 
 ## Consequences
 
