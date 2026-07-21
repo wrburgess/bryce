@@ -46,6 +46,7 @@ function assemblyWith(args: {
     pitchers,
     playerCount: batters.length + pitchers.length,
     statLineCount: [...batters, ...pitchers].reduce((n, r) => n + r.agg.games, 0),
+    unknownFields: [],
   };
 }
 

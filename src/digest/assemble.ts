@@ -47,6 +47,15 @@ export interface DigestAssembly {
   playerCount: number;
   /** Stored lines the window selected, fielding rows included. */
   statLineCount: number;
+  /**
+   * Stat keys the classification did not recognise, deduped across every row.
+   *
+   * These were EXCLUDED from the aggregate rather than guessed at, which is the
+   * safe half of fail-closed. Reporting them is the other half: without it an
+   * upstream field addition is silently dropped from every future report and
+   * nobody learns the tables went stale.
+   */
+  unknownFields: string[];
 }
 
 export interface AssembleDeps {
@@ -117,19 +126,34 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
   const batting = mergeFieldingIntoBatting(splits).map(withPlateAppearances);
   const pitching = splits.filter((s) => s.line.statType === "pitching");
 
+  const batters = buildRows(batting, window, "batting", idlePlayers.filter(isBatter), leagueByPlayer);
+  const pitchers = buildRows(
+    pitching,
+    window,
+    "pitching",
+    idlePlayers.filter((p) => !isBatter(p)),
+    leagueByPlayer,
+  );
+
   return {
     window,
-    batters: buildRows(batting, window, "batting", idlePlayers.filter(isBatter), leagueByPlayer),
-    pitchers: buildRows(
-      pitching,
-      window,
-      "pitching",
-      idlePlayers.filter((p) => !isBatter(p)),
-      leagueByPlayer,
-    ),
+    batters,
+    pitchers,
     playerCount: playersWithLines.size,
     statLineCount: splits.length,
+    unknownFields: unknownFieldsOf(batters, pitchers),
   };
+}
+
+/** Every unrecognised stat key seen across the report, deduped and sorted. */
+function unknownFieldsOf(...rowGroups: DigestRow[][]): string[] {
+  const seen = new Set<string>();
+  for (const rows of rowGroups) {
+    for (const row of rows) {
+      for (const key of row.agg.unknownFields) seen.add(key);
+    }
+  }
+  return [...seen].sort();
 }
 
 /**

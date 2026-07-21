@@ -33,6 +33,12 @@ export interface DigestDeps {
    * in-flight claim, and never overrides the Offseason Sleep decision.
    */
   force?: boolean;
+  /**
+   * Operator-visible channel for things the run noticed but did not act on.
+   * Defaults to stderr; injected in tests so the warning can be asserted rather
+   * than merely printed.
+   */
+  warn?: (message: string) => void;
 }
 
 export interface DigestResult {
@@ -101,6 +107,7 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   // delivery's row should describe the run, not the instant the write landed.
   const runAt = input.now();
   const deps: DigestDeps = { ...input, now: () => runAt };
+  const warn = input.warn ?? ((m: string) => process.stderr.write(`${m}\n`));
   const { db, now, tz } = deps;
   const activePlayers = await loadActivePlayers(db);
   const calendars = await loadCalendars(db);
@@ -159,6 +166,18 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   // assembles exactly what an ordinary run would — the window is the content,
   // and it does not depend on what any previous delivery reported.
   const assembly = await assembleDigest(db, { now, tz, spec: deps.spec });
+
+  // Fail-closed has two halves. Excluding an unrecognised stat key is the safe
+  // one; SAYING SO is the other. Without this an upstream field addition is
+  // dropped from every future report and nobody learns the tables went stale —
+  // which is exactly the silent staleness the classification exists to prevent.
+  if (assembly.unknownFields.length > 0) {
+    warn(
+      `digest: ${assembly.unknownFields.length} unclassified stat field(s) excluded ` +
+        `from ${assembly.window.label}: ${assembly.unknownFields.join(", ")}. ` +
+        `Classify them in src/stats/fields.ts.`,
+    );
+  }
   const mail = renderDigest(assembly);
   const { playerCount, statLineCount } = assembly;
   const window = assembly.window.label;

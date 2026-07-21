@@ -112,6 +112,38 @@ describe("runDigest", () => {
     });
   });
 
+  it("excludes an unclassified stat field AND reports it", async () => {
+    // Fail-closed has two halves. Excluding the field is the safe one; saying
+    // so is the other. Without the warning an upstream field addition is
+    // dropped from every future report and nobody learns the tables went stale.
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-07-18",
+      stats: { hits: 2, atBats: 4, warpDriveEfficiency: 9 },
+    });
+
+    const warnings: string[] = [];
+    const result = await runDigest({ ...deps(), spec: "7d", warn: (m) => warnings.push(m) });
+
+    // Excluded, not summed, and the run still succeeds.
+    expect(result.action).toBe("sent");
+    expect(mailer.sent.at(-1)?.text).not.toContain("warpDriveEfficiency");
+    // ...and reported, by name, with somewhere to go fix it.
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("warpDriveEfficiency");
+    expect(warnings[0]).toContain("src/stats/fields.ts");
+  });
+
+  it("says nothing when every field is classified", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+
+    const warnings: string[] = [];
+    await runDigest({ ...deps(), spec: "7d", warn: (m) => warnings.push(m) });
+    expect(warnings).toEqual([]);
+  });
+
   it("does not straddle midnight: slot date and content window come from one anchor", async () => {
     // The run reads the clock for sleep, the slot date, the claim, assembly,
     // the In Season filter and settlement. Read live, a run starting at
