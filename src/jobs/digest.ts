@@ -12,6 +12,7 @@ import type { ClaimRefusal, ClaimResult, Tx } from "./delivery-claim.js";
 import {
   claimDelivery,
   deliveryKey,
+  findOrphanedDigestDate,
   reportKey,
   settleFailed,
   settleReconciled,
@@ -137,12 +138,38 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   }
 
   const today = hostDate(now(), tz);
-  const claim = claimDelivery(db, {
-    kind: "digest",
-    dateCovered: today,
-    now: now(),
-    force: deps.force,
-  });
+
+  // Catch up ONE orphaned prior day before today's run. `claimDelivery` already
+  // re-claims a failed or stale slot correctly, but only ever sees the date it
+  // is handed — so once midnight passes, yesterday's failed digest is never
+  // retried and its notification is lost (ADR 0034's recovery guarantee, which
+  // novelty selection used to provide for free across dates). The recovered run
+  // assembles ITS date's window (asOf), never today's, and never forces. One
+  // per run bounds catch-up to a single extra email; a multi-day backlog drains
+  // a day at a time rather than arriving as a burst.
+  const orphan = findOrphanedDigestDate(db, today, now().getTime());
+  if (orphan !== null) {
+    await deliverDailyDigest(deps, orphan, orphan, false, warn);
+  }
+
+  return deliverDailyDigest(deps, today, today, deps.force === true, warn);
+}
+
+/**
+ * One daily digest: claim the (digest, dateCovered) slot, reconcile a recovered
+ * claim, assemble the 1d window as of `asOf`, send, settle. Shared by today's
+ * run (dateCovered = asOf = today) and by recovery of an orphaned prior day
+ * (dateCovered = asOf = that day).
+ */
+async function deliverDailyDigest(
+  deps: DigestDeps,
+  dateCovered: string,
+  asOf: string,
+  force: boolean,
+  warn: (message: string) => void,
+): Promise<DigestResult> {
+  const { db, now, tz } = deps;
+  const claim = claimDelivery(db, { kind: "digest", dateCovered, now: now(), force });
   if (!claim.claimed) {
     return {
       kind: "digest",
@@ -170,7 +197,7 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   // accidental protection that would evaporate the day someone adds one. The
   // explicit guard is the one to keep; the test pins the behaviour, not either
   // mechanism.
-  if (!claim.replay && (await reconciled(deps, "digest", today, claim))) {
+  if (!claim.replay && (await reconciled(deps, "digest", dateCovered, claim))) {
     return {
       kind: "digest",
       action: "skipped",
@@ -183,8 +210,10 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
 
   // Pure assembly (src/digest/assemble.ts): what this Digest reports. A replay
   // assembles exactly what an ordinary run would — the window is the content,
-  // and it does not depend on what any previous delivery reported.
-  const assembly = await assembleDigest(db, { now, tz, spec: deps.spec });
+  // and it does not depend on what any previous delivery reported. `asOf`
+  // anchors the window on the slot's own date, so a recovered prior day reports
+  // its day, not today's.
+  const assembly = await assembleDigest(db, { now, tz, spec: "1d", asOf });
 
   // Fail-closed has two halves. Excluding an unrecognised stat key is the safe
   // one; SAYING SO is the other. Without this an upstream field addition is
@@ -199,10 +228,10 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   try {
     receipt = await deps.mailer.send(
       { to: deps.to, from: deps.from, ...mail },
-      { deliveryKey: deliveryKey("digest", today) },
+      { deliveryKey: deliveryKey("digest", dateCovered) },
     );
   } catch (err) {
-    // Send failed: settle the claim as failed. The next run re-claims the slot
+    // Send failed: settle the claim as failed. A later run re-claims the slot
     // and retries the same window, which reports the same content.
     // A REPLAY holds no claim and settles nothing: settling one as `failed`
     // would wipe sent_at off a genuinely delivered digest.
@@ -239,7 +268,7 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   return {
     kind: "digest",
     action: "sent",
-    reason: sendReason(deps.force === true, claim),
+    reason: sendReason(force, claim),
     statLineCount,
     playerCount,
     window,

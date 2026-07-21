@@ -62,6 +62,8 @@ export interface AssembleDeps {
   now: () => Date;
   tz: string;
   spec: WindowSpec;
+  /** Recover a past slot: anchor the window on this host date, not now. */
+  asOf?: string;
 }
 
 interface Split {
@@ -79,6 +81,7 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
     now(),
     tz,
     seasonStartFor(calendars, activePlayers, now(), tz),
+    deps.asOf ?? null,
   );
 
   // One join, not one query per player (rules/backend.md).

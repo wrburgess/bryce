@@ -1,3 +1,4 @@
+import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { openDb } from "../src/db/client.js";
@@ -124,6 +125,82 @@ describe("runDigest", () => {
       statLineCount: 1,
       playerCount: 1,
     });
+  });
+
+  it("recovers a previous day's FAILED digest slot after the date rolls", async () => {
+    // A failed slot for a prior date used to be orphaned forever: claimDelivery
+    // only ever looked at today's date, and novelty (which re-reported the lines
+    // for free) is gone. The next day's run must catch it up.
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-17" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+
+    // A failed digest slot for 2026-07-19 (its 1d window covers Jul 18).
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "failed",
+      sentAt: null,
+    });
+
+    // Today is 2026-07-20 (clock is MID_SEASON = 2026-07-19T17:00Z → hostDate
+    // 2026-07-19... so advance it a day).
+    clock.set("2026-07-20T17:00:00Z");
+    const result = await runDigest({ ...deps(), spec: "1d" });
+
+    // Two emails went out: the recovered Jul 18 day, then today's Jul 19 day.
+    expect(result.action).toBe("sent");
+    expect(mailer.sent).toHaveLength(2);
+    const subjects = mailer.sent.map((m) => m.subject);
+    expect(subjects).toContain("MLB Daily Tracker: Sat, July 18, 2026"); // recovered
+    expect(subjects).toContain("MLB Daily Tracker: Sun, July 19, 2026"); // today
+
+    // The recovered slot is now settled sent, not left failed.
+    const rows = await opened.db
+      .select()
+      .from(digestDeliveries)
+      .where(eq(digestDeliveries.dateCovered, "2026-07-19"));
+    expect(rows[0]?.status).toBe("sent");
+    expect(rows[0]?.attemptCount).toBe(2); // re-claimed, not fresh
+  });
+
+  it("reconciles a previous day's stale SENDING slot instead of re-sending it", async () => {
+    // A run that crashed after the provider accepted leaves a `sending` row.
+    // Recovery must ASK the provider first: if it already landed, settle it
+    // reconciled and send nothing, or the HC gets that day twice.
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+
+    // An expired sending slot for Jul 19 — claimedAt well beyond the lease.
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "sending",
+      sentAt: null,
+      claimedAt: "2026-07-19T00:00:00.000Z",
+      attemptCount: 1,
+    });
+
+    // A mailer that CONFIRMS the crashed Jul 19 attempt already landed.
+    const lookup = new LookupMailer();
+    lookup.result = { outcome: "accepted", providerMessageId: "pm-jul19" };
+    clock.set("2026-07-20T17:00:00Z");
+    const result = await runDigest({ ...deps(), mailer: lookup, spec: "1d" });
+
+    // Today's Jul 19 digest sent; the recovered slot was reconciled, NOT re-sent.
+    expect(result.action).toBe("sent");
+    const recovered = await opened.db
+      .select()
+      .from(digestDeliveries)
+      .where(eq(digestDeliveries.dateCovered, "2026-07-19"));
+    expect(recovered[0]?.status).toBe("sent");
+    expect(recovered[0]?.reconciledAt).not.toBeNull();
+    // The recovery reconciled and sent NOTHING; only today's digest hit send().
+    // Today is Jul 20, so its 1d window covers Jul 19 — proof the reconciled
+    // slot did not also re-send its own Jul 18 content.
+    expect(lookup.sent).toHaveLength(1);
+    expect(lookup.sent[0]?.subject).toBe("MLB Daily Tracker: Sun, July 19, 2026");
+    expect(lookup.lookups.map((l) => l.deliveryKey)).toContain("bryce:digest:2026-07-19");
   });
 
   it("a 7d request is not refused because the day's 1d digest already went out", async () => {

@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, lt } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { DeliveryKind } from "../db/schema.js";
 import { digestDeliveries } from "../db/schema.js";
@@ -365,6 +365,42 @@ export function settleFailed(db: Db, args: SettleFailedArgs): void {
  * so a future reconciliation can ask the provider "did THIS slot land?" and get
  * one answer for every attempt at it.
  */
+/**
+ * The oldest digest slot for a date BEFORE `beforeDate` that still owes a send:
+ * a `failed` row, or a `sending` row whose lease has expired (a run that
+ * crashed and never came back). Returns its `date_covered`, or null.
+ *
+ * This is what makes recovery survive a date change. `claimDelivery` already
+ * re-claims a failed or stale slot correctly — but only ever looks at the date
+ * it is handed, so once midnight passes, yesterday's failed slot is invisible
+ * and its notification is lost. Under novelty selection the next run re-reported
+ * those lines for free; window selection removed that, so recovery has to reach
+ * back explicitly (ADR 0034's guarantee, restored across the date boundary).
+ *
+ * A live `sending` row (lease not expired) is deliberately excluded: another run
+ * holds it right now.
+ */
+export function findOrphanedDigestDate(
+  db: Db,
+  beforeDate: string,
+  nowMs: number,
+  leaseMs = LEASE_MS,
+): string | null {
+  const rows = db
+    .select()
+    .from(digestDeliveries)
+    .where(and(eq(digestDeliveries.kind, "digest"), lt(digestDeliveries.dateCovered, beforeDate)))
+    .orderBy(digestDeliveries.dateCovered)
+    .all();
+  for (const row of rows) {
+    if (row.status === "failed") return row.dateCovered;
+    if (row.status === "sending" && !leaseIsLive(row.claimedAt, nowMs, leaseMs)) {
+      return row.dateCovered;
+    }
+  }
+  return null;
+}
+
 export function deliveryKey(kind: DeliveryKind, dateCovered: string): string {
   return `bryce:${kind}:${dateCovered}`;
 }

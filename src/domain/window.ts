@@ -102,8 +102,14 @@ export function resolveWindow(
   now: Date,
   tz: string,
   seasonStart: string | null = null,
+  /**
+   * Anchor the window on this host date instead of `now`. Used to recover a
+   * daily digest whose slot is a PAST date: its content is the 1d window ending
+   * the day before that slot, not the day before today.
+   */
+  asOf: string | null = null,
 ): ResolvedWindow {
-  const to = shiftDate(hostDate(now, tz), -1);
+  const to = shiftDate(asOf ?? hostDate(now, tz), -1);
   const from =
     spec === "ytd"
       ? (seasonStart ?? `${to.slice(0, 4)}-01-01`)
