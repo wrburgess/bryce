@@ -112,6 +112,45 @@ describe("runDigest", () => {
     });
   });
 
+  it("does not straddle midnight: slot date and content window come from one anchor", async () => {
+    // The run reads the clock for sleep, the slot date, the claim, assembly,
+    // the In Season filter and settlement. Read live, a run starting at
+    // 23:59:59.9 claims yesterday's slot and then assembles today's window —
+    // the same content goes out under two slots on two consecutive days.
+    //
+    // This clock advances past midnight after the first three reads, which is
+    // exactly where the divergence used to appear.
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+
+    let reads = 0;
+    const straddling = (): Date => {
+      reads += 1;
+      // 04:59:59.900Z = 23:59:59.900 CDT on Jul 19; 05:00:00.100Z = 00:00:00.100 CDT on Jul 20.
+      return reads <= 3
+        ? new Date("2026-07-20T04:59:59.900Z")
+        : new Date("2026-07-20T05:00:00.100Z");
+    };
+
+    const result = await runDigest({ ...deps(), now: straddling, spec: "1d" });
+    expect(result.action).toBe("sent");
+
+    // The slot the run claimed...
+    const rows = await opened.db.select().from(digestDeliveries);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.dateCovered).toBe("2026-07-19");
+    // ...and the content it sent must describe the SAME day. A 1d window on
+    // Jul 19 covers Jul 18, so the subject names Jul 18 — not Jul 19, which is
+    // what an unfrozen clock produced.
+    expect(mailer.sent.at(-1)?.subject).toBe("MLB Daily Tracker: Sat, July 18, 2026");
+
+    // The direct pin: the run reads the clock ONCE, so this clock never gets a
+    // second chance to advance. Before the anchor existed there were nine reads
+    // and the subject came out "Sun, July 19, 2026" — a day of content that the
+    // Jul 19 slot does not cover, and that Jul 20's run would send again.
+    expect(reads).toBe(1);
+  });
+
   it("leaves stat_lines byte-identical, whether the send succeeds or fails", async () => {
     // Replaces the old per-outcome "nothing carries a delivery stamp" checks.
     // Those could only ask whether one column was null; this asks the question

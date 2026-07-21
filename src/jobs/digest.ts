@@ -86,7 +86,21 @@ const FORCED = "forced";
  * run that only proceeded BECAUSE of it is a replay: it sends and skips BOTH
  * settles, so no production delivery state can be degraded by a test send.
  */
-export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
+export async function runDigest(input: DigestDeps): Promise<DigestResult> {
+  // ONE clock read for the whole run. Every later `now()` returns this instant.
+  //
+  // The run reads the clock for sleep, the slot date, the claim, assembly, the
+  // In Season filter and settlement. Read live, those can straddle midnight: a
+  // run starting at 23:59:59.9 claims yesterday's slot and then assembles
+  // today's window, so the same content goes out under two different slots on
+  // two consecutive days. Freezing the anchor makes slot identity and content
+  // identity provably the same decision.
+  //
+  // Settlement timestamps are the one thing that may legitimately want the real
+  // completion time; they are recorded from this anchor deliberately, because a
+  // delivery's row should describe the run, not the instant the write landed.
+  const runAt = input.now();
+  const deps: DigestDeps = { ...input, now: () => runAt };
   const { db, now, tz } = deps;
   const activePlayers = await loadActivePlayers(db);
   const calendars = await loadCalendars(db);
