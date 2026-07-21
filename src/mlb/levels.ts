@@ -66,7 +66,7 @@ const SPORT_ID_ABBREV: Record<number, string> = {
   [NCAA_SPORT_ID]: "NCAA",
 };
 
-const LADDER: readonly number[] = [1, 11, 12, 13, 14, 16, NCAA_SPORT_ID];
+const LADDER: readonly number[] = [...SPORT_IDS, NCAA_SPORT_ID];
 
 export function levelAbbrev(sportId: number, leagueName: string | null): string {
   if (sportId === 16 && leagueName === "Dominican Summer League") return "DSL";
