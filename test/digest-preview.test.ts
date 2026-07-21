@@ -1,33 +1,35 @@
-import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { digestDeliveries, statLines } from "../src/db/schema.js";
-import { assembleDigest, previewDeliveryId } from "../src/digest/assemble.js";
-import { renderDigest } from "../src/digest/render.js";
-import { runDigest } from "../src/jobs/digest.js";
+import { assembleDigest } from "../src/digest/assemble.js";
 import {
-  CapturingMailer,
-  MID_SEASON,
-  OFFSEASON,
   TEST_TZ,
   fakeClock,
   insertCalendar,
   insertCalendars2026,
-  insertDelivery,
   insertPlayer,
   insertStatLine,
   testDb,
 } from "./factories.js";
 
-describe("assembleDigest (pure digest preview)", () => {
+/**
+ * Window-selected assembly. Every window ends on the LAST COMPLETED host date,
+ * so this clock — 2026-07-20 in America/Chicago — resolves `1d` to 07-19 and
+ * `7d` to 07-13..07-19. Using MID_SEASON here would shift every window by a day
+ * and make the seeded dates below read as arbitrary.
+ */
+const RUN_AT = "2026-07-20T17:00:00Z";
+
+describe("assembleDigest — window selection", () => {
   let opened: OpenedDb;
   let clock: ReturnType<typeof fakeClock>;
 
-  const deps = () => ({ now: clock.now, tz: TEST_TZ });
+  const assemble = (spec: "1d" | "7d" | "14d" | "21d" | "ytd") =>
+    assembleDigest(opened.db, { now: clock.now, tz: TEST_TZ, spec });
 
   beforeEach(async () => {
     opened = testDb();
-    clock = fakeClock(MID_SEASON);
+    clock = fakeClock(RUN_AT);
     await insertCalendars2026(opened.db);
   });
 
@@ -35,304 +37,365 @@ describe("assembleDigest (pure digest preview)", () => {
     opened.close();
   });
 
-  it("returns exactly what runDigest would send", async () => {
+  it("includes only lines inside the window", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-12" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-15" });
+
+    const a = await assemble("7d");
+    expect(a.window.from).toBe("2026-07-13");
+    expect(a.window.to).toBe("2026-07-19");
+    expect(a.statLineCount).toBe(1);
+    // The one included line is the 07-15 one, not the 07-12 one.
+    expect(a.batters[0]?.agg.games).toBe(1);
+  });
+
+  it("excludes postseason games from every window", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, {
       playerId: player.id,
-      gameDate: "2026-07-18",
-      stats: { hits: 2, atBats: 4, homeRuns: 1, rbi: 3 },
+      gameDate: "2026-07-15",
+      gameType: "R",
+      stats: { hits: 2, atBats: 4 },
     });
-    await insertPlayer(opened.db, { fullName: "Quiet Guy" }); // in-season, no lines
-
-    const assembly = await assembleDigest(opened.db, deps());
-    const previewMail = renderDigest({
-      date: assembly.date,
-      lines: assembly.lines,
-      noNewStats: assembly.noNewStats,
-    });
-
-    const mailer = new CapturingMailer();
-    const result = await runDigest({
-      db: opened.db,
-      mailer,
-      now: clock.now,
-      tz: TEST_TZ,
-      to: "hc@example.com",
-      from: "bryce@example.com",
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-07-15",
+      gameType: "D",
+      stats: { hits: 3, atBats: 4 },
     });
 
-    // The sent mail IS the previewed mail, byte for byte.
-    expect(mailer.sent).toHaveLength(1);
-    expect(mailer.sent[0]?.subject).toBe(previewMail.subject);
-    expect(mailer.sent[0]?.text).toBe(previewMail.text);
-    expect(mailer.sent[0]?.html).toBe(previewMail.html);
-    expect(result.statLineCount).toBe(assembly.reportedIds.length);
-    expect(result.playerCount).toBe(assembly.playerCount);
-
-    expect(assembly.date).toBe("2026-07-19");
-    expect(previewMail.text).toContain(
-      "2026-07-18 vs Charlotte Knights: PA 4, H 2, BB 0, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0",
-    );
-    expect(previewMail.text).toContain("No new stats: Quiet Guy");
+    const a = await assemble("7d");
+    expect(a.statLineCount).toBe(1);
+    // Not merely the count: the postseason hits never reached the aggregate.
+    expect(a.batters[0]?.agg.counters.hits).toBe(2);
   });
 
-  it("merges fielding rows into batting lines and still reports their ids", async () => {
+  it("splits a promoted player into one row per level", async () => {
+    // A 21d window runs 2026-06-29..2026-07-19; both games fall inside it.
+    const player = await insertPlayer(opened.db, { fullName: "Walker Jenkins" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-07-15",
+      sportId: 11,
+      leagueName: "International League",
+      stats: { hits: 2, atBats: 4 },
+    });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-07-05",
+      sportId: 13,
+      leagueName: "Midwest League",
+      stats: { hits: 1, atBats: 3 },
+    });
+
+    const a = await assemble("21d");
+    const rows = a.batters.filter((r) => r.player.fullName === "Walker Jenkins");
+    expect(rows.map((r) => r.lvl).sort()).toEqual(["A+", "AAA"]);
+    // Each level keeps its OWN line — the whole point of the split. A blended
+    // row would show 3-for-7 at one label; these are 2-for-4 and 1-for-3.
+    const byLevel = new Map(rows.map((r) => [r.lvl, r.agg]));
+    expect(byLevel.get("AAA")?.counters.atBats).toBe(4);
+    expect(byLevel.get("A+")?.counters.atBats).toBe(3);
+  });
+
+  it("takes the level from the stat line's sportId, never from players.level", async () => {
+    // Current level says Triple-A; the game in the window was played at High-A.
+    const player = await insertPlayer(opened.db, {
+      fullName: "Walker Jenkins",
+      level: "milb",
+      milbLevel: "Triple-A",
+    });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-07-15",
+      sportId: 13,
+      leagueName: "Midwest League",
+    });
+
+    const a = await assemble("7d");
+    expect(a.batters).toHaveLength(1);
+    expect(a.batters[0]?.lvl).toBe("A+");
+  });
+
+  it("renders a doubleheader as two rows in a 1d window", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Yohandy Pena" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 970001,
+      gameNumber: 1,
+      gameDate: "2026-07-19",
+      stats: { hits: 0, atBats: 3 },
+    });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 970002,
+      gameNumber: 2,
+      gameDate: "2026-07-19",
+      stats: { hits: 2, atBats: 4 },
+    });
+
+    const a = await assemble("1d");
+    expect(a.batters.map((r) => r.gameNumber)).toEqual([1, 2]);
+    expect(a.batters.map((r) => r.agg.counters.hits)).toEqual([0, 2]);
+  });
+
+  it("leaves gameNumber null for a single game in a 1d window", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-19" });
+
+    const a = await assemble("1d");
+    expect(a.batters).toHaveLength(1);
+    expect(a.batters[0]?.gameNumber).toBeNull();
+  });
+
+  it("folds a doubleheader into one row in a 7d window", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Yohandy Pena" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 970001,
+      gameNumber: 1,
+      gameDate: "2026-07-19",
+      stats: { hits: 0, atBats: 3 },
+    });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 970002,
+      gameNumber: 2,
+      gameDate: "2026-07-19",
+      stats: { hits: 2, atBats: 4 },
+    });
+
+    const a = await assemble("7d");
+    expect(a.batters).toHaveLength(1);
+    expect(a.batters[0]?.agg.games).toBe(2);
+    expect(a.batters[0]?.gameNumber).toBeNull();
+    expect(a.batters[0]?.agg.counters.atBats).toBe(7);
+  });
+
+  it("merges fielding errors into the batting row and never makes a fielding table", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Error Prone" });
-    const batting = await insertStatLine(opened.db, {
+    await insertStatLine(opened.db, {
       playerId: player.id,
       gameId: 990001,
       statType: "batting",
+      gameDate: "2026-07-15",
       stats: { hits: 2, atBats: 4 },
     });
-    const fielding = await insertStatLine(opened.db, {
+    await insertStatLine(opened.db, {
       playerId: player.id,
       gameId: 990001,
       statType: "fielding",
-      stats: { errors: 1 },
+      gameDate: "2026-07-15",
+      stats: { errors: 1, putOuts: 3, assists: 2 },
     });
 
-    const assembly = await assembleDigest(opened.db, deps());
-    // One rendered line — the fielding row merged, never a standalone line.
-    expect(assembly.lines).toHaveLength(1);
-    expect(assembly.lines[0]?.statType).toBe("batting");
-    expect(assembly.lines[0]?.stats.errors).toBe(1);
-    // BOTH stored rows are earmarked for marking.
-    expect([...assembly.reportedIds].sort((a, b) => a - b)).toEqual(
-      [batting.id, fielding.id].sort((a, b) => a - b),
-    );
-    expect(assembly.playerCount).toBe(1);
+    const a = await assemble("7d");
+    expect(a.batters).toHaveLength(1);
+    expect(a.batters[0]?.agg.counters.errors).toBe(1);
+    // The fielding row contributed its errors and NOTHING else: a batting
+    // aggregate has no putOuts, and one game was played, not two.
+    expect(a.batters[0]?.agg.games).toBe(1);
+    expect(a.batters[0]?.agg.counters.putOuts).toBeUndefined();
+    expect(a.pitchers).toHaveLength(0);
   });
 
-  it("touches no delivery rows and marks no lines (db state identical before/after)", async () => {
-    const player = await insertPlayer(opened.db);
-    await insertStatLine(opened.db, { playerId: player.id });
-
-    const linesBefore = await opened.db.select().from(statLines);
-    const deliveriesBefore = await opened.db.select().from(digestDeliveries);
-
-    const assembly = await assembleDigest(opened.db, deps());
-    expect(assembly.reportedIds).toHaveLength(1);
-
-    const linesAfter = await opened.db.select().from(statLines);
-    const deliveriesAfter = await opened.db.select().from(digestDeliveries);
-    expect(linesAfter).toEqual(linesBefore);
-    expect(deliveriesAfter).toEqual(deliveriesBefore);
-    expect(deliveriesAfter).toHaveLength(0);
-    expect(linesAfter.every((l) => l.digestDeliveryId === null)).toBe(true);
-
-    // Preview twice: still identical — reads are repeatable, nothing consumed.
-    const again = await assembleDigest(opened.db, deps());
-    expect(again.reportedIds).toEqual(assembly.reportedIds);
-  });
-
-  it("assembles empty: no lines, in-season players in the no-new-stats tail", async () => {
-    await insertPlayer(opened.db, { fullName: "Quiet Guy" });
-
-    const assembly = await assembleDigest(opened.db, deps());
-    expect(assembly.lines).toEqual([]);
-    expect(assembly.reportedIds).toEqual([]);
-    expect(assembly.playerCount).toBe(0);
-    expect(assembly.noNewStats.map((p) => p.fullName)).toEqual(["Quiet Guy"]);
-    expect(assembly.date).toBe("2026-07-19");
-  });
-
-  it("omits out-of-season and inactive players from the tail", async () => {
-    clock.set("2026-10-01T17:00:00Z"); // AAA over (09-27), MLB runs to 10-31
-    await insertPlayer(opened.db, { fullName: "Out Of Season Guy" }); // AAA
-    await insertPlayer(opened.db, {
-      fullName: "Still Playing",
-      level: "mlb",
-      milbLevel: null,
-      teamName: "Miami Marlins",
-    });
-    await insertPlayer(opened.db, { fullName: "Gone Guy", level: "mlb", milbLevel: null, active: false });
-
-    const assembly = await assembleDigest(opened.db, deps());
-    expect(assembly.noNewStats.map((p) => p.fullName)).toEqual(["Still Playing"]);
-  });
-
-  it("lists an In Season NCAA player with no lines in the no-new-stats tail (school shown)", async () => {
-    clock.set("2026-03-15T17:00:00Z"); // NCAA In Season (opens 2026-02-13)
-    await insertCalendar(opened.db, {
-      sportId: 22,
-      season: "2026",
-      regularSeasonStart: "2026-02-13",
-      regularSeasonEnd: "2026-06-22",
-      postSeasonStart: null,
-      postSeasonEnd: null,
-      springStart: null,
-      springEnd: null,
-    });
-    await insertPlayer(opened.db, {
-      externalId: null,
-      ncaaPlayerSeq: 2649785,
-      fullName: "College Guy",
-      level: "ncaa",
-      milbLevel: null,
-      teamName: null,
-      schoolName: "LSU",
-    });
-
-    const assembly = await assembleDigest(opened.db, deps());
-    expect(assembly.noNewStats.map((p) => p.fullName)).toEqual(["College Guy"]);
-    // The preview mail renders the school in the tail-less section; the tail itself is names only.
-    const mail = renderDigest({ date: assembly.date, lines: assembly.lines, noNewStats: assembly.noNewStats });
-    expect(mail.text).toContain("No new stats: College Guy");
-    // Preview is side-effect free.
-    expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
-  });
-
-  it("omits an out-of-season NCAA player from the tail (July, NCAA season over)", async () => {
-    // MID_SEASON is 2026-07-19; NCAA 2026 ended 2026-06-22.
-    await insertCalendar(opened.db, {
-      sportId: 22,
-      season: "2026",
-      regularSeasonStart: "2026-02-13",
-      regularSeasonEnd: "2026-06-22",
-      postSeasonStart: null,
-      postSeasonEnd: null,
-      springStart: null,
-      springEnd: null,
-    });
-    await insertPlayer(opened.db, {
-      externalId: null,
-      ncaaPlayerSeq: 2649785,
-      fullName: "College Guy",
-      level: "ncaa",
-      milbLevel: null,
-      teamName: null,
-      schoolName: "LSU",
-    });
-
-    const assembly = await assembleDigest(opened.db, deps());
-    expect(assembly.noNewStats.map((p) => p.fullName)).toEqual([]);
-  });
-
-  it("a forced preview returns exactly what a forced send reports, and writes nothing", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
-    const line = await insertStatLine(opened.db, {
+  it("synthesizes a zero batting row for a fielding row with no batting counterpart", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Late Sub" });
+    await insertStatLine(opened.db, {
       playerId: player.id,
-      gameDate: "2026-07-18",
-      stats: { hits: 2, atBats: 4, homeRuns: 1, rbi: 3 },
+      gameId: 990002,
+      statType: "fielding",
+      gameDate: "2026-07-15",
+      stats: { errors: 2, putOuts: 1 },
     });
 
-    const mailer = new CapturingMailer();
-    const sendDeps = {
-      db: opened.db,
-      mailer,
-      now: clock.now,
-      tz: TEST_TZ,
-      to: "hc@example.com",
-      from: "bryce@example.com",
-    };
-    await runDigest(sendDeps); // the real send stamps the line
+    const a = await assemble("7d");
+    expect(a.batters).toHaveLength(1);
+    expect(a.batters[0]?.agg.counters.errors).toBe(2);
+    expect(a.batters[0]?.agg.counters.atBats).toBe(0);
+  });
 
-    // Unforced, there is nothing left to report — that is the blocker force exists for.
-    expect((await assembleDigest(opened.db, deps())).reportedIds).toEqual([]);
+  it("counts quality starts across the window", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Zack Wheeler" });
+    for (const gameDate of ["2026-07-14", "2026-07-19"]) {
+      await insertStatLine(opened.db, {
+        playerId: player.id,
+        statType: "pitching",
+        gameDate,
+        stats: { inningsPitched: "7.0", earnedRuns: 2, strikeOuts: 8, hits: 4, baseOnBalls: 1 },
+      });
+    }
+
+    const a = await assemble("7d");
+    expect(a.pitchers).toHaveLength(1);
+    expect(a.pitchers[0]?.qualityStarts).toBe(2);
+    // Outs sum through baseball notation, never arithmetic.
+    expect(a.pitchers[0]?.agg.outs).toBe(42);
+  });
+
+  it("counts only the games that meet the quality-start threshold", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Zack Wheeler" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      statType: "pitching",
+      gameDate: "2026-07-14",
+      stats: { inningsPitched: "7.0", earnedRuns: 2 },
+    });
+    // 5.2 IP is one out short, and 6.0 with 4 ER is one run over.
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      statType: "pitching",
+      gameDate: "2026-07-16",
+      stats: { inningsPitched: "5.2", earnedRuns: 0 },
+    });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      statType: "pitching",
+      gameDate: "2026-07-18",
+      stats: { inningsPitched: "6.0", earnedRuns: 4 },
+    });
+
+    const a = await assemble("7d");
+    expect(a.pitchers[0]?.qualityStarts).toBe(1);
+  });
+
+  it("never reports quality starts for a batter", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-15" });
+
+    const a = await assemble("7d");
+    expect(a.batters[0]?.qualityStarts).toBe(0);
+  });
+
+  it("emits a zero row for an active player with no games in the window", async () => {
+    await insertPlayer(opened.db, { fullName: "Idle Player" });
+
+    const a = await assemble("7d");
+    const idle = a.batters.find((r) => r.player.fullName === "Idle Player");
+    expect(idle?.agg.games).toBe(0);
+    expect(idle?.agg.counters.atBats).toBe(0);
+    expect(idle?.lvl).toBe("AAA");
+    expect(a.statLineCount).toBe(0);
+    expect(a.playerCount).toBe(0);
+  });
+
+  it("omits an out-of-season player from the zero rows", async () => {
+    // The NCAA 2026 season ended 2026-06-22; this window is mid-July.
+    await insertCalendar(opened.db, {
+      sportId: 22,
+      season: "2026",
+      regularSeasonStart: "2026-02-13",
+      regularSeasonEnd: "2026-06-22",
+      postSeasonStart: null,
+      postSeasonEnd: null,
+      springStart: null,
+      springEnd: null,
+    });
+    await insertPlayer(opened.db, {
+      externalId: null,
+      ncaaPlayerSeq: 2649785,
+      fullName: "College Guy",
+      level: "ncaa",
+      milbLevel: null,
+      teamName: null,
+      schoolName: "LSU",
+    });
+    await insertPlayer(opened.db, { fullName: "In Season Guy" });
+
+    const a = await assemble("7d");
+    expect(a.batters.map((r) => r.player.fullName)).toEqual(["In Season Guy"]);
+  });
+
+  it("omits an inactive player from the zero rows", async () => {
+    await insertPlayer(opened.db, { fullName: "Gone Guy", active: false });
+    await insertPlayer(opened.db, { fullName: "Still Here" });
+
+    const a = await assemble("7d");
+    expect(a.batters.map((r) => r.player.fullName)).toEqual(["Still Here"]);
+  });
+
+  it("excludes an inactive player's lines from the window", async () => {
+    const gone = await insertPlayer(opened.db, { fullName: "Gone Guy", active: false });
+    await insertStatLine(opened.db, { playerId: gone.id, gameDate: "2026-07-15" });
+
+    const a = await assemble("7d");
+    expect(a.statLineCount).toBe(0);
+    expect(a.batters).toEqual([]);
+  });
+
+  it("sorts rows by level ladder then player name", async () => {
+    const seed = async (fullName: string, sportId: number, level: "mlb" | "milb") => {
+      const player = await insertPlayer(opened.db, {
+        fullName,
+        level,
+        milbLevel: level === "mlb" ? null : "Triple-A",
+      });
+      await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-15", sportId });
+    };
+    await seed("Zeta Single", 14, "milb");
+    await seed("Alpha Triple", 11, "milb");
+    await seed("Yankee Major", 1, "mlb");
+    await seed("Alpha Single", 14, "milb");
+
+    const a = await assemble("7d");
+    expect(a.batters.map((r) => `${r.lvl} ${r.player.fullName}`)).toEqual([
+      "MLB Yankee Major",
+      "AAA Alpha Triple",
+      "A Alpha Single",
+      "A Zeta Single",
+    ]);
+    const ranks = a.batters.map((r) => r.lvlRank);
+    expect(ranks).toEqual([...ranks].sort((x, y) => x - y));
+  });
+
+  it("labels a Dominican Summer League game DSL and a domestic complex game R", async () => {
+    const dsl = await insertPlayer(opened.db, { fullName: "Dsl Guy" });
+    await insertStatLine(opened.db, {
+      playerId: dsl.id,
+      gameDate: "2026-07-15",
+      sportId: 16,
+      leagueName: "Dominican Summer League",
+    });
+    const complex = await insertPlayer(opened.db, { fullName: "Complex Guy" });
+    await insertStatLine(opened.db, {
+      playerId: complex.id,
+      gameDate: "2026-07-15",
+      sportId: 16,
+      leagueName: "Arizona Complex League",
+    });
+
+    const a = await assemble("7d");
+    expect(a.batters.map((r) => r.lvl).sort()).toEqual(["DSL", "R"]);
+  });
+
+  it("anchors ytd on the season's regular-season start", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    // Spring training, before the MLB regular season opened on 2026-03-25.
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-03-01" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-04-15" });
+
+    const a = await assemble("ytd");
+    expect(a.window.from).toBe("2026-03-25");
+    expect(a.window.to).toBe("2026-07-19");
+    expect(a.statLineCount).toBe(1);
+  });
+
+  it("writes nothing and is repeatable", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-15" });
 
     const linesBefore = await opened.db.select().from(statLines);
     const deliveriesBefore = await opened.db.select().from(digestDeliveries);
 
-    const forcedPreview = await assembleDigest(opened.db, {
-      ...deps(),
-      includeDeliveryId: previewDeliveryId(opened.db, deps(), true),
-    });
-    expect(forcedPreview.reportedIds).toEqual([line.id]);
-    expect(forcedPreview.playerCount).toBe(1);
+    const first = await assemble("7d");
+    const second = await assemble("7d");
 
-    // Read-only: the preview consumed nothing and settled nothing.
     expect(await opened.db.select().from(statLines)).toEqual(linesBefore);
     expect(await opened.db.select().from(digestDeliveries)).toEqual(deliveriesBefore);
-
-    // And it matches the forced SEND, byte for byte.
-    const previewMail = renderDigest({
-      date: forcedPreview.date,
-      lines: forcedPreview.lines,
-      noNewStats: forcedPreview.noNewStats,
-    });
-    const forcedSend = await runDigest({ ...sendDeps, force: true });
-    expect(forcedSend).toMatchObject({ action: "sent", statLineCount: 1 });
-    expect(mailer.sent).toHaveLength(2);
-    expect(mailer.sent[1]?.subject).toBe(previewMail.subject);
-    expect(mailer.sent[1]?.text).toBe(previewMail.text);
-    expect(mailer.sent[1]?.html).toBe(previewMail.html);
-  });
-
-  it("previewDeliveryId resolves today's digest slot only when forced", async () => {
-    expect(previewDeliveryId(opened.db, deps(), true)).toBeNull(); // no row yet
-    const row = await insertDelivery(opened.db, {
-      kind: "digest",
-      dateCovered: "2026-07-19",
-      status: "sent",
-      sentAt: MID_SEASON,
-    });
-    expect(previewDeliveryId(opened.db, deps(), true)).toBe(row.id);
-    expect(previewDeliveryId(opened.db, deps(), false)).toBeNull();
-    // A different slot is never picked up: yesterday's delivery is not today's.
-    await insertDelivery(opened.db, { kind: "digest", dateCovered: "2026-07-18" });
-    expect(previewDeliveryId(opened.db, deps(), true)).toBe(row.id);
-  });
-
-  /**
-   * Only a SETTLED delivery ever stamped a Stat Line — `settleSent` is the one
-   * writer of `stat_lines.digest_delivery_id`. A `failed` or `sending` row's id
-   * would therefore widen the forced preview's novelty predicate by an id no
-   * line carries: harmless today, but only because of a fact about a different
-   * module. These two pin the status filter so the correctness is the helper's
-   * own, not a coincidence.
-   */
-  it("previewDeliveryId ignores a FAILED row for today's slot", async () => {
-    await insertDelivery(opened.db, {
-      kind: "digest",
-      dateCovered: "2026-07-19",
-      status: "failed",
-      errorMessage: "postmark down",
-    });
-    expect(previewDeliveryId(opened.db, deps(), true)).toBeNull();
-
-    // Positive control: the same slot, once genuinely sent, DOES resolve — so
-    // this test is about the status, not about the lookup being broken.
-    await opened.db
-      .update(digestDeliveries)
-      .set({ status: "sent", sentAt: MID_SEASON })
-      .where(eq(digestDeliveries.dateCovered, "2026-07-19"));
-    expect(previewDeliveryId(opened.db, deps(), true)).not.toBeNull();
-  });
-
-  it("previewDeliveryId ignores an in-flight SENDING row for today's slot", async () => {
-    await insertDelivery(opened.db, {
-      kind: "digest",
-      dateCovered: "2026-07-19",
-      status: "sending",
-      claimedAt: MID_SEASON,
-    });
-    expect(previewDeliveryId(opened.db, deps(), true)).toBeNull();
-
-    // A forced preview against that in-flight row is the ordinary preview: it
-    // reports only unreported lines, and reports the same set unforced.
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
-    const line = await insertStatLine(opened.db, { playerId: player.id });
-    const forced = await assembleDigest(opened.db, {
-      ...deps(),
-      includeDeliveryId: previewDeliveryId(opened.db, deps(), true),
-    });
-    expect(forced.reportedIds).toEqual([line.id]);
-    expect((await assembleDigest(opened.db, deps())).reportedIds).toEqual(forced.reportedIds);
-  });
-
-  it("leaves the heartbeat path unaffected (runDigest still heartbeats in the offseason)", async () => {
-    clock.set(OFFSEASON);
-    await insertPlayer(opened.db, { fullName: "Watched One" });
-    const mailer = new CapturingMailer();
-    const result = await runDigest({
-      db: opened.db,
-      mailer,
-      now: clock.now,
-      tz: TEST_TZ,
-      to: "hc@example.com",
-      from: "bryce@example.com",
-    });
-    expect(result).toMatchObject({ kind: "heartbeat", action: "sent", playerCount: 1 });
-    expect(mailer.sent[0]?.subject).toBe("Bryce heartbeat - 2026-12-05");
+    expect(linesBefore.every((l) => l.digestDeliveryId === null)).toBe(true);
+    // Re-running a window is always safe because it consumes nothing: the
+    // second read reports exactly what the first did.
+    expect(second).toEqual(first);
   });
 });
