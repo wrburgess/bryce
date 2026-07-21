@@ -216,6 +216,44 @@ describe("assembleDigest — window selection", () => {
     expect(a.batters[0]?.agg.counters.atBats).toBe(0);
   });
 
+  it("labels an idle DSL player DSL, not R, from his most recent league", async () => {
+    // Caught by running the real database. sportId 16 covers every rookie and
+    // complex league, so the league NAME is the only thing separating the
+    // Dominican Summer League from the domestic ones. An idle player has no
+    // line inside the window to read it from, so a windowed lookup would return
+    // nothing and he would render "R" on the days he sits and "DSL" on the days
+    // he plays — same player, two labels, one email.
+    // insertCalendars2026 only seeds sportIds 1 and 11, and an idle player is
+    // filtered by isInSeason — so a Rookie player with no sportId 16 calendar
+    // is dropped entirely and never reaches the Lvl logic under test.
+    await insertCalendar(opened.db, {
+      sportId: 16,
+      regularSeasonStart: "2026-06-01",
+      regularSeasonEnd: "2026-08-30",
+      postSeasonStart: null,
+      postSeasonEnd: null,
+      springStart: null,
+      springEnd: null,
+    });
+    const player = await insertPlayer(opened.db, {
+      fullName: "Leanders Matos",
+      level: "milb",
+      milbLevel: "Rookie",
+    });
+    // His only line is OUTSIDE the 7d window ending 2026-07-19.
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-06-01",
+      sportId: 16,
+      leagueName: "Dominican Summer League",
+    });
+
+    const a = await assemble("7d");
+    const row = a.batters.find((r) => r.player.fullName === "Leanders Matos");
+    expect(row?.agg.games).toBe(0); // he really is idle in this window
+    expect(row?.lvl).toBe("DSL");
+  });
+
   it("does NOT synthesize a batting row from a pitcher's own fielding row", async () => {
     // Caught by running the real database, not by a fixture: a reliever with a
     // pitching line and its accompanying fielding line was rendering in the

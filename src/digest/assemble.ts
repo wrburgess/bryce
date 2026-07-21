@@ -1,4 +1,4 @@
-import { and, eq, gte, lte } from "drizzle-orm";
+import { and, eq, gte, inArray, lte } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { PlayerRow, StatLineRow } from "../db/schema.js";
 import { players, statLines } from "../db/schema.js";
@@ -102,16 +102,73 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
     (p) => !playersWithLines.has(p.id) && isInSeason(p, calendars, now(), tz),
   );
 
+  // An idle player has no stat line in the window to read a league from, but
+  // sportId 16 alone cannot tell the Dominican Summer League from the domestic
+  // complex leagues — so a DSL player would render "R" on the days he sits and
+  // "DSL" on the days he plays. Same player, two labels, one email. His most
+  // recent league is the honest answer, so look it up outside the window.
+  const leagueByPlayer = await lastKnownLeagues(db, idlePlayers);
+
   const batting = mergeFieldingIntoBatting(splits).map(withPlateAppearances);
   const pitching = splits.filter((s) => s.line.statType === "pitching");
 
   return {
     window,
-    batters: buildRows(batting, window, "batting", idlePlayers.filter(isBatter)),
-    pitchers: buildRows(pitching, window, "pitching", idlePlayers.filter((p) => !isBatter(p))),
+    batters: buildRows(batting, window, "batting", idlePlayers.filter(isBatter), leagueByPlayer),
+    pitchers: buildRows(
+      pitching,
+      window,
+      "pitching",
+      idlePlayers.filter((p) => !isBatter(p)),
+      leagueByPlayer,
+    ),
     playerCount: playersWithLines.size,
     statLineCount: splits.length,
   };
+}
+
+/**
+ * Each idle player's most recently seen league, for the Lvl column.
+ *
+ * Deliberately NOT window-limited: an idle player has no line in the window by
+ * definition, so a windowed lookup would always return nothing. The question is
+ * "where does he play", not "where did he play this week", and the answer must
+ * not flicker between reports.
+ *
+ * Only sportId 16 actually needs this — it covers every rookie/complex league,
+ * so the league name is the only thing separating the Dominican Summer League
+ * from the domestic ones. One query for the whole idle set, not one per player.
+ */
+async function lastKnownLeagues(
+  db: Db,
+  idlePlayers: PlayerRow[],
+): Promise<Map<number, string | null>> {
+  const byPlayer = new Map<number, string | null>();
+  if (idlePlayers.length === 0) return byPlayer;
+
+  const rows = await db
+    .select({
+      playerId: statLines.playerId,
+      leagueName: statLines.leagueName,
+      gameDate: statLines.gameDate,
+    })
+    .from(statLines)
+    .where(
+      inArray(
+        statLines.playerId,
+        idlePlayers.map((p) => p.id),
+      ),
+    );
+
+  const latest = new Map<number, string>();
+  for (const row of rows) {
+    const seen = latest.get(row.playerId);
+    if (seen === undefined || row.gameDate > seen) {
+      latest.set(row.playerId, row.gameDate);
+      byPlayer.set(row.playerId, row.leagueName);
+    }
+  }
+  return byPlayer;
 }
 
 /**
@@ -209,6 +266,7 @@ function buildRows(
   window: ResolvedWindow,
   statType: "batting" | "pitching",
   idlePlayers: PlayerRow[],
+  leagueByPlayer: Map<number, string | null>,
 ): DigestRow[] {
   const groups = new Map<string, Split[]>();
   const gamesPerPlayer = new Map<number, Set<number>>();
@@ -253,7 +311,7 @@ function buildRows(
     const sportId = sportIdForPlayer(player) ?? -1;
     rows.push({
       player: toRenderPlayer(player),
-      lvl: levelAbbrev(sportId, null),
+      lvl: levelAbbrev(sportId, leagueByPlayer.get(player.id) ?? null),
       lvlRank: levelRank(sportId),
       gameNumber: null,
       agg: aggregate(statType, []),
