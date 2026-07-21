@@ -9,7 +9,7 @@ import type { OpenedDb } from "../src/db/client.js";
 import { BUSY_TIMEOUT_MS } from "../src/db/client.js";
 import { digestDeliveries, players, statLines } from "../src/db/schema.js";
 import { upsertStatLines } from "../src/jobs/refresh.js";
-import { insertDelivery, insertPlayer, insertStatLine, testDb, testFileDb } from "./factories.js";
+import { insertPlayer, insertStatLine, testDb, testFileDb } from "./factories.js";
 
 describe("stat_lines schema invariants (ADR 0029)", () => {
   let opened: OpenedDb;
@@ -98,15 +98,13 @@ describe("stat_lines schema invariants (ADR 0029)", () => {
     expect(rows.every((r) => r.ncaaPlayerSeq === null)).toBe(true);
   });
 
-  it("upsert on conflict updates stats but preserves digest_delivery_id and created_at", async () => {
+  it("upsert on conflict updates stats but preserves created_at", async () => {
     const player = await insertPlayer(opened.db);
-    const delivery = await insertDelivery(opened.db);
     const original = await insertStatLine(opened.db, {
       playerId: player.id,
       gameId: 777001,
       statType: "batting",
       stats: { hits: 1, atBats: 4 },
-      digestDeliveryId: delivery.id,
       createdAt: "2026-07-01T00:00:00.000Z",
       updatedAt: "2026-07-01T00:00:00.000Z",
     });
@@ -138,7 +136,6 @@ describe("stat_lines schema invariants (ADR 0029)", () => {
     expect(rows).toHaveLength(1);
     const row = rows[0];
     expect((row?.stats as Record<string, unknown>).hits).toBe(2);
-    expect(row?.digestDeliveryId).toBe(delivery.id); // correction stays quiet (ADR 0030)
     expect(row?.createdAt).toBe("2026-07-01T00:00:00.000Z");
     expect(row?.updatedAt).toBe("2026-07-02T00:00:00.000Z");
   });

@@ -1,4 +1,3 @@
-import { isNotNull } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { openDb } from "../src/db/client.js";
@@ -32,10 +31,6 @@ import {
  */
 const cells = (text: string, startsWith: string): string[] =>
   (text.split("\n").find((l) => l.startsWith(startsWith)) ?? "").trim().split(/\s+/);
-
-/** Lines carrying a delivery stamp. A window consumes nothing, so ALWAYS empty. */
-const stamped = (db: OpenedDb["db"]) =>
-  db.select().from(statLines).where(isNotNull(statLines.digestDeliveryId));
 
 describe("runDigest", () => {
   let opened: OpenedDb;
@@ -103,8 +98,9 @@ describe("runDigest", () => {
     // span a promotion and a section heading could not say that.
     expect(mail?.html).not.toContain("<h2>MiLB - Triple-A</h2>");
 
-    // The delivery row records the counts — and NOTHING is stamped, because a
-    // window consumes nothing.
+    // The delivery row records the counts. Nothing is written to stat_lines —
+    // a window consumes nothing, and since ADR 0035 there is no column that
+    // could record consumption even if a run tried.
     const deliveries = await opened.db.select().from(digestDeliveries);
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0]).toMatchObject({
@@ -114,7 +110,30 @@ describe("runDigest", () => {
       statLineCount: 2,
       playerCount: 1,
     });
-    expect(await stamped(opened.db)).toHaveLength(0);
+  });
+
+  it("leaves stat_lines byte-identical, whether the send succeeds or fails", async () => {
+    // Replaces the old per-outcome "nothing carries a delivery stamp" checks.
+    // Those could only ask whether one column was null; this asks the question
+    // they stood for — did the run change ANY stored line — and it keeps
+    // working now that the stamp column is gone (ADR 0035).
+    //
+    // The failing arm matters most: settleFailed is the path that used to be
+    // able to damage delivery state, so a run that dies at the provider is
+    // where a stray write would surface.
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+    const before = await opened.db.select().from(statLines);
+    expect(before).not.toHaveLength(0); // a vacuous snapshot would prove nothing
+
+    await runDigest(deps());
+    expect(await opened.db.select().from(statLines)).toEqual(before);
+
+    const failing = new CapturingMailer();
+    failing.send = () => Promise.reject(new Error("provider exploded"));
+    const failed = await runDigest({ ...deps(), mailer: failing, spec: "7d", force: true });
+    expect(failed.action).toBe("failed");
+    expect(await opened.db.select().from(statLines)).toEqual(before);
   });
 
   it("re-running the same window sends the same content", async () => {
@@ -357,9 +376,8 @@ describe("runDigest", () => {
       ["E", "Prone", "AAA", "4", "1", "0", "2", "0", "0", "0", "0", "0", "0", "0", "2"],
     );
     expect(text).not.toContain("Fielders");
-    // Both stored rows are in the window's count; neither is stamped.
+    // Both stored rows are in the window's count.
     expect(result.statLineCount).toBe(2);
-    expect(await stamped(opened.db)).toHaveLength(0);
   });
 
   it("renders a fielding-only game as a zeros batting row carrying only E", async () => {
@@ -378,7 +396,6 @@ describe("runDigest", () => {
       ["D", "Sub", "AAA", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "1"],
     );
     expect(result.statLineCount).toBe(1);
-    expect(await stamped(opened.db)).toHaveLength(0);
   });
 
   it("on send failure records a failed delivery, and the retry sends the same window", async () => {
@@ -403,7 +420,6 @@ describe("runDigest", () => {
     const after = await opened.db.select().from(digestDeliveries);
     expect(after).toHaveLength(1); // the failed row was upgraded, not duplicated
     expect(after[0]?.status).toBe("sent");
-    expect(await stamped(opened.db)).toHaveLength(0);
   });
 
   it("excludes deactivated players' lines from the digest", async () => {
@@ -567,8 +583,7 @@ describe("delivery claim under concurrency (ADR 0034)", () => {
     const deliveries = await opened.db.select().from(digestDeliveries);
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0]).toMatchObject({ status: "sent", attemptCount: 1, statLineCount: 2 });
-    // Neither run stamped anything: there is no line state to race over.
-    expect(await stamped(opened.db)).toHaveLength(0);
+    // There is no line state to race over: neither run writes to stat_lines.
   });
 
   it("lets only one of two truly interleaved invocations reach the provider", async () => {
@@ -593,7 +608,6 @@ describe("delivery claim under concurrency (ADR 0034)", () => {
     const deliveries = await opened.db.select().from(digestDeliveries);
     expect(deliveries).toHaveLength(1); // no duplicate row
     expect(deliveries[0]?.status).toBe("sent");
-    expect(await stamped(opened.db)).toHaveLength(0);
   });
 
   it("excludes across two connections to one database file (launchd CLI vs the server)", async () => {
@@ -703,8 +717,6 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
   });
 
   const deliveries = () => opened.db.select().from(digestDeliveries);
-  /** Lines carrying a delivery stamp: ALWAYS empty, at every delivery outcome. */
-  const stampedLines = () => stamped(opened.db);
 
   beforeEach(async () => {
     opened = testDb();
@@ -733,7 +745,6 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
     expect(result.action).toBe("skipped");
     expect(result.reason).toBe("claimed-by-another-run");
     expect(mailer.sent).toHaveLength(0);
-    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("re-sends the duplicate when a run dies after acceptance and before the settle", async () => {
@@ -748,7 +759,6 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
     const stuck = await deliveries();
     expect(stuck).toHaveLength(1);
     expect(stuck[0]).toMatchObject({ status: "sending", sentAt: null, attemptCount: 1 });
-    expect(await stampedLines()).toHaveLength(0);
 
     // Past the lease, the slot heals — and the healing RE-SENDS. This second
     // mail is the documented at-least-once limitation, asserted rather than
@@ -765,7 +775,6 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
       attemptCount: 2,
       sentAt: "2026-07-19T17:11:00.000Z",
     });
-    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("rolls the settle back when the process dies inside it, before COMMIT", async () => {
@@ -791,7 +800,6 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
       attemptCount: 2,
       statLineCount: 2,
     });
-    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("reclaims a sending row older than the lease and bumps the attempt count", async () => {
@@ -813,7 +821,6 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
     const rows = await deliveries();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ status: "sent", attemptCount: 2, statLineCount: 1 });
-    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("clears the previous attempt's error and provider id when re-claiming a slot", async () => {
@@ -979,8 +986,6 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
   });
 
   const deliveries = () => opened.db.select().from(digestDeliveries);
-  /** Lines carrying a delivery stamp: ALWAYS empty, at every delivery outcome. */
-  const stampedLines = () => stamped(opened.db);
 
   /** Crash a digest run between provider acceptance and the settle commit. */
   async function crashAfterAcceptance(): Promise<void> {
@@ -1037,7 +1042,6 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     // ZERO Stat Lines marked. The crashed attempt emailed a set of lines we
     // never recorded; marking TODAY's assembly would report lines that may
     // never have been sent (Refresh can run in between) — silent content loss.
-    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("re-sends when the provider reports the delivery key as not found", async () => {
@@ -1058,7 +1062,6 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
       statLineCount: 1,
       reconciledAt: null,
     });
-    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("re-sends when the lookup is unavailable — a failed lookup never suppresses", async () => {
@@ -1073,7 +1076,6 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     expect(healed).toMatchObject({ action: "sent", reason: "recovered-stale-claim", statLineCount: 1 });
     expect(mailer.sent).toHaveLength(2);
     expect((await deliveries())[0]).toMatchObject({ status: "sent", reconciledAt: null });
-    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("re-sends without any lookup for a provider that cannot answer one (SMTP/console)", async () => {
@@ -1117,7 +1119,6 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     expect(mailer.lookups).toHaveLength(1); // it was asked, and it blew up
     expect(mailer.sent).toHaveLength(2); // and we re-sent anyway
     expect((await deliveries())[0]).toMatchObject({ status: "sent", reconciledAt: null });
-    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("CONTENT-LOSS GUARD: the reconciled window's content is still reachable after", async () => {
@@ -1137,7 +1138,6 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     clock.set(PAST_LEASE);
     expect((await runDigest(deps())).reason).toBe("reconciled-already-accepted");
     expect(mailer.sent).toHaveLength(1);
-    expect(await stampedLines()).toHaveLength(0);
 
     // Next day: a fresh slot, an ordinary send over a window that still covers
     // 07-18 — and it carries the line the reconciled delivery never recorded.
@@ -1148,7 +1148,6 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     expect(cells(mailer.sent[1]?.text ?? "", "M Acosta")).toEqual(
       ["M", "Acosta", "AAA", "1", ".500/.500/1.250", "4", "2", "0", "0", "0", "0", "1", "3", "0", "0", "0", "0"],
     );
-    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("never looks up on a fresh claim or a failed-row retry", async () => {
@@ -1320,8 +1319,6 @@ describe("forced delivery", () => {
   });
 
   const deliveries = () => opened.db.select().from(digestDeliveries);
-  /** Lines carrying a delivery stamp: ALWAYS empty, at every delivery outcome. */
-  const stampedLines = () => stamped(opened.db);
 
   beforeEach(async () => {
     opened = testDb();
@@ -1518,7 +1515,6 @@ describe("forced delivery", () => {
     const after = await deliveries();
     expect(after).toHaveLength(1);
     expect(after[0]).toEqual(before); // id, status, sentAt, counts, provider id
-    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("picks up a line that arrived after the real send, and consumes nothing", async () => {
@@ -1549,7 +1545,6 @@ describe("forced delivery", () => {
 
     // A test send consumes nothing, so the next SCHEDULED run over the same
     // window would report exactly the same thing.
-    expect(await stampedLines()).toHaveLength(0);
     clock.set("2026-07-19T18:30:00Z");
     const next = await runDigest(deps(true));
     expect(next).toMatchObject({ action: "sent", statLineCount: 2 });
@@ -1561,7 +1556,7 @@ describe("forced delivery", () => {
     // re-claimed the sent row, settleFailed would set status='failed',
     // sent_at=NULL — destroying the record of a genuinely delivered email — and
     // the next scheduled run would re-claim that failed row and mail an EMPTY
-    // digest, because its lines are already stamped.
+    // digest, because a window reports whatever falls inside it.
     mailer.providerMessageId = "postmark-first";
     const player = await insertPlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
@@ -1583,7 +1578,6 @@ describe("forced delivery", () => {
       providerMessageId: "postmark-first",
       errorMessage: null,
     });
-    expect(await stampedLines()).toHaveLength(0);
 
     // And the day is still closed: the next scheduled run does not "retry".
     mailer.failWith = null;
@@ -1796,7 +1790,6 @@ describe("forced delivery", () => {
     // No digest slot was taken, and the stat line is untouched.
     const rows = await deliveries();
     expect(rows.every((r) => r.kind === "heartbeat")).toBe(true);
-    expect(await stampedLines()).toHaveLength(0);
   });
 });
 

@@ -94,8 +94,6 @@ export const statLines = sqliteTable(
     stats: text("stats", { mode: "json" }).notNull(),
     /** The whole gameLog split, verbatim, for future re-processing. */
     raw: text("raw", { mode: "json" }).notNull(),
-    /** Set when a Digest reports this line; a correction never clears it (ADR 0030). */
-    digestDeliveryId: integer("digest_delivery_id").references(() => digestDeliveries.id),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
   },

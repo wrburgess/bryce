@@ -485,7 +485,6 @@ describe("assembleDigest — window selection", () => {
 
     expect(await opened.db.select().from(statLines)).toEqual(linesBefore);
     expect(await opened.db.select().from(digestDeliveries)).toEqual(deliveriesBefore);
-    expect(linesBefore.every((l) => l.digestDeliveryId === null)).toBe(true);
     // Re-running a window is always safe because it consumes nothing: the
     // second read reports exactly what the first did.
     expect(second).toEqual(first);

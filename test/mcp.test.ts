@@ -1,6 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { isNotNull } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { digestDeliveries, players, statLines } from "../src/db/schema.js";
@@ -321,9 +320,6 @@ describe("MCP server over Streamable HTTP", () => {
 
     expect(mailer.sent).toHaveLength(0);
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
-    expect(
-      await opened.db.select().from(statLines).where(isNotNull(statLines.digestDeliveryId)),
-    ).toHaveLength(0);
   });
 
   it("both digest tools accept a window, and reject an unsupported one", async () => {
@@ -366,9 +362,6 @@ describe("MCP server over Streamable HTTP", () => {
     expect(mailer.sent).toHaveLength(1);
     expect(mailer.sent[0]?.text).toContain("M Acosta");
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(1);
-    expect(
-      await opened.db.select().from(statLines).where(isNotNull(statLines.digestDeliveryId)),
-    ).toHaveLength(0);
   });
 
   it("send_digest accepts force, replaying without recording", async () => {

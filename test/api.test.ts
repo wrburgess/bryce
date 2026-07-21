@@ -1,4 +1,4 @@
-import { eq, isNotNull } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { digestDeliveries, players, statLines } from "../src/db/schema.js";
@@ -415,11 +415,6 @@ describe("REST API", () => {
       // Read-only: no send, no delivery row, no stamping.
       expect(mailer.sent).toHaveLength(0);
       expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
-      const stamped = await opened.db
-        .select()
-        .from(statLines)
-        .where(isNotNull(statLines.digestDeliveryId));
-      expect(stamped).toHaveLength(0);
     });
 
     it("selects by ?window, and rejects an unsupported one", async () => {
@@ -507,11 +502,6 @@ describe("REST API", () => {
       const deliveries = await opened.db.select().from(digestDeliveries);
       expect(deliveries).toHaveLength(1);
       expect(deliveries[0]).toMatchObject({ kind: "digest", status: "sent", dateCovered: "2026-07-19" });
-      const stamped = await opened.db
-        .select()
-        .from(statLines)
-        .where(isNotNull(statLines.digestDeliveryId));
-      expect(stamped).toHaveLength(0);
     });
 
     it("sends the requested {window}, and rejects an unsupported one without sending", async () => {
@@ -725,6 +715,5 @@ describe("REST API", () => {
     expect(await res.json()).toMatchObject({ action: "sent", statLineCount: 0 });
     const kept = await opened.db.select().from(statLines).where(eq(statLines.playerId, gone.id));
     expect(kept).toHaveLength(1); // his history is kept, just never selected
-    expect(kept[0]?.digestDeliveryId).toBeNull();
   });
 });

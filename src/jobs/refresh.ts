@@ -398,8 +398,13 @@ function splitToRow(
 
 /**
  * Idempotent upsert on the ADR 0029 key. On conflict the stat payload is
- * refreshed but digest_delivery_id and created_at are NEVER touched —
- * corrections update storage quietly and are not re-announced (ADR 0030).
+ * refreshed but created_at is NEVER touched, so a correction updates storage
+ * quietly without looking like a new row.
+ *
+ * There is no longer a reported/unreported stamp to preserve: the Digest
+ * selects by date window and writes nothing here (ADR 0035, superseding the
+ * novelty model of ADR 0030). A correction simply shows up in the next window
+ * that covers its game date.
  */
 export async function upsertStatLines(db: Db, rows: NewStatLineRow[]): Promise<void> {
   for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
