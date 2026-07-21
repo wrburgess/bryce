@@ -216,6 +216,33 @@ describe("assembleDigest — window selection", () => {
     expect(a.batters[0]?.agg.counters.atBats).toBe(0);
   });
 
+  it("does NOT synthesize a batting row from a pitcher's own fielding row", async () => {
+    // Caught by running the real database, not by a fixture: a reliever with a
+    // pitching line and its accompanying fielding line was rendering in the
+    // Batters table hitting .000/.000/.000 — an appalling week rather than an
+    // appearance. The fielding row belongs to the pitching appearance, so there
+    // is no batting row to synthesize from it.
+    const player = await insertPlayer(opened.db, { fullName: "Riley O'Brien", position: "P" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 990003,
+      statType: "pitching",
+      gameDate: "2026-07-15",
+      stats: { inningsPitched: "1.0", strikeOuts: 1, earnedRuns: 0 },
+    });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 990003,
+      statType: "fielding",
+      gameDate: "2026-07-15",
+      stats: { errors: 0, putOuts: 1 },
+    });
+
+    const a = await assemble("7d");
+    expect(a.pitchers.map((r) => r.player.fullName)).toContain("Riley O'Brien");
+    expect(a.batters.map((r) => r.player.fullName)).not.toContain("Riley O'Brien");
+  });
+
   it("counts quality starts across the window", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Zack Wheeler" });
     for (const gameDate of ["2026-07-14", "2026-07-19"]) {

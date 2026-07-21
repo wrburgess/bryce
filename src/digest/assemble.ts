@@ -150,6 +150,17 @@ function mergeFieldingIntoBatting(splits: Split[]): Split[] {
   for (const split of batting) {
     byGame.set(`${split.line.playerId}:${split.line.gameId}`, split);
   }
+  // A pitcher's fielding row belongs to his PITCHING appearance, not to a
+  // batting one he never had. Synthesizing from it would put him in the Batters
+  // table hitting .000/.000/.000 — which reads as an appalling week rather than
+  // "he pitched", the same misreading the idle-pitcher routing exists to avoid.
+  // Under the old per-game prose format this was invisible; a table makes it a
+  // full slash line, so the synthesis has to know when to decline.
+  const pitchedInGame = new Set(
+    splits
+      .filter((s) => s.line.statType === "pitching")
+      .map((s) => `${s.line.playerId}:${s.line.gameId}`),
+  );
   for (const split of splits) {
     if (split.line.statType !== "fielding") continue;
     const key = `${split.line.playerId}:${split.line.gameId}`;
@@ -159,6 +170,7 @@ function mergeFieldingIntoBatting(splits: Split[]): Split[] {
       target.stats.errors = errors;
       continue;
     }
+    if (pitchedInGame.has(key)) continue;
     const synthesized: Split = { ...split, stats: { errors } };
     byGame.set(key, synthesized);
     batting.push(synthesized);
