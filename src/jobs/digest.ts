@@ -1,5 +1,6 @@
 import { and, desc, eq } from "drizzle-orm";
 import { digestDeliveries } from "../db/schema.js";
+import type { DigestAssembly } from "../digest/assemble.js";
 import { assembleDigest } from "../digest/assemble.js";
 import { renderDigest, renderHeartbeat } from "../digest/render.js";
 import { hostDate, sleepWindow } from "../domain/season.js";
@@ -11,6 +12,7 @@ import type { ClaimRefusal, ClaimResult, Tx } from "./delivery-claim.js";
 import {
   claimDelivery,
   deliveryKey,
+  reportKey,
   settleFailed,
   settleReconciled,
   settleSent,
@@ -113,6 +115,23 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   const calendars = await loadCalendars(db);
   const sleep = sleepWindow(calendars, activePlayers, now(), tz);
 
+  // An ON-DEMAND report is not the scheduled artifact, and the two differ in
+  // both directions.
+  //
+  // It takes no claim. The claim exists so the DAILY digest cannot go out twice
+  // for one date; its slot is keyed `(kind, date_covered)` with no room for a
+  // window. Sharing that slot means a 7d request after the day's 1d report is
+  // refused `already-sent-today`, and a failed 7d attempt is silently completed
+  // by the next 1d run — the wrong content settling the wrong slot. An operator
+  // who asks for a window explicitly is not deduplicating anything; he asked.
+  //
+  // It also ignores Offseason Sleep. Sleep stops the daily artifact mailing
+  // nothing every day for months. Answering an explicit "give me my season to
+  // date" with a liveness heartbeat is not that, it is refusing the question.
+  if (deps.spec !== "1d") {
+    return runOnDemandReport(deps, warn);
+  }
+
   if (sleep.sleeping) {
     return runHeartbeat(deps, activePlayers.length, sleep.nextOpeningDay);
   }
@@ -171,13 +190,7 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   // one; SAYING SO is the other. Without this an upstream field addition is
   // dropped from every future report and nobody learns the tables went stale —
   // which is exactly the silent staleness the classification exists to prevent.
-  if (assembly.unknownFields.length > 0) {
-    warn(
-      `digest: ${assembly.unknownFields.length} unclassified stat field(s) excluded ` +
-        `from ${assembly.window.label}: ${assembly.unknownFields.join(", ")}. ` +
-        `Classify them in src/stats/fields.ts.`,
-    );
-  }
+  reportUnknownFields(assembly, warn);
   const mail = renderDigest(assembly);
   const { playerCount, statLineCount } = assembly;
   const window = assembly.window.label;
@@ -241,6 +254,59 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
 function sendReason(forced: boolean, claim: Extract<ClaimResult, { claimed: true }>): string | null {
   if (forced) return FORCED;
   return !claim.replay && claim.recovered ? RECOVERED : null;
+}
+
+/**
+ * An on-demand windowed report: assemble, render, send. No claim, no delivery
+ * row, no settlement, nothing written anywhere.
+ *
+ * This is the whole of option B. The delivery machinery in ADR 0034 protects
+ * ONE guarantee — the daily digest goes out at most once per date — and its
+ * slot key has no room for a window. Rather than widen that key and owe
+ * crash-recovery for every window an operator might ask for, an explicit
+ * request simply opts out of bookkeeping it never needed.
+ *
+ * What that costs: an on-demand report that dies mid-send is not retried
+ * automatically. A human asked for it and is watching; he asks again. What it
+ * buys: a 7d request can never be refused because a 1d one already went out,
+ * and can never be silently completed by one.
+ */
+async function runOnDemandReport(
+  deps: DigestDeps,
+  warn: (message: string) => void,
+): Promise<DigestResult> {
+  const { db, now, tz } = deps;
+  const assembly = await assembleDigest(db, { now, tz, spec: deps.spec });
+  reportUnknownFields(assembly, warn);
+
+  const mail = renderDigest(assembly);
+  const { playerCount, statLineCount } = assembly;
+  const window = assembly.window.label;
+
+  try {
+    await deps.mailer.send(
+      { to: deps.to, from: deps.from, ...mail },
+      { deliveryKey: reportKey(assembly.window.spec, assembly.window.to) },
+    );
+  } catch (err) {
+    return {
+      kind: "digest",
+      action: "failed",
+      reason: errorMessage(err),
+      statLineCount,
+      playerCount,
+      window,
+    };
+  }
+
+  return {
+    kind: "digest",
+    action: "sent",
+    reason: null,
+    statLineCount,
+    playerCount,
+    window,
+  };
 }
 
 /**
@@ -416,6 +482,23 @@ function heartbeatWithinWeek(tx: Tx, nowMs: number): ClaimRefusal | null {
     return "heartbeat-sent-within-week";
   }
   return null;
+}
+
+/**
+ * Fail-closed has two halves. Excluding an unrecognised stat key is the safe
+ * one; SAYING SO is the other. Without this an upstream field addition is
+ * dropped from every future report and nobody learns the tables went stale.
+ */
+function reportUnknownFields(
+  assembly: DigestAssembly,
+  warn: (message: string) => void,
+): void {
+  if (assembly.unknownFields.length === 0) return;
+  warn(
+    `digest: ${assembly.unknownFields.length} unclassified stat field(s) excluded ` +
+      `from ${assembly.window.label}: ${assembly.unknownFields.join(", ")}. ` +
+      `Classify them in src/stats/fields.ts.`,
+  );
 }
 
 function errorMessage(err: unknown): string {

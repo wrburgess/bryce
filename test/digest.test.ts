@@ -72,6 +72,7 @@ describe("runDigest", () => {
     });
 
     // A 7d window ending on the last completed day covers 07-12..07-18.
+    const linesBefore = await opened.db.select().from(statLines);
     const result = await runDigest({ ...deps(), spec: "7d" });
     expect(result).toMatchObject({
       kind: "digest",
@@ -98,18 +99,100 @@ describe("runDigest", () => {
     // span a promotion and a section heading could not say that.
     expect(mail?.html).not.toContain("<h2>MiLB - Triple-A</h2>");
 
-    // The delivery row records the counts. Nothing is written to stat_lines —
-    // a window consumes nothing, and since ADR 0035 there is no column that
-    // could record consumption even if a run tried.
+    // An ON-DEMAND window writes no delivery row at all. The claim exists so
+    // the DAILY digest cannot go out twice for one date; its slot is keyed
+    // (kind, date_covered) with no room for a window, so letting a 7d report
+    // occupy it would refuse the day's 1d run as already-sent.
+    expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
+    // ...and nothing is written to stat_lines either, in any window.
+    expect(await opened.db.select().from(statLines)).toEqual(linesBefore);
+  });
+
+  it("the DAILY 1d digest still claims a slot and records its counts", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+
+    const result = await runDigest({ ...deps(), spec: "1d" });
+    expect(result.action).toBe("sent");
+
     const deliveries = await opened.db.select().from(digestDeliveries);
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0]).toMatchObject({
       kind: "digest",
       dateCovered: "2026-07-19",
       status: "sent",
-      statLineCount: 2,
+      statLineCount: 1,
       playerCount: 1,
     });
+  });
+
+  it("a 7d request is not refused because the day's 1d digest already went out", async () => {
+    // The slot is keyed (kind, date_covered) with no room for a window. When
+    // every window shared it, the day's scheduled 1d report claimed the slot
+    // and a later 7d request came back already-sent-today — the headline
+    // feature refusing to run because the daily one had.
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+
+    expect((await runDigest({ ...deps(), spec: "1d" })).action).toBe("sent");
+    const onDemand = await runDigest({ ...deps(), spec: "7d" });
+    expect(onDemand.action).toBe("sent");
+    expect(onDemand.window).toBe("Last 7 Days (Jul 12-18)");
+    expect(mailer.sent).toHaveLength(2);
+  });
+
+  it("a failed on-demand window is never settled by the next daily digest", async () => {
+    // The other half of the same collision: a failed 7d attempt left a `failed`
+    // row in the shared slot, and the next 1d run reclaimed it, sent 1d content
+    // and settled that row `sent`. The 7d report never landed, and the slot
+    // said it had.
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+
+    const failing = new CapturingMailer();
+    failing.send = () => Promise.reject(new Error("provider exploded"));
+    const failed = await runDigest({ ...deps(), mailer: failing, spec: "7d" });
+    expect(failed.action).toBe("failed");
+    // It holds no slot to strand.
+    expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
+
+    const daily = await runDigest({ ...deps(), spec: "1d" });
+    expect(daily.action).toBe("sent");
+    const rows = await opened.db.select().from(digestDeliveries);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.attemptCount).toBe(1); // a fresh claim, not a reclaimed 7d row
+  });
+
+  it("gives an on-demand report its own provider key, so daily recovery cannot see it", async () => {
+    // The daily digest's stale-claim recovery asks the provider "did the
+    // crashed attempt already land?", and a positive answer SUPPRESSES the
+    // send. If an ad-hoc report carried bryce:digest:{date}, that lookup would
+    // find the report and silently skip the real digest.
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+
+    await runDigest({ ...deps(), spec: "7d" });
+    await runDigest({ ...deps(), spec: "1d" });
+
+    const keys = mailer.contexts.map((c) => c?.deliveryKey);
+    expect(keys).toContain("bryce:report:7d:2026-07-18");
+    expect(keys).toContain("bryce:digest:2026-07-19");
+    expect(new Set(keys).size).toBe(2); // distinct namespaces, no collision
+  });
+
+  it("answers an explicit window during Offseason Sleep instead of a heartbeat", async () => {
+    // Sleep stops the DAILY artifact mailing nothing for months. Answering an
+    // explicit "give me my season to date" with a liveness heartbeat is not
+    // that — it is refusing the question.
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+    clock.set(OFFSEASON);
+
+    const scheduled = await runDigest({ ...deps(), spec: "1d" });
+    expect(scheduled.kind).toBe("heartbeat");
+
+    const asked = await runDigest({ ...deps(), spec: "ytd" });
+    expect(asked.kind).toBe("digest");
   });
 
   it("excludes an unclassified stat field AND reports it", async () => {

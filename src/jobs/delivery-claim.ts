@@ -368,3 +368,17 @@ export function settleFailed(db: Db, args: SettleFailedArgs): void {
 export function deliveryKey(kind: DeliveryKind, dateCovered: string): string {
   return `bryce:${kind}:${dateCovered}`;
 }
+
+/**
+ * Provider key for an ON-DEMAND report, which holds no claim and settles
+ * nothing.
+ *
+ * It must not share a namespace with `deliveryKey`. The daily digest's
+ * stale-claim recovery looks its key up at the provider to ask "did the crashed
+ * attempt already land?" — and a positive answer SUPPRESSES the send. If an
+ * ad-hoc 7d report carried `bryce:digest:{date}`, that lookup would find the
+ * report, conclude the daily digest had landed, and silently skip it.
+ */
+export function reportKey(spec: string, windowEnd: string): string {
+  return `bryce:report:${spec}:${windowEnd}`;
+}
