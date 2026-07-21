@@ -689,9 +689,18 @@ function ratio(numerator: number, denominator: number): number | null {
   return denominator === 0 ? null : numerator / denominator;
 }
 
-/** numerator per nine innings, from summed outs. */
+/**
+ * Per NINE innings, from summed outs. Nine innings is 27 outs, hence * 27.
+ * Not interchangeable with perInning below — the field's NAME decides which
+ * applies, and confusing them is a silent 9x error.
+ */
 function per9(numerator: number, outs: number | null): number | null {
   return outs === null || outs === 0 ? null : (numerator * 27) / outs;
+}
+
+/** Per ONE inning, from summed outs. One inning is 3 outs, hence * 3. */
+function perInning(numerator: number, outs: number | null): number | null {
+  return outs === null || outs === 0 ? null : (numerator * 3) / outs;
 }
 
 type Formula = (agg: Aggregate) => string;
@@ -753,17 +762,13 @@ const BATTING_RATES: Readonly<Record<string, Formula>> = {
 const PITCHING_RATES: Readonly<Record<string, Formula>> = {
   ...SHARED,
   era: fixed(2, (a) => per9(c(a, "earnedRuns"), a.outs)),
-  whip: fixed(2, (a) =>
-    a.outs === null || a.outs === 0
-      ? null
-      : ((c(a, "baseOnBalls") + c(a, "hits")) * 3) / a.outs,
-  ),
+  whip: fixed(2, (a) => perInning(c(a, "baseOnBalls") + c(a, "hits"), a.outs)),
   hitsPer9Inn: fixed(2, (a) => per9(c(a, "hits"), a.outs)),
   homeRunsPer9: fixed(2, (a) => per9(c(a, "homeRuns"), a.outs)),
   runsScoredPer9: fixed(2, (a) => per9(c(a, "runs"), a.outs)),
   strikeoutsPer9Inn: fixed(2, (a) => per9(c(a, "strikeOuts"), a.outs)),
   walksPer9Inn: fixed(2, (a) => per9(c(a, "baseOnBalls"), a.outs)),
-  pitchesPerInning: fixed(2, (a) => per9(c(a, "numberOfPitches"), a.outs)),
+  pitchesPerInning: fixed(2, (a) => perInning(c(a, "numberOfPitches"), a.outs)),
   strikePercentage: slashLine((a) => ratio(c(a, "strikes"), c(a, "numberOfPitches"))),
   strikeoutWalkRatio: fixed(2, (a) => ratio(c(a, "strikeOuts"), c(a, "baseOnBalls"))),
   winPercentage: slashLine((a) => ratio(c(a, "wins"), c(a, "wins") + c(a, "losses"))),
