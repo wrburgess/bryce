@@ -65,7 +65,12 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
   const { now, tz } = deps;
   const activePlayers = await loadActivePlayers(db);
   const calendars = await loadCalendars(db);
-  const window = resolveWindow(deps.spec, now(), tz, seasonStartFor(calendars, now(), tz));
+  const window = resolveWindow(
+    deps.spec,
+    now(),
+    tz,
+    seasonStartFor(calendars, activePlayers, now(), tz),
+  );
 
   // One join, not one query per player (rules/backend.md).
   const rows = await db
@@ -347,11 +352,35 @@ function countQualityStarts(bucket: Split[]): number {
  * calendar row is cached — in which case `ytd` falls back to January 1
  * (src/domain/window.ts), matching the fail-open posture of season.ts.
  */
-function seasonStartFor(calendars: CalendarEntry[], now: Date, tz: string): string | null {
+/**
+ * Where `ytd` starts: the EARLIEST regular-season start among the sports the
+ * watched players actually play.
+ *
+ * Not MLB's opening day. NCAA's season begins in February, roughly six weeks
+ * before MLB's, so anchoring on sportId 1 silently truncated a college player's
+ * season-to-date — his February and March games fell outside the window and the
+ * report showed a partial season as if it were the whole one.
+ *
+ * Earliest-across-watched is safe in the other direction: an MLB player simply
+ * has no games before his own opening day, so a window that starts earlier than
+ * he did costs nothing. Taking the earliest is what makes one shared window
+ * truthful for every row in the report.
+ */
+function seasonStartFor(
+  calendars: CalendarEntry[],
+  activePlayers: PlayerRow[],
+  now: Date,
+  tz: string,
+): string | null {
   const season = hostDate(now, tz).slice(0, 4);
-  return (
-    calendars.find((c) => c.sportId === 1 && c.season === season)?.regularSeasonStart ?? null
+  const watchedSportIds = new Set(
+    activePlayers.map((p) => sportIdForPlayer(p)).filter((id): id is number => id !== null),
   );
+  const starts = calendars
+    .filter((c) => c.season === season && watchedSportIds.has(c.sportId))
+    .map((c) => c.regularSeasonStart)
+    .filter((d): d is string => d !== null);
+  return starts.length === 0 ? null : starts.reduce((a, b) => (a < b ? a : b));
 }
 
 function toRenderPlayer(player: PlayerRow): RenderPlayer {

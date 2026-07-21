@@ -216,6 +216,39 @@ describe("assembleDigest — window selection", () => {
     expect(a.batters[0]?.agg.counters.atBats).toBe(0);
   });
 
+  it("starts ytd at the EARLIEST watched season, not MLB's opening day", async () => {
+    // NCAA's season begins in February, about six weeks before MLB's. Anchoring
+    // ytd on sportId 1 silently truncated a college player's season-to-date:
+    // his February and March games fell outside the window, and the report
+    // showed a partial season as though it were the whole one.
+    await insertCalendar(opened.db, {
+      sportId: 22,
+      regularSeasonStart: "2026-02-13",
+      regularSeasonEnd: "2026-06-22",
+      postSeasonStart: null,
+      postSeasonEnd: null,
+      springStart: null,
+      springEnd: null,
+    });
+    const ncaa = await insertPlayer(opened.db, {
+      fullName: "Wyatt Langford",
+      level: "ncaa",
+      externalId: null,
+      ncaaPlayerSeq: 900123,
+      schoolName: "Florida",
+    });
+    await insertStatLine(opened.db, {
+      playerId: ncaa.id,
+      gameDate: "2026-02-20", // before MLB Opening Day (2026-03-25)
+      sportId: 22,
+      leagueName: null,
+    });
+
+    const a = await assemble("ytd");
+    expect(a.window.from).toBe("2026-02-13");
+    expect(a.statLineCount).toBe(1); // the February game is IN the season
+  });
+
   it("labels an idle DSL player DSL, not R, from his most recent league", async () => {
     // Caught by running the real database. sportId 16 covers every rookie and
     // complex league, so the league NAME is the only thing separating the
@@ -526,16 +559,20 @@ describe("assembleDigest — window selection", () => {
     expect(a.batters.map((r) => r.lvl).sort()).toEqual(["DSL", "R"]);
   });
 
-  it("anchors ytd on the season's regular-season start", async () => {
+  it("anchors ytd on the watched player's own regular-season start", async () => {
+    // This player is Triple-A (insertPlayer's default), and Triple-A opens
+    // 2026-03-27 — two days after MLB. The expectation here used to read
+    // 2026-03-25, which encoded the hardcoded-sportId-1 bug rather than the
+    // boundary it claimed to pin.
     const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
-    // Spring training, before the MLB regular season opened on 2026-03-25.
+    // Spring training, before any regular season opened.
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-03-01" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-04-15" });
 
     const a = await assemble("ytd");
-    expect(a.window.from).toBe("2026-03-25");
+    expect(a.window.from).toBe("2026-03-27");
     expect(a.window.to).toBe("2026-07-19");
-    expect(a.statLineCount).toBe(1);
+    expect(a.statLineCount).toBe(1); // spring game excluded, April game kept
   });
 
   it("writes nothing and is repeatable", async () => {
