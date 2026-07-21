@@ -125,11 +125,22 @@ const c = (agg: Aggregate, key: string): number => agg.counters[key] ?? 0;
 
 const onBase = (agg: Aggregate): number | null =>
   ratio(
+    // hitByPitch, not hitBatsmen: fields.ts declares both as pitching counters,
+    // but they're duplicates in the source data (verified against the live DB —
+    // all 77 pitching rows populate both keys, each summing to 13), so reading
+    // hitByPitch here is correct and not a silent under-count of opponent OBP.
     c(agg, "hits") + c(agg, "baseOnBalls") + c(agg, "hitByPitch"),
     c(agg, "atBats") + c(agg, "baseOnBalls") + c(agg, "hitByPitch") + c(agg, "sacFlies"),
   );
 
 const slugging = (agg: Aggregate): number | null => ratio(c(agg, "totalBases"), c(agg, "atBats"));
+
+// Shared by SHARED and FIELDING_RATES: stolenBases/caughtStealing are counters
+// in all three stat types (fielding's are catcher stats), and the formula is
+// identical everywhere. Hoisted so it's written once instead of twice.
+const stolenBasePercentage: Formula = slashLine((a) =>
+  ratio(c(a, "stolenBases"), c(a, "stolenBases") + c(a, "caughtStealing")),
+);
 
 /** Formulas shared by batting and pitching (pitching's are "against" versions). */
 const SHARED: Readonly<Record<string, Formula>> = {
@@ -141,9 +152,7 @@ const SHARED: Readonly<Record<string, Formula>> = {
     const s = slugging(a);
     return o === null || s === null ? null : o + s;
   }),
-  stolenBasePercentage: slashLine((a) =>
-    ratio(c(a, "stolenBases"), c(a, "stolenBases") + c(a, "caughtStealing")),
-  ),
+  stolenBasePercentage,
   caughtStealingPercentage: slashLine((a) =>
     ratio(c(a, "caughtStealing"), c(a, "stolenBases") + c(a, "caughtStealing")),
   ),
@@ -185,10 +194,8 @@ const FIELDING_RATES: Readonly<Record<string, Formula>> = {
   rangeFactorPer9Inn: fixed(2, (a) => per9(c(a, "putOuts") + c(a, "assists"), a.outs)),
   rangeFactorPerGame: fixed(2, (a) => ratio(c(a, "putOuts") + c(a, "assists"), a.games)),
   // Derivable here too: stolenBases and caughtStealing are fielding counters
-  // (catcher stats). Same formula as the shared batting/pitching version.
-  stolenBasePercentage: slashLine((a) =>
-    ratio(c(a, "stolenBases"), c(a, "stolenBases") + c(a, "caughtStealing")),
-  ),
+  // (catcher stats). Same formula object as SHARED's — see stolenBasePercentage above.
+  stolenBasePercentage,
 };
 
 const FORMULAS: Readonly<Record<StatType, Readonly<Record<string, Formula>>>> = {
