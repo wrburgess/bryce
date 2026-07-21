@@ -51,9 +51,22 @@ upserts it idempotently — no date windows; adding a Player is just his first R
 _Avoid_: "yesterday fetch", "incremental sync" (there is no window to fall out of)
 
 **Digest**:
-The daily email reporting every Stat Line not yet reported by a previous Digest, grouped by Level —
-sent every day, even when empty (an empty Digest is proof of life).
-_Avoid_: "yesterday's stats" (a phrase, not the rule — late-arriving lines are still reported)
+The email reporting every Stat Line whose game date falls inside a **Window**, as two tables of
+aggregate numbers — Batters and Pitchers — one row per Player per **Level**. Sent every day, even
+when empty (an empty Digest is proof of life). A Digest consumes nothing: re-running the same Window
+always reports the same content (ADR 0035).
+_Avoid_: "unreported stat lines" (the novelty model this replaced — ADR 0030's reporting half)
+
+**Window**:
+The inclusive date range a Digest covers: `1d`, `7d`, `14d`, `21d`, or `ytd`. Every Window ends on
+the **last completed** host date — yesterday, not today — so a Digest does not depend on the hour it
+runs. Regular season only.
+_Avoid_: "yesterday's stats" for anything but `1d`
+
+**Roll-up**:
+A Window's aggregate numbers for one Player at one Level: counting stats summed, rates **recomputed
+from those sums** — never averaged across games, which over-weights low-denominator games while
+staying in a plausible range.
 
 **In Season**:
 A Player whose competition still has games left to play. An out-of-season Player drops out of the

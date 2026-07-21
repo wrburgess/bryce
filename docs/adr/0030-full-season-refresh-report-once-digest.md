@@ -1,5 +1,16 @@
 # Completeness-driven ingestion, novelty-driven reporting — no date windows
 
+> **The reporting half of this ADR is superseded by
+> [ADR 0035](0035-window-selected-digest.md).** The Digest now selects by date window rather than by
+> novelty, and `stat_lines.digest_delivery_id` — the stamp that made novelty work — has been dropped.
+>
+> **The ingestion half stands unchanged.** Refresh still re-ingests every active Player's complete
+> current-season game log on every run, with no date windows anywhere in ingestion. That is what makes
+> windowed reporting possible at all, and ADR 0035 depends on it.
+>
+> The reasoning below for *why* novelty was chosen over date windows is left intact deliberately: it
+> is the context for why that choice changed, and ADR 0035 addresses it directly.
+
 The handoff framed the pipeline as "fetch yesterday's stats, email yesterday's digest"; the HC
 clarified that "yesterday" was just a phrase — the requirement is to capture all stats for watched
 players whenever they become available. So the pipeline has no date windows anywhere. **Refresh**
