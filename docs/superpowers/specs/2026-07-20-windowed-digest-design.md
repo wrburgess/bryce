@@ -114,16 +114,51 @@ Counts from the live database as of 2026-07-20, and the basis for the classifica
 The row grain is a parameter:
 
 ```
-groupBy: "game"    → one row per (player, game_id)
-groupBy: "player"  → one row per player across the window
+groupBy: "game"         → one row per (player, game_id)
+groupBy: "playerLevel"  → one row per (player, level) across the window
 ```
+
+### Why level is part of the grouping key
+
+`players.milb_level` records where a player is **now**; `stat_lines.sport_id` records where each game
+was actually **played**. Those diverge constantly — `src/mlb/levels.ts` states the rule directly:
+*"Level is a mutable location, never identity."* In the live database as of 2026-07-20:
+
+| Player | Current level | Games played at |
+|---|---|---|
+| Walker Jenkins | Triple-A | Triple-A (84), High-A (6), Single-A (2) |
+| Seth Hernandez | High-A | High-A (22), Single-A (12) |
+| Zack Wheeler | MLB | MLB (30), Triple-A (6), Double-A (4) |
+
+Grouping by player alone would fold Jenkins's three levels into one slash line labeled `AAA` — a
+number describing nobody, and exactly the blended comparison a prospect tracker exists to prevent.
+Grouping by `(player, level)` gives a promoted player one row per level, each correctly labeled, and
+leaves every other player with a single row.
+
+Level for a row therefore comes from the **stat line's `sport_id`**, never from `players.level`.
+
+### Level abbreviations
+
+| sport_id | `Lvl` |
+|---|---|
+| 1 | `MLB` |
+| 11 | `AAA` |
+| 12 | `AA` |
+| 13 | `A+` |
+| 14 | `A` |
+| 16 | `DSL` when `league_name` is `Dominican Summer League`, else `R` |
+| 22 | `NCAA` |
+
+Rows sort by this ladder (MLB first, NCAA last), then by player name. `sport_id` 16 covers every
+complex/rookie league, so `league_name` is what separates the Dominican Summer League from the
+domestic complex leagues.
 
 `aggregate()` accepts a set of stat lines either way — a single game is the one-element case — so
 there is no second renderer and no doubleheader special case. ADR 0029's per-game identity already
 guarantees the two games of a doubleheader are distinct rows; `game_number` is stored and renders as
 `Gm 1` / `Gm 2`.
 
-Defaults: `1d` → `groupBy: "game"`; `7d`, `14d`, `21d`, `ytd` → `groupBy: "player"`. The parameter is
+Defaults: `1d` → `groupBy: "game"`; `7d`, `14d`, `21d`, `ytd` → `groupBy: "playerLevel"`. The parameter is
 internal; it is not exposed on the CLI in this iteration.
 
 Because `1d` rows are per-game and carry no opponent column, a doubleheader would otherwise render
@@ -264,10 +299,8 @@ Both a plain-text and an HTML rendering are produced from one assembled structur
 diverge in content. The plain-text rendering pads columns to fixed widths; the HTML rendering uses a
 real `<table>`.
 
-Level abbreviations render as `MLB`, `AAA`, `AA`, `A+`, `A`, `R`, `DSL`, `NCAA`, derived from
-`players.level` and `players.milb_level`. The existing `MILB_LEVEL_ORDER` in `src/mlb/levels.ts`
-supplies the sort: rows order by level (MLB first, descending through the minors, NCAA last), then by
-player name.
+Level abbreviations and their sort order are defined in *Row grain* above, and derive from the stat
+line's `sport_id` — never from `players.level`, which records only where the player is today.
 
 ## Error handling
 

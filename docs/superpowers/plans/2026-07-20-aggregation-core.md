@@ -876,7 +876,7 @@ EOF
     to: string;
     /** Human label for the subject line, e.g. "Last 7 Days (Jul 13-19)". */
     label: string;
-    groupBy: "game" | "player";
+    groupBy: "game" | "playerLevel";
   }
   export function resolveWindow(
     spec: WindowSpec,
@@ -925,11 +925,11 @@ describe("resolveWindow — anchored on the last completed day", () => {
     expect(w.groupBy).toBe("game");
   });
 
-  it("7d covers the seven days ending yesterday, grouped by player", () => {
+  it("7d covers the seven days ending yesterday, grouped by player and level", () => {
     const w = resolveWindow("7d", morning, CHICAGO);
     expect(w.from).toBe("2026-07-13");
     expect(w.to).toBe("2026-07-19");
-    expect(w.groupBy).toBe("player");
+    expect(w.groupBy).toBe("playerLevel");
   });
 
   it("14d and 21d span their full inclusive ranges", () => {
@@ -1032,7 +1032,7 @@ export interface ResolvedWindow {
   /** Inclusive host-timezone end date — the last COMPLETED day. */
   to: string;
   label: string;
-  groupBy: "game" | "player";
+  groupBy: "game" | "playerLevel";
 }
 
 export function parseWindowSpec(raw: string): WindowSpec | null {
@@ -1085,7 +1085,7 @@ export function resolveWindow(
     from,
     to,
     label: labelFor(spec, from, to),
-    groupBy: spec === "1d" ? "game" : "player",
+    groupBy: spec === "1d" ? "game" : "playerLevel",
   };
 }
 ```
@@ -1133,7 +1133,7 @@ half of "Testing strategy". Steps 4-6 (assemble, render, wiring, migration) are 
 
 **Type consistency.** `StatType` is defined once in `fields.ts` and imported by `aggregate.ts`.
 `Aggregate` is defined in Task 2 and consumed unchanged in Task 3. `ResolvedWindow.groupBy` uses the
-same `"game" | "player"` union the spec's row-grain section names, which Plan 3's `assemble.ts`
+same `"game" | "playerLevel"` union the spec's row-grain section names, which Plan 3's `assemble.ts`
 consumes.
 
 **Deliberate gaps, deferred to Plan 3.**
