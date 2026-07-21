@@ -94,6 +94,10 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
   // A player with no games still appears, as a zero row — this replaces the old
   // "no new stats" tail, and inherits its In Season filter: a player whose
   // season is over is omitted entirely, not listed at zero for months.
+  //
+  // The filter can only ever touch a player with ZERO games in the window, so it
+  // cannot hide anyone who actually played: a pitcher whose season ended in
+  // September still has splits inside a `ytd` window and is built from those.
   const idlePlayers = activePlayers.filter(
     (p) => !playersWithLines.has(p.id) && isInSeason(p, calendars, now(), tz),
   );
@@ -103,13 +107,28 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
 
   return {
     window,
-    // Zero rows go to the batters table only: a player who did not appear left
-    // no stat line to say whether he would have batted or pitched.
-    batters: buildRows(batting, window, "batting", idlePlayers),
-    pitchers: buildRows(pitching, window, "pitching", []),
+    batters: buildRows(batting, window, "batting", idlePlayers.filter(isBatter)),
+    pitchers: buildRows(pitching, window, "pitching", idlePlayers.filter((p) => !isBatter(p))),
     playerCount: playersWithLines.size,
     statLineCount: splits.length,
   };
+}
+
+/**
+ * Which table an IDLE player's zero row belongs in. Position is the only signal
+ * available — he left no stat line to read a role from.
+ *
+ * A pitcher who did not pitch must not render as a batter: 0 PA / 0 H / 0 HR
+ * reads as "he had a terrible week", not "he did not pitch", and three of the
+ * watched players are pitchers. An unknown position falls to batting, which is
+ * the larger population and the harmless default.
+ *
+ * There is deliberately no two-way handling: a two-way player who actually
+ * played appears in both tables from his real splits, and this path fires only
+ * when he has no games at all.
+ */
+function isBatter(player: PlayerRow): boolean {
+  return player.position !== "P";
 }
 
 /**

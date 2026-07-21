@@ -89,7 +89,7 @@ describe("runDigest", () => {
     expect(mailer.sent).toHaveLength(1);
     const mail = mailer.sent[0];
     expect(mail?.to).toBe("hc@example.com");
-    expect(mail?.subject).toBe("Bryce - Last 7 Days (Jul 12-18)");
+    expect(mail?.subject).toBe("MLB Daily Tracker: Last 7 Days (Jul 12-18)");
     // Never assert only success: BOTH parts carry the actual stat content, and
     // the numbers are the WINDOW's — 3-for-9 with 6 total bases across two
     // games, derived from summed counters rather than averaged per game.
@@ -151,7 +151,7 @@ describe("runDigest", () => {
     expect(result.action).toBe("sent");
     expect(result.statLineCount).toBe(0);
     const mail = mailer.sent[1];
-    expect(mail?.subject).toBe("Bryce - Jul 19");
+    expect(mail?.subject).toBe("MLB Daily Tracker: Sun, July 19, 2026");
     // A GP 0 row says it better than the old "no new stats" tail.
     expect(cells(mail?.text ?? "", "M Acosta")).toEqual(
       ["M", "Acosta", "AAA", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0"],

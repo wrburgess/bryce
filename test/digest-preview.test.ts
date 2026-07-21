@@ -301,18 +301,44 @@ describe("assembleDigest — window selection", () => {
     expect(a.batters[0]?.agg.counters.runs).toBe(1);
   });
 
-  it("gives an idle player a zero row in the batters table only", async () => {
-    // He left no stat line, so there is nothing to say whether he would have
-    // batted or pitched; the batters table is the one place to show him.
-    await insertPlayer(opened.db, { fullName: "Idle Player" });
+  it("routes an idle PITCHER's zero row to the pitchers table", async () => {
+    // A pitcher who did not pitch must never render as a batter: 0 PA / 0 H /
+    // 0 HR reads as "he had a terrible week", not "he did not pitch".
+    await insertPlayer(opened.db, { fullName: "Zack Wheeler", position: "P" });
 
     const a = await assemble("7d");
-    expect(a.batters).toHaveLength(1);
-    expect(a.pitchers).toEqual([]);
+    expect(a.batters).toEqual([]);
+    expect(a.pitchers).toHaveLength(1);
+    expect(a.pitchers[0]?.player.fullName).toBe("Zack Wheeler");
+    expect(a.pitchers[0]?.agg.games).toBe(0);
+    expect(a.pitchers[0]?.agg.outs).toBe(0);
+    expect(a.pitchers[0]?.qualityStarts).toBe(0);
+  });
+
+  it.each([["SS"], ["DH"], ["1B"], ["OF"], [null]])(
+    "routes an idle non-pitcher (%s) to the batters table",
+    async (position) => {
+      await insertPlayer(opened.db, { fullName: "Idle Player", position });
+
+      const a = await assemble("7d");
+      expect(a.batters).toHaveLength(1);
+      expect(a.pitchers).toEqual([]);
+    },
+  );
+
+  it("routes each idle player independently", async () => {
+    await insertPlayer(opened.db, { fullName: "Idle Batter", position: "SS" });
+    await insertPlayer(opened.db, { fullName: "Idle Pitcher", position: "P" });
+
+    const a = await assemble("7d");
+    expect(a.batters.map((r) => r.player.fullName)).toEqual(["Idle Batter"]);
+    expect(a.pitchers.map((r) => r.player.fullName)).toEqual(["Idle Pitcher"]);
   });
 
   it("emits no zero row for a player who did appear, even in the other table", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Zack Wheeler" });
+    // He pitched, so he is built from his splits — the idle path must not also
+    // add him to the batters table as a phantom 0-for-0.
+    const player = await insertPlayer(opened.db, { fullName: "Zack Wheeler", position: "P" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       statType: "pitching",
@@ -323,6 +349,15 @@ describe("assembleDigest — window selection", () => {
     const a = await assemble("7d");
     expect(a.pitchers).toHaveLength(1);
     expect(a.batters).toEqual([]);
+  });
+
+  it("emits no zero row for a position player who batted", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta", position: "SS" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-15" });
+
+    const a = await assemble("7d");
+    expect(a.batters).toHaveLength(1);
+    expect(a.batters[0]?.agg.games).toBe(1);
   });
 
   it("emits a zero row for an active player with no games in the window", async () => {

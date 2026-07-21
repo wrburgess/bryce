@@ -317,7 +317,7 @@ describe("MCP server over Streamable HTTP", () => {
       from: "2026-07-18",
       to: "2026-07-18",
     });
-    expect((result.structuredContent?.mail as { subject: string }).subject).toBe("Bryce - Jul 18");
+    expect((result.structuredContent?.mail as { subject: string }).subject).toBe("MLB Daily Tracker: Sat, July 18, 2026");
 
     expect(mailer.sent).toHaveLength(0);
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);

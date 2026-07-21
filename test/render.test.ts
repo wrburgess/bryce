@@ -144,16 +144,19 @@ describe("renderDigest — tables", () => {
     expect(dataLine).toContain("11.08");
   });
 
-  it("puts the window label in the subject", () => {
+  it("puts the window label in the subject for a range window", () => {
     const mail = renderDigest(assemblyWith({ spec: "7d" }));
-    expect(mail.subject).toContain("Last 7 Days");
-    expect(mail.subject).toContain("Jul 13-19");
+    expect(mail.subject).toBe("MLB Daily Tracker: Last 7 Days (Jul 13-19)");
+    expect(mail.text).toContain("Bryce - Last 7 Days (Jul 13-19)");
   });
 
-  it("puts the single date in the subject for a 1d window", () => {
+  it("keeps the established full-date subject for a 1d window", () => {
+    // The daily artifact's subject format is unchanged. The DATE is the last
+    // completed day (07-19 for a run on 07-20), because the title names the
+    // content, not the run.
     const mail = renderDigest(assemblyWith({ spec: "1d" }));
-    expect(mail.subject).toContain("Jul 19");
-    expect(mail.subject).not.toContain("Last");
+    expect(mail.subject).toBe("MLB Daily Tracker: Sun, July 19, 2026");
+    expect(mail.text).toContain("Bryce - Sun, July 19, 2026");
   });
 
   it("emits an HTML table, not a list", () => {

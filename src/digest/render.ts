@@ -33,6 +33,38 @@ export interface RenderedMail {
   text: string;
 }
 
+/** "2026-07-30" → "Thu, July 30, 2026" (HC-specified subject date style). */
+export function formatSubjectDate(isoDate: string): string {
+  const d = new Date(`${isoDate}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return isoDate;
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    weekday: "short",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(d);
+}
+
+/**
+ * What the window is CALLED, in the subject and the body heading.
+ *
+ * A 1d window is a single date, so it keeps the established
+ * "Sun, July 19, 2026" style — this is the artifact the HC receives daily, and
+ * dropping the weekday and year to a bare "Jul 19" would be a quiet
+ * information regression. Every other spec is a RANGE, which `window.label`
+ * already describes.
+ *
+ * The two are not competing sources of truth: `window.label` owns range
+ * descriptions, `formatSubjectDate` owns a single date.
+ *
+ * Note the date is `window.to` — the last COMPLETED day, so a run on July 19
+ * is titled July 18. The title names the content, not the run.
+ */
+function windowTitle(window: ResolvedWindow): string {
+  return window.spec === "1d" ? formatSubjectDate(window.to) : window.label;
+}
+
 export function escapeHtml(s: string): string {
   return s
     .replaceAll("&", "&amp;")
@@ -189,7 +221,8 @@ interface Table {
 
 export function renderDigest(assembly: DigestAssembly): RenderedMail {
   const { window } = assembly;
-  const heading = `Bryce - ${window.label}`;
+  const title = windowTitle(window);
+  const heading = `Bryce - ${title}`;
 
   // An empty table is omitted rather than rendered as a bare heading: a watch
   // list with no pitchers should not carry an empty Pitchers section daily.
@@ -213,7 +246,7 @@ export function renderDigest(assembly: DigestAssembly): RenderedMail {
   }
 
   return {
-    subject: heading,
+    subject: `MLB Daily Tracker: ${title}`,
     text: `${textParts.join("\n").trimEnd()}\n`,
     html: htmlParts.join("\n"),
   };

@@ -117,7 +117,7 @@ describe("digest CLI", () => {
       expect(await runDigestCli(["--window", "7d"], deps())).toBe(0);
       expect(output[0]).toContain("statLines=2");
       expect(output[0]).toContain("window=Last 7 Days (Jul 12-18)");
-      expect(mailer.sent[0]?.subject).toBe("Bryce - Last 7 Days (Jul 12-18)");
+      expect(mailer.sent[0]?.subject).toBe("MLB Daily Tracker: Last 7 Days (Jul 12-18)");
 
       expect(await runDigestCli(["--force"], deps())).toBe(0);
       expect(output[1]).toContain("statLines=1");

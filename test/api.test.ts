@@ -409,7 +409,7 @@ describe("REST API", () => {
       expect(body.playerCount).toBe(1);
       expect(body.batters[0]).toMatchObject({ lvl: "AAA" });
       expect(body.batters[0]?.player.fullName).toBe("Maximo Acosta");
-      expect(body.mail.subject).toBe("Bryce - Jul 18");
+      expect(body.mail.subject).toBe("MLB Daily Tracker: Sat, July 18, 2026");
       expect(body.mail.text).toContain("M Acosta");
 
       // Read-only: no send, no delivery row, no stamping.
@@ -530,7 +530,7 @@ describe("REST API", () => {
         statLineCount: 2,
         window: "Last 7 Days (Jul 12-18)",
       });
-      expect(mailer.sent[0]?.subject).toBe("Bryce - Last 7 Days (Jul 12-18)");
+      expect(mailer.sent[0]?.subject).toBe("MLB Daily Tracker: Last 7 Days (Jul 12-18)");
 
       const bogus = await app().request("/api/digest/send", {
         method: "POST",
