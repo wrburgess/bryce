@@ -190,6 +190,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
           playerCount: assembly.playerCount,
           batters: assembly.batters,
           pitchers: assembly.pitchers,
+          unknownFields: assembly.unknownFields,
           mail: renderDigest(assembly),
         });
       }),

@@ -295,6 +295,60 @@ describe("runDigest", () => {
     expect(warnings[0]).toContain("src/stats/fields.ts");
   });
 
+  it("surfaces an unclassified FIELDING key, which the fielding-to-batting merge could hide", async () => {
+    // A fielding split is reduced to its error count before aggregation, so an
+    // unknown fielding key never reaches an aggregate — it was being dropped
+    // silently, the exact staleness the warning exists to catch. The union is
+    // computed from the raw splits so it sees fielding keys by their own type.
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 990101,
+      statType: "batting",
+      gameDate: "2026-07-18",
+    });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 990101,
+      statType: "fielding",
+      gameDate: "2026-07-18",
+      stats: { errors: 0, warpFielding: 3 },
+    });
+
+    const warnings: string[] = [];
+    await runDigest({ ...deps(), spec: "7d", warn: (m) => warnings.push(m) });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("warpFielding");
+  });
+
+  it("recovers a prior failed slot even when TODAY is in Offseason Sleep", async () => {
+    // Recovery must run BEFORE the sleep check. A digest that failed on the
+    // season's last day would otherwise never recover: the next run is already
+    // asleep and returns a heartbeat before reaching the recovery pass.
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-10-30" });
+
+    await insertDelivery(opened.db, {
+      kind: "digest",
+      dateCovered: "2026-10-31",
+      status: "failed",
+      sentAt: null,
+    });
+
+    clock.set(OFFSEASON); // 2026-12-05: deep in the offseason
+    const result = await runDigest({ ...deps(), spec: "1d" });
+
+    // Today's run is the offseason heartbeat...
+    expect(result.kind).toBe("heartbeat");
+    // ...but the failed Oct 31 slot was still caught up first.
+    const recovered = await opened.db
+      .select()
+      .from(digestDeliveries)
+      .where(eq(digestDeliveries.dateCovered, "2026-10-31"));
+    expect(recovered[0]?.status).toBe("sent");
+    expect(recovered[0]?.attemptCount).toBe(2);
+  });
+
   it("says nothing when every field is classified", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });

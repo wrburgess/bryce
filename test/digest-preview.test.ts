@@ -24,8 +24,10 @@ describe("assembleDigest — window selection", () => {
   let opened: OpenedDb;
   let clock: ReturnType<typeof fakeClock>;
 
-  const assemble = (spec: "1d" | "7d" | "14d" | "21d" | "ytd") =>
-    assembleDigest(opened.db, { now: clock.now, tz: TEST_TZ, spec });
+  const assemble = (
+    spec: "1d" | "7d" | "14d" | "21d" | "ytd",
+    extra?: { asOf?: string },
+  ) => assembleDigest(opened.db, { now: clock.now, tz: TEST_TZ, spec, ...extra });
 
   beforeEach(async () => {
     opened = testDb();
@@ -214,6 +216,31 @@ describe("assembleDigest — window selection", () => {
     expect(a.batters).toHaveLength(1);
     expect(a.batters[0]?.agg.counters.errors).toBe(2);
     expect(a.batters[0]?.agg.counters.atBats).toBe(0);
+  });
+
+  it("judges an idle player's zero row as of the WINDOW's date, not today", async () => {
+    // A recovered digest covers a past day (asOf). An idle player's zero row
+    // belongs on it if he was in season THEN. Anchoring the In Season check on
+    // today would drop a player whose season ended between the covered day and
+    // the recovery run.
+    //
+    // Triple-A's cached season (insertCalendars2026) runs through a postseason
+    // ending 2026-09-27; isInSeason honors postSeasonEnd. Today is 2026-07-20,
+    // in season for everyone — so if the filter used today, BOTH asserts below
+    // would include him and the test could not distinguish the fix.
+    const player = await insertPlayer(opened.db, {
+      fullName: "Walker Jenkins",
+      level: "milb",
+      milbLevel: "Triple-A",
+    });
+
+    // 1d asOf 2026-09-28 covers 09-27 — the season's last day, still in season.
+    const onLastDay = await assemble("1d", { asOf: "2026-09-28" });
+    expect(onLastDay.batters.some((r) => r.player.fullName === "Walker Jenkins")).toBe(true);
+
+    // asOf 2026-09-29 covers 09-28 — one day past the season, correctly gone.
+    const afterEnd = await assemble("1d", { asOf: "2026-09-29" });
+    expect(afterEnd.batters.some((r) => r.player.fullName === "Walker Jenkins")).toBe(false);
   });
 
   it("starts ytd at the EARLIEST watched season, not MLB's opening day", async () => {

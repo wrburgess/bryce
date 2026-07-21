@@ -56,10 +56,17 @@ export function isInSeason(
   calendars: CalendarEntry[],
   now: Date,
   tz: string,
+  /**
+   * Judge season membership as of THIS host date instead of `now`. A recovered
+   * digest covers a past day, and an idle player's zero row belongs on the
+   * report if he was in season THEN — using today would drop a player whose
+   * season ended between the covered day and the recovery run.
+   */
+  asOfDate: string | null = null,
 ): boolean {
   const sportId = sportIdForPlayer(player);
   if (sportId === null) return false;
-  const today = hostDate(now, tz);
+  const today = asOfDate ?? hostDate(now, tz);
   return calendars.some((cal) => {
     if (cal.sportId !== sportId) return false;
     const start = cal.regularSeasonStart;

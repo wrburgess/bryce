@@ -325,15 +325,28 @@ describe("digest_deliveries claim columns and lock behaviour (ADR 0034)", () => 
            VALUES (5, 'digest', '2026-07-18', '2026-07-18T17:00:00.000Z', 1, 1, 'sent', '2026-07-18T17:00:00.000Z')`,
         )
         .run();
-      const insertLine = sqlite.prepare(
-        `INSERT INTO stat_lines
-           (player_id, game_id, stat_type, game_date, game_number, game_type, sport_id,
-            stats, raw, digest_delivery_id, created_at, updated_at)
-         VALUES (1, ?, 'batting', '2026-07-18', 1, 'R', 11, '{"hits":2}', '{}', ?,
-                 '2026-07-18T00:00:00.000Z', '2026-07-18T00:00:00.000Z')`,
-      );
-      insertLine.run(900001, 5); // stamped
-      insertLine.run(900002, null); // unstamped
+      // 900001 sets game_number explicitly; 900002 OMITS it, so the pre-migration
+      // DEFAULT of 1 fills it. Asserting 900002.game_number === 1 after the
+      // rebuild then proves the default carried through the copy — reading an
+      // inserted literal would prove nothing.
+      sqlite
+        .prepare(
+          `INSERT INTO stat_lines
+             (player_id, game_id, stat_type, game_date, game_number, game_type, sport_id,
+              stats, raw, digest_delivery_id, created_at, updated_at)
+           VALUES (1, 900001, 'batting', '2026-07-18', 2, 'R', 11, '{"hits":2}', '{}', 5,
+                   '2026-07-18T00:00:00.000Z', '2026-07-18T00:00:00.000Z')`,
+        )
+        .run();
+      sqlite
+        .prepare(
+          `INSERT INTO stat_lines
+             (player_id, game_id, stat_type, game_date, game_type, sport_id,
+              stats, raw, digest_delivery_id, created_at, updated_at)
+           VALUES (1, 900002, 'batting', '2026-07-18', 'R', 11, '{"hits":2}', '{}', NULL,
+                   '2026-07-18T00:00:00.000Z', '2026-07-18T00:00:00.000Z')`,
+        )
+        .run();
 
       applyMigration(sqlite, "0004_steep_justin_hammer.sql");
 
@@ -349,8 +362,9 @@ describe("digest_deliveries claim columns and lock behaviour (ADR 0034)", () => 
         .all() as Array<Record<string, unknown>>;
       expect(rows).toHaveLength(2);
       expect(rows[0]).toMatchObject({ game_id: 900001, player_id: 1, stat_type: "batting" });
-      expect(rows[0]?.game_number).toBe(1); // a rebuilt DEFAULT survived
+      expect(rows[0]?.game_number).toBe(2); // explicit value copied intact
       expect(rows[1]?.game_id).toBe(900002);
+      expect(rows[1]?.game_number).toBe(1); // the DEFAULT applied pre-rebuild survived the copy
 
       // The unique index exists...
       const indexes = (

@@ -9,6 +9,7 @@ import { resolveWindow } from "../domain/window.js";
 import { levelAbbrev, levelRank } from "../mlb/levels.js";
 import type { Aggregate } from "../stats/aggregate.js";
 import { aggregate } from "../stats/aggregate.js";
+import { classifyField } from "../stats/fields.js";
 import { loadActivePlayers, loadCalendars } from "../jobs/refresh.js";
 import { ipToOuts, qualityStart } from "./rates.js";
 import type { RenderPlayer } from "./render.js";
@@ -116,7 +117,7 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
   // cannot hide anyone who actually played: a pitcher whose season ended in
   // September still has splits inside a `ytd` window and is built from those.
   const idlePlayers = activePlayers.filter(
-    (p) => !playersWithLines.has(p.id) && isInSeason(p, calendars, now(), tz),
+    (p) => !playersWithLines.has(p.id) && isInSeason(p, calendars, now(), tz, window.to),
   );
 
   // An idle player has no stat line in the window to read a league from, but
@@ -144,16 +145,24 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
     pitchers,
     playerCount: playersWithLines.size,
     statLineCount: splits.length,
-    unknownFields: unknownFieldsOf(batters, pitchers),
+    unknownFields: unknownFieldsOf(splits),
   };
 }
 
-/** Every unrecognised stat key seen across the report, deduped and sorted. */
-function unknownFieldsOf(...rowGroups: DigestRow[][]): string[] {
+/**
+ * Every unrecognised stat key across the RAW selected lines, deduped and sorted.
+ *
+ * Computed from the raw splits, NOT from the built rows: a fielding split is
+ * projected down to its error count before aggregation, so an unknown fielding
+ * key never reaches a DigestRow's aggregate and would be silently dropped —
+ * the exact staleness the report exists to surface. Classifying each split by
+ * its OWN statType catches batting, pitching and fielding alike.
+ */
+function unknownFieldsOf(splits: Split[]): string[] {
   const seen = new Set<string>();
-  for (const rows of rowGroups) {
-    for (const row of rows) {
-      for (const key of row.agg.unknownFields) seen.add(key);
+  for (const { line, stats } of splits) {
+    for (const key of Object.keys(stats)) {
+      if (classifyField(line.statType, key) === null) seen.add(key);
     }
   }
   return [...seen].sort();

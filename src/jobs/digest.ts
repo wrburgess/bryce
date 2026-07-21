@@ -133,23 +133,28 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
     return runOnDemandReport(deps, warn);
   }
 
-  if (sleep.sleeping) {
-    return runHeartbeat(deps, activePlayers.length, sleep.nextOpeningDay);
-  }
-
   const today = hostDate(now(), tz);
 
-  // Catch up ONE orphaned prior day before today's run. `claimDelivery` already
-  // re-claims a failed or stale slot correctly, but only ever sees the date it
-  // is handed — so once midnight passes, yesterday's failed digest is never
-  // retried and its notification is lost (ADR 0034's recovery guarantee, which
-  // novelty selection used to provide for free across dates). The recovered run
-  // assembles ITS date's window (asOf), never today's, and never forces. One
-  // per run bounds catch-up to a single extra email; a multi-day backlog drains
-  // a day at a time rather than arriving as a burst.
+  // Catch up ONE orphaned prior day BEFORE deciding today's run — and before the
+  // sleep check, deliberately. `claimDelivery` already re-claims a failed or
+  // stale slot correctly, but only ever sees the date it is handed, so once
+  // midnight passes, yesterday's failed digest is never retried and its
+  // notification is lost (ADR 0034's recovery guarantee, which novelty selection
+  // used to provide for free across dates). A digest that failed on the season's
+  // last day would then never recover, because the next run is already asleep —
+  // so recovery must run whether or not TODAY is sleeping. The recovered run
+  // assembles ITS date's window (asOf), never today's, and never forces. One per
+  // run bounds catch-up to a single extra email; a multi-day backlog drains a
+  // day at a time rather than arriving as a burst.
   const orphan = findOrphanedDigestDate(db, today, now().getTime());
   if (orphan !== null) {
     await deliverDailyDigest(deps, orphan, orphan, false, warn);
+  }
+
+  // Only TODAY's run is replaced by the offseason heartbeat; the recovery above
+  // is for an in-season day that still owes its digest.
+  if (sleep.sleeping) {
+    return runHeartbeat(deps, activePlayers.length, sleep.nextOpeningDay);
   }
 
   return deliverDailyDigest(deps, today, today, deps.force === true, warn);

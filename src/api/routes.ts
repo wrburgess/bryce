@@ -119,6 +119,7 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
       playerCount: assembly.playerCount,
       batters: assembly.batters,
       pitchers: assembly.pitchers,
+      unknownFields: assembly.unknownFields,
       mail: renderDigest(assembly),
     });
   });
