@@ -131,11 +131,13 @@ const FIELDING: Readonly<Record<string, FieldClass>> = {
   catchersInterference: "counter",
   caughtStealing: "counter",
   chances: "counter",
-  // Excluded, not rate: an ERA needs earned runs, which the fielding payload
-  // never carries (it only has innings). The four classes describe *how to
-  // aggregate*, and a rate that cannot be recomputed here is not
-  // aggregatable at all — classifying it "rate" would promise a derivation
-  // that cannot exist from this table alone.
+  // Excluded, not rate — and the reason is the contract above, NOT missing
+  // data. Earned runs are technically recoverable (ER = catcherERA * IP / 9),
+  // so a season figure could be had as sum(catcherERA * IP) / sum(IP). That is
+  // an innings-weighted average of an already-rounded per-game rate, which is
+  // exactly what "never sum, never average" forbids, and it compounds the
+  // source's rounding error. No path to this value through summed counters
+  // exists, so it is not aggregatable under these rules.
   catcherERA: "excluded",
   doublePlays: "counter",
   errors: "counter",
