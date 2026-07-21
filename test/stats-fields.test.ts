@@ -40,6 +40,33 @@ describe("classifyField", () => {
     expect(classifyField("batting", "strikeOuts")).toBe("counter");
     expect(classifyField("pitching", "strikeOuts")).toBe("counter");
   });
+
+  it("classifies the ADR 0033 merged fielding-errors key for batters", () => {
+    // No hitting-gamelog fixture carries "errors" (it's merged in from the
+    // same game's fielding row), so neither the unit tests above nor the
+    // exhaustiveness suite below exercises this key without this assertion.
+    expect(classifyField("batting", "errors")).toBe("counter");
+  });
+
+  it("returns null instead of a prototype method for inherited property names", () => {
+    // A plain object literal's lookups fall through to Object.prototype, so
+    // TABLES[statType][key] would return a function (not null) for these
+    // keys unless classifyField guards with Object.hasOwn. Any of these
+    // ever appearing as a real gamelog stat key would silently defeat the
+    // "unknown keys fail closed" contract every caller relies on.
+    for (const key of [
+      "toString",
+      "constructor",
+      "valueOf",
+      "hasOwnProperty",
+      "__proto__",
+      "isPrototypeOf",
+    ]) {
+      expect(classifyField("batting", key)).toBeNull();
+      expect(classifyField("pitching", key)).toBeNull();
+      expect(classifyField("fielding", key)).toBeNull();
+    }
+  });
 });
 
 describe("classification is exhaustive against real gamelog payloads", () => {
@@ -88,10 +115,26 @@ function collectSplits(payload: unknown): Array<Record<string, unknown>> {
 }
 
 describe("key accessors", () => {
+  it("counterKeys and rateKeys return the expected keys", () => {
+    expect(counterKeys("batting")).toContain("hits");
+    expect(counterKeys("batting")).not.toContain("avg");
+    expect(rateKeys("batting")).toContain("avg");
+    expect(rateKeys("batting")).not.toContain("hits");
+  });
+
   it("counterKeys and rateKeys are disjoint", () => {
+    // Disjointness is also guaranteed by construction (each table is a
+    // Record<string, FieldClass>, so a key maps to exactly one class) and
+    // cannot fail from a table edit alone. It guards a future refactor that
+    // splits the single table into separate counter/rate arrays, where that
+    // guarantee would no longer be automatic.
     for (const statType of ["batting", "pitching", "fielding"] as const) {
-      const counters = new Set(counterKeys(statType));
-      for (const rate of rateKeys(statType)) expect(counters.has(rate)).toBe(false);
+      const counters = counterKeys(statType);
+      const rates = rateKeys(statType);
+      expect(counters.length).toBeGreaterThan(0);
+      expect(rates.length).toBeGreaterThan(0);
+      const counterSet = new Set(counters);
+      for (const rate of rates) expect(counterSet.has(rate)).toBe(false);
     }
   });
 });

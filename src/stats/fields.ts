@@ -128,7 +128,15 @@ const PITCHING: Readonly<Record<string, FieldClass>> = {
 
 const FIELDING: Readonly<Record<string, FieldClass>> = {
   assists: "counter",
+  catchersInterference: "counter",
+  caughtStealing: "counter",
   chances: "counter",
+  // Excluded, not rate: an ERA needs earned runs, which the fielding payload
+  // never carries (it only has innings). The four classes describe *how to
+  // aggregate*, and a rate that cannot be recomputed here is not
+  // aggregatable at all — classifying it "rate" would promise a derivation
+  // that cannot exist from this table alone.
+  catcherERA: "excluded",
   doublePlays: "counter",
   errors: "counter",
   fielding: "rate",
@@ -136,12 +144,18 @@ const FIELDING: Readonly<Record<string, FieldClass>> = {
   gamesPlayed: "counter",
   gamesStarted: "counter",
   innings: "innings",
+  passedBall: "counter",
+  pickoffs: "counter",
   position: "excluded",
   putOuts: "counter",
   rangeFactorPer9Inn: "rate",
   rangeFactorPerGame: "rate",
+  // Derivable here: both stolenBases and caughtStealing are fielding counters.
+  stolenBasePercentage: "rate",
+  stolenBases: "counter",
   throwingErrors: "counter",
   triplePlays: "counter",
+  wildPitches: "counter",
 };
 
 const TABLES: Readonly<Record<StatType, Readonly<Record<string, FieldClass>>>> = {
@@ -152,7 +166,14 @@ const TABLES: Readonly<Record<StatType, Readonly<Record<string, FieldClass>>>> =
 
 /** The field's class, or null when the key is unknown (caller excludes it). */
 export function classifyField(statType: StatType, key: string): FieldClass | null {
-  return TABLES[statType][key] ?? null;
+  // Object.hasOwn (not plain indexing, not `in`) matters here: a gamelog key
+  // named "toString", "constructor", "valueOf", "hasOwnProperty",
+  // "__proto__", or "isPrototypeOf" would otherwise read through the object
+  // literal's prototype chain and return a function instead of null, quietly
+  // breaking the fail-closed contract every caller relies on. Do not
+  // "simplify" this back to `TABLES[statType][key] ?? null`.
+  const table = TABLES[statType];
+  return Object.hasOwn(table, key) ? (table[key] ?? null) : null;
 }
 
 function keysOfClass(statType: StatType, wanted: FieldClass): readonly string[] {
