@@ -10,7 +10,15 @@ export interface LevelInfo {
   milbLevel: string | null;
 }
 
-/** Every sportId the Refresh sweeps for an MLB/MiLB Player. */
+/**
+ * Every sportId the Refresh sweeps for an MLB/MiLB Player.
+ *
+ * DECLARATION ORDER IS LOAD-BEARING. `LADDER` below derives from this array,
+ * so `levelRank` — and therefore the sort order of every row in the digest —
+ * follows it. The order here is the level ladder, top down: MLB, Triple-A,
+ * Double-A, High-A, Single-A, Rookie. Reordering this for tidiness would
+ * silently reorder the digest.
+ */
 export const SPORT_IDS = [1, 11, 12, 13, 14, 16] as const;
 
 /** MLB Stats API sportId for College Baseball (NCAA) — no data source in Phase 1. */
