@@ -27,31 +27,55 @@ describe("resolveWindow — anchored on the last completed day", () => {
 
   it("1d covers yesterday only, grouped by game", () => {
     const w = resolveWindow("1d", morning, CHICAGO);
+    expect(w.spec).toBe("1d");
     expect(w.from).toBe("2026-07-19");
     expect(w.to).toBe("2026-07-19");
     expect(w.groupBy).toBe("game");
+    expect(w.label).toBe("Jul 19");
   });
 
   it("7d covers the seven days ending yesterday, grouped by player and level", () => {
     const w = resolveWindow("7d", morning, CHICAGO);
+    expect(w.spec).toBe("7d");
     expect(w.from).toBe("2026-07-13");
     expect(w.to).toBe("2026-07-19");
     expect(w.groupBy).toBe("playerLevel");
+    expect(w.label).toBe("Last 7 Days (Jul 13-19)");
   });
 
   it("14d and 21d span their full inclusive ranges", () => {
-    expect(resolveWindow("14d", morning, CHICAGO).from).toBe("2026-07-06");
-    expect(resolveWindow("21d", morning, CHICAGO).from).toBe("2026-06-29");
+    const w14 = resolveWindow("14d", morning, CHICAGO);
+    const w21 = resolveWindow("21d", morning, CHICAGO);
+
+    expect(w14.spec).toBe("14d");
+    expect(w14.from).toBe("2026-07-06");
+    expect(w14.to).toBe("2026-07-19");
+    expect(w14.groupBy).toBe("playerLevel");
+    expect(w14.label).toBe("Last 14 Days (Jul 6-19)");
+
+    expect(w21.spec).toBe("21d");
+    expect(w21.from).toBe("2026-06-29");
+    expect(w21.to).toBe("2026-07-19");
+    expect(w21.groupBy).toBe("playerLevel");
+    expect(w21.label).toBe("Last 21 Days (Jun 29-Jul 19)");
   });
 
   it("ytd runs from the season start through yesterday", () => {
     const w = resolveWindow("ytd", morning, CHICAGO, "2026-03-25");
+    expect(w.spec).toBe("ytd");
     expect(w.from).toBe("2026-03-25");
     expect(w.to).toBe("2026-07-19");
+    expect(w.groupBy).toBe("playerLevel");
+    expect(w.label).toBe("Season to Date (Mar 25-Jul 19)");
   });
 
   it("ytd falls back to January 1 when no season start is known", () => {
-    expect(resolveWindow("ytd", morning, CHICAGO, null).from).toBe("2026-01-01");
+    const w = resolveWindow("ytd", morning, CHICAGO, null);
+    expect(w.spec).toBe("ytd");
+    expect(w.from).toBe("2026-01-01");
+    expect(w.to).toBe("2026-07-19");
+    expect(w.groupBy).toBe("playerLevel");
+    expect(w.label).toBe("Season to Date (Jan 1-Jul 19)");
   });
 });
 
@@ -69,8 +93,11 @@ describe("resolveWindow — run hour must not shift the window", () => {
 describe("resolveWindow — calendar boundaries", () => {
   it("crosses a month boundary", () => {
     const w = resolveWindow("7d", new Date("2026-08-03T14:00:00Z"), CHICAGO);
+    expect(w.spec).toBe("7d");
     expect(w.to).toBe("2026-08-02");
     expect(w.from).toBe("2026-07-27");
+    expect(w.groupBy).toBe("playerLevel");
+    expect(w.label).toBe("Last 7 Days (Jul 27-Aug 2)");
   });
 
   it("crosses a year boundary", () => {

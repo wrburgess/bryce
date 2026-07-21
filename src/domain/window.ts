@@ -61,11 +61,32 @@ function shortDate(isoDate: string): string {
   }).format(d);
 }
 
+/** Format a date range, collapsing the month if both dates are in the same month. */
+function formatDateRange(from: string, to: string): string {
+  const [fromY, fromM] = from.split("-");
+  const [toY, toM] = to.split("-");
+
+  // Same month: show month once, then both days
+  if (fromY === toY && fromM === toM) {
+    const month = new Intl.DateTimeFormat("en-US", {
+      timeZone: "UTC",
+      month: "short",
+    }).format(new Date(`${from}T12:00:00Z`));
+    const fromDay = String(Number(from.slice(8)));
+    const toDay = String(Number(to.slice(8)));
+    return `${month} ${fromDay}-${toDay}`;
+  }
+
+  // Different months: show both dates with their months
+  return `${shortDate(from)}-${shortDate(to)}`;
+}
+
 function labelFor(spec: WindowSpec, from: string, to: string): string {
   if (spec === "1d") return shortDate(to);
-  if (spec === "ytd") return `Season to Date (${shortDate(from)}-${shortDate(to)})`;
+  const range = formatDateRange(from, to);
+  if (spec === "ytd") return `Season to Date (${range})`;
   const days = SPAN_DAYS[spec];
-  return `Last ${days} Days (${shortDate(from)}-${shortDate(to)})`;
+  return `Last ${days} Days (${range})`;
 }
 
 export function resolveWindow(
