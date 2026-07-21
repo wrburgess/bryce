@@ -13,9 +13,17 @@ import { hostDate } from "./season.js";
  * local day is 23 or 25 hours long.
  */
 
-export type WindowSpec = "1d" | "7d" | "14d" | "21d" | "ytd";
+/**
+ * The supported windows, as a tuple. DECLARATION ORDER IS THE DISPLAY ORDER an
+ * operator sees when a bad value is refused. `WindowSpec` derives FROM this
+ * array rather than standing beside it (the src/mlb/levels.ts SPORT_IDS
+ * pattern), so the list and the type cannot drift, and consumers that need a
+ * literal-typed enum — the Zod schemas behind the REST and MCP surfaces — get
+ * one without a cast.
+ */
+export const WINDOW_SPECS = ["1d", "7d", "14d", "21d", "ytd"] as const;
 
-export const WINDOW_SPECS: readonly WindowSpec[] = ["1d", "7d", "14d", "21d", "ytd"];
+export type WindowSpec = (typeof WINDOW_SPECS)[number];
 
 /** Inclusive day counts; `ytd` is anchored on the season start instead. */
 const SPAN_DAYS: Readonly<Record<Exclude<WindowSpec, "ytd">, number>> = {

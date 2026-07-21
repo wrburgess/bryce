@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { isNull } from "drizzle-orm";
+import { isNotNull } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { digestDeliveries, players, statLines } from "../src/db/schema.js";
@@ -306,28 +306,54 @@ describe("MCP server over Streamable HTTP", () => {
     expect(invalid.content[0]?.text).toContain("from must be <= to");
   });
 
-  it("digest_preview reports without sending or marking", async () => {
+  it("digest_preview reports without sending or stamping", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     const result = await call("digest_preview");
-    expect(result.structuredContent).toMatchObject({
-      date: "2026-07-19",
-      statLineCount: 1,
-      playerCount: 1,
+    expect(result.structuredContent).toMatchObject({ statLineCount: 1, playerCount: 1 });
+    expect(result.structuredContent?.window).toMatchObject({
+      spec: "1d",
+      from: "2026-07-18",
+      to: "2026-07-18",
     });
-    expect((result.structuredContent?.mail as { subject: string }).subject).toBe(
-      "MLB Daily Tracker: Sun, July 19, 2026",
-    );
+    expect((result.structuredContent?.mail as { subject: string }).subject).toBe("Bryce - Jul 18");
 
     expect(mailer.sent).toHaveLength(0);
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
     expect(
-      await opened.db.select().from(statLines).where(isNull(statLines.digestDeliveryId)),
-    ).toHaveLength(1);
+      await opened.db.select().from(statLines).where(isNotNull(statLines.digestDeliveryId)),
+    ).toHaveLength(0);
   });
 
-  it("send_digest sends, marks lines, and records the delivery", async () => {
+  it("both digest tools accept a window, and reject an unsupported one", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-14" });
+
+    const week = await call("digest_preview", { window: "7d" });
+    expect(week.structuredContent).toMatchObject({ statLineCount: 2 });
+    expect(week.structuredContent?.window).toMatchObject({ spec: "7d", from: "2026-07-12" });
+    expect((await call("digest_preview")).structuredContent).toMatchObject({ statLineCount: 1 });
+
+    // Fails closed on BOTH tools: named, refused, and nothing sent.
+    for (const tool of ["digest_preview", "send_digest"]) {
+      const bogus = await call(tool, { window: "30d" });
+      expect(bogus.isError).toBe(true);
+      expect(bogus.content[0]?.text).toContain("window");
+    }
+    expect(mailer.sent).toHaveLength(0);
+    expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
+
+    const sent = await call("send_digest", { window: "7d" });
+    expect(sent.structuredContent).toMatchObject({
+      action: "sent",
+      statLineCount: 2,
+      window: "Last 7 Days (Jul 12-18)",
+    });
+  });
+
+  it("send_digest sends, records the delivery, and stamps nothing", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
@@ -338,31 +364,29 @@ describe("MCP server over Streamable HTTP", () => {
       statLineCount: 1,
     });
     expect(mailer.sent).toHaveLength(1);
-    expect(mailer.sent[0]?.text).toContain("Maximo Acosta");
+    expect(mailer.sent[0]?.text).toContain("M Acosta");
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(1);
     expect(
-      await opened.db.select().from(statLines).where(isNull(statLines.digestDeliveryId)),
+      await opened.db.select().from(statLines).where(isNotNull(statLines.digestDeliveryId)),
     ).toHaveLength(0);
   });
 
-  it("send_digest and digest_preview accept force, replaying without recording", async () => {
+  it("send_digest accepts force, replaying without recording", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     expect((await call("send_digest")).structuredContent).toMatchObject({ action: "sent" });
     const before = (await opened.db.select().from(digestDeliveries))[0];
 
-    // Unforced, the day is closed and the preview is empty.
+    // Unforced, the day is closed — but the PREVIEW still reports the window,
+    // because a window consumes nothing and a preview never claimed anything.
     expect((await call("send_digest")).structuredContent).toMatchObject({
       action: "skipped",
       reason: "already-sent-today",
     });
-    expect((await call("digest_preview")).structuredContent).toMatchObject({ statLineCount: 0 });
-
-    // Forced preview shows the delivered content back; still read-only.
-    const preview = await call("digest_preview", { force: true });
+    const preview = await call("digest_preview");
     expect(preview.structuredContent).toMatchObject({ statLineCount: 1, playerCount: 1 });
-    expect((preview.structuredContent?.mail as { text: string }).text).toContain("Maximo Acosta");
+    expect((preview.structuredContent?.mail as { text: string }).text).toContain("M Acosta");
     expect(mailer.sent).toHaveLength(1);
 
     // Forced send re-mails it and leaves the delivery row exactly as it was.
