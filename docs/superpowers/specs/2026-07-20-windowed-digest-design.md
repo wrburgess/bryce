@@ -30,7 +30,8 @@ Windowed aggregation is therefore a **read-side** problem. No new collection is 
 | 1 | A window renders as a **roll-up** — aggregate numbers per player, not a list of games. |
 | 2 | A window is a **calendar-day range**, and every row shows `GP` so sample size is visible. |
 | 3 | A report covers **one window**. Multiple windows means multiple reports. |
-| 4 | Layout is **two tables** — Batters and Pitchers — each with a TOTALS row. Abbreviated names, no links. |
+| 4 | Layout is **two tables** — Batters and Pitchers. Abbreviated names, no links, **no TOTALS rows**. |
+| 4a | Each row carries a **`Lvl`** column (`MLB`, `AAA`, `AA`, `A+`, `A`, `R`, `DSL`, `NCAA`). No team column and no opponent column — the reader already knows the teams, and level is the fact that changes how a stat line reads. This replaces the current level-section grouping in `render.ts`. |
 | 5 | **One artifact.** The daily Digest *becomes* the 1-day windowed report. Selection changes from novelty to window; format changes from per-game lines to tables. |
 | 6 | `stat_lines.digest_delivery_id` is **dropped**. |
 | 7 | **Regular season only** in every window. |
@@ -122,10 +123,13 @@ there is no second renderer and no doubleheader special case. ADR 0029's per-gam
 guarantees the two games of a doubleheader are distinct rows; `game_number` is stored and renders as
 `Gm 1` / `Gm 2`.
 
-Defaults: `1d` → `groupBy: "game"`; `7d`, `14d`, `ytd` → `groupBy: "player"`. The parameter is
+Defaults: `1d` → `groupBy: "game"`; `7d`, `14d`, `21d`, `ytd` → `groupBy: "player"`. The parameter is
 internal; it is not exposed on the CLI in this iteration.
 
-Because `1d` rows are per-game, they carry opponent (`vs CHW`, `@ STL`). Aggregated windows do not.
+Because `1d` rows are per-game and carry no opponent column, a doubleheader would otherwise render
+two visually identical rows for one player. The `1d` table therefore carries a **`Gm`** column, from
+the stored `game_number`, populated only for players with more than one game on the date. Aggregated
+windows have no `Gm` column — a doubleheader is simply two games folded into the player's row.
 
 ## Window semantics
 
@@ -152,6 +156,7 @@ Note this is distinct from `digest_deliveries.date_covered`, which remains the h
 | `1d` | the single host-timezone date `end` |
 | `7d` | `end - 6` through `end`, inclusive (7 calendar days) |
 | `14d` | `end - 13` through `end`, inclusive |
+| `21d` | `end - 20` through `end`, inclusive |
 | `ytd` | the current season's `regularSeasonStart` through `end` |
 
 Every window filters `game_type` to regular season only. Ingestion currently allows postseason types
@@ -177,7 +182,7 @@ posture in `src/domain/season.ts` ("with no calendar data ... the pipeline is tr
 | Module | Change |
 |---|---|
 | `src/digest/assemble.ts` | Select by window instead of novelty; group per `groupBy`; drop `includeDeliveryId` and `previewDeliveryId`. |
-| `src/digest/render.ts` | Batters and Pitchers tables with TOTALS rows, in text and HTML. |
+| `src/digest/render.ts` | Batters and Pitchers tables in text and HTML; `Lvl` column replaces level-section grouping. |
 | `src/jobs/digest.ts` | Same claim → send → settle flow; remove replay plumbing and line stamping. |
 | `src/cli/digest.ts` | Add `--window` (default `1d`). |
 | `src/api/routes.ts` | `window` parameter on the existing preview and send routes. |
@@ -204,33 +209,65 @@ sends without touching delivery state. It simply no longer needs to carry a deli
 
 ## Rendering
 
+Two tables, Batters and Pitchers. No TOTALS rows. The stat set is the existing ADR 0033 fixed format
+in both cases — every stat always shown, zeros included, in the established order — transposed from
+comma-joined text into table columns.
+
+The two layouts differ in exactly two ways: `1d` has a `Gm` column and no `GP` (every row is one
+game, so `GP` would always be `1`); aggregated windows have `GP` and, for batters, a leading
+`Batting` slash-line column.
+
+**`1d`** — one row per game:
+
+```
+Bryce — Sun, July 19, 2026
+
+Batters
+Player      Lvl  Gm   PA   H  BB   K  2B  3B  HR  RBI   R  SB  CS   E
+B Harper    MLB       5    2   1   0   0   0   1    3   2   0   0   0
+J Made      A+        4    1   0   2   1   0   0    1   1   1   0   1
+Y Pena      DSL   1   3    0   1   1   0   0   0    0   0   0   0   0
+Y Pena      DSL   2   4    2   0   0   1   0   0    2   1   0   0   0
+
+Pitchers
+Player      Lvl  Gm    IP  ER   K   K/9  BB  HA  HRA   ERA  WHIP   S  HLD  QS
+Z Wheeler   MLB      7.0   1   9  11.57   2   4    0  1.29  0.86   0    0   1
+```
+
+**`7d` / `14d` / `21d` / `ytd`** — one row per player:
+
 ```
 Bryce — Last 7 Days (Jul 13–19)
 
 Batters
-Player        GP   Batting          HR   RBI    K
-B Harper       6   .310/.380/.520    3     8    7
-C Yelich       5   .250/.333/.400    0     2    4
-TOTALS        11   .282/.354/.497    3    10   11
+Player      Lvl   GP   Batting           PA   H  BB   K  2B  3B  HR  RBI   R  SB  CS   E
+B Harper    MLB    6   .310/.380/.520    28   9   4   6   2   0   3    8   5   1   0   0
+J Made      A+     5   .250/.333/.400    21   5   2   7   1   0   0    2   3   2   1   1
 
 Pitchers
-Player        GP     IP   W-L    ERA   WHIP    K
-Z Wheeler      2   13.0   1-0   2.31   0.98   14
-TOTALS         2   13.0   1-0   2.31   0.98   14
+Player      Lvl   GP     IP  ER   K   K/9  BB  HA  HRA   ERA  WHIP   S  HLD  QS
+Z Wheeler   MLB    2   13.0   4  16  11.08   3   9    1  2.77  0.92   0    0   2
 ```
+
+Aggregated `ERA`, `WHIP`, and `K/9` are window rates derived from summed counters and summed outs —
+never averaged across games. Aggregated `QS` is a **count** of games meeting the quality-start
+threshold, not a per-game flag; `S` and `HLD` are ordinary counters.
 
 The rendered column set is a **selection** over the complete aggregate. The aggregator computes every
 classified field for every window; the email renders the columns above; the REST and MCP surfaces
 return the full object. Adding a column later is a render change, not a data change.
 
-`aggregate()` produces both the per-player rows and the TOTALS row — same function, different
-grouping — so a totals row cannot drift from the rows above it.
-
-Players with no games in the window appear with zeros (`0`, `.000/.000/.000`, `0`, `0`, `0`). This
-replaces the current "no new stats" tail, which becomes unnecessary: a `GP 0` row says it better.
+Players with no games in the window appear with a zero row. This replaces the current "no new stats"
+tail, which becomes unnecessary: a `GP 0` row says it better.
 
 Both a plain-text and an HTML rendering are produced from one assembled structure, so the two cannot
-diverge in content.
+diverge in content. The plain-text rendering pads columns to fixed widths; the HTML rendering uses a
+real `<table>`.
+
+Level abbreviations render as `MLB`, `AAA`, `AA`, `A+`, `A`, `R`, `DSL`, `NCAA`, derived from
+`players.level` and `players.milb_level`. The existing `MILB_LEVEL_ORDER` in `src/mlb/levels.ts`
+supplies the sort: rows order by level (MLB first, descending through the minors, NCAA last), then by
+player name.
 
 ## Error handling
 
@@ -258,7 +295,8 @@ Testing-first, per `rules/testing.md`.
   identical windows. This is the test that would have caught the `TZ` bug as a content defect.
 - **Doubleheader renders two rows** for a 1-day window.
 - **Zero-GP player renders a zero row.**
-- **TOTALS are re-derived** from summed counters, not averaged across rendered rows.
+- **Aggregated `QS` counts games**, not a per-game flag — two quality starts in a 7d window render `2`.
+- **`Gm` appears only for doubleheaders** in a `1d` report, and is absent from aggregated windows.
 - **Regular-season filter** excludes an ingested postseason game from every window.
 
 One validation to run once, outside the suite: aggregate a player's full YTD from `stat_lines` and
