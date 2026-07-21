@@ -1,20 +1,21 @@
+import type { DigestAssembly, DigestRow } from "./assemble.js";
+import type { ResolvedWindow } from "../domain/window.js";
 import type { Level } from "../mlb/levels.js";
-import { MILB_LEVEL_ORDER } from "../mlb/levels.js";
-import {
-  formatIp,
-  ipToOuts,
-  qualityStart,
-  singleGameEra,
-  singleGameK9,
-  singleGameWhip,
-} from "./rates.js";
+import { deriveRate } from "../stats/aggregate.js";
+import { formatOuts } from "./rates.js";
 
 /**
- * Digest rendering: HTML + plain-text parts, single-column simple markup
- * readable in iPhone Mail. Stat Lines are per-game (ADR 0029); the
- * "Game 1"/"Game 2" doubleheader labels here are presentation only. Stat text
- * is the HC-specified fixed format (ADR 0033) — every stat always shown,
- * zeros included, single-game rates.
+ * Digest rendering: HTML + plain-text parts, readable in iPhone Mail.
+ *
+ * A window renders as TWO TABLES — Batters and Pitchers — each row carrying a
+ * `Lvl` column (windowed Digest spec). That replaces the old level-section
+ * grouping: level is a property of the GAME, so a player who was promoted
+ * mid-window has one row per level, and a section heading could not say that.
+ *
+ * The stat set is the ADR 0033 fixed format — every stat always shown, zeros
+ * included, in the established order — transposed from comma-joined prose into
+ * columns. Both parts render from one `Column[]`, so text and HTML cannot
+ * diverge in content.
  */
 
 export interface RenderPlayer {
@@ -26,98 +27,10 @@ export interface RenderPlayer {
   schoolName: string | null;
 }
 
-export interface RenderLine {
-  player: RenderPlayer;
-  gameId: number;
-  /** Never "fielding": fielding rows merge into batting lines at assembly (ADR 0033). */
-  statType: "batting" | "pitching";
-  gameDate: string;
-  gameNumber: number;
-  isHome: boolean | null;
-  opponentName: string | null;
-  stats: Record<string, unknown>;
-}
-
 export interface RenderedMail {
   subject: string;
   html: string;
   text: string;
-}
-
-const num = (stats: Record<string, unknown>, key: string): number => {
-  const v = stats[key];
-  return typeof v === "number" && Number.isFinite(v) ? v : 0;
-};
-
-/**
- * Fixed-format batting line (ADR 0033): every stat always shown, zeros
- * included, in the HC-specified order. PA comes from the source when present;
- * the AB + BB + HBP fallback is belt-and-suspenders (NCAA rows derive PA at
- * ingest). E arrives merged from the same game's fielding row (assemble.ts).
- */
-export function formatBattingLine(stats: Record<string, unknown>): string {
-  const pa =
-    typeof stats.plateAppearances === "number" && Number.isFinite(stats.plateAppearances)
-      ? stats.plateAppearances
-      : num(stats, "atBats") + num(stats, "baseOnBalls") + num(stats, "hitByPitch");
-  const parts: Array<[string, number]> = [
-    ["PA", pa],
-    ["H", num(stats, "hits")],
-    ["BB", num(stats, "baseOnBalls")],
-    ["K", num(stats, "strikeOuts")],
-    ["2B", num(stats, "doubles")],
-    ["3B", num(stats, "triples")],
-    ["HR", num(stats, "homeRuns")],
-    ["RBI", num(stats, "rbi")],
-    ["R", num(stats, "runs")],
-    ["SB", num(stats, "stolenBases")],
-    ["CS", num(stats, "caughtStealing")],
-    ["E", num(stats, "errors")],
-  ];
-  return parts.map(([label, value]) => `${label} ${value}`).join(", ");
-}
-
-/**
- * Fixed-format pitching line (ADR 0033): every stat always shown, in the
- * HC-specified order. ERA/WHIP/K-9 are SINGLE-GAME rates (this outing only);
- * zero or unparseable IP renders them "-". HA/HRA are hits/home runs allowed;
- * HLD is absent from NCAA data and renders 0.
- */
-export function formatPitchingLine(stats: Record<string, unknown>): string {
-  const ip = formatIp(stats.inningsPitched);
-  const outs = ipToOuts(ip);
-  const er = num(stats, "earnedRuns");
-  const k = num(stats, "strikeOuts");
-  const bb = num(stats, "baseOnBalls");
-  const ha = num(stats, "hits");
-  const parts: Array<[string, number | string]> = [
-    ["IP", ip],
-    ["ER", er],
-    ["K", k],
-    ["K/9", singleGameK9(k, outs)],
-    ["BB", bb],
-    ["HA", ha],
-    ["HRA", num(stats, "homeRuns")],
-    ["ERA", singleGameEra(er, outs)],
-    ["WHIP", singleGameWhip(bb, ha, outs)],
-    ["S", num(stats, "saves")],
-    ["HLD", num(stats, "holds")],
-    ["QS", qualityStart(outs, er)],
-  ];
-  return parts.map(([label, value]) => `${label} ${value}`).join(", ");
-}
-
-/** "2026-07-30" → "Thu, July 30, 2026" (HC-specified subject date style). */
-export function formatSubjectDate(isoDate: string): string {
-  const d = new Date(`${isoDate}T00:00:00Z`);
-  if (Number.isNaN(d.getTime())) return isoDate;
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: "UTC",
-    weekday: "short",
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  }).format(d);
 }
 
 export function escapeHtml(s: string): string {
@@ -128,113 +41,190 @@ export function escapeHtml(s: string): string {
     .replaceAll('"', "&quot;");
 }
 
-interface Section {
-  title: string;
-  players: Array<{ player: RenderPlayer; lines: RenderLine[] }>;
+interface Column {
+  header: string;
+  /** Right-aligned for numbers, left for names. */
+  align: "left" | "right";
+  value: (row: DigestRow) => string;
 }
 
-function sectionTitle(level: Level, milbLevel: string | null): string {
-  if (level === "mlb") return "MLB";
-  if (level === "ncaa") return "NCAA";
-  return milbLevel !== null ? `MiLB - ${milbLevel}` : "MiLB";
+/** "Bryce Harper" -> "B Harper"; a single-word name is left alone. */
+function abbreviate(fullName: string): string {
+  const parts = fullName.trim().split(/\s+/);
+  return parts.length < 2 ? fullName : `${parts[0]![0]} ${parts.slice(1).join(" ")}`;
 }
 
-function sectionOrder(): string[] {
-  return ["MLB", ...MILB_LEVEL_ORDER.map((l) => `MiLB - ${l}`), "MiLB", "NCAA"];
-}
+const counter =
+  (key: string): Column["value"] =>
+  (row) =>
+    String(row.agg.counters[key] ?? 0);
 
-function buildSections(lines: RenderLine[]): Section[] {
-  const byTitle = new Map<string, Map<string, { player: RenderPlayer; lines: RenderLine[] }>>();
-  for (const line of lines) {
-    const title = sectionTitle(line.player.level, line.player.milbLevel);
-    const playersOfTitle = byTitle.get(title) ?? new Map();
-    byTitle.set(title, playersOfTitle);
-    const entry = playersOfTitle.get(line.player.fullName) ?? { player: line.player, lines: [] };
-    playersOfTitle.set(line.player.fullName, entry);
-    entry.lines.push(line);
+const rate =
+  (key: string): Column["value"] =>
+  (row) =>
+    deriveRate(row.agg, key);
+
+/**
+ * AVG/OBP/SLG from the SUMMED counters. A zero denominator renders ".000"
+ * rather than deriveRate's "-": an idle player's row reads as a zero line, and
+ * a pinch-runner with no at-bats did bat .000, which is the conventional
+ * baseball display.
+ */
+const slashLine: Column["value"] = (row) =>
+  ["avg", "obp", "slg"]
+    .map((key) => {
+      const value = deriveRate(row.agg, key);
+      return value === "-" ? ".000" : value;
+    })
+    .join("/");
+
+/**
+ * PA from the source when present, else AB + BB + HBP. Carried over from the
+ * fixed-format batting line this table replaces: every one of those is a summed
+ * counter, so the fallback holds over an aggregate exactly as it did per game.
+ * Without it a source that omits plateAppearances renders PA 0 beside populated
+ * H and BB — visibly wrong rather than merely absent.
+ */
+const plateAppearances: Column["value"] = (row) => {
+  const c = (key: string): number => row.agg.counters[key] ?? 0;
+  const pa = c("plateAppearances");
+  return String(pa > 0 ? pa : c("atBats") + c("baseOnBalls") + c("hitByPitch"));
+};
+
+const PLAYER_COLUMNS: Column[] = [
+  { header: "Player", align: "left", value: (r) => abbreviate(r.player.fullName) },
+  { header: "Lvl", align: "left", value: (r) => r.lvl },
+];
+
+/**
+ * The two layouts differ in exactly two ways: a 1d window carries `Gm` (to tell
+ * a doubleheader's two rows apart, since there is no opponent column) and no
+ * `GP`, which would always be 1; an aggregated window carries `GP` and, for
+ * batters, a leading slash line.
+ */
+function leadColumns(window: ResolvedWindow, statType: "batting" | "pitching"): Column[] {
+  if (window.groupBy === "game") {
+    return [
+      {
+        header: "Gm",
+        align: "right",
+        value: (r) => (r.gameNumber === null ? "" : String(r.gameNumber)),
+      },
+    ];
   }
-  const sections: Section[] = [];
-  for (const title of sectionOrder()) {
-    const playersOfTitle = byTitle.get(title);
-    if (playersOfTitle === undefined) continue;
-    const playerEntries = [...playersOfTitle.values()].sort((a, b) =>
-      a.player.fullName.localeCompare(b.player.fullName),
-    );
-    for (const entry of playerEntries) {
-      entry.lines.sort(
-        (a, b) =>
-          a.gameDate.localeCompare(b.gameDate) ||
-          a.gameNumber - b.gameNumber ||
-          a.statType.localeCompare(b.statType),
-      );
-    }
-    sections.push({ title, players: playerEntries });
-  }
-  return sections;
+  const gp: Column = { header: "GP", align: "right", value: (r) => String(r.agg.games) };
+  return statType === "batting"
+    // Left, unlike every other non-name column: slash lines are fixed width, so
+    // they stay aligned either way, and a right-padded "Batting" header floats
+    // away from the column it names.
+    ? [gp, { header: "Batting", align: "left", value: slashLine }]
+    : [gp];
 }
 
-/** "Game N" label only when the player really played two games that date (doubleheader). */
-function gameLabel(line: RenderLine, playerLines: RenderLine[]): string {
-  const gameIdsOnDate = new Set(
-    playerLines.filter((l) => l.gameDate === line.gameDate).map((l) => l.gameId),
+function battingColumns(window: ResolvedWindow): Column[] {
+  return [
+    ...PLAYER_COLUMNS,
+    ...leadColumns(window, "batting"),
+    { header: "PA", align: "right", value: plateAppearances },
+    { header: "H", align: "right", value: counter("hits") },
+    { header: "BB", align: "right", value: counter("baseOnBalls") },
+    { header: "K", align: "right", value: counter("strikeOuts") },
+    { header: "2B", align: "right", value: counter("doubles") },
+    { header: "3B", align: "right", value: counter("triples") },
+    { header: "HR", align: "right", value: counter("homeRuns") },
+    { header: "RBI", align: "right", value: counter("rbi") },
+    { header: "R", align: "right", value: counter("runs") },
+    { header: "SB", align: "right", value: counter("stolenBases") },
+    { header: "CS", align: "right", value: counter("caughtStealing") },
+    // Merged in from the same game's fielding row (ADR 0033).
+    { header: "E", align: "right", value: counter("errors") },
+  ];
+}
+
+function pitchingColumns(window: ResolvedWindow): Column[] {
+  return [
+    ...PLAYER_COLUMNS,
+    ...leadColumns(window, "pitching"),
+    { header: "IP", align: "right", value: (r) => formatOuts(r.agg.outs) },
+    { header: "ER", align: "right", value: counter("earnedRuns") },
+    { header: "K", align: "right", value: counter("strikeOuts") },
+    { header: "K/9", align: "right", value: rate("strikeoutsPer9Inn") },
+    { header: "BB", align: "right", value: counter("baseOnBalls") },
+    { header: "HA", align: "right", value: counter("hits") },
+    { header: "HRA", align: "right", value: counter("homeRuns") },
+    { header: "ERA", align: "right", value: rate("era") },
+    { header: "WHIP", align: "right", value: rate("whip") },
+    { header: "S", align: "right", value: counter("saves") },
+    { header: "HLD", align: "right", value: counter("holds") },
+    // A COUNT of qualifying games, not a per-game flag: QS is not a source
+    // field and cannot be recovered from summed outs and earned runs.
+    { header: "QS", align: "right", value: (r) => String(r.qualityStarts) },
+  ];
+}
+
+const GUTTER = "  ";
+
+function textTable(columns: Column[], rows: DigestRow[]): string[] {
+  const cells = rows.map((row) => columns.map((col) => col.value(row)));
+  const widths = columns.map((col, i) =>
+    cells.reduce((max, rowCells) => Math.max(max, rowCells[i]!.length), col.header.length),
   );
-  return gameIdsOnDate.size > 1 ? ` (Game ${line.gameNumber})` : "";
+  const line = (values: string[]): string =>
+    values
+      .map((value, i) =>
+        columns[i]!.align === "left" ? value.padEnd(widths[i]!) : value.padStart(widths[i]!),
+      )
+      .join(GUTTER)
+      // Trailing pad on the last column is invisible noise in a mail client.
+      .trimEnd();
+  return [line(columns.map((c) => c.header)), ...cells.map(line)];
 }
 
-function describeLine(line: RenderLine, playerLines: RenderLine[]): string {
-  const where =
-    line.opponentName === null ? "" : ` ${line.isHome === false ? "at" : "vs"} ${line.opponentName}`;
-  const statText =
-    line.statType === "batting" ? formatBattingLine(line.stats) : formatPitchingLine(line.stats);
-  return `${line.gameDate}${where}${gameLabel(line, playerLines)}: ${statText}`;
+function htmlTable(columns: Column[], rows: DigestRow[]): string {
+  const cell = (tag: "th" | "td", align: Column["align"], value: string): string =>
+    `<${tag} style="text-align: ${align}; padding: 2px 6px">${escapeHtml(value)}</${tag}>`;
+  const head = columns.map((col) => cell("th", col.align, col.header)).join("");
+  const body = rows
+    .map(
+      (row) => `<tr>${columns.map((col) => cell("td", col.align, col.value(row))).join("")}</tr>`,
+    )
+    .join("");
+  return `<table cellspacing="0" cellpadding="0"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
-export function renderDigest(args: {
-  date: string;
-  lines: RenderLine[];
-  noNewStats: RenderPlayer[];
-}): RenderedMail {
-  const { date, lines, noNewStats } = args;
-  const sections = buildSections(lines);
-  const subject = `MLB Daily Tracker: ${formatSubjectDate(date)}`;
+interface Table {
+  title: string;
+  columns: Column[];
+  rows: DigestRow[];
+}
 
-  const textParts: string[] = [`Bryce digest for ${date}`, ""];
-  const htmlParts: string[] = [`<h1>Bryce digest for ${escapeHtml(date)}</h1>`];
+export function renderDigest(assembly: DigestAssembly): RenderedMail {
+  const { window } = assembly;
+  const heading = `Bryce - ${window.label}`;
 
-  if (sections.length === 0) {
-    textParts.push("No new stat lines today.", "");
-    htmlParts.push("<p>No new stat lines today.</p>");
+  // An empty table is omitted rather than rendered as a bare heading: a watch
+  // list with no pitchers should not carry an empty Pitchers section daily.
+  const tables: Table[] = [
+    { title: "Batters", columns: battingColumns(window), rows: assembly.batters },
+    { title: "Pitchers", columns: pitchingColumns(window), rows: assembly.pitchers },
+  ].filter((t) => t.rows.length > 0);
+
+  const textParts: string[] = [heading, ""];
+  const htmlParts: string[] = [`<h1>${escapeHtml(heading)}</h1>`];
+
+  if (tables.length === 0) {
+    // Still sent: "send daily even when empty" survives the redesign (ADR 0030).
+    textParts.push("No games in this window.", "");
+    htmlParts.push("<p>No games in this window.</p>");
   }
 
-  for (const section of sections) {
-    textParts.push(section.title);
-    htmlParts.push(`<h2>${escapeHtml(section.title)}</h2>`);
-    for (const { player, lines: playerLines } of section.players) {
-      // NCAA Players carry a school, not a team; everyone else carries a team.
-      const affiliation = player.level === "ncaa" ? player.schoolName : player.teamName;
-      const team = affiliation !== null ? ` (${affiliation})` : "";
-      textParts.push(`  ${player.fullName}${team}`);
-      htmlParts.push(`<h3>${escapeHtml(`${player.fullName}${team}`)}</h3>`, "<ul>");
-      for (const line of playerLines) {
-        const described = describeLine(line, playerLines);
-        textParts.push(`    ${described}`);
-        htmlParts.push(`<li>${escapeHtml(described)}</li>`);
-      }
-      htmlParts.push("</ul>");
-    }
-    textParts.push("");
-  }
-
-  if (noNewStats.length > 0) {
-    const names = [...noNewStats]
-      .sort((a, b) => a.fullName.localeCompare(b.fullName))
-      .map((p) => p.fullName);
-    textParts.push(`No new stats: ${names.join(", ")}`);
-    htmlParts.push(`<p>No new stats: ${escapeHtml(names.join(", "))}</p>`);
+  for (const table of tables) {
+    textParts.push(table.title, ...textTable(table.columns, table.rows), "");
+    htmlParts.push(`<h2>${escapeHtml(table.title)}</h2>`, htmlTable(table.columns, table.rows));
   }
 
   return {
-    subject,
+    subject: `Bryce - ${window.label}`,
     text: `${textParts.join("\n").trimEnd()}\n`,
     html: htmlParts.join("\n"),
   };
