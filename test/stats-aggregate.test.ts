@@ -107,6 +107,14 @@ describe("deriveRate — derived from sums, never averaged", () => {
     expect(deriveRate(agg, "strikeoutsPer9Inn")).toBe("10.00");
   });
 
+  it("computes pitches per SINGLE inning, not per nine", () => {
+    // 100 pitches over 9.0 IP (27 outs) = 100 / 9 = 11.11 pitches/inning.
+    // A per-9 formula (numerator * 27 / outs) would wrongly return 100.00 here
+    // — the raw pitch count, unchanged — because outs happens to equal 27.
+    const agg = aggregate("pitching", [{ inningsPitched: "9.0", numberOfPitches: 100 }]);
+    expect(deriveRate(agg, "pitchesPerInning")).toBe("11.11");
+  });
+
   it("returns '-' when the denominator is zero", () => {
     const empty = aggregate("batting", []);
     expect(deriveRate(empty, "avg")).toBe("-");

@@ -90,12 +90,17 @@ function ratio(numerator: number, denominator: number): number | null {
   return denominator === 0 ? null : numerator / denominator;
 }
 
-/** numerator per nine innings, from summed outs. */
+// per9 vs. perInning: the field's NAME decides which one applies, and mixing
+// them up is the trap — a per9 field wrongly using perInning under-reports by
+// 9x; a per-inning field wrongly using per9 (as pitchesPerInning briefly did)
+// over-reports by 9x, silently, because the result still looks plausible.
+
+/** numerator per nine innings (27 outs), from summed outs. */
 function per9(numerator: number, outs: number | null): number | null {
   return outs === null || outs === 0 ? null : (numerator * 27) / outs;
 }
 
-/** numerator per single inning (outs / 3), from summed outs. */
+/** numerator per single inning (3 outs), from summed outs. */
 function perInning(numerator: number, outs: number | null): number | null {
   return outs === null || outs === 0 ? null : (numerator * 3) / outs;
 }
@@ -159,20 +164,14 @@ const BATTING_RATES: Readonly<Record<string, Formula>> = {
 const PITCHING_RATES: Readonly<Record<string, Formula>> = {
   ...SHARED,
   era: fixed(2, (a) => per9(c(a, "earnedRuns"), a.outs)),
-  whip: fixed(2, (a) =>
-    a.outs === null || a.outs === 0
-      ? null
-      : ((c(a, "baseOnBalls") + c(a, "hits")) * 3) / a.outs,
-  ),
+  whip: fixed(2, (a) => perInning(c(a, "baseOnBalls") + c(a, "hits"), a.outs)),
   hitsPer9Inn: fixed(2, (a) => per9(c(a, "hits"), a.outs)),
   homeRunsPer9: fixed(2, (a) => per9(c(a, "homeRuns"), a.outs)),
   runsScoredPer9: fixed(2, (a) => per9(c(a, "runs"), a.outs)),
   strikeoutsPer9Inn: fixed(2, (a) => per9(c(a, "strikeOuts"), a.outs)),
   walksPer9Inn: fixed(2, (a) => per9(c(a, "baseOnBalls"), a.outs)),
-  // Pitches per SINGLE inning (not per 9) — deliberately perInning(), not per9().
-  // per9() here would return raw numberOfPitches unchanged whenever outs === 27
-  // (100 pitches over exactly 9 innings would render "100.00" pitches/inning
-  // instead of ~11.11), a 9x error masked by staying in a plausible-looking range.
+  // Per SINGLE inning, not per 9 — see the perInning/per9 note above. This is
+  // the field the brief originally routed through per9() by mistake.
   pitchesPerInning: fixed(2, (a) => perInning(c(a, "numberOfPitches"), a.outs)),
   strikePercentage: slashLine((a) => ratio(c(a, "strikes"), c(a, "numberOfPitches"))),
   strikeoutWalkRatio: fixed(2, (a) => ratio(c(a, "strikeOuts"), c(a, "baseOnBalls"))),
