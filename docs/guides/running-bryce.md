@@ -56,7 +56,7 @@ missing.
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
 | `DATABASE_PATH` | no | `data/bryce.db` | SQLite file; created and migrated automatically |
-| `TZ` | no | `America/Chicago` | Host timezone for "today" (digest date, season math) |
+| `BRYCE_TZ` | no | `America/Chicago` | Host timezone for "today" (digest windows, season math) |
 | `MAILER_PROVIDER` | no | `postmark` | `postmark`, `smtp` (Forward Email), or `console` |
 | `POSTMARK_SERVER_TOKEN` | with postmark | — | Postmark server token |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | with smtp | port `465` | SMTP relay credentials |

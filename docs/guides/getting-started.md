@@ -94,7 +94,7 @@ Every other line can stay at its default. For reference, what they mean:
 | Variable | What it is | Default |
 |---|---|---|
 | `DATABASE_PATH` | Where the SQLite file lives; created + migrated automatically | `data/bryce.db` |
-| `TZ` | Your timezone — defines "today" for digests and season boundaries | `America/Chicago` |
+| `BRYCE_TZ` | Your timezone — defines "today" for digests and season boundaries | `America/Chicago` |
 | `MAILER_PROVIDER` | `console` (print), `postmark`, or `smtp` | `postmark` |
 | `POSTMARK_SERVER_TOKEN` | Only when provider is `postmark` (see step 9) | empty |
 | `SMTP_HOST/PORT/USER/PASS` | Only when provider is `smtp` (e.g. Forward Email) | empty |
