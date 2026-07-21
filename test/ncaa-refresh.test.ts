@@ -287,26 +287,33 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
       tz: TEST_TZ,
       to: "hc@example.com",
       from: "bryce@example.com",
+      // A 7d window covers both scraped game dates; 1d would see only one.
+      spec: "7d",
     };
     await runDigest(digestDeps);
 
     expect(mailer.sent).toHaveLength(1);
     const text = mailer.sent[0]!.text;
-    // Regression: the scraped AB/H/HR/E headers must reach the renderer as
+    const cells = (startsWith: string, from = 0): string[] =>
+      (text.slice(from).split("\n").find((l) => l.startsWith(startsWith)) ?? "")
+        .trim()
+        .split(/\s+/);
+
+    // Regression: the scraped AB/H/HR/E headers must reach the aggregate as
     // canonical keys, PA is derived at ingest (no PA column on the page), and
-    // the game 6001 fielding row's E merges into the batting line (ADR 0033).
-    expect(text).toContain("College Guy (LSU)");
-    expect(text).toContain(
-      "2026-03-13 vs Georgia: PA 4, H 2, BB 0, K 0, 2B 0, 3B 0, HR 1, RBI 2, R 0, SB 0, CS 0, E 1",
+    // the game 6001 fielding row's E merges into the batting row (ADR 0033) —
+    // one batting row for two games, never a third fielding row.
+    // KNOWN GAP, pinned deliberately: SLG is .000 because the stats.ncaa.org
+    // game log carries no totalBases column, so there is nothing to sum. AVG
+    // and OBP are right; SLG and OPS are not derivable for an NCAA row until
+    // src/ncaa/normalize.ts computes total bases at ingest. The windowed-digest
+    // design puts NCAA aggregation out of scope for this iteration, and the old
+    // prose format hid this by never showing a slash line at all.
+    expect(cells("C Guy").slice(0, 8)).toEqual(["C", "Guy", "NCAA", "2", ".429/.429/.000", "7", "3", "0"]);
+    expect(cells("C Guy").slice(-1)).toEqual(["1"]); // E, merged from fielding
+    expect(cells("C Guy", text.indexOf("Pitchers"))).toEqual(
+      ["C", "Guy", "NCAA", "1", "6.0", "1", "8", "12.00", "2", "4", "0", "1.50", "1.00", "0", "0", "1"],
     );
-    expect(text).toContain(
-      "2026-03-14 at Georgia: PA 3, H 1, BB 0, K 0, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 0",
-    );
-    expect(text).toContain(
-      "2026-03-13 vs Georgia: IP 6.0, ER 1, K 8, K/9 12.0, BB 2, HA 4, HRA 0, ERA 1.50, WHIP 1.00, S 0, HLD 0, QS 1",
-    );
-    // The fielding row never renders standalone: game 6001 shows exactly the
-    // merged batting line plus the pitching line.
-    expect(text.match(/2026-03-13/g)).toHaveLength(2);
+    expect(text.split("\n").filter((l) => l.startsWith("C Guy"))).toHaveLength(2);
   });
 });

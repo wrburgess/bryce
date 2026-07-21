@@ -78,19 +78,6 @@ const slashLine: Column["value"] = (row) =>
     })
     .join("/");
 
-/**
- * PA from the source when present, else AB + BB + HBP. Carried over from the
- * fixed-format batting line this table replaces: every one of those is a summed
- * counter, so the fallback holds over an aggregate exactly as it did per game.
- * Without it a source that omits plateAppearances renders PA 0 beside populated
- * H and BB — visibly wrong rather than merely absent.
- */
-const plateAppearances: Column["value"] = (row) => {
-  const c = (key: string): number => row.agg.counters[key] ?? 0;
-  const pa = c("plateAppearances");
-  return String(pa > 0 ? pa : c("atBats") + c("baseOnBalls") + c("hitByPitch"));
-};
-
 const PLAYER_COLUMNS: Column[] = [
   { header: "Player", align: "left", value: (r) => abbreviate(r.player.fullName) },
   { header: "Lvl", align: "left", value: (r) => r.lvl },
@@ -125,7 +112,9 @@ function battingColumns(window: ResolvedWindow): Column[] {
   return [
     ...PLAYER_COLUMNS,
     ...leadColumns(window, "batting"),
-    { header: "PA", align: "right", value: plateAppearances },
+    // PA is a summed counter; assemble.ts derives it per game when the
+    // source omits it, so the fallback lives at the grain it is true at.
+    { header: "PA", align: "right", value: counter("plateAppearances") },
     { header: "H", align: "right", value: counter("hits") },
     { header: "BB", align: "right", value: counter("baseOnBalls") },
     { header: "K", align: "right", value: counter("strikeOuts") },

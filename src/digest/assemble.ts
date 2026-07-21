@@ -97,9 +97,11 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
       !splits.some((s) => s.player.id === p.id) && isInSeason(p, calendars, now(), tz),
   );
 
+  const batting = mergeFieldingIntoBatting(splits).map(withPlateAppearances);
+
   return {
     window,
-    batters: buildRows(mergeFieldingIntoBatting(splits), window, "batting", idlePlayers),
+    batters: buildRows(batting, window, "batting", idlePlayers),
     pitchers: buildRows(
       splits.filter((s) => s.line.statType === "pitching"),
       window,
@@ -144,6 +146,25 @@ function mergeFieldingIntoBatting(splits: Split[]): Split[] {
     batting.push(synthesized);
   }
   return batting;
+}
+
+/**
+ * PA from the source when present, else AB + BB + HBP — computed PER GAME,
+ * before aggregation. The fixed-format batting line carried this fallback at
+ * display time, where one game was one row; a window SUMS, so it has to happen
+ * at the grain the fallback is true at.
+ *
+ * Deriving it after summing would silently undercount a window whose games
+ * disagree: if even one game reports plateAppearances the sum is non-zero, the
+ * fallback never fires, and every game that omitted it contributes nothing.
+ */
+function withPlateAppearances(split: Split): Split {
+  if (numberOr0(split.stats.plateAppearances) > 0) return split;
+  const derived =
+    numberOr0(split.stats.atBats) +
+    numberOr0(split.stats.baseOnBalls) +
+    numberOr0(split.stats.hitByPitch);
+  return derived === 0 ? split : { ...split, stats: { ...split.stats, plateAppearances: derived } };
 }
 
 /**

@@ -3,6 +3,7 @@ import { digestDeliveries } from "../db/schema.js";
 import { assembleDigest } from "../digest/assemble.js";
 import { renderDigest, renderHeartbeat } from "../digest/render.js";
 import { hostDate, sleepWindow } from "../domain/season.js";
+import type { WindowSpec } from "../domain/window.js";
 import type { DeliveryKind } from "../db/schema.js";
 import type { LookupResult, MailReceipt, Mailer } from "../mailer/types.js";
 import type { Db } from "../db/client.js";
@@ -23,6 +24,8 @@ export interface DigestDeps {
   tz: string;
   to: string;
   from: string;
+  /** Which date window this run reports. */
+  spec: WindowSpec;
   /**
    * Operator override of the once-a-day / once-a-week bookkeeping (testing).
    * When force is what let the run proceed, the run is a REPLAY: it sends and
@@ -38,6 +41,13 @@ export interface DigestResult {
   reason: string | null;
   statLineCount: number;
   playerCount: number;
+  /**
+   * The resolved window label, or null when this run never assembled one — a
+   * heartbeat (which covers no window at all) or a digest that was refused
+   * before assembly. Reporting a label for a run that composed nothing would
+   * describe content that was never selected.
+   */
+  window: string | null;
 }
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -58,14 +68,19 @@ const RECONCILED = "reconciled-already-accepted";
 const FORCED = "forced";
 
 /**
- * The Digest (ADR 0030): report every Stat Line not yet reported by a previous
- * Digest — novelty-driven, no date windows — and send daily even when empty.
- * During Offseason Sleep (ADR 0031) a weekly heartbeat replaces it.
+ * The Digest: report every Stat Line in a DATE WINDOW, and send daily even when
+ * empty. During Offseason Sleep (ADR 0031) a weekly heartbeat replaces it.
+ *
+ * Selection is by window, not by novelty (superseding ADR 0030): the run
+ * consumes nothing and stamps nothing, so re-running a window is always safe
+ * and always reports the same content.
  *
  * Delivery runs claim -> assemble -> send -> settle (ADR 0034): the slot is
  * reserved durably BEFORE the provider is called, so two concurrent invocations
  * cannot both send, and a run that dies after acceptance leaves a `sending` row
- * whose lease heals it instead of a silently missing digest.
+ * whose lease heals it instead of a silently missing digest. The delivery slot
+ * is still keyed by the RUN's host date; the content covers the window ending
+ * the day before.
  *
  * `deps.force` is a testing affordance over the de-duplication bookkeeping. A
  * run that only proceeded BECAUSE of it is a replay: it sends and skips BOTH
@@ -95,6 +110,7 @@ export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
       reason: claim.reason,
       statLineCount: 0,
       playerCount: 0,
+      window: null,
     };
   }
 
@@ -121,23 +137,17 @@ export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
       reason: RECONCILED,
       statLineCount: 0,
       playerCount: 0,
+      window: null,
     };
   }
 
-  // Pure assembly (src/digest/assemble.ts): what this Digest would report.
-  // ONLY a replay widens the novelty predicate. An ordinary claim's row can
-  // never have lines stamped with it — settleSent is the sole writer of
-  // digest_delivery_id and a `sent` row is never re-claimed — so passing its id
-  // would add an OR branch that provably matches nothing, and would read as
-  // though an ordinary run might re-include reported lines when it cannot.
-  const includeDeliveryId = claim.replay ? claim.replayOfDeliveryId : null;
-  const assembly = await assembleDigest(db, { now, tz, includeDeliveryId });
-  const mail = renderDigest({
-    date: assembly.date,
-    lines: assembly.lines,
-    noNewStats: assembly.noNewStats,
-  });
-  const { reportedIds, playerCount } = assembly;
+  // Pure assembly (src/digest/assemble.ts): what this Digest reports. A replay
+  // assembles exactly what an ordinary run would — the window is the content,
+  // and it does not depend on what any previous delivery reported.
+  const assembly = await assembleDigest(db, { now, tz, spec: deps.spec });
+  const mail = renderDigest(assembly);
+  const { playerCount, statLineCount } = assembly;
+  const window = assembly.window.label;
 
   let receipt: MailReceipt;
   try {
@@ -146,8 +156,8 @@ export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
       { deliveryKey: deliveryKey("digest", today) },
     );
   } catch (err) {
-    // Send failed: settle the claim as failed, leave every line unmarked — the
-    // next run re-claims the slot, retries, and nothing is lost (ADR 0030).
+    // Send failed: settle the claim as failed. The next run re-claims the slot
+    // and retries the same window, which reports the same content.
     // A REPLAY holds no claim and settles nothing: settling one as `failed`
     // would wipe sent_at off a genuinely delivered digest.
     if (!claim.replay) {
@@ -155,29 +165,28 @@ export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
         deliveryId: claim.deliveryId,
         errorMessage: errorMessage(err),
         playerCount,
-        statLineCount: reportedIds.length,
+        statLineCount,
       });
     }
     return {
       kind: "digest",
       action: "failed",
       reason: errorMessage(err),
-      statLineCount: reportedIds.length,
+      statLineCount,
       playerCount,
+      window,
     };
   }
 
-  // Send succeeded: one transaction marks the delivery and every reported line.
-  // A REPLAY marks nothing — including any genuinely new line it happened to
-  // carry, which the next real digest therefore still reports.
+  // Send succeeded: record the delivery. No Stat Line is touched — a window
+  // consumes nothing, so there is no line state to write.
   if (!claim.replay) {
     settleSent(db, {
       deliveryId: claim.deliveryId,
       now: now(),
       playerCount,
-      statLineCount: reportedIds.length,
+      statLineCount,
       providerMessageId: receipt.providerMessageId,
-      reportedIds,
     });
   }
 
@@ -185,8 +194,9 @@ export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
     kind: "digest",
     action: "sent",
     reason: sendReason(deps.force === true, claim),
-    statLineCount: reportedIds.length,
+    statLineCount,
     playerCount,
+    window,
   };
 }
 
@@ -233,6 +243,7 @@ async function runHeartbeat(
       reason: claim.reason,
       statLineCount: 0,
       playerCount: watchedCount,
+      window: null,
     };
   }
 
@@ -245,6 +256,7 @@ async function runHeartbeat(
       reason: RECONCILED,
       statLineCount: 0,
       playerCount: watchedCount,
+      window: null,
     };
   }
 
@@ -271,6 +283,7 @@ async function runHeartbeat(
       reason: errorMessage(err),
       statLineCount: 0,
       playerCount: watchedCount,
+      window: null,
     };
   }
 
@@ -283,7 +296,6 @@ async function runHeartbeat(
       playerCount: watchedCount,
       statLineCount: 0,
       providerMessageId: receipt.providerMessageId,
-      reportedIds: [],
     });
   }
   return {
@@ -292,6 +304,7 @@ async function runHeartbeat(
     reason: sendReason(deps.force === true, claim),
     statLineCount: 0,
     playerCount: watchedCount,
+    window: null,
   };
 }
 

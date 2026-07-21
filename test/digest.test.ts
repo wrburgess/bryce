@@ -1,4 +1,4 @@
-import { isNull } from "drizzle-orm";
+import { isNotNull } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { openDb } from "../src/db/client.js";
@@ -25,6 +25,18 @@ import {
   testFileDb,
 } from "./factories.js";
 
+/**
+ * The cell values of the table row starting with `startsWith`, whitespace
+ * collapsed — asserts every column without depending on column padding, which
+ * shifts whenever a wider value shares the table.
+ */
+const cells = (text: string, startsWith: string): string[] =>
+  (text.split("\n").find((l) => l.startsWith(startsWith)) ?? "").trim().split(/\s+/);
+
+/** Lines carrying a delivery stamp. A window consumes nothing, so ALWAYS empty. */
+const stamped = (db: OpenedDb["db"]) =>
+  db.select().from(statLines).where(isNotNull(statLines.digestDeliveryId));
+
 describe("runDigest", () => {
   let opened: OpenedDb;
   let mailer: CapturingMailer;
@@ -37,6 +49,7 @@ describe("runDigest", () => {
     tz: TEST_TZ,
     to: "hc@example.com",
     from: "bryce@example.com",
+    spec: "1d",
   });
 
   beforeEach(async () => {
@@ -50,42 +63,48 @@ describe("runDigest", () => {
     opened.close();
   });
 
-  it("selects unreported lines, sends both parts with stat content, and marks them", async () => {
+  it("aggregates the window's lines, sends both parts with stat content, and stamps nothing", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameDate: "2026-07-18",
-      stats: { hits: 2, atBats: 4, homeRuns: 1, rbi: 3 },
+      stats: { plateAppearances: 4, atBats: 4, hits: 2, homeRuns: 1, rbi: 3, totalBases: 5 },
     });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameDate: "2026-07-17",
-      stats: { hits: 1, atBats: 5, strikeOuts: 2 },
+      stats: { plateAppearances: 5, atBats: 5, hits: 1, strikeOuts: 2, totalBases: 1 },
     });
 
-    const result = await runDigest(deps());
-    expect(result).toMatchObject({ kind: "digest", action: "sent", statLineCount: 2, playerCount: 1 });
+    // A 7d window ending on the last completed day covers 07-12..07-18.
+    const result = await runDigest({ ...deps(), spec: "7d" });
+    expect(result).toMatchObject({
+      kind: "digest",
+      action: "sent",
+      statLineCount: 2,
+      playerCount: 1,
+      window: "Last 7 Days (Jul 12-18)",
+    });
 
     expect(mailer.sent).toHaveLength(1);
     const mail = mailer.sent[0];
     expect(mail?.to).toBe("hc@example.com");
-    expect(mail?.subject).toBe("MLB Daily Tracker: Sun, July 19, 2026");
-    // Never assert only success: BOTH parts carry the actual stat content.
-    // Fixed-format lines (ADR 0033): every stat always shown, zeros included.
-    expect(mail?.text).toContain("Maximo Acosta");
-    expect(mail?.text).toContain(
-      "2026-07-18 vs Charlotte Knights: PA 4, H 2, BB 0, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0",
+    expect(mail?.subject).toBe("Bryce - Last 7 Days (Jul 12-18)");
+    // Never assert only success: BOTH parts carry the actual stat content, and
+    // the numbers are the WINDOW's — 3-for-9 with 6 total bases across two
+    // games, derived from summed counters rather than averaged per game.
+    expect(cells(mail?.text ?? "", "M Acosta")).toEqual(
+      ["M", "Acosta", "AAA", "2", ".333/.333/.667", "9", "3", "0", "2", "0", "0", "1", "3", "0", "0", "0", "0"],
     );
-    expect(mail?.text).toContain(
-      "2026-07-17 vs Charlotte Knights: PA 5, H 1, BB 0, K 2, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 0",
-    );
-    expect(mail?.html).toContain("Maximo Acosta");
-    expect(mail?.html).toContain("PA 4, H 2, BB 0, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0");
-    expect(mail?.html).toContain("<h2>MiLB - Triple-A</h2>");
+    expect(mail?.html).toContain("<td");
+    expect(mail?.html).toContain("M Acosta");
+    expect(mail?.html).toContain(".333/.333/.667");
+    // Level sections are gone: the level is a column now, because a window can
+    // span a promotion and a section heading could not say that.
+    expect(mail?.html).not.toContain("<h2>MiLB - Triple-A</h2>");
 
-    // Lines are marked with the delivery; the delivery row records the counts.
-    const unmarked = await opened.db.select().from(statLines).where(isNull(statLines.digestDeliveryId));
-    expect(unmarked).toHaveLength(0);
+    // The delivery row records the counts — and NOTHING is stamped, because a
+    // window consumes nothing.
     const deliveries = await opened.db.select().from(digestDeliveries);
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0]).toMatchObject({
@@ -95,8 +114,20 @@ describe("runDigest", () => {
       statLineCount: 2,
       playerCount: 1,
     });
-    const marked = await opened.db.select().from(statLines);
-    expect(marked.every((l) => l.digestDeliveryId === deliveries[0]?.id)).toBe(true);
+    expect(await stamped(opened.db)).toHaveLength(0);
+  });
+
+  it("re-running the same window sends the same content", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+
+    // The point of the redesign: under novelty selection the second run
+    // reported nothing, because the first had consumed the line.
+    const first = await runDigest({ ...deps(), spec: "7d", force: true });
+    const second = await runDigest({ ...deps(), spec: "7d", force: true });
+    expect(second.statLineCount).toBe(first.statLineCount);
+    expect(second.statLineCount).toBe(1);
+    expect(mailer.sent[1]?.text).toBe(mailer.sent[0]?.text);
   });
 
   it("a same-day re-run does not send a second digest", async () => {
@@ -109,41 +140,49 @@ describe("runDigest", () => {
     expect(mailer.sent).toHaveLength(1);
   });
 
-  it("sends the next-day digest even when empty, listing In Season players under No new stats", async () => {
+  it("sends the next day's digest even when the window is empty, as a zero row", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
-    await insertStatLine(opened.db, { playerId: player.id });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
     await runDigest(deps());
 
+    // 07-20's 1d window is 07-19, on which nobody played.
     clock.set("2026-07-20T17:00:00Z");
     const result = await runDigest(deps());
     expect(result.action).toBe("sent");
     expect(result.statLineCount).toBe(0);
     const mail = mailer.sent[1];
-    expect(mail?.subject).toBe("MLB Daily Tracker: Mon, July 20, 2026");
-    expect(mail?.text).toContain("No new stat lines today.");
-    expect(mail?.text).toContain("No new stats: Maximo Acosta");
-    expect(mail?.html).toContain("No new stats: Maximo Acosta");
+    expect(mail?.subject).toBe("Bryce - Jul 19");
+    // A GP 0 row says it better than the old "no new stats" tail.
+    expect(cells(mail?.text ?? "", "M Acosta")).toEqual(
+      ["M", "Acosta", "AAA", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0"],
+    );
+    expect(mail?.html).toContain("M Acosta");
   });
 
-  it("reports a late-arriving line the next day (novelty-driven, never lost)", async () => {
+  it("reports a line by its GAME date, so a late arrival lands in the window it belongs to", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
     await runDigest(deps());
 
-    // A late final from 07-17 lands after the 07-19 digest already went out.
+    // A late final from 07-17 lands after the 07-19 digest already went out. It
+    // is NOT carried forward: it belongs to 07-17, and a window that covers
+    // 07-17 reports it — which is what makes re-running one meaningful.
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameDate: "2026-07-17",
-      stats: { hits: 3, atBats: 4 },
+      stats: { plateAppearances: 4, atBats: 4, hits: 3 },
     });
     clock.set("2026-07-20T17:00:00Z");
-    const result = await runDigest(deps());
-    expect(result.action).toBe("sent");
-    expect(result.statLineCount).toBe(1);
-    expect(mailer.sent[1]?.text).toContain("2026-07-17 vs Charlotte Knights: PA 4, H 3,");
+    const nextDay = await runDigest(deps());
+    expect(nextDay.statLineCount).toBe(0); // 1d window is 07-19: nothing there
+
+    clock.set("2026-07-21T17:00:00Z");
+    const wide = await runDigest({ ...deps(), spec: "7d" });
+    expect(wide.statLineCount).toBe(2);
+    expect(cells(mailer.sent[2]?.text ?? "", "M Acosta")[5]).toBe("8"); // PA 4 + 4
   });
 
-  it("groups MLB before MiLB, with MiLB subgrouped by MiLB Level", async () => {
+  it("orders rows by the level ladder and labels each with the level the GAME was played at", async () => {
     const mlb = await insertPlayer(opened.db, {
       fullName: "Paul Skenes",
       level: "mlb",
@@ -167,20 +206,20 @@ describe("runDigest", () => {
 
     await runDigest(deps());
     const text = mailer.sent[0]?.text ?? "";
-    const mlbAt = text.indexOf("MLB");
-    const aaaAt = text.indexOf("MiLB - Triple-A");
-    const aaAt = text.indexOf("MiLB - Double-A");
-    expect(mlbAt).toBeGreaterThanOrEqual(0);
-    expect(aaaAt).toBeGreaterThan(mlbAt);
-    expect(aaAt).toBeGreaterThan(aaaAt);
-    expect(text).toContain(
-      "IP 6.0, ER 1, K 8, K/9 12.0, BB 2, HA 4, HRA 0, ERA 1.50, WHIP 1.00, S 0, HLD 0, QS 1",
+    // Batters, top of the ladder first; no level SECTIONS, just a Lvl column.
+    expect(text).not.toContain("MiLB - Triple-A");
+    expect(text.indexOf("M Acosta")).toBeLessThan(text.indexOf("D Guy"));
+    expect(cells(text, "M Acosta")[2]).toBe("AAA");
+    expect(cells(text, "D Guy")[2]).toBe("AA");
+    // The pitcher's whole row, including the derived single-game rates.
+    expect(cells(text, "P Skenes")).toEqual(
+      ["P", "Skenes", "MLB", "6.0", "1", "8", "12.00", "2", "4", "0", "1.50", "1.00", "0", "0", "1"],
     );
     const html = mailer.sent[0]?.html ?? "";
-    expect(html.indexOf("<h2>MLB</h2>")).toBeLessThan(html.indexOf("<h2>MiLB - Triple-A</h2>"));
+    expect(html.indexOf("<h2>Batters</h2>")).toBeLessThan(html.indexOf("<h2>Pitchers</h2>"));
   });
 
-  it("groups MLB then MiLB then NCAA, labeling NCAA players with their school", async () => {
+  it("places an NCAA row last on the ladder", async () => {
     const mlb = await insertPlayer(opened.db, {
       fullName: "Paul Skenes",
       level: "mlb",
@@ -213,20 +252,14 @@ describe("runDigest", () => {
 
     await runDigest(deps());
     const text = mailer.sent[0]?.text ?? "";
-    const mlbAt = text.indexOf("MLB");
-    const aaaAt = text.indexOf("MiLB - Triple-A");
-    const ncaaAt = text.indexOf("NCAA");
-    expect(mlbAt).toBeGreaterThanOrEqual(0);
-    expect(aaaAt).toBeGreaterThan(mlbAt);
-    expect(ncaaAt).toBeGreaterThan(aaaAt);
-    // NCAA players are labeled with their school where a team would appear.
-    expect(text).toContain("College Guy (LSU)");
-    const html = mailer.sent[0]?.html ?? "";
-    expect(html).toContain("<h2>NCAA</h2>");
-    expect(html).toContain("College Guy (LSU)");
+    expect(cells(text, "M Acosta")[2]).toBe("AAA");
+    expect(cells(text, "C Guy")[2]).toBe("NCAA");
+    // NCAA is the bottom of the ladder, below every MiLB level.
+    expect(text.indexOf("M Acosta")).toBeLessThan(text.indexOf("C Guy"));
+    expect(mailer.sent[0]?.html).toContain("C Guy");
   });
 
-  it("omits an out-of-season player entirely from the No new stats tail", async () => {
+  it("omits an out-of-season player entirely from the zero rows", async () => {
     // AAA season ended 2026-09-27; MLB runs to 10-31.
     clock.set("2026-10-01T17:00:00Z");
     await insertPlayer(opened.db, { fullName: "Out Of Season Guy" }); // AAA, no lines
@@ -240,33 +273,45 @@ describe("runDigest", () => {
     const result = await runDigest(deps());
     expect(result.action).toBe("sent");
     const text = mailer.sent[0]?.text ?? "";
-    expect(text).toContain("No new stats: Still Playing");
-    expect(text).not.toContain("Out Of Season Guy");
+    expect(text).toContain("S Playing");
+    expect(text).not.toContain("Season Guy");
   });
 
-  it("labels doubleheader games Game 1 / Game 2 (presentation only)", async () => {
+  it("renders a doubleheader as two Gm rows in a 1d window and folds it in a 7d one", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameId: 880001,
-      gameDate: "2026-06-01",
+      gameDate: "2026-07-18",
       gameNumber: 1,
-      stats: { hits: 1, atBats: 3 },
+      stats: { plateAppearances: 3, atBats: 3, hits: 1, totalBases: 1 },
     });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameId: 880002,
-      gameDate: "2026-06-01",
+      gameDate: "2026-07-18",
       gameNumber: 2,
-      stats: { hits: 2, atBats: 4 },
+      stats: { plateAppearances: 4, atBats: 4, hits: 2, totalBases: 3 },
     });
+
     await runDigest(deps());
-    const text = mailer.sent[0]?.text ?? "";
-    expect(text).toContain("(Game 1): PA 3, H 1,");
-    expect(text).toContain("(Game 2): PA 4, H 2,");
+    const oneDay = mailer.sent[0]?.text ?? "";
+    // Two rows, told apart by Gm — there is no opponent column to do it.
+    expect(oneDay.split("\n").filter((l) => l.startsWith("M Acosta"))).toHaveLength(2);
+    expect(oneDay).toMatch(/Player\s+Lvl\s+Gm\s+PA/);
+    const rows = oneDay.split("\n").filter((l) => l.startsWith("M Acosta"));
+    expect(rows[0]?.trim().split(/\s+/).slice(2, 6)).toEqual(["AAA", "1", "3", "1"]);
+    expect(rows[1]?.trim().split(/\s+/).slice(2, 6)).toEqual(["AAA", "2", "4", "2"]);
+
+    // The same day inside a 7d window is one row of two games, no Gm column.
+    const week = await runDigest({ ...deps(), spec: "7d", force: true });
+    expect(week.statLineCount).toBe(2);
+    const weekText = mailer.sent[1]?.text ?? "";
+    expect(weekText.split("\n").filter((l) => l.startsWith("M Acosta"))).toHaveLength(1);
+    expect(cells(weekText, "M Acosta").slice(2, 6)).toEqual(["AAA", "2", ".429/.429/.571", "7"]);
   });
 
-  it("does not label a single game, and a two-way player keeps separate batting and pitching lines", async () => {
+  it("gives a two-way player a row in each table, and leaves Gm blank for one game", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Two Way" });
     await insertStatLine(opened.db, { playerId: player.id, gameId: 880001, statType: "batting" });
     await insertStatLine(opened.db, {
@@ -277,11 +322,13 @@ describe("runDigest", () => {
     });
     await runDigest(deps());
     const text = mailer.sent[0]?.text ?? "";
-    expect(text).not.toContain("(Game");
-    // Both roles render, each in its own fixed format (ADR 0033).
-    expect(text).toContain("PA 4, H 2, BB 0, K 1, 2B 0, 3B 0, HR 1, RBI 3, R 1, SB 0, CS 0, E 0");
-    expect(text).toContain(
-      "IP 5.0, ER 2, K 6, K/9 10.8, BB 1, HA 3, HRA 0, ERA 3.60, WHIP 0.80, S 0, HLD 0, QS 0",
+    // One game apiece, so no Gm value on either row: the third cell is PA / IP.
+    expect(cells(text, "T Way")).toEqual(
+      ["T", "Way", "AAA", "4", "2", "0", "1", "0", "0", "1", "3", "1", "0", "0", "0"],
+    );
+    const pitchingRow = text.slice(text.indexOf("Pitchers"));
+    expect(cells(pitchingRow, "T Way")).toEqual(
+      ["T", "Way", "AAA", "5.0", "2", "6", "10.80", "1", "3", "0", "3.60", "0.80", "0", "0", "0"],
     );
   });
 
@@ -304,18 +351,18 @@ describe("runDigest", () => {
 
     const result = await runDigest(deps());
     const text = mailer.sent[0]?.text ?? "";
-    expect(text).toContain(
-      "2026-07-18 vs Charlotte Knights: PA 4, H 1, BB 0, K 2, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 2",
+    // One row, carrying the batting line with E merged in — never a third table.
+    expect(text.split("\n").filter((l) => l.startsWith("E Prone"))).toHaveLength(1);
+    expect(cells(text, "E Prone")).toEqual(
+      ["E", "Prone", "AAA", "4", "1", "0", "2", "0", "0", "0", "0", "0", "0", "0", "2"],
     );
-    // Exactly ONE rendered line for the game — the fielding row never stands alone.
-    expect(text.match(/2026-07-18 vs Charlotte Knights/g)).toHaveLength(1);
-    // Both stored rows (batting + fielding) are marked reported.
+    expect(text).not.toContain("Fielders");
+    // Both stored rows are in the window's count; neither is stamped.
     expect(result.statLineCount).toBe(2);
-    const unmarked = await opened.db.select().from(statLines).where(isNull(statLines.digestDeliveryId));
-    expect(unmarked).toHaveLength(0);
+    expect(await stamped(opened.db)).toHaveLength(0);
   });
 
-  it("renders a fielding-only game as a zeros batting line with E, and marks the fielding row", async () => {
+  it("renders a fielding-only game as a zeros batting row carrying only E", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Defensive Sub" });
     await insertStatLine(opened.db, {
       playerId: player.id,
@@ -327,17 +374,14 @@ describe("runDigest", () => {
 
     const result = await runDigest(deps());
     const text = mailer.sent[0]?.text ?? "";
-    expect(text).toContain("Defensive Sub");
-    expect(text).toContain(
-      "2026-07-18 vs Charlotte Knights: PA 0, H 0, BB 0, K 0, 2B 0, 3B 0, HR 0, RBI 0, R 0, SB 0, CS 0, E 1",
+    expect(cells(text, "D Sub")).toEqual(
+      ["D", "Sub", "AAA", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "1"],
     );
     expect(result.statLineCount).toBe(1);
-    // No unreported fielding rows remain after the digest runs.
-    const unmarked = await opened.db.select().from(statLines).where(isNull(statLines.digestDeliveryId));
-    expect(unmarked).toHaveLength(0);
+    expect(await stamped(opened.db)).toHaveLength(0);
   });
 
-  it("on send failure records a failed delivery, leaves lines unmarked, and the retry succeeds", async () => {
+  it("on send failure records a failed delivery, and the retry sends the same window", async () => {
     const player = await insertPlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     mailer.failWith = new Error("postmark down");
@@ -349,10 +393,9 @@ describe("runDigest", () => {
     const deliveries = await opened.db.select().from(digestDeliveries);
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0]).toMatchObject({ status: "failed", errorMessage: "postmark down" });
-    const unmarked = await opened.db.select().from(statLines).where(isNull(statLines.digestDeliveryId));
-    expect(unmarked).toHaveLength(1);
 
-    // Same-day retry after the outage: sends and marks.
+    // Same-day retry after the outage: re-claims the slot and sends the SAME
+    // window, because a failed send consumed nothing there was to consume.
     mailer.failWith = null;
     const retried = await runDigest(deps());
     expect(retried.action).toBe("sent");
@@ -360,11 +403,7 @@ describe("runDigest", () => {
     const after = await opened.db.select().from(digestDeliveries);
     expect(after).toHaveLength(1); // the failed row was upgraded, not duplicated
     expect(after[0]?.status).toBe("sent");
-    const stillUnmarked = await opened.db
-      .select()
-      .from(statLines)
-      .where(isNull(statLines.digestDeliveryId));
-    expect(stillUnmarked).toHaveLength(0);
+    expect(await stamped(opened.db)).toHaveLength(0);
   });
 
   it("excludes deactivated players' lines from the digest", async () => {
@@ -376,8 +415,8 @@ describe("runDigest", () => {
     const result = await runDigest(deps());
     expect(result.statLineCount).toBe(1);
     const text = mailer.sent[0]?.text ?? "";
-    expect(text).toContain("Active Guy");
-    expect(text).not.toContain("Deactivated Guy");
+    expect(text).toContain("A Guy");
+    expect(text).not.toContain("D Guy");
   });
 });
 
@@ -393,6 +432,7 @@ describe("runDigest heartbeat (Offseason Sleep, ADR 0031)", () => {
     tz: TEST_TZ,
     to: "hc@example.com",
     from: "bryce@example.com",
+    spec: "1d",
   });
 
   beforeEach(async () => {
@@ -493,6 +533,7 @@ describe("delivery claim under concurrency (ADR 0034)", () => {
     tz: TEST_TZ,
     to: "hc@example.com",
     from: "bryce@example.com",
+    spec: "1d",
   });
 
   beforeEach(async () => {
@@ -526,9 +567,8 @@ describe("delivery claim under concurrency (ADR 0034)", () => {
     const deliveries = await opened.db.select().from(digestDeliveries);
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0]).toMatchObject({ status: "sent", attemptCount: 1, statLineCount: 2 });
-    // Every line marked, and marked by the ONE delivery that actually sent.
-    const lines = await opened.db.select().from(statLines);
-    expect(lines.every((l) => l.digestDeliveryId === deliveries[0]?.id)).toBe(true);
+    // Neither run stamped anything: there is no line state to race over.
+    expect(await stamped(opened.db)).toHaveLength(0);
   });
 
   it("lets only one of two truly interleaved invocations reach the provider", async () => {
@@ -553,11 +593,7 @@ describe("delivery claim under concurrency (ADR 0034)", () => {
     const deliveries = await opened.db.select().from(digestDeliveries);
     expect(deliveries).toHaveLength(1); // no duplicate row
     expect(deliveries[0]?.status).toBe("sent");
-    const unmarked = await opened.db
-      .select()
-      .from(statLines)
-      .where(isNull(statLines.digestDeliveryId));
-    expect(unmarked).toHaveLength(0);
+    expect(await stamped(opened.db)).toHaveLength(0);
   });
 
   it("excludes across two connections to one database file (launchd CLI vs the server)", async () => {
@@ -576,6 +612,7 @@ describe("delivery claim under concurrency (ADR 0034)", () => {
       tz: TEST_TZ,
       to: "hc@example.com",
       from: "bryce@example.com",
+      spec: "1d" as const,
     };
     try {
       await insertCalendars2026(file.opened.db);
@@ -662,11 +699,12 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
     tz: TEST_TZ,
     to: "hc@example.com",
     from: "bryce@example.com",
+    spec: "1d",
   });
 
   const deliveries = () => opened.db.select().from(digestDeliveries);
-  const unmarkedLines = () =>
-    opened.db.select().from(statLines).where(isNull(statLines.digestDeliveryId));
+  /** Lines carrying a delivery stamp: ALWAYS empty, at every delivery outcome. */
+  const stampedLines = () => stamped(opened.db);
 
   beforeEach(async () => {
     opened = testDb();
@@ -695,7 +733,7 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
     expect(result.action).toBe("skipped");
     expect(result.reason).toBe("claimed-by-another-run");
     expect(mailer.sent).toHaveLength(0);
-    expect(await unmarkedLines()).toHaveLength(1);
+    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("re-sends the duplicate when a run dies after acceptance and before the settle", async () => {
@@ -710,7 +748,7 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
     const stuck = await deliveries();
     expect(stuck).toHaveLength(1);
     expect(stuck[0]).toMatchObject({ status: "sending", sentAt: null, attemptCount: 1 });
-    expect(await unmarkedLines()).toHaveLength(1);
+    expect(await stampedLines()).toHaveLength(0);
 
     // Past the lease, the slot heals — and the healing RE-SENDS. This second
     // mail is the documented at-least-once limitation, asserted rather than
@@ -727,57 +765,33 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
       attemptCount: 2,
       sentAt: "2026-07-19T17:11:00.000Z",
     });
-    expect(await unmarkedLines()).toHaveLength(0);
+    expect(await stampedLines()).toHaveLength(0);
   });
 
-  it("rolls the whole settle back when the process dies after the delivery update", async () => {
-    const player = await insertPlayer(opened.db);
-    await insertStatLine(opened.db, { playerId: player.id });
-
-    const crashed = runDigest({
-      ...deps(),
-      db: faultingDb(opened.db, { failAt: "after-delivery-update" }),
-    });
-    // The message pins WHERE the fault fired: between the two statements.
-    await expect(crashed).rejects.toThrow(/after the delivery update/);
-
-    expect(mailer.sent).toHaveLength(1);
-    // The delivery update is GONE — SQLite rolled the transaction back, so
-    // there is never a "sent" delivery whose lines went unmarked.
-    const stuck = await deliveries();
-    expect(stuck[0]).toMatchObject({ status: "sending", sentAt: null });
-    expect(await unmarkedLines()).toHaveLength(1);
-
-    clock.set(PAST_LEASE);
-    const healed = await runDigest(deps());
-    expect(healed).toMatchObject({ action: "sent", reason: "recovered-stale-claim" });
-    expect((await deliveries())[0]).toMatchObject({ status: "sent", attemptCount: 2 });
-    expect(await unmarkedLines()).toHaveLength(0);
-  });
-
-  it("rolls the whole settle back when the process dies while marking Stat Lines", async () => {
+  it("rolls the settle back when the process dies inside it, before COMMIT", async () => {
     const player = await insertPlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     await insertStatLine(opened.db, { playerId: player.id });
 
-    const crashed = runDigest({
-      ...deps(),
-      db: faultingDb(opened.db, { failAt: "after-line-update" }),
-    });
-    // Fires only after BOTH statements ran — the second fault point, not the first.
-    await expect(crashed).rejects.toThrow(/after marking stat lines, before COMMIT/);
+    const crashed = runDigest({ ...deps(), db: faultingDb(opened.db, { failAt: "in-settle" }) });
+    // The message pins WHERE the fault fired: the statement ran, COMMIT did not.
+    await expect(crashed).rejects.toThrow(/inside the settle, before COMMIT/);
 
     expect(mailer.sent).toHaveLength(1);
-    // Both statements ran, then the process died before COMMIT: neither lands.
+    // The delivery update is GONE — SQLite rolled the transaction back, so the
+    // slot is left claimed rather than half-settled, and the lease heals it.
     const stuck = await deliveries();
     expect(stuck[0]).toMatchObject({ status: "sending", sentAt: null });
-    expect(await unmarkedLines()).toHaveLength(2);
 
     clock.set(PAST_LEASE);
     const healed = await runDigest(deps());
-    expect(healed).toMatchObject({ action: "sent", statLineCount: 2 });
-    expect((await deliveries())[0]).toMatchObject({ status: "sent", statLineCount: 2 });
-    expect(await unmarkedLines()).toHaveLength(0);
+    expect(healed).toMatchObject({ action: "sent", statLineCount: 2, reason: "recovered-stale-claim" });
+    expect((await deliveries())[0]).toMatchObject({
+      status: "sent",
+      attemptCount: 2,
+      statLineCount: 2,
+    });
+    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("reclaims a sending row older than the lease and bumps the attempt count", async () => {
@@ -799,7 +813,7 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
     const rows = await deliveries();
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ status: "sent", attemptCount: 2, statLineCount: 1 });
-    expect(await unmarkedLines()).toHaveLength(0);
+    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("clears the previous attempt's error and provider id when re-claiming a slot", async () => {
@@ -961,11 +975,12 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     tz: TEST_TZ,
     to: "hc@example.com",
     from: "bryce@example.com",
+    spec: "1d",
   });
 
   const deliveries = () => opened.db.select().from(digestDeliveries);
-  const unmarkedLines = () =>
-    opened.db.select().from(statLines).where(isNull(statLines.digestDeliveryId));
+  /** Lines carrying a delivery stamp: ALWAYS empty, at every delivery outcome. */
+  const stampedLines = () => stamped(opened.db);
 
   /** Crash a digest run between provider acceptance and the settle commit. */
   async function crashAfterAcceptance(): Promise<void> {
@@ -1022,7 +1037,7 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     // ZERO Stat Lines marked. The crashed attempt emailed a set of lines we
     // never recorded; marking TODAY's assembly would report lines that may
     // never have been sent (Refresh can run in between) — silent content loss.
-    expect(await unmarkedLines()).toHaveLength(1);
+    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("re-sends when the provider reports the delivery key as not found", async () => {
@@ -1043,7 +1058,7 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
       statLineCount: 1,
       reconciledAt: null,
     });
-    expect(await unmarkedLines()).toHaveLength(0);
+    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("re-sends when the lookup is unavailable — a failed lookup never suppresses", async () => {
@@ -1058,7 +1073,7 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     expect(healed).toMatchObject({ action: "sent", reason: "recovered-stale-claim", statLineCount: 1 });
     expect(mailer.sent).toHaveLength(2);
     expect((await deliveries())[0]).toMatchObject({ status: "sent", reconciledAt: null });
-    expect(await unmarkedLines()).toHaveLength(0);
+    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("re-sends without any lookup for a provider that cannot answer one (SMTP/console)", async () => {
@@ -1102,18 +1117,19 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     expect(mailer.lookups).toHaveLength(1); // it was asked, and it blew up
     expect(mailer.sent).toHaveLength(2); // and we re-sent anyway
     expect((await deliveries())[0]).toMatchObject({ status: "sent", reconciledAt: null });
-    expect(await unmarkedLines()).toHaveLength(0);
+    expect(await stampedLines()).toHaveLength(0);
   });
 
-  it("CONTENT-LOSS GUARD: the crashed attempt's lines go out in the NEXT digest", async () => {
-    // This is the assertion that makes "mark nothing" safe rather than lossy.
-    // The reconciled delivery reports nothing, so every line stays unreported
-    // and the next digest carries it: content is DUPLICATED, never lost.
+  it("CONTENT-LOSS GUARD: the reconciled window's content is still reachable after", async () => {
+    // A reconciled delivery composed nothing and recorded nothing. Under window
+    // selection its content cannot be lost by construction — the window is a
+    // date range over stored lines, so re-asking for it returns it. This pins
+    // that the reconciliation path leaves no state that could hide it.
     const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameDate: "2026-07-18",
-      stats: { hits: 2, atBats: 4, homeRuns: 1, rbi: 3 },
+      stats: { plateAppearances: 4, atBats: 4, hits: 2, homeRuns: 1, rbi: 3, totalBases: 5 },
     });
     await crashAfterAcceptance();
 
@@ -1121,19 +1137,18 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     clock.set(PAST_LEASE);
     expect((await runDigest(deps())).reason).toBe("reconciled-already-accepted");
     expect(mailer.sent).toHaveLength(1);
-    expect(await unmarkedLines()).toHaveLength(1);
+    expect(await stampedLines()).toHaveLength(0);
 
-    // Next day: a fresh slot, an ordinary send — and it carries the line the
-    // reconciled delivery deliberately left unmarked.
+    // Next day: a fresh slot, an ordinary send over a window that still covers
+    // 07-18 — and it carries the line the reconciled delivery never recorded.
     clock.set("2026-07-20T17:00:00Z");
-    const nextDay = await runDigest(deps());
+    const nextDay = await runDigest({ ...deps(), spec: "7d" });
     expect(nextDay).toMatchObject({ action: "sent", statLineCount: 1 });
     expect(mailer.sent).toHaveLength(2);
-    expect(mailer.sent[1]?.text).toContain("Maximo Acosta");
-    expect(mailer.sent[1]?.text).toContain(
-      "2026-07-18 vs Charlotte Knights: PA 4, H 2, BB 0, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0",
+    expect(cells(mailer.sent[1]?.text ?? "", "M Acosta")).toEqual(
+      ["M", "Acosta", "AAA", "1", ".500/.500/1.250", "4", "2", "0", "0", "0", "0", "1", "3", "0", "0", "0", "0"],
     );
-    expect(await unmarkedLines()).toHaveLength(0);
+    expect(await stampedLines()).toHaveLength(0);
   });
 
   it("never looks up on a fresh claim or a failed-row retry", async () => {
@@ -1300,12 +1315,13 @@ describe("forced delivery", () => {
     tz: TEST_TZ,
     to: "hc@example.com",
     from: "bryce@example.com",
+    spec: "1d",
     force,
   });
 
   const deliveries = () => opened.db.select().from(digestDeliveries);
-  const unmarkedLines = () =>
-    opened.db.select().from(statLines).where(isNull(statLines.digestDeliveryId));
+  /** Lines carrying a delivery stamp: ALWAYS empty, at every delivery outcome. */
+  const stampedLines = () => stamped(opened.db);
 
   beforeEach(async () => {
     opened = testDb();
@@ -1339,11 +1355,12 @@ describe("forced delivery", () => {
       now: new Date(MID_SEASON),
       force: true,
     });
-    // A replay, carrying the id of the delivery it REPLAYS so assembly can
-    // re-include the lines that delivery already reported — but holding NO
-    // claim to settle. The field is deliberately not called `deliveryId`: a
-    // settle cannot be reached from this arm even after a null check.
-    expect(claim).toEqual({ claimed: true, replay: true, replayOfDeliveryId: row.id });
+    // A replay holds NO claim to settle, and carries no delivery id at all —
+    // a settle cannot be reached from this arm even after a null check. It once
+    // carried the replayed delivery's id so assembly could re-include that
+    // delivery's lines; a window stamps nothing, so there is nothing to widen.
+    expect(claim).toEqual({ claimed: true, replay: true });
+    expect(row.id).toBeGreaterThan(0);
 
     // Every field: status, sentAt, counts, providerMessageId, attemptCount.
     const after = await deliveries();
@@ -1455,11 +1472,9 @@ describe("forced delivery", () => {
     expect(forced).toMatchObject({ action: "sent", statLineCount: 1, playerCount: 1 });
     expect(mailer.sent).toHaveLength(2);
 
-    // The CONTENT is the point: a replay that assembled "no new stats" would
-    // still report action=sent while being useless as a test send.
-    expect(mailer.sent[1]?.text).toContain(
-      "2026-07-18 vs Charlotte Knights: PA 4, H 2, BB 0, K 0, 2B 0, 3B 0, HR 1, RBI 3, R 0, SB 0, CS 0, E 0",
-    );
+    // The CONTENT is the point: a replay that assembled an empty report would
+    // still say action=sent while being useless as a test send.
+    expect(cells(mailer.sent[1]?.text ?? "", "M Acosta")[4]).toBe("2"); // H
     expect(mailer.sent[1]?.text).toBe(mailer.sent[0]?.text);
     expect(mailer.sent[1]?.html).toBe(mailer.sent[0]?.html);
     expect(mailer.sent[1]?.subject).toBe(mailer.sent[0]?.subject);
@@ -1485,7 +1500,7 @@ describe("forced delivery", () => {
     expect((await deliveries())[0]).toMatchObject({ status: "sent", attemptCount: 2 });
   });
 
-  it("leaves the delivery row and the stamped lines exactly as the real send left them", async () => {
+  it("leaves the delivery row exactly as the real send left it", async () => {
     mailer.providerMessageId = "postmark-first";
     const player = await insertPlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
@@ -1503,42 +1518,42 @@ describe("forced delivery", () => {
     const after = await deliveries();
     expect(after).toHaveLength(1);
     expect(after[0]).toEqual(before); // id, status, sentAt, counts, provider id
-    const lines = await opened.db.select().from(statLines);
-    expect(lines.every((l) => l.digestDeliveryId === before?.id)).toBe(true);
+    expect(await stampedLines()).toHaveLength(0);
   });
 
-  it("includes genuinely new lines but leaves them UNSTAMPED for the next real digest", async () => {
+  it("picks up a line that arrived after the real send, and consumes nothing", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameDate: "2026-07-18",
-      stats: { hits: 2, atBats: 4 },
+      stats: { plateAppearances: 4, atBats: 4, hits: 2 },
     });
     await runDigest(deps());
+    expect(cells(mailer.sent[0]?.text ?? "", "M Acosta")[3]).toBe("4"); // PA, 1d window
 
-    // A line that arrived AFTER the real send: never reported to anyone yet.
-    const fresh = await insertStatLine(opened.db, {
+    // A late final for the SAME date, landing after the real send went out.
+    await insertStatLine(opened.db, {
       playerId: player.id,
-      gameDate: "2026-07-19",
-      stats: { hits: 3, atBats: 5 },
+      gameId: 870009,
+      gameNumber: 2,
+      gameDate: "2026-07-18",
+      stats: { plateAppearances: 5, atBats: 5, hits: 3 },
     });
 
+    // A replay re-reads the window, so it carries both games — no novelty
+    // predicate to widen, and nothing about the first send to work around.
     const forced = await runDigest(deps(true));
     expect(forced).toMatchObject({ action: "sent", statLineCount: 2 });
-    expect(mailer.sent[1]?.text).toContain("2026-07-18 vs Charlotte Knights: PA 4, H 2,");
-    expect(mailer.sent[1]?.text).toContain("2026-07-19 vs Charlotte Knights: PA 5, H 3,");
+    const rows = (mailer.sent[1]?.text ?? "").split("\n").filter((l) => l.startsWith("M Acosta"));
+    expect(rows).toHaveLength(2);
 
-    // A test send consumes nothing: the new line is still unreported.
-    const unmarked = await unmarkedLines();
-    expect(unmarked).toHaveLength(1);
-    expect(unmarked[0]?.id).toBe(fresh.id);
-
-    // ...so the next SCHEDULED digest still reports it.
-    clock.set("2026-07-20T17:00:00Z");
-    const next = await runDigest(deps());
-    expect(next).toMatchObject({ action: "sent", statLineCount: 1 });
-    expect(mailer.sent[2]?.text).toContain("2026-07-19 vs Charlotte Knights: PA 5, H 3,");
-    expect(await unmarkedLines()).toHaveLength(0);
+    // A test send consumes nothing, so the next SCHEDULED run over the same
+    // window would report exactly the same thing.
+    expect(await stampedLines()).toHaveLength(0);
+    clock.set("2026-07-19T18:30:00Z");
+    const next = await runDigest(deps(true));
+    expect(next).toMatchObject({ action: "sent", statLineCount: 2 });
+    expect(mailer.sent[2]?.text).toBe(mailer.sent[1]?.text);
   });
 
   it("DATA LOSS: a forced send whose mailer throws leaves the delivered row sent", async () => {
@@ -1568,7 +1583,7 @@ describe("forced delivery", () => {
       providerMessageId: "postmark-first",
       errorMessage: null,
     });
-    expect(await unmarkedLines()).toHaveLength(0);
+    expect(await stampedLines()).toHaveLength(0);
 
     // And the day is still closed: the next scheduled run does not "retry".
     mailer.failWith = null;
@@ -1684,17 +1699,20 @@ describe("forced delivery", () => {
     expect(await deliveries()).toEqual(before);
   });
 
-  it("replays a heartbeat with a NULL id when the refusal is about another slot", async () => {
-    // The replay's id is documented as the delivery whose lines it re-includes,
-    // so it must never be a row that reported none. The rolling rule reads the
-    // latest `sent` heartbeat of ANY date, so it can refuse while THIS slot's
-    // row is `failed` — an unrelated row whose id would widen the novelty
-    // predicate by an id no Stat Line carries.
-    const failedToday = await insertDelivery(opened.db, {
+  /**
+   * A precondition refusal turned into a replay writes nothing, whatever this
+   * slot's own row happens to be. The rolling rule reads the latest `sent`
+   * heartbeat of ANY date, so it can refuse while this slot's row is `failed`,
+   * or absent entirely — none of which the replay is allowed to touch.
+   */
+  it.each([
+    ["a failed row for this slot", { status: "failed" as const, errorMessage: "postmark down" }],
+    ["a sent row for this slot", { status: "sent" as const, sentAt: OFFSEASON }],
+  ])("replays a refused heartbeat and writes nothing, given %s", async (_label, overrides) => {
+    const existing = await insertDelivery(opened.db, {
       kind: "heartbeat",
       dateCovered: "2026-12-05",
-      status: "failed",
-      errorMessage: "postmark down",
+      ...overrides,
     });
 
     expect(
@@ -1705,30 +1723,9 @@ describe("forced delivery", () => {
         force: true,
         precondition: () => "heartbeat-sent-within-week",
       }),
-    ).toEqual({ claimed: true, replay: true, replayOfDeliveryId: null });
+    ).toEqual({ claimed: true, replay: true });
 
-    // And the replay wrote nothing on this path either.
-    expect(await deliveries()).toEqual([failedToday]);
-  });
-
-  it("replays a heartbeat with the slot's id when that slot is already sent", async () => {
-    const sentToday = await insertDelivery(opened.db, {
-      kind: "heartbeat",
-      dateCovered: "2026-12-05",
-      status: "sent",
-      sentAt: OFFSEASON,
-    });
-
-    expect(
-      claimDelivery(opened.db, {
-        kind: "heartbeat",
-        dateCovered: "2026-12-05",
-        now: new Date(OFFSEASON),
-        force: true,
-        precondition: () => "heartbeat-sent-within-week",
-      }),
-    ).toEqual({ claimed: true, replay: true, replayOfDeliveryId: sentToday.id });
-    expect(await deliveries()).toEqual([sentToday]);
+    expect(await deliveries()).toEqual([existing]);
   });
 
   it("sends a heartbeat when forced inside the seven-day window", async () => {
@@ -1799,7 +1796,7 @@ describe("forced delivery", () => {
     // No digest slot was taken, and the stat line is untouched.
     const rows = await deliveries();
     expect(rows.every((r) => r.kind === "heartbeat")).toBe(true);
-    expect(await unmarkedLines()).toHaveLength(1);
+    expect(await stampedLines()).toHaveLength(0);
   });
 });
 
@@ -1819,6 +1816,7 @@ describe("digest respects host-timezone dates", () => {
       tz: TEST_TZ,
       to: "hc@example.com",
       from: "bryce@example.com",
+      spec: "1d",
     });
     const deliveries = await opened.db.select().from(digestDeliveries);
     expect(deliveries[0]?.dateCovered).toBe("2026-07-19");

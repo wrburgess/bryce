@@ -94,7 +94,10 @@ describe("renderDigest — tables", () => {
 
   it("leaves Gm blank for a player who played once in a 1d window", () => {
     const mail = renderDigest(
-      assemblyWith({ spec: "1d", batters: [row("Bryce Harper", "batting", [{ atBats: 4 }])] }),
+      assemblyWith({
+        spec: "1d",
+        batters: [row("Bryce Harper", "batting", [{ atBats: 4, plateAppearances: 4 }])],
+      }),
     );
     const dataLine = mail.text.split("\n").find((l) => l.includes("B Harper"));
     expect(dataLine).toMatch(/^B Harper\s+MLB\s+4\b/);

@@ -1,7 +1,7 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { DeliveryKind } from "../db/schema.js";
-import { digestDeliveries, statLines } from "../db/schema.js";
+import { digestDeliveries } from "../db/schema.js";
 
 /**
  * The durable delivery claim (ADR 0034).
@@ -35,11 +35,10 @@ import { digestDeliveries, statLines } from "../db/schema.js";
  * state. The concrete failure this rules out: `settleFailed` sets
  * `status = 'failed', sent_at = NULL`. If a forced run re-claimed an already
  * `sent` row and the mailer then threw, the record of a genuinely delivered
- * email would be destroyed — and the next scheduled run would re-claim that
- * `failed` row and send an EMPTY digest, because the lines it covered are
- * already stamped. The replay design makes that impossible by construction
- * rather than by remembering to check for it: a replay carries no claim to
- * settle, and the `ClaimResult` union below makes settling one a type error.
+ * email would be destroyed. The replay design makes that impossible by
+ * construction rather than by remembering to check for it: a replay carries no
+ * claim to settle, and the `ClaimResult` union below makes settling one a type
+ * error.
  *
  * Force NEVER overrides a live lease. That refusal keeps its own branch,
  * evaluated before anything force can influence — it is ADR 0034's
@@ -73,20 +72,17 @@ export type ClaimResult =
     }
   /**
    * A forced REPLAY: send the mail, write nothing. There is no claim to settle,
-   * and this variant is shaped so that saying otherwise does not compile: it has
-   * no `attempt`, and its id field is NAMED DIFFERENTLY (`replayOfDeliveryId`,
-   * not `deliveryId`), so `settleSent`/`settleFailed` cannot be reached from it
-   * even via a null check — a rename is a barrier a narrowing cannot cross.
+   * and this variant is shaped so that saying otherwise does not compile — it
+   * carries NO delivery id at all, so `settleSent`/`settleFailed` cannot be
+   * reached from it even via a null check. An absent field is a barrier a
+   * narrowing cannot cross.
    *
-   * `replayOfDeliveryId` is the id of the already-`sent` delivery this run is
-   * replaying, so assembly can re-include the lines that delivery already
-   * reported. It is null whenever there is no such delivery — no row for the
-   * slot at all, or a row that is `failed`/`sending` and therefore stamped no
-   * lines (which happens when a heartbeat's rolling seven-day rule refused
-   * because of a `sent` row for a DIFFERENT date). Null is the ordinary
-   * "unreported lines only" predicate, which is exactly right in those cases.
+   * It once carried `replayOfDeliveryId`, purely so assembly could re-include
+   * the lines that delivery had already stamped. Window selection stamps
+   * nothing, so a replay's content is simply the window's content — there is no
+   * novelty predicate left to widen, and no id left to carry.
    */
-  | { claimed: true; replay: true; replayOfDeliveryId: number | null }
+  | { claimed: true; replay: true }
   | { claimed: false; reason: ClaimRefusal };
 
 export type ClaimRefusal =
@@ -166,16 +162,7 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
       // instead: send now, record nothing, leave the clock where it was.
       const refusal = args.precondition?.(tx) ?? null;
       if (refusal !== null) {
-        if (forced) {
-          // Only an already-`sent` slot has lines to re-include. A precondition
-          // may refuse because of a row that is not this slot's at all (the
-          // heartbeat rule reads the latest `sent` heartbeat of ANY date), and
-          // this slot's own row may be `failed` or `sending` — stamped nothing,
-          // so offering its id would widen the novelty predicate by an id no
-          // line carries, and describe a replay of something never delivered.
-          const replayOf = existing?.status === "sent" ? existing.id : null;
-          return { claimed: true, replay: true, replayOfDeliveryId: replayOf };
-        }
+        if (forced) return { claimed: true, replay: true };
         return { claimed: false, reason: refusal };
       }
 
@@ -212,7 +199,7 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
           // The whole point of the replay: this row is NOT re-claimed, so its
           // status, sent_at, counts and provider id survive the forced run
           // untouched — including when the mailer then throws.
-          return { claimed: true, replay: true, replayOfDeliveryId: existing.id };
+          return { claimed: true, replay: true };
         }
         return { claimed: false, reason: "already-sent-today" };
       }
@@ -261,35 +248,6 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
   );
 }
 
-/**
- * The id of the `sent` delivery for a slot, or null when there is none. The
- * preview surfaces need it to widen their novelty predicate the way a forced
- * send does (they hold no claim to read it from); it lives here, beside the
- * state machine that owns the table. Read-only, and synchronous like the rest
- * of this module.
- *
- * `status = "sent"` is part of the question, not an optimization: only a
- * settled delivery ever stamped a Stat Line, so a `failed` or `sending` row's
- * id would widen the predicate by an id no line carries. That is inert today
- * only because `settleSent` is the single writer of `stat_lines`
- * `digest_delivery_id` — filtering here makes the correctness structural
- * instead of resting on that unrelated fact staying true.
- */
-export function findDeliveryId(db: Db, kind: DeliveryKind, dateCovered: string): number | null {
-  const row = db
-    .select({ id: digestDeliveries.id })
-    .from(digestDeliveries)
-    .where(
-      and(
-        eq(digestDeliveries.kind, kind),
-        eq(digestDeliveries.dateCovered, dateCovered),
-        eq(digestDeliveries.status, "sent"),
-      ),
-    )
-    .all()[0];
-  return row?.id ?? null;
-}
-
 /** A claim is live while its lease has not expired; an unstamped claim is stale. */
 function leaseIsLive(claimedAt: string | null, nowMs: number, leaseMs: number): boolean {
   if (claimedAt === null) return false;
@@ -304,14 +262,16 @@ export interface SettleSentArgs {
   playerCount: number;
   statLineCount: number;
   providerMessageId: string | null;
-  /** stat_lines.id to mark reported in the SAME transaction as the delivery. */
-  reportedIds: number[];
 }
 
 /**
- * Settle a claim as `sent`. One immediate transaction marks the delivery and
- * every reported Stat Line, so a crash mid-settle rolls both back together and
- * the lease heals the slot — never a delivery marked sent with unmarked lines.
+ * Settle a claim as `sent`.
+ *
+ * It touches `digest_deliveries` and NOTHING else. It used to stamp every
+ * reported Stat Line in the same transaction, which is what made novelty
+ * selection work; a window selects by date and consumes nothing, so there is no
+ * line state to record and none a re-run could corrupt. The counts here are
+ * bookkeeping about the run, not a record of what was consumed.
  */
 export function settleSent(db: Db, args: SettleSentArgs): void {
   const nowIso = args.now.toISOString();
@@ -328,12 +288,6 @@ export function settleSent(db: Db, args: SettleSentArgs): void {
         })
         .where(eq(digestDeliveries.id, args.deliveryId))
         .run();
-      if (args.reportedIds.length > 0) {
-        tx.update(statLines)
-          .set({ digestDeliveryId: args.deliveryId })
-          .where(inArray(statLines.id, args.reportedIds))
-          .run();
-      }
     },
     { behavior: "immediate" },
   );
@@ -349,17 +303,11 @@ export interface SettleReconciledArgs {
  * Settle a recovered claim as `sent` because the PROVIDER confirmed the crashed
  * attempt already landed — no second email (ADR 0034 amendment).
  *
- * It marks NO Stat Lines, and that is the load-bearing decision. The crashed
- * attempt emailed a set of lines we never recorded; Refresh may have run since,
- * so today's assembly can contain lines that were never in that email. Marking
- * those would report them as delivered when they were not — silent CONTENT
- * loss, the exact failure this whole design refuses. Marking nothing costs a
- * repeat of the crashed email's content in the next digest; content is
- * duplicated, never lost.
- *
- * The counts are zeroed for the same reason: this run composed nothing, so it
- * records nothing. `reconciled_at` is what lets an operator tell "we sent this"
- * from "the provider told us it was already accepted".
+ * The counts are zeroed because this run composed nothing: it never assembled a
+ * window, so it has no counts to report. `reconciled_at` is what lets an
+ * operator tell "we sent this" from "the provider told us it was already
+ * accepted", and makes a zero-count row read as recorded-nothing rather than
+ * sent-nothing.
  */
 export function settleReconciled(db: Db, args: SettleReconciledArgs): void {
   const nowIso = args.now.toISOString();
@@ -391,8 +339,8 @@ export interface SettleFailedArgs {
 
 /**
  * Settle a claim as `failed` after the provider rejected the send: the slot is
- * released for the next run (a `failed` row is re-claimable) and every line
- * stays unmarked, so nothing is lost (ADR 0030).
+ * released for the next run (a `failed` row is re-claimable), which retries the
+ * same window and sends the same content.
  */
 export function settleFailed(db: Db, args: SettleFailedArgs): void {
   db.transaction(
