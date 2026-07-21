@@ -8,7 +8,18 @@ import { z } from "zod";
 const EnvSchema = z
   .object({
     DATABASE_PATH: z.string().trim().min(1).default("data/bryce.db"),
-    TZ: z.string().trim().min(1).default("America/Chicago"),
+    /**
+     * Host timezone for "today" — digest windows and season boundaries.
+     *
+     * Deliberately NOT named `TZ`. `TZ` is a reserved POSIX variable that
+     * terminals, editors and CI set on their own, and `loadDotEnv` never
+     * overrides a real environment variable (src/env.ts) — so a `.env` saying
+     * `TZ=America/Chicago` silently loses to an ambient `TZ=UTC` and every host
+     * date shifts. Observed in production 2026-07-20: an evening run recorded a
+     * delivery for tomorrow's date. An app-scoped key nothing else sets is the
+     * fix; the "real env wins" rule is correct and unchanged.
+     */
+    BRYCE_TZ: z.string().trim().min(1).default("America/Chicago"),
     MAILER_PROVIDER: z.enum(["postmark", "smtp", "console"]).default("postmark"),
     POSTMARK_SERVER_TOKEN: z.string().optional(),
     SMTP_HOST: z.string().optional(),
@@ -85,7 +96,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   const parsed = EnvSchema.parse(env);
   return {
     databasePath: parsed.DATABASE_PATH,
-    tz: parsed.TZ,
+    tz: parsed.BRYCE_TZ,
     mailerProvider: parsed.MAILER_PROVIDER,
     postmarkServerToken: clean(parsed.POSTMARK_SERVER_TOKEN),
     smtpHost: clean(parsed.SMTP_HOST),

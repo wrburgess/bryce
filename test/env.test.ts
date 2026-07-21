@@ -65,3 +65,24 @@ describe("createApp fail-closed auth (rules/security.md: deny by default)", () =
     }
   });
 });
+
+describe("BRYCE_TZ config (ambient TZ must never win)", () => {
+  const base = { MAILER_PROVIDER: "console" };
+
+  it("reads the host timezone from BRYCE_TZ", () => {
+    expect(loadConfig({ ...base, BRYCE_TZ: "America/New_York" }).tz).toBe("America/New_York");
+  });
+
+  it("defaults to America/Chicago when BRYCE_TZ is absent", () => {
+    expect(loadConfig(base).tz).toBe("America/Chicago");
+  });
+
+  it("ignores TZ entirely — an ambient TZ=UTC must not become the host timezone", () => {
+    // The 2026-07-20 production bug: a terminal exporting TZ=UTC defeated
+    // .env's TZ=America/Chicago, and every host date shifted after 19:00 CDT.
+    expect(loadConfig({ ...base, TZ: "UTC" }).tz).toBe("America/Chicago");
+    expect(loadConfig({ ...base, TZ: "UTC", BRYCE_TZ: "America/Chicago" }).tz).toBe(
+      "America/Chicago",
+    );
+  });
+});
