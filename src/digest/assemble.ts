@@ -89,26 +89,25 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
     stats: asRecord(line.stats),
   }));
 
+  const playersWithLines = new Set(splits.map((s) => s.player.id));
+
   // A player with no games still appears, as a zero row — this replaces the old
   // "no new stats" tail, and inherits its In Season filter: a player whose
   // season is over is omitted entirely, not listed at zero for months.
   const idlePlayers = activePlayers.filter(
-    (p) =>
-      !splits.some((s) => s.player.id === p.id) && isInSeason(p, calendars, now(), tz),
+    (p) => !playersWithLines.has(p.id) && isInSeason(p, calendars, now(), tz),
   );
 
   const batting = mergeFieldingIntoBatting(splits).map(withPlateAppearances);
+  const pitching = splits.filter((s) => s.line.statType === "pitching");
 
   return {
     window,
+    // Zero rows go to the batters table only: a player who did not appear left
+    // no stat line to say whether he would have batted or pitched.
     batters: buildRows(batting, window, "batting", idlePlayers),
-    pitchers: buildRows(
-      splits.filter((s) => s.line.statType === "pitching"),
-      window,
-      "pitching",
-      [],
-    ),
-    playerCount: new Set(splits.map((s) => s.player.id)).size,
+    pitchers: buildRows(pitching, window, "pitching", []),
+    playerCount: playersWithLines.size,
     statLineCount: splits.length,
   };
 }
@@ -266,7 +265,7 @@ function seasonStartFor(calendars: CalendarEntry[], now: Date, tz: string): stri
   );
 }
 
-export function toRenderPlayer(player: PlayerRow): RenderPlayer {
+function toRenderPlayer(player: PlayerRow): RenderPlayer {
   return {
     fullName: player.fullName,
     level: player.level,

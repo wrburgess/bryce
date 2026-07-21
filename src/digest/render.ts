@@ -213,7 +213,7 @@ export function renderDigest(assembly: DigestAssembly): RenderedMail {
   }
 
   return {
-    subject: `Bryce - ${window.label}`,
+    subject: heading,
     text: `${textParts.join("\n").trimEnd()}\n`,
     html: htmlParts.join("\n"),
   };

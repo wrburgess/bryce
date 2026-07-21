@@ -268,6 +268,63 @@ describe("assembleDigest — window selection", () => {
     expect(a.batters[0]?.qualityStarts).toBe(0);
   });
 
+  it("derives a missing plateAppearances PER GAME, before summing", async () => {
+    // The trap: derive it after summing and a window whose games disagree is
+    // silently short. Game one reports PA, game two does not — a post-sum
+    // fallback sees a non-zero total, never fires, and reports 4 instead of 9.
+    const player = await insertPlayer(opened.db, { fullName: "Mixed Source" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-07-15",
+      stats: { plateAppearances: 4, atBats: 4, hits: 2 },
+    });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-07-16",
+      stats: { atBats: 4, baseOnBalls: 1, hitByPitch: 0, hits: 1 },
+    });
+
+    const a = await assemble("7d");
+    expect(a.batters[0]?.agg.counters.plateAppearances).toBe(9);
+  });
+
+  it("leaves a zero-PA game alone rather than inventing one", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Pinch Runner" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-07-15",
+      stats: { runs: 1, stolenBases: 1 },
+    });
+
+    const a = await assemble("7d");
+    expect(a.batters[0]?.agg.counters.plateAppearances).toBe(0);
+    expect(a.batters[0]?.agg.counters.runs).toBe(1);
+  });
+
+  it("gives an idle player a zero row in the batters table only", async () => {
+    // He left no stat line, so there is nothing to say whether he would have
+    // batted or pitched; the batters table is the one place to show him.
+    await insertPlayer(opened.db, { fullName: "Idle Player" });
+
+    const a = await assemble("7d");
+    expect(a.batters).toHaveLength(1);
+    expect(a.pitchers).toEqual([]);
+  });
+
+  it("emits no zero row for a player who did appear, even in the other table", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Zack Wheeler" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      statType: "pitching",
+      gameDate: "2026-07-15",
+      stats: { inningsPitched: "7.0", earnedRuns: 2 },
+    });
+
+    const a = await assemble("7d");
+    expect(a.pitchers).toHaveLength(1);
+    expect(a.batters).toEqual([]);
+  });
+
   it("emits a zero row for an active player with no games in the window", async () => {
     await insertPlayer(opened.db, { fullName: "Idle Player" });
 
