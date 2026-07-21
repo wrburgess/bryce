@@ -92,8 +92,21 @@ const clean = (v: string | undefined): string | null => {
   return t.length > 0 ? t : null;
 };
 
-export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
+export function loadConfig(
+  env: Record<string, string | undefined> = process.env,
+  warn: (message: string) => void = (m) => process.stderr.write(`${m}\n`),
+): Config {
   const parsed = EnvSchema.parse(env);
+
+  // A .env written before the rename still says TZ=..., which is now inert.
+  // Silence there would mean wrong windows with no signal, so say so once.
+  if (env.BRYCE_TZ === undefined && typeof env.TZ === "string" && env.TZ.trim().length > 0) {
+    warn(
+      `config: TZ=${env.TZ.trim()} is ignored — set BRYCE_TZ instead ` +
+        `(using ${parsed.BRYCE_TZ}). TZ is a reserved variable ambient tooling sets.`,
+    );
+  }
+
   return {
     databasePath: parsed.DATABASE_PATH,
     tz: parsed.BRYCE_TZ,

@@ -85,4 +85,20 @@ describe("BRYCE_TZ config (ambient TZ must never win)", () => {
       "America/Chicago",
     );
   });
+
+  it("warns when TZ is set but BRYCE_TZ is not, so a stale .env is visible", () => {
+    const warnings: string[] = [];
+    loadConfig({ ...base, TZ: "America/Denver" }, (m) => warnings.push(m));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("BRYCE_TZ");
+    expect(warnings[0]).toContain("America/Denver");
+  });
+
+  it("does not warn once BRYCE_TZ is set", () => {
+    const warnings: string[] = [];
+    loadConfig({ ...base, TZ: "America/Denver", BRYCE_TZ: "America/Denver" }, (m) =>
+      warnings.push(m),
+    );
+    expect(warnings).toEqual([]);
+  });
 });
