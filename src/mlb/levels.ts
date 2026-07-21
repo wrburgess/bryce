@@ -47,3 +47,34 @@ export function sportIdForLevel(level: Level, milbLevel: string | null): number 
   if (milbLevel === null) return null;
   return MILB_LEVEL_TO_SPORT_ID[milbLevel] ?? null;
 }
+
+/**
+ * Display abbreviation for the level a GAME was played at (windowed Digest
+ * spec). Derived from the stat line's sportId, never from players.level —
+ * a player's level is where he is today, and a window can span a promotion.
+ *
+ * sportId 16 covers every rookie/complex league, so league_name is the only
+ * thing separating the Dominican Summer League from the domestic complexes.
+ */
+const SPORT_ID_ABBREV: Record<number, string> = {
+  1: "MLB",
+  11: "AAA",
+  12: "AA",
+  13: "A+",
+  14: "A",
+  16: "R",
+  [NCAA_SPORT_ID]: "NCAA",
+};
+
+const LADDER: readonly number[] = [1, 11, 12, 13, 14, 16, NCAA_SPORT_ID];
+
+export function levelAbbrev(sportId: number, leagueName: string | null): string {
+  if (sportId === 16 && leagueName === "Dominican Summer League") return "DSL";
+  return SPORT_ID_ABBREV[sportId] ?? "?";
+}
+
+/** Sort rank: MLB first, NCAA last, unknown ids after everything. */
+export function levelRank(sportId: number): number {
+  const index = LADDER.indexOf(sportId);
+  return index === -1 ? LADDER.length : index;
+}
