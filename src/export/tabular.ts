@@ -4,7 +4,7 @@ import type { CsvCell } from "./csv.js";
 import { toCsv } from "./csv.js";
 
 /**
- * Tabular Exports (ADR 0036): a stored stat-line set and an ad-hoc SQL result,
+ * Tabular Exports (ADR 0037): a stored stat-line set and an ad-hoc SQL result,
  * each rendered as ONE CSV table. Both defer every cell to `toCsv`, so the
  * formula-injection guard and RFC-4180 quoting are applied uniformly and are
  * tested once, in src/export/csv.ts.

@@ -409,7 +409,7 @@ describe("REST API", () => {
       expect(body.playerCount).toBe(1);
       expect(body.batters[0]).toMatchObject({ lvl: "AAA" });
       expect(body.batters[0]?.player.fullName).toBe("Maximo Acosta");
-      expect(body.mail.subject).toBe("MLB Daily Tracker: Sat, July 18, 2026");
+      expect(body.mail.subject).toBe("MLB Daily Tracker - Sat, July 18, 2026");
       expect(body.mail.text).toContain("M Acosta");
 
       // Read-only: no send, no delivery row, no stamping.
@@ -482,7 +482,7 @@ describe("REST API", () => {
     });
   });
 
-  describe("Presentation/Export formats (ADR 0036)", () => {
+  describe("Presentation/Export formats (ADR 0037)", () => {
     const seedBatter = async () => {
       const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
       await insertStatLine(opened.db, { playerId: player.id, gameId: 900500, gameDate: "2026-07-18" });
@@ -498,9 +498,9 @@ describe("REST API", () => {
         pitchers: [],
         unknownFields: [],
         mail: {
-          subject: "MLB Daily Tracker: Sat, July 18, 2026",
-          html: "<h1>Bryce - Sat, July 18, 2026</h1>\n<p>No games in this window.</p>",
-          text: "Bryce - Sat, July 18, 2026\n\nNo games in this window.\n",
+          subject: "MLB Daily Tracker - Sat, July 18, 2026",
+          html: "<h1>Sat, July 18, 2026</h1>\n<p>No games in this window.</p>",
+          text: "Sat, July 18, 2026\n\nNo games in this window.\n",
         },
       };
       const omitted = await app().request("/api/digest/preview", { headers: AUTH });
@@ -530,7 +530,9 @@ describe("REST API", () => {
       expect(res.headers.get("content-disposition")).toBe(
         'attachment; filename="bryce-digest-7d.md"',
       );
-      expect((await res.text()).startsWith("# Bryce -")).toBe(true);
+      const mdText = await res.text();
+      expect(mdText.startsWith("# ")).toBe(true);
+      expect(mdText).not.toContain("Bryce - ");
     });
 
     it("GET /api/digest/preview?format=csv exports one table, named for table+window", async () => {
@@ -673,7 +675,7 @@ describe("REST API", () => {
         statLineCount: 2,
         window: "Last 7 Days (Jul 12-18)",
       });
-      expect(mailer.sent[0]?.subject).toBe("MLB Daily Tracker: Last 7 Days (Jul 12-18)");
+      expect(mailer.sent[0]?.subject).toBe("MLB Daily Tracker - Last 7 Days (Jul 12-18)");
 
       const bogus = await app().request("/api/digest/send", {
         method: "POST",
@@ -682,6 +684,34 @@ describe("REST API", () => {
       });
       expect(bogus.status).toBe(400);
       expect(mailer.sent).toHaveLength(1); // fail closed: nothing else went out
+    });
+
+    it("accepts a new long window (28d) on the on-demand path, recording no delivery", async () => {
+      const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+      await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+      // Inside the 28d window (Jun 21..Jul 18) but outside the daily 1d one.
+      await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-06-30" });
+
+      const sent = await app().request("/api/digest/send", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ window: "28d" }),
+      });
+      expect(sent.status).toBe(200);
+      expect(await sent.json()).toMatchObject({ action: "sent", statLineCount: 2 });
+      expect(mailer.sent[0]?.subject).toContain("Last 28 Days");
+      // On-demand: the slot is keyed (kind, date) with no room for a window, so
+      // any non-1d send takes no slot and writes no delivery row.
+      expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
+
+      // 30d is still not a supported window — fail closed, nothing else sent.
+      const bogus = await app().request("/api/digest/send", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ window: "30d" }),
+      });
+      expect(bogus.status).toBe(400);
+      expect(mailer.sent).toHaveLength(1);
     });
 
     it("re-sends with {force:true} after a same-day send, recording nothing new", async () => {

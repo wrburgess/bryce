@@ -48,7 +48,7 @@ import {
  */
 
 /**
- * A non-JSON Presentation/Export body as a downloadable file (ADR 0036): set a
+ * A non-JSON Presentation/Export body as a downloadable file (ADR 0037): set a
  * charset-tagged Content-Type and an `attachment` disposition with a
  * deterministic filename, then return the rendered string. Stays under `/api`,
  * so it inherits the same bearer auth as every other route.

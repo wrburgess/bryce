@@ -172,8 +172,8 @@ Builds the digest of every stat line not yet reported and "sends" it — with
 `MAILER_PROVIDER=console` it prints the email (subject, HTML, and plain text) straight to your
 terminal. You should see your players' lines grouped by level, in the fixed format — e.g.
 `PA 4, H 2, BB 1, K 1, 2B 0, 3B 0, HR 1, RBI 3, R 2, SB 0, CS 0, E 0` for hitters or
-`IP 6.1, ER 2, K 8, K/9 11.4, BB 1, HA 4, HRA 1, ERA 2.84, WHIP 0.79, S 0, HLD 0, QS 1` for
-pitchers (every stat always shown, zeros included; ERA/WHIP/K-9 are that game's rates only) —
+`IP 6.1, ER 2, K 8, K/9 11.4, BB 1, HA 4, HRA 1, ERA 2.84, WHIP 0.79, QS 1, S 0, BS 0, HLD 0, RW 0, RL 0`
+for pitchers (every stat always shown, zeros included; ERA/WHIP/K-9 are that game's rates only) —
 with a "No new stats" list for in-season players who didn't play.
 
 Two behaviors that surprise people, both by design:
@@ -234,8 +234,8 @@ curl -H "Authorization: Bearer YOUR_API_TOKEN" http://localhost:3000/api/players
 
 The MCP server — the primary interface — is at `http://localhost:3000/mcp` with the same bearer
 token; point a Claude client at it and you can say "add Paul Skenes to my watch list" instead of
-using the CLI. Tool list, REST routes, and remote setup:
-[Running Bryce → The MCP server and REST API](running-bryce.md#the-mcp-server-and-rest-api).
+using the CLI. Tool list, REST routes, and remote setup: the [MCP](../mcp/README.md),
+[REST API](../api/README.md), and [CLI](../cli/README.md) reference pages.
 
 ## 11. Make it permanent (production)
 
@@ -246,7 +246,7 @@ set-and-forget daily email:
    digest that self-heal if the laptop was asleep.
 2. [Litestream backup to Cloudflare R2](running-bryce.md#backup-litestream-to-cloudflare-r2).
 3. [Cloudflare Tunnel](running-bryce.md#remote-access-cloudflare-tunnel) +
-   [connecting a Claude client to the remote MCP endpoint](running-bryce.md#connecting-a-claude-client-to-the-remote-mcp-endpoint)
+   [connecting a Claude client to the remote MCP endpoint](../mcp/README.md)
    — manage the watch list from your phone, from anywhere.
 
 ## Updating to a newer version later

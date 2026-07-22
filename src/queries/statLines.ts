@@ -21,19 +21,41 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
  * COMPOSE them (e.g. add a `format` param) without re-declaring the bounds or
  * fighting the fact that the refined schema is a wrapped type. The refinement
  * that pairs them (`refineFromTo`) is exported beside the shape so a composed
- * schema keeps identical validation.
+ * schema keeps identical validation. Every field carries a `.describe()` so the
+ * MCP tool schema surfaces a description for it (#54).
  */
 export const StatLineFilterShape = {
-  playerId: z.coerce.number().int().positive().optional(),
-  level: z.enum(["mlb", "milb", "ncaa"]).optional(),
-  from: z.string().trim().regex(ISO_DATE, "expected YYYY-MM-DD").optional(),
-  to: z.string().trim().regex(ISO_DATE, "expected YYYY-MM-DD").optional(),
+  playerId: z.coerce
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe("Internal Bryce player id (players.id, not the MLB personId) to scope results to one player."),
+  level: z
+    .enum(["mlb", "milb", "ncaa"])
+    .optional()
+    .describe("Affiliation level filter: mlb, milb, or ncaa."),
+  from: z
+    .string()
+    .trim()
+    .regex(ISO_DATE, "expected YYYY-MM-DD")
+    .optional()
+    .describe("Inclusive earliest game date, YYYY-MM-DD; must be <= to when both are given."),
+  to: z
+    .string()
+    .trim()
+    .regex(ISO_DATE, "expected YYYY-MM-DD")
+    .optional()
+    .describe("Inclusive latest game date, YYYY-MM-DD; must be >= from when both are given."),
   limit: z.coerce
     .number()
     .int()
     .positive()
     .max(STAT_LINES_MAX_LIMIT)
-    .default(STAT_LINES_DEFAULT_LIMIT),
+    .default(STAT_LINES_DEFAULT_LIMIT)
+    .describe(
+      `Maximum rows to return, newest first; 1 to ${STAT_LINES_MAX_LIMIT}, default ${STAT_LINES_DEFAULT_LIMIT}.`,
+    ),
 };
 
 /** `from` must not be after `to`; shared by every schema built on the shape. */

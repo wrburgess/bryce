@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { digestDeliveries, statLines } from "../src/db/schema.js";
 import { assembleDigest } from "../src/digest/assemble.js";
+import { renderDigest } from "../src/digest/render.js";
 import {
   TEST_TZ,
   fakeClock,
@@ -25,7 +26,7 @@ describe("assembleDigest — window selection", () => {
   let clock: ReturnType<typeof fakeClock>;
 
   const assemble = (
-    spec: "1d" | "7d" | "14d" | "21d" | "ytd",
+    spec: "1d" | "7d" | "14d" | "21d" | "28d" | "35d" | "60d" | "ytd",
     extra?: { asOf?: string },
   ) => assembleDigest(opened.db, { now: clock.now, tz: TEST_TZ, spec, ...extra });
 
@@ -391,6 +392,101 @@ describe("assembleDigest — window selection", () => {
 
     const a = await assemble("7d");
     expect(a.batters[0]?.qualityStarts).toBe(0);
+  });
+
+  it("counts relief wins and losses across the window, never a starter's decision", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Relief Guy", position: "P" });
+    // A starter win (also a quality start): gamesStarted PRESENT and 1 → RW 0.
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      statType: "pitching",
+      gameDate: "2026-07-14",
+      stats: { wins: 1, gamesStarted: 1, inningsPitched: "7.0", earnedRuns: 2 },
+    });
+    // A relief win: gamesStarted PRESENT and 0 → RW 1.
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      statType: "pitching",
+      gameDate: "2026-07-15",
+      stats: { wins: 1, gamesStarted: 0, inningsPitched: "1.0", earnedRuns: 0 },
+    });
+    // A relief loss: gamesStarted PRESENT and 0 → RL 1.
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      statType: "pitching",
+      gameDate: "2026-07-16",
+      stats: { losses: 1, gamesStarted: 0, inningsPitched: "1.0", earnedRuns: 1 },
+    });
+    // A starter loss: gamesStarted PRESENT and 1 → RL 0.
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      statType: "pitching",
+      gameDate: "2026-07-17",
+      stats: { losses: 1, gamesStarted: 1, inningsPitched: "6.0", earnedRuns: 5 },
+    });
+
+    const a = await assemble("7d");
+    expect(a.pitchers).toHaveLength(1);
+    expect(a.pitchers[0]?.reliefWins).toBe(1);
+    expect(a.pitchers[0]?.reliefLosses).toBe(1);
+    // QS is unaffected — only the 7.0 IP / 2 ER start qualifies.
+    expect(a.pitchers[0]?.qualityStarts).toBe(1);
+  });
+
+  it("fails closed on an NCAA row with no gamesStarted, never crediting a relief decision", async () => {
+    // NCAA rows carry W/L but no gamesStarted (src/ncaa/normalize.ts). A missing
+    // value is unknown-not-relief, so a decision is never miscounted as relief.
+    const player = await insertPlayer(opened.db, { fullName: "College Arm", position: "P" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      statType: "pitching",
+      sportId: 22,
+      gameDate: "2026-07-15",
+      stats: { wins: 1, inningsPitched: "5.0", earnedRuns: 2 },
+    });
+
+    const a = await assemble("7d");
+    expect(a.pitchers).toHaveLength(1);
+    expect(a.pitchers[0]?.reliefWins).toBe(0);
+    expect(a.pitchers[0]?.reliefLosses).toBe(0);
+  });
+
+  it("reports zero relief decisions for an idle pitcher and for a batter", async () => {
+    await insertPlayer(opened.db, { fullName: "Idle Arm", position: "P" });
+    const batter = await insertPlayer(opened.db, { fullName: "Some Batter", position: "SS" });
+    await insertStatLine(opened.db, {
+      playerId: batter.id,
+      gameDate: "2026-07-15",
+      stats: { wins: 1, losses: 1, hits: 2, atBats: 4, gamesStarted: 0 },
+    });
+
+    const a = await assemble("7d");
+    const idle = a.pitchers.find((r) => r.player.fullName === "Idle Arm");
+    expect(idle?.agg.games).toBe(0);
+    expect(idle?.reliefWins).toBe(0);
+    expect(idle?.reliefLosses).toBe(0);
+    // A batter's wins/losses are meaningless and never surfaced as relief.
+    const row = a.batters.find((r) => r.player.fullName === "Some Batter");
+    expect(row?.reliefWins).toBe(0);
+    expect(row?.reliefLosses).toBe(0);
+  });
+
+  it("renders BB%/K% columns on a long window and omits them on a short one", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    // On 2026-07-19: inside both the 1d and the 28d window ending that day.
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameDate: "2026-07-19",
+      stats: { plateAppearances: 4, atBats: 4, hits: 1, baseOnBalls: 0, strikeOuts: 2 },
+    });
+
+    const long = renderDigest(await assemble("28d"));
+    expect(long.text).toContain("BB%");
+    expect(long.text).toContain("K%");
+
+    const short = renderDigest(await assemble("1d"));
+    expect(short.text).not.toContain("BB%");
+    expect(short.text).not.toContain("K%");
   });
 
   it("derives a missing plateAppearances PER GAME, before summing", async () => {

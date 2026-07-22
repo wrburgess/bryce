@@ -58,9 +58,9 @@ always reports the same content (ADR 0035).
 _Avoid_: "unreported stat lines" (the novelty model this replaced — ADR 0030's reporting half)
 
 **Window**:
-The inclusive date range a Digest covers: `1d`, `7d`, `14d`, `21d`, or `ytd`. Every Window ends on
-the **last completed** host date — yesterday, not today — so a Digest does not depend on the hour it
-runs. Regular season only.
+The inclusive date range a Digest covers: `1d`, `7d`, `14d`, `21d`, `28d`, `35d`, `60d`, or `ytd`.
+Every Window ends on the **last completed** host date — yesterday, not today — so a Digest does not
+depend on the hour it runs. Regular season only.
 _Avoid_: "yesterday's stats" for anything but `1d`
 
 **Roll-up**:

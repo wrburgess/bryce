@@ -4,7 +4,7 @@ import { sqlResultToCsv, statLinesToCsv } from "../src/export/tabular.js";
 import type { StatLineView } from "../src/queries/statLines.js";
 
 /**
- * The tabular Export shapers (ADR 0036). The header row is a FIXED constant, so
+ * The tabular Export shapers (ADR 0037). The header row is a FIXED constant, so
  * an empty result is still a valid single-header file; `isHome`, `null`, and the
  * `stats` JSON blob get the documented encoding; and both shapers inherit the
  * CSV writer's guard/quoting.

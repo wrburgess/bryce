@@ -69,7 +69,7 @@ function jsonResult(payload: JsonPayload): CallToolResult {
 
 /**
  * A non-JSON tool result: the rendered Presentation/Export string as a single
- * text content part, with NO structuredContent (ADR 0036). A deliberate,
+ * text content part, with NO structuredContent (ADR 0037). A deliberate,
  * documented divergence from `jsonResult` — an HTML/Markdown/CSV body is not a
  * JSON object, so it must not be advertised as one.
  */
@@ -187,7 +187,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "stat_lines",
     {
       description:
-        "Query stored per-game stat lines, newest first. Filters: playerId (internal id), level (mlb/milb), from/to (YYYY-MM-DD, inclusive), limit (max 200). format (default 'json') is 'json' or 'csv'; 'csv' returns the rows as a CSV table (one column per field, stats as a JSON column) instead of JSON.",
+        "Query stored per-game stat lines, newest first. Filters: playerId (internal id), level (mlb/milb/ncaa), from/to (YYYY-MM-DD, inclusive), limit (max 200). format (default 'json') is 'json' or 'csv'; 'csv' returns the rows as a CSV table (one column per field, stats as a JSON column) instead of JSON.",
       inputSchema: StatLinesFormatShape,
     },
     (args) =>
@@ -204,7 +204,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "digest_preview",
     {
       description:
-        "Preview the digest for a date window, as the Batters and Pitchers tables the email would carry. window (default '1d') is one of 1d, 7d, 14d, 21d, ytd; an unsupported value is rejected. Every window ends on the last COMPLETED host date — yesterday, not today — so the result does not depend on the hour you ask. Rows group by player and by the LEVEL each game was played at, so a player promoted mid-window gets one row per level; a 1d window groups by game instead, so a doubleheader stays two rows. Regular season only. Read-only: sends nothing, claims nothing, and writes nothing — re-running a window always returns the same content. format (default 'json') is one of json, html, md, csv: json is the structured preview; html/md render the WHOLE digest (both tables) as a document; csv exports ONE table, chosen by table (default 'batters', ignored for html/md).",
+        "Preview the digest for a date window, as the Batters and Pitchers tables the email would carry. window (default '1d') is one of 1d, 7d, 14d, 21d, 28d, 35d, 60d, ytd; an unsupported value is rejected. Every window ends on the last COMPLETED host date — yesterday, not today — so the result does not depend on the hour you ask. Rows group by player and by the LEVEL each game was played at, so a player promoted mid-window gets one row per level; a 1d window groups by game instead, so a doubleheader stays two rows. Regular season only. Read-only: sends nothing, claims nothing, and writes nothing — re-running a window always returns the same content. format (default 'json') is one of json, html, md, csv: json is the structured preview; html/md render the WHOLE digest (both tables) as a document; csv exports ONE table, chosen by table (default 'batters', ignored for html/md).",
       inputSchema: DigestPreviewInputShape,
     },
     (args) =>
@@ -233,7 +233,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "send_digest",
     {
       description:
-        "Run the digest job now for a date window. window (default '1d') is one of 1d, 7d, 14d, 21d, ytd; an unsupported value is rejected and nothing is sent. The report writes NO stat-line state, so re-running a window is always safe and sends the same content. The daily '1d' window is the SCHEDULED artifact: it claims a once-per-date slot (so it never double-sends for a covered date, and a failed prior day is recovered on the next run), and during Offseason Sleep it becomes the weekly heartbeat. Any OTHER window (7d/14d/21d/ytd) is an on-demand report: it takes no slot, and it answers even during Offseason Sleep — an explicit 'season to date' is a question, not the daily liveness signal. force (default false) applies only to the daily slot: it is a TEST send overriding the already-sent-today guard and the heartbeat's weekly rule, sending as a replay that records nothing. It does NOT override an in-flight claim held by another run — that still returns claimed-by-another-run.",
+        "Run the digest job now for a date window. window (default '1d') is one of 1d, 7d, 14d, 21d, 28d, 35d, 60d, ytd; an unsupported value is rejected and nothing is sent. The report writes NO stat-line state, so re-running a window is always safe and sends the same content. The daily '1d' window is the SCHEDULED artifact: it claims a once-per-date slot (so it never double-sends for a covered date, and a failed prior day is recovered on the next run), and during Offseason Sleep it becomes the weekly heartbeat. Any OTHER window (7d/14d/21d/28d/35d/60d/ytd) is an on-demand report: it takes no slot, and it answers even during Offseason Sleep — an explicit 'season to date' is a question, not the daily liveness signal. force (default false) applies only to the daily slot: it is a TEST send overriding the already-sent-today guard and the heartbeat's weekly rule. Overriding one of those makes the send a write-free replay that records nothing; forcing with no slot yet today, or over a failed slot, sends and records a delivery row normally. It does NOT override an in-flight claim held by another run — that still returns claimed-by-another-run.",
       inputSchema: DigestInputShape,
     },
     (args) =>

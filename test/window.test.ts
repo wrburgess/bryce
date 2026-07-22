@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { parseWindowSpec, resolveWindow } from "../src/domain/window.js";
+import { isLongWindow, parseWindowSpec, resolveWindow } from "../src/domain/window.js";
 
 const CHICAGO = "America/Chicago";
 
 describe("parseWindowSpec", () => {
   it("accepts every supported spec", () => {
-    for (const spec of ["1d", "7d", "14d", "21d", "ytd"]) {
+    for (const spec of ["1d", "7d", "14d", "21d", "28d", "35d", "60d", "ytd"]) {
       expect(parseWindowSpec(spec)).toBe(spec);
     }
   });
@@ -58,6 +58,30 @@ describe("resolveWindow — anchored on the last completed day", () => {
     expect(w21.to).toBe("2026-07-19");
     expect(w21.groupBy).toBe("playerLevel");
     expect(w21.label).toBe("Last 21 Days (Jun 29-Jul 19)");
+  });
+
+  it("28d, 35d and 60d span their full inclusive ranges", () => {
+    const w28 = resolveWindow("28d", morning, CHICAGO);
+    const w35 = resolveWindow("35d", morning, CHICAGO);
+    const w60 = resolveWindow("60d", morning, CHICAGO);
+
+    expect(w28.spec).toBe("28d");
+    expect(w28.from).toBe("2026-06-22"); // 27 days before Jul 19, inclusive
+    expect(w28.to).toBe("2026-07-19");
+    expect(w28.groupBy).toBe("playerLevel");
+    expect(w28.label).toBe("Last 28 Days (Jun 22-Jul 19)");
+
+    expect(w35.spec).toBe("35d");
+    expect(w35.from).toBe("2026-06-15"); // 34 days before Jul 19, inclusive
+    expect(w35.to).toBe("2026-07-19");
+    expect(w35.groupBy).toBe("playerLevel");
+    expect(w35.label).toBe("Last 35 Days (Jun 15-Jul 19)");
+
+    expect(w60.spec).toBe("60d");
+    expect(w60.from).toBe("2026-05-21"); // 59 days before Jul 19, inclusive
+    expect(w60.to).toBe("2026-07-19");
+    expect(w60.groupBy).toBe("playerLevel");
+    expect(w60.label).toBe("Last 60 Days (May 21-Jul 19)");
   });
 
   it("ytd runs from the season start through yesterday", () => {
@@ -118,5 +142,30 @@ describe("resolveWindow — calendar boundaries", () => {
     const w = resolveWindow("7d", new Date("2026-11-03T14:00:00Z"), CHICAGO);
     expect(w.to).toBe("2026-11-02");
     expect(w.from).toBe("2026-10-27");
+  });
+});
+
+describe("isLongWindow — the >=21d rule that gates BB%/K%", () => {
+  it("is false for the short windows", () => {
+    for (const spec of ["1d", "7d", "14d"] as const) {
+      expect(isLongWindow(spec), spec).toBe(false);
+    }
+  });
+
+  it("is true for every window >= 21 days, plus ytd", () => {
+    for (const spec of ["21d", "28d", "35d", "60d", "ytd"] as const) {
+      expect(isLongWindow(spec), spec).toBe(true);
+    }
+  });
+
+  it("is true for ytd by spec identity, even when its real span is under 21 days", () => {
+    // Early in a season ytd's from..to span can be short; it is still a LONG
+    // window by identity, so the columns stay uniform across the whole season.
+    const w = resolveWindow("ytd", new Date("2026-07-20T14:00:00Z"), CHICAGO, "2026-07-10");
+    // The resolved span is only 10 days (Jul 10..Jul 19)...
+    expect(w.from).toBe("2026-07-10");
+    expect(w.to).toBe("2026-07-19");
+    // ...and isLongWindow still returns true.
+    expect(isLongWindow(w.spec)).toBe(true);
   });
 });

@@ -222,6 +222,53 @@ describe("deriveRate — batting-only rates", () => {
   });
 });
 
+describe("deriveRate — BB%/K% display rates (>=21d email columns)", () => {
+  it("renders a walk rate as a 1-decimal percentage of plate appearances", () => {
+    // 10 BB / 100 PA = 10.0%.
+    const agg = aggregate("batting", [{ baseOnBalls: 10, plateAppearances: 100 }]);
+    expect(deriveRate(agg, "walkPct")).toBe("10.0");
+  });
+
+  it("renders a strikeout rate as a 1-decimal percentage of plate appearances", () => {
+    // 25 K / 100 PA = 25.0%.
+    const agg = aggregate("batting", [{ strikeOuts: 25, plateAppearances: 100 }]);
+    expect(deriveRate(agg, "kPct")).toBe("25.0");
+  });
+
+  it("rounds to one decimal", () => {
+    // 7 / 90 = 7.777...% → 7.8.
+    const agg = aggregate("batting", [{ baseOnBalls: 7, plateAppearances: 90 }]);
+    expect(deriveRate(agg, "walkPct")).toBe("7.8");
+  });
+
+  it("computes from SUMMED counters across splits, never averaging per game", () => {
+    // Game 1: 5 BB / 20 PA = 25.0%; Game 2: 5 BB / 80 PA = 6.25%.
+    // Summed: 10 BB / 100 PA = 10.0%. Averaging the two gives 15.6% — wrong.
+    const agg = aggregate("batting", [
+      { baseOnBalls: 5, strikeOuts: 5, plateAppearances: 20 },
+      { baseOnBalls: 5, strikeOuts: 5, plateAppearances: 80 },
+    ]);
+    expect(deriveRate(agg, "walkPct")).toBe("10.0");
+    expect(deriveRate(agg, "kPct")).toBe("10.0");
+    expect(deriveRate(agg, "walkPct")).not.toBe("15.6");
+  });
+
+  it("renders '-' for a zero-PA denominator", () => {
+    const agg = aggregate("batting", [{ baseOnBalls: 3, strikeOuts: 2 }]);
+    expect(deriveRate(agg, "walkPct")).toBe("-");
+    expect(deriveRate(agg, "kPct")).toBe("-");
+  });
+
+  it("does NOT carry BB%/K% in deriveAllRates — they are display-only, off the JSON payload", () => {
+    // They are intentionally not declared as rate keys in fields.ts, so the
+    // ">=21d only" rule stays uniform and the JSON never carries them.
+    const agg = aggregate("batting", [{ baseOnBalls: 10, strikeOuts: 20, plateAppearances: 100 }]);
+    const rates = deriveAllRates(agg);
+    expect(rates.walkPct).toBeUndefined();
+    expect(rates.kPct).toBeUndefined();
+  });
+});
+
 describe("deriveRate — pitching-only rates", () => {
   it("computes hitsPer9Inn from summed hits and summed outs", () => {
     // Game 1: 18 outs (6.0 IP), 9 H → 9 * 27 / 18 = 13.50

@@ -125,6 +125,59 @@ describe("MCP server over Streamable HTTP", () => {
     for (const tool of tools) {
       expect(tool.description, tool.name).toBeTruthy();
     }
+
+    // Both digest tools enumerate all eight windows — including the three added
+    // in #54 — so a client sees them without reading the source.
+    const descriptionOf = (name: string) => tools.find((t) => t.name === name)?.description ?? "";
+    for (const name of ["digest_preview", "send_digest"]) {
+      for (const win of ["28d", "35d", "60d"]) {
+        expect(descriptionOf(name), `${name} enumerates ${win}`).toContain(win);
+      }
+    }
+    // send_digest names the new windows among the on-demand ones (no daily slot).
+    expect(descriptionOf("send_digest")).toContain("on-demand");
+    expect(descriptionOf("send_digest")).toContain("28d/35d/60d");
+  });
+
+  it("describes every input field of every exposed tool schema", async () => {
+    const { tools } = await client.listTools();
+
+    // The `description` string a JSON-Schema property carries, or undefined.
+    const describedOf = (schema: unknown): string | undefined => {
+      if (typeof schema === "object" && schema !== null && "description" in schema) {
+        const value = (schema as { description: unknown }).description;
+        return typeof value === "string" ? value : undefined;
+      }
+      return undefined;
+    };
+    const propertiesOf = (name: string): Record<string, unknown> =>
+      (tools.find((t) => t.name === name)?.inputSchema.properties ?? {}) as Record<string, unknown>;
+
+    // Every tool that declares input fields is checked; only field-less `status` is exempt.
+    const toolsWithInputs = tools.filter(
+      (t) => Object.keys(t.inputSchema.properties ?? {}).length > 0,
+    );
+    expect(toolsWithInputs.map((t) => t.name).sort()).toEqual(
+      ALL_TOOLS.filter((n) => n !== "status").sort(),
+    );
+
+    // Every exposed field carries a genuinely informative description (`.describe()`
+    // reaching the wire) — a bare or trivial label fails here.
+    for (const tool of toolsWithInputs) {
+      for (const [field, schema] of Object.entries(tool.inputSchema.properties ?? {})) {
+        const description = describedOf(schema);
+        expect(typeof description, `${tool.name}.${field} description`).toBe("string");
+        expect((description ?? "").length, `${tool.name}.${field} description`).toBeGreaterThan(20);
+      }
+    }
+
+    // Semantic asserts: the descriptions must be authored correct, not merely present.
+    // `level` names all three affiliations (the schema allows ncaa, so the prose must too).
+    expect(describedOf(propertiesOf("stat_lines").level)).toMatch(/ncaa/i);
+    // The shared `force` description names the digest_preview no-op on both digest tools.
+    for (const name of ["digest_preview", "send_digest"]) {
+      expect(describedOf(propertiesOf(name).force), `${name}.force`).toMatch(/preview/i);
+    }
   });
 
   it("401s the /mcp endpoint without (or with a wrong) token", async () => {
@@ -316,7 +369,7 @@ describe("MCP server over Streamable HTTP", () => {
       from: "2026-07-18",
       to: "2026-07-18",
     });
-    expect((result.structuredContent?.mail as { subject: string }).subject).toBe("MLB Daily Tracker: Sat, July 18, 2026");
+    expect((result.structuredContent?.mail as { subject: string }).subject).toBe("MLB Daily Tracker - Sat, July 18, 2026");
 
     expect(mailer.sent).toHaveLength(0);
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
@@ -331,6 +384,11 @@ describe("MCP server over Streamable HTTP", () => {
     expect(week.structuredContent).toMatchObject({ statLineCount: 2 });
     expect(week.structuredContent?.window).toMatchObject({ spec: "7d", from: "2026-07-12" });
     expect((await call("digest_preview")).structuredContent).toMatchObject({ statLineCount: 1 });
+
+    // A new long window (added in #54) is accepted on both tools.
+    const long = await call("digest_preview", { window: "28d" });
+    expect(long.structuredContent).toMatchObject({ statLineCount: 2 });
+    expect(long.structuredContent?.window).toMatchObject({ spec: "28d" });
 
     // Fails closed on BOTH tools: named, refused, and nothing sent.
     for (const tool of ["digest_preview", "send_digest"]) {
@@ -450,7 +508,7 @@ describe("MCP server over Streamable HTTP", () => {
     expect(await opened.db.select().from(players)).toHaveLength(1);
   });
 
-  // --- Presentation/Export formats (ADR 0036, issue #55) -------------------
+  // --- Presentation/Export formats (ADR 0037, issue #55) -------------------
 
   it("advertises format/table on digest_preview ONLY, and format on the tabular tools", async () => {
     const { tools } = await client.listTools();
@@ -478,9 +536,9 @@ describe("MCP server over Streamable HTTP", () => {
       pitchers: [],
       unknownFields: [],
       mail: {
-        subject: "MLB Daily Tracker: Sat, July 18, 2026",
-        html: "<h1>Bryce - Sat, July 18, 2026</h1>\n<p>No games in this window.</p>",
-        text: "Bryce - Sat, July 18, 2026\n\nNo games in this window.\n",
+        subject: "MLB Daily Tracker - Sat, July 18, 2026",
+        html: "<h1>Sat, July 18, 2026</h1>\n<p>No games in this window.</p>",
+        text: "Sat, July 18, 2026\n\nNo games in this window.\n",
       },
     };
     const omitted = await call("digest_preview");
@@ -502,7 +560,8 @@ describe("MCP server over Streamable HTTP", () => {
 
     const md = await call("digest_preview", { format: "md" });
     expect(md.structuredContent).toBeUndefined();
-    expect(md.content[0]?.text.startsWith("# Bryce -")).toBe(true);
+    expect(md.content[0]?.text.startsWith("# ")).toBe(true);
+    expect(md.content[0]?.text).not.toContain("Bryce - ");
     expect(md.content[0]?.text).toContain("## Batters");
   });
 
