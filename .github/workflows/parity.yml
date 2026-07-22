@@ -35,3 +35,11 @@ jobs:
 
       - name: Structural parity check
         run: ruby scripts/parity_check.rb
+
+      # Supply-chain guard: fail if any workflow reintroduces an unpinned external
+      # `uses:` (mutable tag/branch) instead of a full commit SHA (issue #59).
+      - name: Action-pin guard self-test (offline, fixtures)
+        run: bash scripts/check_action_pins.test.sh
+
+      - name: Action-pin guard (external actions must be SHA-pinned)
+        run: ruby scripts/check_action_pins.rb

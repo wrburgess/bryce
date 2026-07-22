@@ -235,5 +235,9 @@ Repo-mode (no explicit filename, so it auto-detects `renovate.json`), pinned ver
 
 Implemented on `feature/dependency-automation` via a PR referencing **`Part of #59`** (no closing
 keyword). #59 remains open through operational acceptance (§7) and is closed by the HC after live
-verification. **Fast-follow (tracked, not in this PR):** a CI guard that rejects any future external
-`uses:` not pinned to a full SHA, so the hardening covers new references too.
+verification.
+
+**Pin guard (in this PR):** [`scripts/check_action_pins.rb`](../../../scripts/check_action_pins.rb)
+(stdlib-only, with a `.test.sh` self-test) fails CI if any workflow reintroduces an unpinned external
+`uses:`, wired into `parity.yml` so the hardening cannot erode as new steps are added. The convention
+is documented in [`rules/security.md`](../../../rules/security.md) (Patterns + Anti-Patterns).
