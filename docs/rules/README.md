@@ -29,7 +29,7 @@ Notice that every deferred deep doc above (e.g. `docs/rules/scripting-postmortem
 **backticked inline-code path**, not a `[text](path)` markdown link — even though it names a real
 target pattern. That is deliberate and load-bearing:
 
-- The parity check's link validator (`check_links` in `scripts/parity_check.rb`) resolves **only
+- The parity check's link validator (`checkLinks` in `scripts/parity-check.ts`) resolves **only
   markdown links**, and **only** in the scanned files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`,
   `PROJECT.md`, `.github/copilot-instructions.md`). A markdown link to a file that doesn't exist yet
   reddens CI with a dead-link failure; a backticked path is inert text the validator ignores.

@@ -9,7 +9,7 @@
 
 - **Keep secrets out of the repo.** Use per-environment encrypted credentials or the deploy platform's secret store; read config from there, never from committed literals.
 - **Run the scanners before every commit/push.** Wire the host's static-analysis and dependency-audit tools into the required workflow so a vulnerability is caught locally, not in review.
-- **Pin third-party CI actions to an immutable ref.** Reference every external CI action by a full commit SHA (`owner/repo@<40-hex>`), not a mutable tag or branch, and let a dependency bot keep the SHA current. Wire a guard into the required workflow so a newly-added unpinned reference fails the build (this host: [`scripts/check_action_pins.rb`](../scripts/check_action_pins.rb)).
+- **Pin third-party CI actions to an immutable ref.** Reference every external CI action by a full commit SHA (`owner/repo@<40-hex>`), not a mutable tag or branch, and let a dependency bot keep the SHA current. Wire a guard into the required workflow so a newly-added unpinned reference fails the build (this host: [`scripts/check-action-pins.ts`](../scripts/check-action-pins.ts)).
 - **Fail closed on authorization.** Deny by default; an action that forgets to authorize should be inaccessible, not open.
 - **Normalize input at the boundary** before any authorization or "require a filter" guard.
 

@@ -130,7 +130,7 @@ under `rules/` and leaves that projection to a host.
 Before declaring any work in this repository done, run its quality check and get it green:
 
 ```
-ruby scripts/parity_check.rb
+npx tsx scripts/parity-check.ts
 ```
 
 A Host App's own checks (tests, linters, security scanners) are declared in

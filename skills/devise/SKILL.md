@@ -112,7 +112,7 @@ Declaration*, using your runtime-actual model.
 posted, request an independent second-model critique of the plan text using the Reviewer declared in
 [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Reviewer*, which names the mechanism, its
 invocation, and the fallback order. In this host that summon is a bundled script,
-`scripts/summon_reviewer.rb` (plan mode); read the Project Config for how to invoke it and never
+`scripts/summon-reviewer.ts` (plan mode); read the Project Config for how to invoke it and never
 hardcode a command here.
 
 **This critique blocks the handoff to the implement skill (`invoke`).** Do not start implementing

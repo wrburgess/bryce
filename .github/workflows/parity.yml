@@ -16,12 +16,16 @@ jobs:
       # Actions pinned to full commit SHAs (not mutable tags); Renovate keeps them current.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@a30dfa457ad68707b8b910ac3a244714b61c0626 # v1.320.0
+      # The tooling scripts run via tsx (ADR 0039), so the parity job needs Node + deps like app.yml.
+      # setup-node MUST be SHA-pinned (same SHA as app.yml) or the action-pin guard reddens on its own
+      # workflow.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          ruby-version: "3.3"
-          # No bundler: the checker is stdlib-only (ADR 0008).
-          bundler-cache: false
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
 
       # The upstream ai-config self-tests live in its test/ tree, which is deliberately not vendored
       # into a Host App (ai-config-sync skips it) — this host runs only the checks it ships.
@@ -34,7 +38,7 @@ jobs:
         run: bash scripts/summon_reviewer.test.sh
 
       - name: Structural parity check
-        run: ruby scripts/parity_check.rb
+        run: npx tsx scripts/parity-check.ts
 
       # Supply-chain guard: fail if any workflow reintroduces an unpinned external
       # `uses:` (mutable tag/branch) instead of a full commit SHA (issue #59).
@@ -42,4 +46,4 @@ jobs:
         run: bash scripts/check_action_pins.test.sh
 
       - name: Action-pin guard (external actions must be SHA-pinned)
-        run: ruby scripts/check_action_pins.rb
+        run: npx tsx scripts/check-action-pins.ts

@@ -2,7 +2,7 @@
 
 > Note (#73): skill names below predate the six-skill rename (grill-with-docs→distill, cplan→devise, impl→invoke, rtr→listen, drop→clip, voice→follow). This ADR records the decision as of its date; the names here are historical.
 
-**Status:** accepted
+**Status:** accepted — part (i) (don't rewrite the Ruby tooling) is superseded by [ADR 0039](0039-repo-tooling-unifies-on-typescript-remove-ruby.md) (issue #64, the "separate follow-up issue" this ADR anticipated); part (ii) (rules-neutrality stays author-owned) stands unchanged.
 
 Abstracting the bundle to stack-neutral ([ADR 0017](0017-stack-neutral-baseline-with-stack-overlays.md),
 issue #48) raised two "do we touch the quality-gate tooling?" questions. We deliberately answer **no**
@@ -17,6 +17,11 @@ tooling is in *some* language, and ai-config's being Ruby leaks no Rails assumpt
 rewrite would change the quality-gate command itself (`ruby scripts/parity_check.rb`), carry real
 regression risk, and is disproportionate to a content-neutrality pass. If a host ever wants it,
 that is a **separate follow-up issue**, not part of #48.
+
+> **Superseded ([ADR 0039](0039-repo-tooling-unifies-on-typescript-remove-ruby.md), issue #64):** that
+> follow-up issue arrived. Bryce is now a committed Node/TS app, so the tooling is ported from Ruby to
+> TypeScript (run via `tsx`) and the quality-gate command changes accordingly. Part (ii) below is
+> unaffected.
 
 ## (ii) Rules-neutrality stays author-owned, not machine-enforced
 

@@ -31,8 +31,8 @@ node --version    # must print v22.x or higher
 npm --version     # any version that comes with it is fine
 ```
 
-**Ruby** — used only by the repo's structural check, never by the app. macOS ships with Ruby, so
-there is nothing to install; `ruby --version` should just work.
+No separate language runtime is needed for the repo's structural check either — it runs on the same
+Node toolchain as the app (via `tsx`), so Node ≥ 22 above covers it.
 
 **Git** — you have it if you've used GitHub from this machine (`git --version`; macOS offers to
 install the developer tools if not).
@@ -111,7 +111,7 @@ npm test
 ```
 
 Expected: a Vitest run ending in `Tests  225 passed` (a few seconds). Optionally also
-`ruby scripts/parity_check.rb`, which should print `parity_check: OK`. Green here means your
+`npx tsx scripts/parity-check.ts`, which should print `parity_check: OK`. Green here means your
 machine is fully set up. There is no "create the database" step — the first real command below
 creates and migrates `data/bryce.db` on its own.
 
