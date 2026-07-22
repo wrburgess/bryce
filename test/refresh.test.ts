@@ -274,6 +274,56 @@ describe("runRefresh", () => {
     expect(rows.map((r) => r.gameType).sort()).toEqual(["R", "W"]);
   });
 
+  it("skips a game dated today (may be in progress); ingests it once the date has passed", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    // host-today = 2026-07-19 (MID_SEASON in America/Chicago). The 2026-07-19
+    // split is a live capture — 1-for-2 through a few innings; the 2026-07-18
+    // one is yesterday's final line.
+    clock.set(MID_SEASON);
+    api.options.gameLogs = {
+      "11:hitting": makeGameLogBody("hitting", [
+        makeSplit({ date: "2026-07-18", game: { gamePk: 900001, gameNumber: 1 } }),
+        makeSplit({
+          date: "2026-07-19",
+          game: { gamePk: 900002, gameNumber: 1 },
+          stat: { hits: 1, atBats: 2, summary: "1-2 (in progress)" },
+        }),
+      ]),
+    };
+
+    const first = await runRefresh(deps());
+    expect(first.statLinesInserted).toBe(1); // only yesterday's final line
+    const afterFirst = await opened.db
+      .select()
+      .from(statLines)
+      .where(eq(statLines.playerId, player.id));
+    expect(afterFirst.map((r) => r.gameId)).toEqual([900001]); // today's live game stayed out
+
+    // Next day the 2026-07-19 game is final; a re-run ingests it with the final
+    // stat line — the correction the date gate deliberately waits for.
+    clock.set("2026-07-20T17:00:00Z"); // host-today = 2026-07-20
+    api.options.gameLogs = {
+      "11:hitting": makeGameLogBody("hitting", [
+        makeSplit({ date: "2026-07-18", game: { gamePk: 900001, gameNumber: 1 } }),
+        makeSplit({
+          date: "2026-07-19",
+          game: { gamePk: 900002, gameNumber: 1 },
+          stat: { hits: 3, atBats: 4, summary: "3-4 (final)" },
+        }),
+      ]),
+    };
+
+    const second = await runRefresh(deps());
+    expect(second.statLinesInserted).toBe(1); // the once-skipped game inserts now
+    const afterSecond = await opened.db
+      .select()
+      .from(statLines)
+      .where(eq(statLines.playerId, player.id));
+    expect(afterSecond.map((r) => r.gameId).sort((a, b) => a - b)).toEqual([900001, 900002]);
+    const finalLine = afterSecond.find((r) => r.gameId === 900002);
+    expect((finalLine?.stats as Record<string, unknown>).hits).toBe(3);
+  });
+
   it("makes ZERO API calls during Offseason Sleep (ADR 0031)", async () => {
     await insertPlayer(opened.db, { externalId: 691185, level: "mlb", milbLevel: null });
     await insertCalendars2026(opened.db);
