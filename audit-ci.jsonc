@@ -1,0 +1,28 @@
+{
+  // Runtime-dependency security gate for CI (see .github/workflows/app.yml).
+  //
+  // Fail the build on any moderate-or-higher advisory in PRODUCTION
+  // dependencies — the same scope the previous `npm audit --omit=dev` had,
+  // expressed here as `skip-dev`. Dev-only advisories never ship, so they do
+  // not gate a release.
+  "moderate": true,
+  "skip-dev": true,
+
+  // --- Allowlisted advisories: each entry needs a documented reason and a
+  //     removal trigger, and is revisited whenever dependencies change. ---
+  //
+  // GHSA-frvp-7c67-39w9 — @hono/node-server <2.0.5: path traversal in
+  // `serve-static` on Windows via an encoded backslash (`%5C`).
+  //
+  // Accepted because it is not exploitable in this deployment:
+  //   * We never mount `serveStatic`; src/server.ts uses only `serve()`.
+  //   * The flaw is Windows-only. Bryce runs on macOS via launchd (ADR 0028).
+  //   * There is no upstream fix to take: @modelcontextprotocol/sdk@1.29.0
+  //     (latest) pins `@hono/node-server: ^1.19.9`, a range that sits wholly
+  //     inside the vulnerable `<2.0.5` band, and the fixed line (2.0.11) is a
+  //     breaking major the SDK was not built against.
+  //
+  // REMOVE this entry once @modelcontextprotocol/sdk widens its
+  // @hono/node-server range to >=2.0.5 (then bump the dependency instead).
+  "allowlist": ["GHSA-frvp-7c67-39w9"]
+}
