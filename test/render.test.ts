@@ -279,6 +279,19 @@ describe("renderDigestMarkdown", () => {
     expect(md).not.toContain("<b>x</b>");
   });
 
+  it("neutralises a Markdown image/link in a cell (Reviewer P2)", () => {
+    // `![x](http://evil/pixel)` would auto-load an image in a Markdown viewer;
+    // escaping `!` `[` `]` renders it as literal text instead.
+    const md = renderDigestMarkdown(
+      assemblyWith({
+        spec: "7d",
+        batters: [row("![x](http://evil/pixel)", "batting", [{ atBats: 1 }])],
+      }),
+    );
+    expect(md).toContain("\\!\\[x\\]");
+    expect(md).not.toContain("![x](");
+  });
+
   it("omits an empty table and, when both are empty, prints the empty-window line", () => {
     const oneTable = renderDigestMarkdown(assemblyWith({ spec: "7d", batters: [harper7d] }));
     expect(oneTable).toContain("## Batters");

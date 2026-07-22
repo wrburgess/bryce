@@ -18,8 +18,12 @@
 
 export type CsvCell = string | number | null;
 
-/** A cell whose leading character makes a spreadsheet evaluate it as a formula. */
-const FORMULA_LEAD = /^[=+\-@\t\r]/;
+/**
+ * A cell whose leading character makes a spreadsheet evaluate it as a formula.
+ * Includes CR *and* LF: a value like "\n=HYPERLINK(...)" is still a live formula
+ * once pasted, and RFC-4180 quoting preserves the newline without neutralising it.
+ */
+const FORMULA_LEAD = /^[=+\-@\t\r\n]/;
 
 /** A plain numeric literal, exempt from the formula guard (e.g. "-5", ".333"). */
 const NUMERIC_LITERAL = /^[+-]?(\d+\.?\d*|\.\d+)$/;

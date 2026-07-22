@@ -45,6 +45,12 @@ describe("csvCell — OWASP formula-injection guard", () => {
     expect(csvCell("\rcmd")).toBe('"\'\rcmd"');
   });
 
+  it("guards a leading LF (Reviewer P2): \\n=HYPERLINK(...) is a live formula once pasted", () => {
+    // LF triggers the guard AND forces quoting — RFC quoting alone would not
+    // neutralise a formula that begins on the second physical line.
+    expect(csvCell("\n=HYPERLINK(0)")).toBe('"\'\n=HYPERLINK(0)"');
+  });
+
   it("never guards a NUMBER cell, even a negative one", () => {
     expect(csvCell(-5)).toBe("-5");
     expect(csvCell(0)).toBe("0");

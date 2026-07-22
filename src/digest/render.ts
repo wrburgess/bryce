@@ -257,7 +257,9 @@ export function renderDigest(assembly: DigestAssembly): RenderedMail {
  * escape is not itself re-escaped), `|` (the column separator — an unescaped
  * one would forge extra columns), CR/LF collapsed to a space (an embedded
  * newline would forge extra ROWS), then `<`/`>` (so an HTML-like value renders
- * as text, not markup, in a Markdown viewer that passes raw HTML through).
+ * as text, not markup, in a Markdown viewer that passes raw HTML through), then
+ * the link/image delimiters `!` `[` `]` (so a value like `![x](http://evil/pixel)`
+ * renders as literal text, not an auto-loaded image or link, in a Markdown viewer).
  */
 function escapeMarkdownCell(s: string): string {
   return s
@@ -265,7 +267,10 @@ function escapeMarkdownCell(s: string): string {
     .replaceAll("|", "\\|")
     .replace(/[\r\n]+/g, " ")
     .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
+    .replaceAll(">", "&gt;")
+    .replaceAll("!", "\\!")
+    .replaceAll("[", "\\[")
+    .replaceAll("]", "\\]");
 }
 
 /**
