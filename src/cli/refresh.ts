@@ -1,6 +1,6 @@
 import { loadConfig } from "../config.js";
 import { loadDotEnv } from "../env.js";
-import { openDb } from "../db/client.js";
+import { startupDb } from "../db/startup.js";
 import { runRefresh } from "../jobs/refresh.js";
 import { MlbClient } from "../mlb/client.js";
 import { NcaaClient } from "../ncaa/client.js";
@@ -9,7 +9,10 @@ import { isMain } from "./main.js";
 export async function main(): Promise<number> {
   loadDotEnv();
   const config = loadConfig();
-  const { db, close } = openDb(config.databasePath);
+  const { db, close } = await startupDb(config.databasePath, {
+    backupDir: config.backupDir,
+    keepLast: config.backupKeepLast,
+  });
   try {
     const client = new MlbClient({ delayMs: config.mlbApiDelayMs });
     const ncaaClient = new NcaaClient({ delayMs: config.ncaaScrapeDelayMs });

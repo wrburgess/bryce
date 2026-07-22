@@ -107,7 +107,83 @@ npm run db:migrate
 
 Opens (creating if needed) the SQLite database, which **applies any pending migrations as a side
 effect**, then reports `migrations applied path=…`. Takes **no arguments**. Every other entry point
-migrates on startup too, so this is only for applying migrations without running a job.
+migrates on startup too, so this is only for applying migrations without running a job. It now also
+takes an automatic **Snapshot before any pending migration applies** (see `db:backup` below and
+[ADR 0042](../adr/0042-snapshot-and-player-backup-complement-litestream.md)).
+
+## `db:backup` — take a Snapshot and prune
+
+```sh
+npm run db:backup
+```
+
+Takes a **Snapshot** — a consistent, whole-database point-in-time copy — into `BACKUP_DIR` (default
+`backups/`), then prunes to the newest `BACKUP_KEEP_LAST` (default `10`). Takes **no arguments**;
+malformed invocation fails loud. Output is two `key=value` lines:
+
+```
+snapshot created name=bryce-20260722T030000Z-000.db dir=backups
+retention keepLast=10 kept=10 deleted=1
+```
+
+A **Snapshot** is the local, testable rollback point — complementary to, not a replacement for, the
+off-box Litestream **Replica** ([ADR 0042](../adr/0042-snapshot-and-player-backup-complement-litestream.md)).
+Snapshot files are owner-only (`0600`). Schedule it nightly with launchd — see
+[Running Bryce → Backup and restore](../guides/running-bryce.md#backup-and-restore).
+
+## `db:restore` — swap a Snapshot into place
+
+```sh
+npm run db:restore -- --from backups/bryce-20260722T030000Z-000.db
+```
+
+**Restore** is the destructive recovery op: it validates the candidate Snapshot (integrity check,
+foreign-key check, expected tables, and migration-history compatibility), takes a **safety Snapshot**
+of the current database, then atomically swaps the validated file into place, clearing stale WAL
+sidecars.
+
+| Flag | Required | Notes |
+|---|---|---|
+| `--from FILE` | **yes** | The Snapshot file to restore. Refused if it aliases the live database (path, symlink, or hardlink). |
+
+**Stop the app first.** Restore **refuses** (`error: database is in use by pid …`) while any Bryce
+process (server, launchd jobs) is running, via a cooperative interlock. It never opens or migrates the
+live database itself — see the [Restore runbook](../guides/running-bryce.md#restore-runbook) for the
+full stop-everything-then-restore procedure, including the mandatory **fix/revert the offending
+migration before restart** step.
+
+## `players:backup` — write a Player List Backup
+
+```sh
+npm run players:backup -- --out backups/players.json
+```
+
+Writes a **Player List Backup** — a portable, versioned JSON serialization of *every* Player row
+(active and inactive) — the recovery counterpart to the one thing no Refresh can rebuild: the human's
+roster choices and notes. Network-free. The file is written crash-safely (temp + fsync + rename),
+owner-only (`0600`). Refuses to overwrite the live database or a Snapshot filename.
+
+| Flag | Required | Notes |
+|---|---|---|
+| `--out FILE` | **yes** | Destination path for the JSON envelope. |
+
+A **Player List Backup** is *not* an **Export** (a spreadsheet artifact for consumption) — it is a
+restore point ([Domain glossary](../domain/CONTEXT.md)).
+
+## `players:restore` — re-import a Player List Backup
+
+```sh
+npm run players:restore -- --in backups/players.json
+```
+
+Re-imports a Player List Backup **network-free and all-or-nothing**, upserting on each Player's natural
+identity (MLB `external_id` or NCAA `stats_player_seq`) so existing rows keep their `id` and their
+**Stat Line** history stays intact. Reports `player-list restored inserted=N updated=M total=T`. An
+invalid payload or a split-identity conflict fails the whole import with a non-zero exit.
+
+| Flag | Required | Notes |
+|---|---|---|
+| `--in FILE` | **yes** | The Player List Backup JSON to import. |
 
 ## `server` — start the HTTP server
 

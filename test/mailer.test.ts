@@ -11,6 +11,8 @@ import { SmtpMailer } from "../src/mailer/smtp.js";
 const baseConfig: Config = {
   databasePath: ":memory:",
   tz: "America/Chicago",
+  backupDir: "backups",
+  backupKeepLast: 10,
   mailerProvider: "console",
   postmarkServerToken: null,
   smtpHost: null,

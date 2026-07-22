@@ -2,6 +2,8 @@ import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { PlayerRow } from "../db/schema.js";
 import { players } from "../db/schema.js";
+import type { PlayerBackupEntry } from "../backup/player-list.js";
+import { canonicalizeName } from "../domain/names.js";
 import { hostDate } from "../domain/season.js";
 import { runRefreshForPlayer } from "../jobs/refresh.js";
 import type { MlbClient } from "../mlb/client.js";
@@ -266,6 +268,129 @@ export async function listPlayers(db: Db, filter: PlayerListFilter = "active"): 
     .from(players)
     .where(eq(players.active, filter === "active"))
     .orderBy(players.id);
+}
+
+/**
+ * A backup row's two natural identities resolve to two DIFFERENT existing rows —
+ * an ambiguity no upsert can safely reconcile, so the whole import is aborted.
+ */
+export class SplitIdentityConflictError extends Error {
+  constructor(externalId: number, ncaaPlayerSeq: number, externalRowId: number, ncaaRowId: number) {
+    super(
+      `split identity: externalId=${externalId} resolves to player id ${externalRowId} ` +
+        `but ncaaPlayerSeq=${ncaaPlayerSeq} resolves to player id ${ncaaRowId}`,
+    );
+    this.name = "SplitIdentityConflictError";
+  }
+}
+
+export interface RestorePlayerListSummary {
+  inserted: number;
+  updated: number;
+  total: number;
+}
+
+/** The drizzle better-sqlite3 transaction handle (a synchronous transaction). */
+type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * Re-import a Player List Backup, network-free and all-or-nothing (ADR 0042).
+ *
+ * Identity (ADR 0032 / ADR 0041): each row is matched on EITHER natural id; when
+ * both are present they must resolve to the SAME existing row (a promotion
+ * NCAA -> pro keeps one row and gains external_id WITHOUT losing ncaa_player_seq)
+ * — a split-row conflict fails the whole transaction. Names are canonicalized on
+ * this new direct write path.
+ *
+ * Authority (ADR 0042 matrix): natural ids + level + milbLevel + teamName +
+ * position + schoolName + notes + active come from the backup; the source-local
+ * `id` is never authoritative (existing rows keep their id so Stat Line FKs stay
+ * intact); `createdAt` is the existing row's on update / the backup value (or
+ * `now` if absent) on insert; `updatedAt` is always `now`.
+ */
+export function restorePlayerListBackup(
+  db: Db,
+  rows: PlayerBackupEntry[],
+  now: Date,
+): RestorePlayerListSummary {
+  const nowIso = now.toISOString();
+
+  return db.transaction((tx: Tx): RestorePlayerListSummary => {
+    let inserted = 0;
+    let updated = 0;
+
+    for (const row of rows) {
+      const fullName = canonicalizeName(row.fullName);
+      const schoolName =
+        row.schoolName === null || row.schoolName === undefined
+          ? null
+          : canonicalizeName(row.schoolName);
+
+      const byExternal =
+        row.externalId != null
+          ? tx.select().from(players).where(eq(players.externalId, row.externalId)).all()[0]
+          : undefined;
+      const byNcaa =
+        row.ncaaPlayerSeq != null
+          ? tx.select().from(players).where(eq(players.ncaaPlayerSeq, row.ncaaPlayerSeq)).all()[0]
+          : undefined;
+
+      if (byExternal !== undefined && byNcaa !== undefined && byExternal.id !== byNcaa.id) {
+        throw new SplitIdentityConflictError(
+          row.externalId as number,
+          row.ncaaPlayerSeq as number,
+          byExternal.id,
+          byNcaa.id,
+        );
+      }
+
+      const existing = byExternal ?? byNcaa;
+
+      if (existing !== undefined) {
+        // Coalesce natural ids so a backup can ADD an id without erasing one the
+        // existing row already holds (the promotion case keeps ncaa_player_seq).
+        tx
+          .update(players)
+          .set({
+            externalId: row.externalId ?? existing.externalId,
+            ncaaPlayerSeq: row.ncaaPlayerSeq ?? existing.ncaaPlayerSeq,
+            fullName,
+            level: row.level,
+            milbLevel: row.milbLevel ?? null,
+            teamName: row.teamName ?? null,
+            position: row.position ?? null,
+            schoolName,
+            active: row.active,
+            notes: row.notes ?? null,
+            updatedAt: nowIso,
+          })
+          .where(eq(players.id, existing.id))
+          .run();
+        updated += 1;
+      } else {
+        tx
+          .insert(players)
+          .values({
+            externalId: row.externalId ?? null,
+            ncaaPlayerSeq: row.ncaaPlayerSeq ?? null,
+            fullName,
+            level: row.level,
+            milbLevel: row.milbLevel ?? null,
+            teamName: row.teamName ?? null,
+            position: row.position ?? null,
+            schoolName,
+            active: row.active,
+            notes: row.notes ?? null,
+            createdAt: row.createdAt ?? nowIso,
+            updatedAt: nowIso,
+          })
+          .run();
+        inserted += 1;
+      }
+    }
+
+    return { inserted, updated, total: rows.length };
+  });
 }
 
 /**
