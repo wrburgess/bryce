@@ -305,10 +305,18 @@ export async function refreshPlayer(
   player: PlayerRow,
   season: string,
 ): Promise<{ inserted: number; updated: number }> {
-  const { db, client, now } = deps;
+  const { db, client, now, tz } = deps;
   if (player.externalId === null) {
     throw new Error(`refreshPlayer requires an externalId (player id ${player.id})`);
   }
+
+  // Finality gate (ADR 0040, issue #77): a game whose date is not yet in the
+  // past may still be IN PROGRESS. The MLB gameLog split carries no game-status
+  // field and updates live, so ingesting a same-day game would store a partial
+  // line as if it were final. The Digest only ever reports yesterday, so holding
+  // today's games one day costs nothing — the next Refresh re-ingests the
+  // now-final line and the ADR 0029 upsert overwrites the row in place.
+  const hostToday = hostDate(now(), tz);
 
   const person = await client.getPerson(player.externalId);
   const changes: Partial<typeof players.$inferInsert> = {
@@ -351,6 +359,7 @@ export async function refreshPlayer(
       for (const stat of log.stats) {
         for (const split of stat.splits) {
           if (!isIngestedGameType(split.gameType)) continue;
+          if (split.date >= hostToday) continue; // not yet final — see the gate above
           rows.push(splitToRow(player.id, statType, split, now().toISOString()));
         }
       }

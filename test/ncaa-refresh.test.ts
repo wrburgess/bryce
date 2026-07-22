@@ -215,7 +215,11 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
     await insertNcaa();
     await insertPlayer(opened.db, { externalId: 691185, level: "milb", milbLevel: "Triple-A" });
     api.options.gameLogs = {
-      "11:hitting": makeGameLogBody("hitting", [makeSplit({ game: { gamePk: 900001, gameNumber: 1 } })]),
+      // Dated before the NCAA-in-season clock (2026-03-15) so it is a completed
+      // game the ingestion finality gate admits (ADR 0040).
+      "11:hitting": makeGameLogBody("hitting", [
+        makeSplit({ date: "2026-03-14", game: { gamePk: 900001, gameNumber: 1 } }),
+      ]),
     };
 
     const summary = await runRefresh(deps());
