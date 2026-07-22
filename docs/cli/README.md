@@ -44,7 +44,7 @@ state, so re-running a Window always sends the same content.
   already-sent-today guard (and, in Offseason Sleep, the weekly-heartbeat rule) and records nothing.
   It does not jump an in-flight claim held by another run. The full semantics — and the three
   consequences worth knowing — are in
-  [Running Bryce → the `--force` flag](../guides/running-bryce.md#setup) and
+  [Running Bryce → Forcing a test send](../guides/running-bryce.md#forcing-a-test-send) and
   [ADR 0034](../adr/0034-digest-delivery-claim-at-least-once.md).
 - The `1d` window is the scheduled daily artifact; any wider window (`7d`/`14d`/`21d`/`ytd`) is an
   on-demand report that takes no slot and answers even during Offseason Sleep

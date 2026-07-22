@@ -26,6 +26,8 @@ npm run digest
 npm run digest -- --force   # test send: re-send today's digest even if it already went out
 ```
 
+### Forcing a test send
+
 `--force` overrides only the "already sent today" bookkeeping, and a forced run is a **replay**: it
 sends the mail and writes nothing at all — no delivery row is created or changed, and no Stat Line is
 marked reported. Three consequences worth knowing before you use it:
