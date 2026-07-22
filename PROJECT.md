@@ -26,7 +26,12 @@ this table — they never hardcode a stack's commands.
 | Typecheck | `npm run typecheck` |
 | Lint | `npm run lint` |
 | Tests | `npm test` |
-| Dependency audit | `npm audit --omit=dev` |
+| Dependency audit | `npm run audit` |
+
+The dependency audit runs through **audit-ci** (`npm run audit`, config `audit-ci.jsonc`) rather than
+raw `npm audit`, so a reviewed, non-exploitable advisory can be allowlisted with a documented reason
+([#51](https://github.com/wrburgess/bryce/pull/51)) instead of failing the gate — and this is the
+exact command CI runs (`.github/workflows/app.yml`).
 
 Until the TypeScript application is scaffolded (Phase 1 of the digest build), the npm rows have
 nothing to inspect and are reported `not_run` with that stated reason. A check whose command runs
