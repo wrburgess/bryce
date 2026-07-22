@@ -1,5 +1,6 @@
 import type { DigestAssembly, DigestRow } from "./assemble.js";
 import type { ResolvedWindow } from "../domain/window.js";
+import { isLongWindow } from "../domain/window.js";
 import type { Level } from "../mlb/levels.js";
 import { deriveRate } from "../stats/aggregate.js";
 import { formatOuts } from "./rates.js";
@@ -147,6 +148,15 @@ function battingColumns(window: ResolvedWindow): Column[] {
     // PA is a summed counter; assemble.ts derives it per game when the
     // source omits it, so the fallback lives at the grain it is true at.
     { header: "PA", align: "right", value: counter("plateAppearances") },
+    // BB%/K% are display-only derived rates, shown only on the >=21d windows —
+    // a single week's plate appearances are too few for a rate to mean much.
+    // They are recomputed from summed counters like every other rate (deriveRate).
+    ...(isLongWindow(window.spec)
+      ? ([
+          { header: "BB%", align: "right", value: rate("walkPct") },
+          { header: "K%", align: "right", value: rate("kPct") },
+        ] as Column[])
+      : []),
     { header: "H", align: "right", value: counter("hits") },
     { header: "BB", align: "right", value: counter("baseOnBalls") },
     { header: "K", align: "right", value: counter("strikeOuts") },
@@ -175,17 +185,33 @@ function pitchingColumns(window: ResolvedWindow): Column[] {
     { header: "HRA", align: "right", value: counter("homeRuns") },
     { header: "ERA", align: "right", value: rate("era") },
     { header: "WHIP", align: "right", value: rate("whip") },
-    { header: "S", align: "right", value: counter("saves") },
-    { header: "HLD", align: "right", value: counter("holds") },
     // A COUNT of qualifying games, not a per-game flag: QS is not a source
     // field and cannot be recovered from summed outs and earned runs.
     { header: "QS", align: "right", value: (r) => String(r.qualityStarts) },
+    { header: "S", align: "right", value: counter("saves") },
+    { header: "BS", align: "right", value: counter("blownSaves") },
+    { header: "HLD", align: "right", value: counter("holds") },
+    // RW/RL are relief decisions, likewise COUNTS across the window — a
+    // starter's win or loss is never surfaced here (see isReliefAppearance).
+    { header: "RW", align: "right", value: (r) => String(r.reliefWins) },
+    { header: "RL", align: "right", value: (r) => String(r.reliefLosses) },
   ];
 }
 
 const GUTTER = "  ";
 
-function textTable(columns: Column[], rows: DigestRow[]): string[] {
+/**
+ * Row index to draw the MLB / Other-Levels rule at: after the last MLB
+ * (lvlRank===0) row, but only when the table has BOTH an MLB row and a
+ * non-MLB row. null => no rule (one side absent).
+ */
+function mlbDividerIndex(rows: DigestRow[]): number | null {
+  const lastMlb = rows.reduce((idx, r, i) => (r.lvlRank === 0 ? i : idx), -1);
+  const hasOther = rows.some((r) => r.lvlRank > 0);
+  return lastMlb >= 0 && hasOther ? lastMlb + 1 : null;
+}
+
+function textTable(columns: Column[], rows: DigestRow[], dividerAfter: number | null = null): string[] {
   const cells = rows.map((row) => columns.map((col) => col.value(row)));
   const widths = columns.map((col, i) =>
     cells.reduce((max, rowCells) => Math.max(max, rowCells[i]!.length), col.header.length),
@@ -198,19 +224,30 @@ function textTable(columns: Column[], rows: DigestRow[]): string[] {
       .join(GUTTER)
       // Trailing pad on the last column is invisible noise in a mail client.
       .trimEnd();
-  return [line(columns.map((c) => c.header)), ...cells.map(line)];
+  const lines = [line(columns.map((c) => c.header)), ...cells.map(line)];
+  if (dividerAfter !== null && dividerAfter > 0 && dividerAfter < rows.length) {
+    const maxLineWidth = lines.reduce((max, l) => Math.max(max, l.length), 0);
+    // +1 skips the header line so the rule lands after the last MLB data row.
+    lines.splice(1 + dividerAfter, 0, "-".repeat(maxLineWidth));
+  }
+  return lines;
 }
 
-function htmlTable(columns: Column[], rows: DigestRow[]): string {
+function htmlTable(columns: Column[], rows: DigestRow[], dividerAfter: number | null = null): string {
   const cell = (tag: "th" | "td", align: Column["align"], value: string): string =>
     `<${tag} style="text-align: ${align}; padding: 2px 6px">${escapeHtml(value)}</${tag}>`;
   const head = columns.map((col) => cell("th", col.align, col.header)).join("");
-  const body = rows
-    .map(
-      (row) => `<tr>${columns.map((col) => cell("td", col.align, col.value(row))).join("")}</tr>`,
-    )
-    .join("");
-  return `<table cellspacing="0" cellpadding="0"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  const bodyRows = rows.map(
+    (row) => `<tr>${columns.map((col) => cell("td", col.align, col.value(row))).join("")}</tr>`,
+  );
+  if (dividerAfter !== null && dividerAfter > 0 && dividerAfter < rows.length) {
+    bodyRows.splice(
+      dividerAfter,
+      0,
+      `<tr><td colspan="${columns.length}" style="padding: 0"><hr style="border: none; border-top: 1px solid #ccc; margin: 4px 0" /></td></tr>`,
+    );
+  }
+  return `<table cellspacing="0" cellpadding="0"><thead><tr>${head}</tr></thead><tbody>${bodyRows.join("")}</tbody></table>`;
 }
 
 interface Table {
@@ -222,7 +259,7 @@ interface Table {
 export function renderDigest(assembly: DigestAssembly): RenderedMail {
   const { window } = assembly;
   const title = windowTitle(window);
-  const heading = `Bryce - ${title}`;
+  const heading = title;
 
   // An empty table is omitted rather than rendered as a bare heading: a watch
   // list with no pitchers should not carry an empty Pitchers section daily.
@@ -241,12 +278,16 @@ export function renderDigest(assembly: DigestAssembly): RenderedMail {
   }
 
   for (const table of tables) {
-    textParts.push(table.title, ...textTable(table.columns, table.rows), "");
-    htmlParts.push(`<h2>${escapeHtml(table.title)}</h2>`, htmlTable(table.columns, table.rows));
+    const divider = mlbDividerIndex(table.rows);
+    textParts.push(table.title, ...textTable(table.columns, table.rows, divider), "");
+    htmlParts.push(
+      `<h2>${escapeHtml(table.title)}</h2>`,
+      htmlTable(table.columns, table.rows, divider),
+    );
   }
 
   return {
-    subject: `MLB Daily Tracker: ${title}`,
+    subject: `MLB Daily Tracker - ${title}`,
     text: `${textParts.join("\n").trimEnd()}\n`,
     html: htmlParts.join("\n"),
   };

@@ -93,7 +93,7 @@ Query stored per-game Stat Lines, newest first.
 
 Preview the Digest for a Window as the Batters and Pitchers tables the email would carry.
 
-- **Inputs:** `window` (`1d`/`7d`/`14d`/`21d`/`ytd`, default `1d`; an unsupported value is rejected)
+- **Inputs:** `window` (`1d`/`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`, default `1d`; an unsupported value is rejected)
   and `force` — **accepted but ignored here**, because a preview never claims or sends.
 - **Success:** `{ window, statLineCount, playerCount, batters, pitchers, unknownFields, mail }`.
 - **Side effects:** none — sends nothing, claims nothing, writes nothing; re-running a Window returns

@@ -252,7 +252,7 @@ npm run digest
 A specific past day has no direct re-send: `--window` always ends on yesterday, and there is no
 as-of flag on the CLI (recovery targets a past date only through the automatic pass above, keyed off
 its delivery row). To see a past day's games on demand, ask for a wider window that still covers it —
-`npm run digest -- --window 7d` (or `14d`, `21d`, `ytd`). An on-demand window takes no slot and is
+`npm run digest -- --window 7d` (or `14d`, `21d`, `28d`, `35d`, `60d`, `ytd`). An on-demand window takes no slot and is
 always safe to repeat.
 
 Do **not** delete a delivery row by hand: the recovery pass keys off it, and deleting a `sent` row

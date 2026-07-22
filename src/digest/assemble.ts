@@ -38,6 +38,10 @@ export interface DigestRow {
   agg: Aggregate;
   /** Count of quality starts in the window; always 0 for batters. */
   qualityStarts: number;
+  /** Count of wins earned in relief in the window; always 0 for batters. */
+  reliefWins: number;
+  /** Count of losses charged in relief in the window; always 0 for batters. */
+  reliefLosses: number;
 }
 
 export interface DigestAssembly {
@@ -343,6 +347,8 @@ function buildRows(
         bucket.map((s) => s.stats),
       ),
       qualityStarts: statType === "pitching" ? countQualityStarts(bucket) : 0,
+      reliefWins: statType === "pitching" ? countReliefWins(bucket) : 0,
+      reliefLosses: statType === "pitching" ? countReliefLosses(bucket) : 0,
     });
   }
 
@@ -357,6 +363,8 @@ function buildRows(
       gameNumber: null,
       agg: aggregate(statType, []),
       qualityStarts: 0,
+      reliefWins: 0,
+      reliefLosses: 0,
     });
   }
 
@@ -381,6 +389,22 @@ function countQualityStarts(bucket: Split[]): number {
     const outs = ipToOuts(typeof ip === "string" ? ip : String(ip));
     return qualityStart(outs, numberOr0(s.stats.earnedRuns)) === 1;
   }).length;
+}
+
+/** An appearance is relief only when gamesStarted is PRESENT and 0. A missing
+ * value (NCAA rows have no gamesStarted) is unknown-not-relief, so a starter's
+ * decision is never miscounted as relief. Starter decisions are never surfaced. */
+function isReliefAppearance(stats: Record<string, unknown>): boolean {
+  const gs = stats.gamesStarted;
+  return typeof gs === "number" && Number.isFinite(gs) && gs === 0;
+}
+
+function countReliefWins(bucket: Split[]): number {
+  return bucket.filter((s) => numberOr0(s.stats.wins) === 1 && isReliefAppearance(s.stats)).length;
+}
+
+function countReliefLosses(bucket: Split[]): number {
+  return bucket.filter((s) => numberOr0(s.stats.losses) === 1 && isReliefAppearance(s.stats)).length;
 }
 
 /**

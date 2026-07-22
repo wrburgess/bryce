@@ -121,6 +121,14 @@ const slashLine =
     return value === null ? "-" : slash(value);
   };
 
+/** A ratio as a 1-decimal percentage: 0.085 -> "8.5". Zero denominator -> "-". */
+const percent =
+  (digits: number, compute: (agg: Aggregate) => number | null): Formula =>
+  (agg) => {
+    const value = compute(agg);
+    return value === null ? "-" : (value * 100).toFixed(digits);
+  };
+
 const c = (agg: Aggregate, key: string): number => agg.counters[key] ?? 0;
 
 const onBase = (agg: Aggregate): number | null =>
@@ -168,6 +176,12 @@ const BATTING_RATES: Readonly<Record<string, Formula>> = {
     ),
   ),
   atBatsPerHomeRun: fixed(2, (a) => ratio(c(a, "atBats"), c(a, "homeRuns"))),
+  // Display-only rates, rendered on the >=21d email columns via deriveRate.
+  // INTENTIONALLY not declared as rate keys in fields.ts, so deriveAllRates and
+  // the JSON payload never carry them and the ">=21d only" rule stays uniform.
+  // Recomputed from summed counters like every other rate — never averaged.
+  walkPct: percent(1, (a) => ratio(c(a, "baseOnBalls"), c(a, "plateAppearances"))),
+  kPct: percent(1, (a) => ratio(c(a, "strikeOuts"), c(a, "plateAppearances"))),
 };
 
 const PITCHING_RATES: Readonly<Record<string, Formula>> = {

@@ -37,7 +37,7 @@ state, so re-running a Window always sends the same content.
 
 | Flag | Default | Accepted values |
 |---|---|---|
-| `--window <spec>` / `--window=<spec>` | `1d` | `1d`, `7d`, `14d`, `21d`, `ytd` |
+| `--window <spec>` / `--window=<spec>` | `1d` | `1d`, `7d`, `14d`, `21d`, `28d`, `35d`, `60d`, `ytd` |
 | `--force` | off (boolean) | present or absent |
 
 - Both `--window 7d` and `--window=7d` are accepted. An unsupported window (e.g. `30d`) **fails
@@ -51,7 +51,7 @@ state, so re-running a Window always sends the same content.
   consequences worth knowing — are in
   [Running Bryce → Forcing a test send](../guides/running-bryce.md#forcing-a-test-send) and
   [ADR 0034](../adr/0034-digest-delivery-claim-at-least-once.md).
-- The `1d` window is the scheduled daily artifact; any wider window (`7d`/`14d`/`21d`/`ytd`) is an
+- The `1d` window is the scheduled daily artifact; any wider window (`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`) is an
   on-demand report that takes no slot and answers even during Offseason Sleep
   ([ADR 0035](../adr/0035-window-selected-digest.md)).
 

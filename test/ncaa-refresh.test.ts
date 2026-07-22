@@ -311,8 +311,10 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
     // prose format hid this by never showing a slash line at all.
     expect(cells("C Guy").slice(0, 8)).toEqual(["C", "Guy", "NCAA", "2", ".429/.429/.000", "7", "3", "0"]);
     expect(cells("C Guy").slice(-1)).toEqual(["1"]); // E, merged from fielding
+    // Tail is QS S BS HLD RW RL. An NCAA row carries no gamesStarted, so RW/RL
+    // stay 0 (fail-closed) even when the page reports a decision.
     expect(cells("C Guy", text.indexOf("Pitchers"))).toEqual(
-      ["C", "Guy", "NCAA", "1", "6.0", "1", "8", "12.00", "2", "4", "0", "1.50", "1.00", "0", "0", "1"],
+      ["C", "Guy", "NCAA", "1", "6.0", "1", "8", "12.00", "2", "4", "0", "1.50", "1.00", "1", "0", "0", "0", "0", "0"],
     );
     expect(text.split("\n").filter((l) => l.startsWith("C Guy"))).toHaveLength(2);
   });

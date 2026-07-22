@@ -82,7 +82,7 @@ Returns `{ "statLines": [...] }`.
 ### `GET /api/digest/preview`
 
 Preview what a Digest would report for a Window, without sending or claiming anything (read-only).
-Query: `window=` (one of `1d`/`7d`/`14d`/`21d`/`ytd`, default `1d`) and `force=true|false` (default
+Query: `window=` (one of `1d`/`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`, default `1d`) and `force=true|false` (default
 `false`). **`force` is accepted but a no-op here** — a preview never claims or sends, and window
 selection makes its content identical either way. Returns
 `{ window, statLineCount, playerCount, batters, pitchers, unknownFields, mail }`.

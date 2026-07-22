@@ -125,6 +125,18 @@ describe("MCP server over Streamable HTTP", () => {
     for (const tool of tools) {
       expect(tool.description, tool.name).toBeTruthy();
     }
+
+    // Both digest tools enumerate all eight windows — including the three added
+    // in #54 — so a client sees them without reading the source.
+    const descriptionOf = (name: string) => tools.find((t) => t.name === name)?.description ?? "";
+    for (const name of ["digest_preview", "send_digest"]) {
+      for (const win of ["28d", "35d", "60d"]) {
+        expect(descriptionOf(name), `${name} enumerates ${win}`).toContain(win);
+      }
+    }
+    // send_digest names the new windows among the on-demand ones (no daily slot).
+    expect(descriptionOf("send_digest")).toContain("on-demand");
+    expect(descriptionOf("send_digest")).toContain("28d/35d/60d");
   });
 
   it("describes every input field of every exposed tool schema", async () => {
@@ -357,7 +369,7 @@ describe("MCP server over Streamable HTTP", () => {
       from: "2026-07-18",
       to: "2026-07-18",
     });
-    expect((result.structuredContent?.mail as { subject: string }).subject).toBe("MLB Daily Tracker: Sat, July 18, 2026");
+    expect((result.structuredContent?.mail as { subject: string }).subject).toBe("MLB Daily Tracker - Sat, July 18, 2026");
 
     expect(mailer.sent).toHaveLength(0);
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
@@ -372,6 +384,11 @@ describe("MCP server over Streamable HTTP", () => {
     expect(week.structuredContent).toMatchObject({ statLineCount: 2 });
     expect(week.structuredContent?.window).toMatchObject({ spec: "7d", from: "2026-07-12" });
     expect((await call("digest_preview")).structuredContent).toMatchObject({ statLineCount: 1 });
+
+    // A new long window (added in #54) is accepted on both tools.
+    const long = await call("digest_preview", { window: "28d" });
+    expect(long.structuredContent).toMatchObject({ statLineCount: 2 });
+    expect(long.structuredContent?.window).toMatchObject({ spec: "28d" });
 
     // Fails closed on BOTH tools: named, refused, and nothing sent.
     for (const tool of ["digest_preview", "send_digest"]) {
