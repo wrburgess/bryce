@@ -4,6 +4,7 @@ import type { OpenedDb } from "../src/db/client.js";
 import { players, refreshRuns, seasonCalendar, statLines } from "../src/db/schema.js";
 import type { RefreshDeps } from "../src/jobs/refresh.js";
 import { runRefresh } from "../src/jobs/refresh.js";
+import { SUPERSEDED_MESSAGE, claimRefreshRun } from "../src/jobs/refresh-run.js";
 import { MlbClient } from "../src/mlb/client.js";
 import {
   FakeNcaaApi,
@@ -485,6 +486,50 @@ describe("runRefresh records a freshness run (ADR 0042)", () => {
     const summary = await runRefresh(deps());
     expect(summary).toMatchObject({ skipped: true, reason: "offseason-sleep", runId: null });
     expect(await opened.db.select().from(refreshRuns)).toHaveLength(0);
+  });
+
+  it("aborts WITHOUT settling when its lease is superseded mid-sweep (ADR 0042 fencing)", async () => {
+    // Two watched players, so the sweep has two loop iterations. Player 0 is
+    // fetched; DURING that fetch a successor run B claims — reaping run A's row
+    // `failed` because A's lease has expired. At player 1's top-of-loop renew, A
+    // no longer owns its lease, so the sweep ABORTS: it must not settle its own
+    // row `ok` (B already stamped it `failed`), and B must remain the newest run.
+    await insertPlayer(opened.db, { externalId: 691185 });
+    await insertPlayer(opened.db, { externalId: 660271 });
+
+    let reaped = false;
+    // A far-future clock for B's claim so A's just-renewed lease reads as expired.
+    const bClaimAt = new Date("2026-07-19T17:11:00.000Z"); // MID_SEASON + 11 min
+    const fencingClient = new MlbClient({
+      fetchImpl: (url: string) => {
+        // On player 0's identity fetch (getPerson → `/people/691185?hydrate=…`),
+        // let a successor take over. The gameLog path is `/people/691185/stats?…`,
+        // so keying on the `?` right after the id isolates the identity call.
+        if (!reaped && url.includes("/people/691185?")) {
+          reaped = true;
+          const b = claimRefreshRun(opened.db, { now: bClaimAt, playersTotal: 2 });
+          if (!b.claimed) throw new Error("expected successor B to claim");
+        }
+        return api.fetch(url);
+      },
+      delayMs: 0,
+    });
+
+    const summary = await runRefresh({ ...deps(), client: fencingClient });
+    expect(summary).toMatchObject({ skipped: true, reason: "superseded" });
+    expect(summary.runId).not.toBeNull();
+
+    const runs = await opened.db.select().from(refreshRuns);
+    expect(runs).toHaveLength(2);
+    // Run A (its id is surfaced on the summary) was reaped `failed`, never `ok`.
+    const runA = runs.find((r) => r.id === summary.runId);
+    expect(runA).toMatchObject({ status: "failed", errorMessage: SUPERSEDED_MESSAGE });
+    // B is the sole `running` row — the watermark winner that took over.
+    const running = runs.filter((r) => r.status === "running");
+    expect(running).toHaveLength(1);
+    expect(running[0]?.id).not.toBe(summary.runId);
+    // Crucially, A never settled `ok`: no ok row exists at all.
+    expect(runs.some((r) => r.status === "ok")).toBe(false);
   });
 
   it("no-ops `already-running` under a concurrent live lease, recording no new run", async () => {

@@ -4,6 +4,7 @@ import type { OpenedDb } from "../src/db/client.js";
 import { openDb } from "../src/db/client.js";
 import { refreshRuns } from "../src/db/schema.js";
 import {
+  SUPERSEDED_MESSAGE,
   claimRefreshRun,
   digestFreshnessFor,
   refreshHealth,
@@ -67,15 +68,67 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0042)", () => {
     expect(contender).toEqual({ claimed: false, reason: "already-running" });
   });
 
-  it("a run that STOPS renewing expires and is recoverable by the next claim", () => {
+  it("a run that STOPS renewing expires and is reaped `failed` by the next claim", () => {
     const first = claimRefreshRun(opened.db, { now: at(T0), playersTotal: 2 });
     if (!first.claimed) throw new Error("expected claim");
 
-    // No renewal: at +11 min the lease has expired, so a new run may claim.
+    // No renewal: at +11 min the lease has expired, so a new run may claim — and
+    // the claim FENCES the crashed run by settling its row `failed` BEFORE
+    // inserting its own, so a superseded run can never write past its lease.
     const recovered = claimRefreshRun(opened.db, { now: at(PAST_LEASE), playersTotal: 2 });
-    expect(recovered.claimed).toBe(true);
-    // Two rows now: the crashed one (still `running`) and the fresh claim.
-    expect(opened.db.select().from(refreshRuns).where(eq(refreshRuns.status, "running")).all()).toHaveLength(2);
+    if (!recovered.claimed) throw new Error("expected recovery claim");
+
+    // Only ONE `running` row now — the fresh claim; the crashed one was reaped.
+    const running = opened.db.select().from(refreshRuns).where(eq(refreshRuns.status, "running")).all();
+    expect(running).toHaveLength(1);
+    expect(running[0]?.id).toBe(recovered.runId);
+
+    // The crashed row is now `failed`, stamped finished with the superseded note.
+    const reaped = opened.db.select().from(refreshRuns).where(eq(refreshRuns.id, first.runId)).all()[0];
+    expect(reaped).toMatchObject({
+      status: "failed",
+      finishedAt: PAST_LEASE,
+      errorMessage: SUPERSEDED_MESSAGE,
+    });
+  });
+
+  it("claimRefreshRun reaps an expired-lease `running` row to `failed` before inserting the new run", () => {
+    // A crashed run left `running` with a long-stale lease, and no live lease
+    // exists, so the next claim proceeds — and must fence the zombie first.
+    const first = claimRefreshRun(opened.db, { now: at(T0), playersTotal: 2 });
+    if (!first.claimed) throw new Error("expected claim");
+
+    const second = claimRefreshRun(opened.db, { now: at(PAST_LEASE), playersTotal: 3 });
+    if (!second.claimed) throw new Error("expected second claim");
+
+    // The reap happened INSIDE the claim txn, before the insert: the old row is
+    // terminal, the new row is the sole `running` one.
+    const reaped = opened.db.select().from(refreshRuns).where(eq(refreshRuns.id, first.runId)).all()[0];
+    expect(reaped?.status).toBe("failed");
+    expect(reaped?.finishedAt).toBe(PAST_LEASE);
+    expect(reaped?.errorMessage).toBe(SUPERSEDED_MESSAGE);
+    const fresh = opened.db.select().from(refreshRuns).where(eq(refreshRuns.id, second.runId)).all()[0];
+    expect(fresh).toMatchObject({ status: "running", finishedAt: null, playersTotal: 3 });
+  });
+
+  it("renewRefreshRun returns true while a run owns its live lease, false once reaped", () => {
+    // +20 min: well past the lease even after a +5 min renew (which pushes
+    // expiry to +15 min), so the successor's claim genuinely reaps the owner.
+    const PAST_RENEWED_LEASE = "2026-07-19T07:20:00.000Z";
+    const owner = claimRefreshRun(opened.db, { now: at(T0), playersTotal: 2 });
+    if (!owner.claimed) throw new Error("expected claim");
+
+    // Still `running`: renew succeeds and reports continued ownership.
+    expect(renewRefreshRun(opened.db, owner.runId, at(WITHIN_LEASE))).toBe(true);
+
+    // A successor claims after the renewed lease expires, reaping the owner's row.
+    const successor = claimRefreshRun(opened.db, { now: at(PAST_RENEWED_LEASE), playersTotal: 2 });
+    if (!successor.claimed) throw new Error("expected successor");
+
+    // The owner has lost the lease: its next renew updates nothing → false.
+    expect(renewRefreshRun(opened.db, owner.runId, at(PAST_RENEWED_LEASE))).toBe(false);
+    // And a renew of a wholly unknown id is likewise false (nothing to own).
+    expect(renewRefreshRun(opened.db, 999_999, at(PAST_RENEWED_LEASE))).toBe(false);
   });
 
   it("a live and an expired running row coexist: the LIVE one wins admission", async () => {
@@ -223,6 +276,34 @@ describe("digestFreshnessFor boundary (ADR 0042)", () => {
     expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ)).toMatchObject({
       state: "stale",
       asOf: null,
+    });
+  });
+
+  it("breaks a started_at tie deterministically by id (the later-inserted run wins)", async () => {
+    // Two qualifying ok runs sharing an exact started_at: the ORDER BY id DESC
+    // tie-breaker makes the winner deterministic (the higher id, inserted last),
+    // never dependent on storage/scan order.
+    const shared = "2026-07-19T12:00:00.000Z"; // host 07-19 > content 07-18
+    await insertRefreshRun(opened.db, {
+      status: "ok",
+      startedAt: shared,
+      finishedAt: "2026-07-19T12:05:00.000Z",
+      playersRefreshed: 2,
+      playersTotal: 9,
+    });
+    await insertRefreshRun(opened.db, {
+      status: "ok",
+      startedAt: shared,
+      finishedAt: "2026-07-19T12:06:00.000Z",
+      playersRefreshed: 7,
+      playersTotal: 9,
+    });
+
+    const fresh = digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ);
+    expect(fresh).toMatchObject({
+      state: "fresh",
+      asOf: "2026-07-19T12:06:00.000Z", // the SECOND row's finish
+      playersRefreshed: 7,
     });
   });
 

@@ -296,8 +296,10 @@ function freshnessBanner(
   if (freshness.state === "fresh") return null;
   const text =
     freshness.state === "stale"
-      ? `⚠️ Data as of last successful refresh: ${freshness.asOf ?? "never"}; ` +
-        `no refresh has run since ${contentDate} — stats may be non-final.`
+      ? // Accurate whether the latest qualifying run FAILED, is still RUNNING, or
+        // none ever ran: a refresh may well have run — none SUCCEEDED for this day.
+        `⚠️ Data as of last successful refresh: ${freshness.asOf ?? "never"}. ` +
+        `No successful refresh has completed for ${contentDate} — stats may be non-final.`
       : `⚠️ Last refresh was incomplete (${freshness.playersRefreshed} of ` +
         `${freshness.playersTotal} watched players refreshed) — some players may be missing.`;
   return { text, html: `<p>${escapeHtml(text)}</p>` };

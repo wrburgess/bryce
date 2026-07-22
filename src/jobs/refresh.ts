@@ -30,9 +30,12 @@ export interface RefreshSummary {
   /**
    * Why the sweep did not run normally, or null when it did. `offseason-sleep`
    * is the pure no-op (ADR 0031); `already-running` is a concurrent sweep
-   * holding a live lease (ADR 0042) — neither records a run.
+   * holding a live lease (ADR 0042) — neither records a run. `superseded` is a
+   * run whose lease expired mid-sweep: a successor reaped its row and took over,
+   * so it aborts WITHOUT settling (ADR 0042 fencing) rather than clobber the
+   * successor's newer data.
    */
-  reason: "offseason-sleep" | "already-running" | null;
+  reason: "offseason-sleep" | "already-running" | "superseded" | null;
   playersRefreshed: number;
   statLinesInserted: number;
   statLinesUpdated: number;
@@ -111,10 +114,24 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
     await refreshNcaaCalendar(deps, season, activePlayers);
 
     for (const player of activePlayers) {
+      // Renew + ownership check BEFORE this player's fetch/write (ADR 0042
+      // fencing). A healthy long sweep keeps its lease live here; a run whose
+      // lease expired was reaped `failed` by the successor that took over, so
+      // renew returns false and we ABORT the sweep immediately — never settling
+      // this run (the successor already marked it `failed`) and never letting a
+      // stale write past this point. Any stale write is thus bounded to at most
+      // the single player already in flight, which the successor re-fetches.
+      if (!renewRefreshRun(db, runId, now())) {
+        return {
+          skipped: true,
+          reason: "superseded",
+          playersRefreshed,
+          statLinesInserted: inserted,
+          statLinesUpdated: updated,
+          runId,
+        };
+      }
       const result = await refreshOnePlayer(deps, player, season);
-      // Renew after EVERY player (skipped ones included): a healthy long sweep
-      // must keep its lease live so a concurrent run cannot take over.
-      renewRefreshRun(db, runId, now());
       if (result === null) continue;
       playersRefreshed += 1;
       inserted += result.inserted;

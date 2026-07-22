@@ -1,4 +1,5 @@
-import { integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
+import { check, index, integer, sqliteTable, text, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 /**
  * Storage schema. Invariants live in the database, not just app code
@@ -103,40 +104,63 @@ export const statLines = sqliteTable(
   ],
 );
 
-export const refreshRuns = sqliteTable("refresh_runs", {
-  id: integer("id").primaryKey({ autoIncrement: true }),
-  /**
-   * When the sweep CLAIMED its run — the freshness anchor (ADR 0042). Freshness
-   * is judged on the START, never the finish: a run that started after the
-   * content day ended captured every player under ADR 0040's forward-clock
-   * finality gate, whereas a midnight-straddling run started before is
-   * conservatively stale. Also `claimed_at`'s initial value: start == claim.
-   */
-  startedAt: text("started_at").notNull(),
-  /** Null WHILE running; stamped when the run settles (CHECK below enforces the iff). */
-  finishedAt: text("finished_at"),
-  /**
-   * The run state machine (ADR 0042). Each run owns its OWN row — a stream, not
-   * a shared slot — so a late-settling superseded run only writes its older row,
-   * and the freshness watermark is the latest by (started_at, id). Every member
-   * has a writing path (claim → running; settle → ok/partial/failed); no
-   * speculative state, so no consumer of RefreshRunStatus handles a case that
-   * cannot occur (rules/backend.md).
-   */
-  status: text("status", { enum: ["running", "ok", "partial", "failed"] }).notNull(),
-  /**
-   * The lease clock (ADR 0034's pattern), RENEWED after each player. A healthy
-   * long sweep keeps renewing and stays live; a crashed run stops and its lease
-   * expires after REFRESH_LEASE_MS, so another run may claim without waiting.
-   */
-  claimedAt: text("claimed_at").notNull(),
-  playersRefreshed: integer("players_refreshed").notNull().default(0),
-  playersTotal: integer("players_total").notNull().default(0),
-  statLinesInserted: integer("stat_lines_inserted").notNull().default(0),
-  statLinesUpdated: integer("stat_lines_updated").notNull().default(0),
-  errorMessage: text("error_message"),
-  createdAt: text("created_at").notNull(),
-});
+export const refreshRuns = sqliteTable(
+  "refresh_runs",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    /**
+     * When the sweep CLAIMED its run — the freshness anchor (ADR 0042). Freshness
+     * is judged on the START, never the finish: a run that started after the
+     * content day ended captured every player under ADR 0040's forward-clock
+     * finality gate, whereas a midnight-straddling run started before is
+     * conservatively stale. Also `claimed_at`'s initial value: start == claim.
+     */
+    startedAt: text("started_at").notNull(),
+    /** Null WHILE running; stamped when the run settles (CHECK below enforces the iff). */
+    finishedAt: text("finished_at"),
+    /**
+     * The run state machine (ADR 0042). Each run owns its OWN row — a stream, not
+     * a shared slot — so a late-settling superseded run only writes its older row,
+     * and the freshness watermark is the latest by (started_at, id). Every member
+     * has a writing path (claim → running; settle → ok/partial/failed); no
+     * speculative state, so no consumer of RefreshRunStatus handles a case that
+     * cannot occur (rules/backend.md).
+     */
+    status: text("status", { enum: ["running", "ok", "partial", "failed"] }).notNull(),
+    /**
+     * The lease clock (ADR 0034's pattern), RENEWED after each player. A healthy
+     * long sweep keeps renewing and stays live; a crashed run stops and its lease
+     * expires after REFRESH_LEASE_MS, so another run may claim without waiting.
+     */
+    claimedAt: text("claimed_at").notNull(),
+    playersRefreshed: integer("players_refreshed").notNull().default(0),
+    playersTotal: integer("players_total").notNull().default(0),
+    statLinesInserted: integer("stat_lines_inserted").notNull().default(0),
+    statLinesUpdated: integer("stat_lines_updated").notNull().default(0),
+    errorMessage: text("error_message"),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    // refresh_runs is append-only and read on every /health poll (public) plus
+    // every digest and every claim's live-lease check. This composite index
+    // serves those hot, LIMIT-bounded reads — WHERE status (IN ...) ORDER BY
+    // started_at — so none of them full-scans and sorts the whole table.
+    index("refresh_runs_status_started_idx").on(t.status, t.startedAt),
+    // The invariants live in the DATABASE, DECLARED in the schema (rules/backend.md)
+    // — not only in hand-written migration SQL — so the drizzle snapshot records
+    // them and a future drizzle-kit table rebuild re-emits every CHECK.
+    check("refresh_runs_status_ck", sql`${t.status} in ('running', 'ok', 'partial', 'failed')`),
+    // finished_at is NULL exactly while running: terminal iff finished.
+    check(
+      "refresh_runs_finished_iff_terminal_ck",
+      sql`(${t.status} = 'running' and ${t.finishedAt} is null) or (${t.status} <> 'running' and ${t.finishedAt} is not null)`,
+    ),
+    check("refresh_runs_players_refreshed_nonneg_ck", sql`${t.playersRefreshed} >= 0`),
+    check("refresh_runs_players_total_nonneg_ck", sql`${t.playersTotal} >= 0`),
+    check("refresh_runs_stat_lines_inserted_nonneg_ck", sql`${t.statLinesInserted} >= 0`),
+    check("refresh_runs_stat_lines_updated_nonneg_ck", sql`${t.statLinesUpdated} >= 0`),
+  ],
+);
 
 export const seasonCalendar = sqliteTable(
   "season_calendar",

@@ -26,7 +26,10 @@ import {
  * stale/partial reading annotates the email — it NEVER suppresses it.
  */
 
-const STALE_BANNER = "no refresh has run since";
+// The stale banner is accurate whether the latest qualifying run failed, is
+// still running, or none ever ran — so it says "no SUCCESSFUL refresh completed",
+// never the false "no refresh has run".
+const STALE_BANNER = "No successful refresh has completed for";
 const PARTIAL_BANNER = "Last refresh was incomplete";
 
 describe("digest freshness gate (ADR 0042)", () => {
@@ -87,6 +90,29 @@ describe("digest freshness gate (ADR 0042)", () => {
     const result = await runDigest(deps());
     expect(result.freshness).toBe("stale");
     expect(mailer.sent[0]?.text).toContain("as of last successful refresh: 2026-07-18T12:05:00.000Z");
+  });
+
+  it("stale: a FAILED latest run still yields the stale banner (a refresh ran, none succeeded)", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+    // The latest run FAILED after starting past the content date. A refresh DID
+    // run, so the old "no refresh has run since" wording would have lied; the
+    // banner must still warn (no SUCCESSFUL refresh) and freshness stays stale.
+    await insertRefreshRun(opened.db, {
+      status: "failed",
+      startedAt: "2026-07-19T07:00:00.000Z", // host 07-19 > content 07-18
+      finishedAt: "2026-07-19T07:05:00.000Z",
+      playersRefreshed: 0,
+      playersTotal: 5,
+    });
+
+    const result = await runDigest(deps());
+    expect(result.action).toBe("sent");
+    expect(result.freshness).toBe("stale");
+    const mail = mailer.sent[0];
+    expect(mail?.text).toContain(STALE_BANNER);
+    expect(mail?.text).toContain("2026-07-18"); // the content date
+    expect(mail?.text).toContain("as of last successful refresh: never");
   });
 
   it("partial: a qualifying partial run → partial banner with N of M and freshness === 'partial'", async () => {

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "5aac6b33-e262-4f9d-ab4d-d25437cb4430",
+  "id": "5cb8d6dc-b8d7-4266-9e1d-3b1cdbcb4dc5",
   "prevId": "5cf9f107-30ed-4381-9734-991e3c88c63f",
   "tables": {
     "digest_deliveries": {
@@ -319,11 +319,45 @@
           "autoincrement": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "refresh_runs_status_started_idx": {
+          "name": "refresh_runs_status_started_idx",
+          "columns": [
+            "status",
+            "started_at"
+          ],
+          "isUnique": false
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
-      "checkConstraints": {}
+      "checkConstraints": {
+        "refresh_runs_status_ck": {
+          "name": "refresh_runs_status_ck",
+          "value": "\"refresh_runs\".\"status\" in ('running', 'ok', 'partial', 'failed')"
+        },
+        "refresh_runs_finished_iff_terminal_ck": {
+          "name": "refresh_runs_finished_iff_terminal_ck",
+          "value": "(\"refresh_runs\".\"status\" = 'running' and \"refresh_runs\".\"finished_at\" is null) or (\"refresh_runs\".\"status\" <> 'running' and \"refresh_runs\".\"finished_at\" is not null)"
+        },
+        "refresh_runs_players_refreshed_nonneg_ck": {
+          "name": "refresh_runs_players_refreshed_nonneg_ck",
+          "value": "\"refresh_runs\".\"players_refreshed\" >= 0"
+        },
+        "refresh_runs_players_total_nonneg_ck": {
+          "name": "refresh_runs_players_total_nonneg_ck",
+          "value": "\"refresh_runs\".\"players_total\" >= 0"
+        },
+        "refresh_runs_stat_lines_inserted_nonneg_ck": {
+          "name": "refresh_runs_stat_lines_inserted_nonneg_ck",
+          "value": "\"refresh_runs\".\"stat_lines_inserted\" >= 0"
+        },
+        "refresh_runs_stat_lines_updated_nonneg_ck": {
+          "name": "refresh_runs_stat_lines_updated_nonneg_ck",
+          "value": "\"refresh_runs\".\"stat_lines_updated\" >= 0"
+        }
+      }
     },
     "season_calendar": {
       "name": "season_calendar",

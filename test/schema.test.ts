@@ -438,7 +438,7 @@ describe("digest_deliveries claim columns and lock behaviour (ADR 0034)", () => 
         )
         .run();
 
-      applyMigration(sqlite, "0005_fuzzy_barracuda.sql");
+      applyMigration(sqlite, "0005_yummy_tony_stark.sql");
 
       // The pre-existing delivery is untouched by the additive migration.
       const delivery = sqlite.prepare("SELECT * FROM digest_deliveries").get() as Record<string, unknown>;
