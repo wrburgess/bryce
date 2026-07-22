@@ -81,6 +81,18 @@ watched; games resume ~{next opening day}"). Spring-training games are deliberat
 domain — no Stat Lines, no early wake. MCP and the API stay live; only the pipeline sleeps.
 _Avoid_: "shutdown", "hibernate" (history remains queryable all winter)
 
+**Presentation**:
+A human-readable rendering of a whole **Digest** — both the Batters and Pitchers **Roll-up** tables
+in one multi-section artifact — as HTML, PDF, or Markdown, instead of (or alongside) the email. Same
+content as the Digest for a given **Window**; only the format differs.
+_Avoid_: "report" (the Digest is the report; a Presentation is one rendering of it), "document"
+
+**Export**:
+Raw tabular rows for a spreadsheet or data tool, as CSV or Excel — *one table per file*. Targets a
+single tabular result: a query (**Stat Lines**, ad-hoc SQL) or *one* of a **Digest**'s two tables
+(Batters or Pitchers, never both at once). Carries data, not formatting.
+_Avoid_: "download" (that is the delivery, not the artifact), "dump"
+
 ## Relationships
 
 - A **Player** has exactly one **Level** at a time; promotion or demotion *changes* his Level, it
@@ -103,6 +115,11 @@ _Avoid_: "shutdown", "hibernate" (history remains queryable all winter)
   **Offseason Sleep** a weekly heartbeat replaces it, and the daily cadence resumes automatically
   at the earliest opening day among watched levels
   ([ADR 0031](../adr/0031-offseason-sleep-world-series-to-opening-day.md)).
+- A **Presentation** carries the same content as the **Digest** email for a given **Window** — a PDF
+  of `7d` shows exactly what the email would; only the format differs.
+- **Presentation = document, Export = table.** A **Presentation** renders a whole **Digest** (both
+  tables) as one human-readable artifact; an **Export** carries exactly one table — a query result,
+  or one of the Digest's two tables — for a spreadsheet.
 
 ## Example dialogue
 
@@ -129,3 +146,7 @@ _Avoid_: "shutdown", "hibernate" (history remains queryable all winter)
   sleep window. Resolved: the sleep ends at the *earliest opening day among watched levels*, so a
   watched NCAA Player wakes the pipeline for NCAA opening day; MLB/MiLB Players rejoin at MLB
   Opening Day (spring training still excluded).
+- **"presentation" vs "export"** — issue #55 listed HTML, PDF, Markdown, CSV, and Excel as one
+  "presentation and export" set — resolved: a **Presentation** is a human-readable rendering of a
+  **Digest** (HTML/PDF/Markdown); an **Export** is raw rows for a spreadsheet (CSV/Excel) over any
+  tabular result. Two concepts, not five loose formats.
