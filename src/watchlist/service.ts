@@ -284,6 +284,21 @@ export class SplitIdentityConflictError extends Error {
   }
 }
 
+/**
+ * Two DISTINCT backup rows resolve to the SAME existing player (e.g. an existing
+ * row carrying external_id A + ncaa X, with the payload holding a separate A-only
+ * row and a B+X row). Applying both would silently overwrite one with the other
+ * and drop a backed-up player, so the whole import is aborted.
+ */
+export class AmbiguousImportTargetError extends Error {
+  constructor(existingRowId: number) {
+    super(
+      `ambiguous import: two backup rows both resolve to existing player id ${existingRowId}`,
+    );
+    this.name = "AmbiguousImportTargetError";
+  }
+}
+
 export interface RestorePlayerListSummary {
   inserted: number;
   updated: number;
@@ -316,16 +331,10 @@ export function restorePlayerListBackup(
   const nowIso = now.toISOString();
 
   return db.transaction((tx: Tx): RestorePlayerListSummary => {
-    let inserted = 0;
-    let updated = 0;
-
-    for (const row of rows) {
-      const fullName = canonicalizeName(row.fullName);
-      const schoolName =
-        row.schoolName === null || row.schoolName === undefined
-          ? null
-          : canonicalizeName(row.schoolName);
-
+    // Phase 1 — pre-resolve every payload row to its existing-row target (against
+    // the pre-import state, before any write), so a split identity or two rows
+    // mapping to ONE existing player is caught before anything is mutated.
+    const resolved = rows.map((row) => {
       const byExternal =
         row.externalId != null
           ? tx.select().from(players).where(eq(players.externalId, row.externalId)).all()[0]
@@ -343,8 +352,28 @@ export function restorePlayerListBackup(
           byNcaa.id,
         );
       }
+      return { row, existing: byExternal ?? byNcaa };
+    });
 
-      const existing = byExternal ?? byNcaa;
+    // Two distinct payload rows resolving to the same existing player would have
+    // the second silently overwrite the first — reject the whole import.
+    const claimed = new Set<number>();
+    for (const { existing } of resolved) {
+      if (existing !== undefined) {
+        if (claimed.has(existing.id)) throw new AmbiguousImportTargetError(existing.id);
+        claimed.add(existing.id);
+      }
+    }
+
+    // Phase 2 — apply.
+    let inserted = 0;
+    let updated = 0;
+    for (const { row, existing } of resolved) {
+      const fullName = canonicalizeName(row.fullName);
+      const schoolName =
+        row.schoolName === null || row.schoolName === undefined
+          ? null
+          : canonicalizeName(row.schoolName);
 
       if (existing !== undefined) {
         // Coalesce natural ids so a backup can ADD an id without erasing one the

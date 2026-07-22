@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,10 +6,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DatabaseBusyError,
   acquireDbLock,
+  acquireOpenLock,
+  acquireRestoreLock,
   assertNotBusy,
   isProcessAlive,
   liveHolders,
   lockDirFor,
+  restoreMarkerPath,
 } from "../src/db/lock.js";
 import { createSnapshot } from "../src/backup/snapshot.js";
 import { restoreSnapshot } from "../src/backup/restore.js";
@@ -20,9 +23,29 @@ import { fakeClock, insertPlayer, testFileDb } from "./factories.js";
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const tsxBin = join(repoRoot, "node_modules", ".bin", "tsx");
 const holderScript = join(repoRoot, "test", "helpers", "lock-holder.ts");
+const restoreHolderScript = join(repoRoot, "test", "helpers", "restore-holder.ts");
+const CLOCK = fakeClock("2026-07-22T12:00:00Z").now;
 
 /** Definitely-dead pid: the max 32-bit pid is not a running process. */
 const DEAD_PID = 2_147_483_647;
+
+/** Spawn a holder script and resolve once it prints HELD (never a wall-clock sleep). */
+function spawnUntilHeld(script: string, dbPath: string): {
+  child: ReturnType<typeof spawn>;
+  ready: Promise<void>;
+} {
+  const child = spawn(tsxBin, [script, dbPath], { stdio: ["ignore", "pipe", "pipe"] });
+  const ready = new Promise<void>((resolve, reject) => {
+    let buf = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      buf += chunk.toString();
+      if (buf.includes("HELD")) resolve();
+    });
+    child.on("error", reject);
+    child.on("exit", (code) => reject(new Error(`holder exited early code=${code}`)));
+  });
+  return { child, ready };
+}
 
 /**
  * The interlock (ADR 0042): a cooperative presence registry. Many app processes
@@ -131,4 +154,88 @@ describe("restoreSnapshot interlock (real second process)", () => {
       await new Promise<void>((resolve) => child.on("exit", () => resolve()));
     }
   }, 30_000);
+});
+
+/**
+ * The RACE-FREE two-flag exclusion (finding #1): each party publishes its own
+ * artifact before checking the other's, so a mid-restore opener is rejected AND a
+ * restore refuses while an opener is live — with no TOCTOU window. Proven with
+ * REAL spawned processes in both directions.
+ */
+describe("two-flag restore exclusion", () => {
+  let dir: TempDir;
+  let dbPath: string;
+
+  beforeEach(() => {
+    dir = makeTempDir();
+    dbPath = join(dir.path, "bryce.db");
+  });
+
+  afterEach(() => {
+    dir.cleanup();
+  });
+
+  it("rejects a REAL opener process that starts while a restore marker is held", () => {
+    // This test process holds the exclusive restore marker.
+    const held = acquireRestoreLock(dbPath, CLOCK);
+    try {
+      // A real opener process must refuse to open and exit non-zero.
+      const result = spawnSync(tsxBin, [holderScript, dbPath], { encoding: "utf8" });
+      expect(result.status).not.toBe(0);
+      expect(`${result.stdout}${result.stderr}`).toContain("REJECTED");
+    } finally {
+      held?.release();
+    }
+  }, 30_000);
+
+  it("rejects an in-process open while a REAL restore-holder process holds the marker", async () => {
+    const { child, ready } = spawnUntilHeld(restoreHolderScript, dbPath);
+    try {
+      await ready;
+      // The opener publishes its presence then sees the real process's marker.
+      expect(() => acquireOpenLock(dbPath)).toThrow(DatabaseBusyError);
+    } finally {
+      child.kill("SIGTERM");
+      await new Promise<void>((resolve) => child.on("exit", () => resolve()));
+    }
+  }, 30_000);
+
+  it("rejects a second restore while a REAL restore-holder process holds the marker", async () => {
+    const { child, ready } = spawnUntilHeld(restoreHolderScript, dbPath);
+    try {
+      await ready;
+      expect(() => acquireRestoreLock(dbPath)).toThrow(DatabaseBusyError);
+    } finally {
+      child.kill("SIGTERM");
+      await new Promise<void>((resolve) => child.on("exit", () => resolve()));
+    }
+  }, 30_000);
+
+  it("a dead-pid restore marker never wedges an opener or a new restore (self-heal)", () => {
+    // A stale marker from a crashed restore (dead owner).
+    mkdirSync(dir.path, { recursive: true });
+    writeFileSync(
+      restoreMarkerPath(dbPath),
+      JSON.stringify({ pid: DEAD_PID, startedAt: "2020-01-01T00:00:00.000Z" }),
+    );
+    // An opener sees a dead marker and opens normally.
+    const openLock = acquireOpenLock(dbPath, CLOCK);
+    expect(openLock).not.toBeNull();
+    openLock?.release();
+    // A new restore clears the stale marker (O_EXCL EEXIST -> dead -> unlink -> retry).
+    const restoreLock = acquireRestoreLock(dbPath, CLOCK);
+    expect(restoreLock).not.toBeNull();
+    restoreLock?.release();
+  });
+
+  it("a dead-pid presence entry never wedges a restore (self-heal)", () => {
+    mkdirSync(lockDirFor(dbPath), { recursive: true });
+    writeFileSync(
+      join(lockDirFor(dbPath), `${DEAD_PID}.json`),
+      JSON.stringify({ pid: DEAD_PID, startedAt: "2020-01-01T00:00:00.000Z" }),
+    );
+    const restoreLock = acquireRestoreLock(dbPath, CLOCK);
+    expect(restoreLock).not.toBeNull();
+    restoreLock?.release();
+  });
 });

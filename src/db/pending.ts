@@ -101,10 +101,20 @@ export function migrationHistoryCompatibility(
   for (let i = 0; i < applied.length; i += 1) {
     const expected = build[i];
     const got = applied[i];
-    if (expected === undefined || got === undefined || expected.hash !== got.hash) {
+    // Compare BOTH the hash AND the folderMillis (created_at): Drizzle decides
+    // "pending" from folderMillis, so a candidate whose first hash matches but
+    // whose created_at is newer than this build's head would otherwise pass
+    // compatibility, then startup would skip the remaining migrations and leave
+    // the restored schema missing current columns.
+    if (
+      expected === undefined ||
+      got === undefined ||
+      expected.hash !== got.hash ||
+      expected.folderMillis !== got.folderMillis
+    ) {
       return {
         compatible: false,
-        reason: `applied migration #${i} does not match this build's ordered history`,
+        reason: `applied migration #${i} does not match this build's ordered history (hash/timestamp)`,
       };
     }
   }

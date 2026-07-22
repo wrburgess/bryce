@@ -1,6 +1,8 @@
-import { closeSync, fsyncSync, openSync, renameSync, rmSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, rmSync, writeSync } from "node:fs";
+import { dirname } from "node:path";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
+import { canonicalizeName } from "../domain/names.js";
 import { listPlayers } from "../watchlist/service.js";
 import { fsyncDir } from "./snapshot.js";
 
@@ -46,6 +48,23 @@ const playerEntrySchema = z
   })
   .strict()
   .superRefine((row, ctx) => {
+    // A name that is only whitespace passes min(1) but canonicalizes to empty,
+    // which would store a nameless player — reject it up front (fullName and,
+    // when present, schoolName).
+    if (canonicalizeName(row.fullName).length === 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["fullName"],
+        message: "fullName is blank after normalization",
+      });
+    }
+    if (row.schoolName != null && canonicalizeName(row.schoolName).length === 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["schoolName"],
+        message: "schoolName is blank after normalization",
+      });
+    }
     const hasExternal = row.externalId != null;
     const hasSeq = row.ncaaPlayerSeq != null;
     if (!hasExternal && !hasSeq) {
@@ -185,6 +204,9 @@ export function parsePlayerListBackup(json: string): PlayerListBackup {
  * final name.
  */
 export function writePlayerListBackupFile(path: string, json: string): void {
+  // Create the destination parent so the documented `--out backups/players.json`
+  // works on a fresh clone where `backups/` does not yet exist.
+  mkdirSync(dirname(path), { recursive: true });
   const tempPath = `${path}.tmp-${process.pid}`;
   const fd = openSync(tempPath, "wx", 0o600);
   try {

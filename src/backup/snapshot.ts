@@ -3,13 +3,14 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
   readdirSync,
-  renameSync,
   rmSync,
   statSync,
+  unlinkSync,
 } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
@@ -98,38 +99,37 @@ function fsyncFile(path: string): void {
   }
 }
 
+export interface CreateSnapshotOptions {
+  /**
+   * Test seam: invoked just before the atomic name publication, so a test can
+   * simulate a concurrent process claiming the same sequence and prove the
+   * publish never overwrites it.
+   */
+  onBeforePublish?: () => void;
+}
+
 /**
  * Take a Snapshot of `source` into `dir`, crash-safely. Uses better-sqlite3's
  * online `.backup()` (WAL-consistent — folds committed frames, no torn read),
- * validates the copy, fsyncs, and atomically publishes it. Returns the published
- * file's metadata.
+ * validates the copy, fsyncs, and publishes it under the first free
+ * `bryce-<stamp>-NNN.db` name using an ATOMIC exclusive claim (`link()`): two
+ * processes snapshotting in the same second can never both take `-000` and clobber
+ * one another — the loser gets EEXIST and bumps the sequence. Returns the
+ * published file's metadata.
  */
 export async function createSnapshot(
   source: Database.Database,
   dir: string,
   now: () => Date = () => new Date(),
+  options: CreateSnapshotOptions = {},
 ): Promise<SnapshotInfo> {
   mkdirSync(dir, { recursive: true });
   const stamp = utcStamp(now());
+  const tempPath = join(dir, `.tmp-snapshot-${stamp}-${process.pid}.db`);
 
-  // First free same-second sequence — sequential callers get 000, 001, ... .
   let seq = -1;
   let finalName = "";
-  for (let candidate = 0; candidate < MAX_SEQ_PER_SECOND; candidate += 1) {
-    const name = `bryce-${stamp}-${pad(candidate, 3)}.db`;
-    if (!existsSync(join(dir, name))) {
-      seq = candidate;
-      finalName = name;
-      break;
-    }
-  }
-  if (finalName === "") {
-    throw new SnapshotValidationError(`snapshot name space exhausted for ${stamp}`);
-  }
-
-  const finalPath = join(dir, finalName);
-  const tempPath = join(dir, `.tmp-snapshot-${stamp}-${pad(seq, 3)}-${process.pid}.db`);
-
+  let finalPath = "";
   try {
     await source.backup(tempPath);
 
@@ -146,7 +146,31 @@ export async function createSnapshot(
 
     fsyncFile(tempPath);
     chmodSync(tempPath, SNAPSHOT_FILE_MODE);
-    renameSync(tempPath, finalPath);
+
+    options.onBeforePublish?.();
+
+    // Atomically claim the first free sequence name. link() creates a second name
+    // for the temp's inode and FAILS with EEXIST if the name is already taken —
+    // an exclusive, race-free publish. No 0-byte placeholder is ever left behind.
+    for (let candidate = 0; candidate < MAX_SEQ_PER_SECOND; candidate += 1) {
+      const name = `bryce-${stamp}-${pad(candidate, 3)}.db`;
+      const path = join(dir, name);
+      try {
+        linkSync(tempPath, path);
+        seq = candidate;
+        finalName = name;
+        finalPath = path;
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EEXIST") continue;
+        throw err;
+      }
+    }
+    if (finalName === "") {
+      throw new SnapshotValidationError(`snapshot name space exhausted for ${stamp}`);
+    }
+
+    unlinkSync(tempPath); // drop the temp name; finalPath keeps the inode alive
     fsyncDir(dir);
   } catch (err) {
     try {

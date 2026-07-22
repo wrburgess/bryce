@@ -5,6 +5,7 @@ import type { Db } from "../db/client.js";
 import { MIGRATIONS_FOLDER } from "../db/client.js";
 import { startupDb } from "../db/startup.js";
 import {
+  MAX_BACKUP_BYTES,
   createPlayerListBackup,
   writePlayerListBackupFile,
 } from "../backup/player-list.js";
@@ -78,6 +79,14 @@ export async function runPlayersBackup(argv: string[], deps: PlayersBackupRunDep
 
   const backup = await createPlayerListBackup(deps.db, deps.now);
   const json = JSON.stringify(backup, null, 2);
+  // Enforce the SAME ceiling the parser applies, so the producer never writes a
+  // file that players:restore would always reject. Fail loud, write nothing.
+  if (json.length > MAX_BACKUP_BYTES) {
+    deps.write(
+      `error: generated backup is ${json.length} bytes, over the ${MAX_BACKUP_BYTES}-byte ceiling; nothing written`,
+    );
+    return 1;
+  }
   const writeFile = deps.writeFile ?? writePlayerListBackupFile;
   writeFile(outPath, json);
   deps.write(`player-list backup written out=${outPath} players=${backup.players.length}`);

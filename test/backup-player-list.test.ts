@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
@@ -7,9 +9,14 @@ import {
   PlayerBackupParseError,
   createPlayerListBackup,
   parsePlayerListBackup,
+  writePlayerListBackupFile,
 } from "../src/backup/player-list.js";
-import { SplitIdentityConflictError, restorePlayerListBackup } from "../src/watchlist/service.js";
-import { makeBackupEntry, makeBackupEnvelope } from "./backup-helpers.js";
+import {
+  AmbiguousImportTargetError,
+  SplitIdentityConflictError,
+  restorePlayerListBackup,
+} from "../src/watchlist/service.js";
+import { makeBackupEntry, makeBackupEnvelope, makeTempDir } from "./backup-helpers.js";
 import { fakeClock, insertPlayer, insertStatLine, testDb } from "./factories.js";
 
 const NOW = new Date("2026-07-22T12:00:00.000Z");
@@ -251,6 +258,51 @@ describe("restorePlayerListBackup: import semantics", () => {
     // The earlier row was NOT persisted — the whole transaction rolled back.
     expect(await opened.db.select().from(players).where(eq(players.externalId, 700003))).toHaveLength(0);
   });
+
+  it("rejects two payload rows that resolve to ONE existing player, writing nothing (finding #3)", async () => {
+    // An existing row combines external_id A and ncaa X (a promoted player).
+    const combined = await insertPlayer(opened.db, {
+      externalId: 500002,
+      ncaaPlayerSeq: 600002,
+      level: "mlb",
+      milbLevel: null,
+      fullName: "Combined Row",
+    });
+    const before = await opened.db.select().from(players);
+
+    // A-only resolves to `combined` (by external_id); B+X ALSO resolves to it (by
+    // ncaa). The second update would silently overwrite the first and drop a
+    // backed-up player — reject the whole import.
+    const rows = parse([
+      makeBackupEntry({ externalId: 500002, fullName: "First Target", level: "mlb", milbLevel: null }),
+      makeBackupEntry({
+        externalId: 999001,
+        ncaaPlayerSeq: 600002,
+        fullName: "Second Target",
+        level: "mlb",
+        milbLevel: null,
+      }),
+    ]);
+
+    expect(() => restorePlayerListBackup(opened.db, rows, NOW)).toThrow(AmbiguousImportTargetError);
+    // Nothing was written — the combined row is byte-for-byte unchanged.
+    const after = await opened.db.select().from(players);
+    expect(after).toEqual(before);
+    expect(after.find((p) => p.id === combined.id)?.fullName).toBe("Combined Row");
+  });
+});
+
+describe("writePlayerListBackupFile", () => {
+  it("creates the destination parent directory (finding #7)", () => {
+    const dir = makeTempDir();
+    try {
+      const target = join(dir.path, "nested", "deeper", "players.json");
+      writePlayerListBackupFile(target, '{"version":1,"players":[]}');
+      expect(readFileSync(target, "utf8")).toBe('{"version":1,"players":[]}');
+    } finally {
+      dir.cleanup();
+    }
+  });
 });
 
 describe("parsePlayerListBackup: strict validation", () => {
@@ -283,6 +335,25 @@ describe("parsePlayerListBackup: strict validation", () => {
   it("rejects a non-positive natural id", () => {
     expect(() => parse([makeBackupEntry({ externalId: 0 })])).toThrow(PlayerBackupParseError);
     expect(() => parse([makeBackupEntry({ externalId: -5 })])).toThrow(PlayerBackupParseError);
+  });
+
+  it("rejects a name that is only whitespace — canonicalizes to empty (finding #8)", () => {
+    // fullName "   " passes min(1) but canonicalizeName trims it to "".
+    expect(() => parse([makeBackupEntry({ fullName: "   " })])).toThrow(PlayerBackupParseError);
+    // schoolName too, on an NCAA row.
+    expect(() =>
+      parse([
+        makeBackupEntry({
+          externalId: null,
+          ncaaPlayerSeq: 700100,
+          level: "ncaa",
+          milbLevel: null,
+          teamName: null,
+          fullName: "Real Name",
+          schoolName: "   ",
+        }),
+      ]),
+    ).toThrow(PlayerBackupParseError);
   });
 
   it("rejects duplicate natural ids within the payload", () => {

@@ -1,4 +1,4 @@
-import { symlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -78,6 +78,24 @@ describe("createSnapshot", () => {
     expect(listed.map((s) => s.name).sort()).toEqual([first.name, second.name].sort());
     // Newest-first: the higher same-second sequence leads.
     expect(listed[0]?.name).toBe(second.name);
+  });
+
+  it("atomically claims the sequence name — a concurrent -000 is never overwritten (finding #4)", async () => {
+    const stamp = "20260722T120000Z";
+    const clock = fakeClock("2026-07-22T12:00:00Z").now;
+    let injected = false;
+    const info = await createSnapshot(live.opened.sqlite, backups.path, clock, {
+      onBeforePublish: () => {
+        if (injected) return;
+        injected = true;
+        // A competitor publishes -000 in the same second, after we materialized
+        // our copy but before we publish. The atomic link claim must NOT clobber
+        // it (the old existsSync-then-rename protocol would have).
+        writeFileSync(join(backups.path, `bryce-${stamp}-000.db`), "COMPETITOR");
+      },
+    });
+    expect(info.name).toBe(`bryce-${stamp}-001.db`);
+    expect(readFileSync(join(backups.path, `bryce-${stamp}-000.db`), "utf8")).toBe("COMPETITOR");
   });
 
   it("listSnapshots ignores unrelated files and symlinks and orders newest-first", async () => {

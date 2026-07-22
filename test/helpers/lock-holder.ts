@@ -1,13 +1,17 @@
-import { acquireDbLock } from "../../src/db/lock.js";
+import { acquireOpenLock } from "../../src/db/lock.js";
 
 /**
- * A real second process that registers itself against a database and stays alive
- * until signalled — the harness for the interlock's "restore refuses while the
- * app is running" test (rules/testing.md: build the harness, do not declare it
- * untestable). Not a `*.test.ts`, so vitest never collects it.
+ * A real second process that opens (registers against) a database as an ordinary
+ * app opener and stays alive until signalled — the harness for the interlock
+ * tests (rules/testing.md: build the harness, do not declare it untestable). Not
+ * a `*.test.ts`, so vitest never collects it.
+ *
+ * It uses the REAL opener path (`acquireOpenLock`), so if a live restore marker is
+ * present it is REJECTED and exits non-zero (printing `REJECTED ...`) — that is
+ * how the "opener starting mid-restore is refused" test observes the two-flag
+ * exclusion. Otherwise it prints `HELD pid=<pid>` and waits.
  *
  * Usage: tsx test/helpers/lock-holder.ts <dbPath>
- * Prints `HELD pid=<pid>` once registered, then waits.
  */
 const dbPath = process.argv[2];
 if (dbPath === undefined || dbPath.length === 0) {
@@ -15,7 +19,13 @@ if (dbPath === undefined || dbPath.length === 0) {
   process.exit(2);
 }
 
-const lock = acquireDbLock(dbPath);
+let lock;
+try {
+  lock = acquireOpenLock(dbPath);
+} catch (err) {
+  process.stderr.write(`REJECTED ${err instanceof Error ? err.message : String(err)}\n`);
+  process.exit(1);
+}
 process.stdout.write(`HELD pid=${process.pid}\n`);
 
 const timer = setInterval(() => {

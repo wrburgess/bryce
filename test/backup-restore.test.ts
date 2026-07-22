@@ -415,8 +415,9 @@ describe("restoreSnapshot: fault-injected swap rolls back", () => {
     }
   }
 
-  for (const stage of ["checkpoint", "rename", "dir-fsync"] as RestoreStage[]) {
-    it(`a fault at "${stage}" leaves the original live DB intact and cleans up`, async () => {
+  // Pre-swap faults (before the atomic rename): the live DB is untouched.
+  for (const stage of ["checkpoint", "rename"] as RestoreStage[]) {
+    it(`a fault at "${stage}" (before the atomic rename) leaves the original live DB intact`, async () => {
       await expect(
         restoreSnapshot({
           liveDbPath: live.path,
@@ -430,12 +431,59 @@ describe("restoreSnapshot: fault-injected swap rolls back", () => {
         }),
       ).rejects.toThrow(/injected fault/);
 
-      // The live database is unchanged — the rollback restored the original.
+      // The atomic swap never happened — the original is untouched, temp cleaned.
+      expect(existsSync(live.path)).toBe(true);
       expect(liveName()).toBe("Original");
-      // No stale swap artifacts remain in the live directory.
       expect(residualSwapFiles(join(live.path, ".."))).toEqual([]);
     });
   }
+
+  // Post-swap fault (after the atomic rename): the single rename already REPLACED
+  // the live file, so it holds the RESTORED data — present and consistent, never
+  // blank (finding #2). Failure is reported; the safety Snapshot is the recovery
+  // source.
+  it('a fault at "dir-fsync" (after the atomic rename) leaves the RESTORED data present, never blank', async () => {
+    await expect(
+      restoreSnapshot({
+        liveDbPath: live.path,
+        candidatePath,
+        backupDir: backups.path,
+        keepLast: 10,
+        now: CLOCK,
+        fault: (s) => {
+          if (s === "dir-fsync") throw new Error("injected fault at dir-fsync");
+        },
+      }),
+    ).rejects.toThrow(/injected fault/);
+
+    expect(existsSync(live.path)).toBe(true); // never absent — the atomic replace guarantee
+    expect(liveName()).toBe("Snapshot Only"); // the restored data is installed
+    expect(residualSwapFiles(join(live.path, ".."))).toEqual([]);
+  });
+
+  it("keeps the live path PRESENT at the moment of the rename — no blank-DB window (finding #2)", async () => {
+    let presentAtRename: boolean | null = null;
+    await expect(
+      restoreSnapshot({
+        liveDbPath: live.path,
+        candidatePath,
+        backupDir: backups.path,
+        keepLast: 10,
+        now: CLOCK,
+        fault: (s) => {
+          if (s === "rename") {
+            // With the old move-aside protocol the live file was already renamed
+            // to `.restore-old-*` here, so it would be ABSENT. The single atomic
+            // rename never moves it away first, so it is still present.
+            presentAtRename = existsSync(live.path);
+            throw new Error("injected fault at rename");
+          }
+        },
+      }),
+    ).rejects.toThrow(/injected fault/);
+    expect(presentAtRename).toBe(true);
+    expect(liveName()).toBe("Original");
+  });
 
   it("succeeds on the happy path: the candidate's data replaces the live DB, safety snapshot taken", async () => {
     const result = await restoreSnapshot({
@@ -450,5 +498,45 @@ describe("restoreSnapshot: fault-injected swap rolls back", () => {
     expect(residualSwapFiles(join(live.path, ".."))).toEqual([]);
     // The safety snapshot (of the pre-restore "Original") is a real, listable snapshot.
     expect(listSnapshots(backups.path)).toHaveLength(1);
+  });
+});
+
+/**
+ * Fresh-install rollback (finding #6): when the live path did NOT pre-exist, a
+ * post-rename fault must remove the half-installed DB rather than leave it behind
+ * while reporting failure.
+ */
+describe("restoreSnapshot: fresh-install rollback", () => {
+  it("removes the installed DB on a post-rename fault when the live path did not pre-exist", async () => {
+    const liveDir = makeTempDir();
+    const backups = makeTempDir();
+    const candDir = makeTempDir();
+    const dbPath = join(liveDir.path, "bryce.db"); // does NOT exist yet
+
+    const src = testFileDb();
+    await insertPlayer(src.opened.db, { fullName: "Fresh Install" });
+    const candidatePath = (await createSnapshot(src.opened.sqlite, candDir.path, CLOCK)).path;
+    src.cleanup();
+
+    expect(existsSync(dbPath)).toBe(false);
+    await expect(
+      restoreSnapshot({
+        liveDbPath: dbPath,
+        candidatePath,
+        backupDir: backups.path,
+        keepLast: 10,
+        now: CLOCK,
+        fault: (s) => {
+          if (s === "dir-fsync") throw new Error("injected fault at dir-fsync");
+        },
+      }),
+    ).rejects.toThrow(/injected fault/);
+
+    // The half-installed fresh database was removed; the pre-state (absent) holds.
+    expect(existsSync(dbPath)).toBe(false);
+
+    liveDir.cleanup();
+    backups.cleanup();
+    candDir.cleanup();
   });
 });

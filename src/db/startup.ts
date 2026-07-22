@@ -3,7 +3,7 @@ import type { Db } from "./client.js";
 import type Database from "better-sqlite3";
 import { MIGRATIONS_FOLDER, openDb } from "./client.js";
 import type { DbLock } from "./lock.js";
-import { acquireDbLock } from "./lock.js";
+import { acquireOpenLock } from "./lock.js";
 import { hasExistingSchema, hasPendingMigrations } from "./pending.js";
 import { createSnapshot, pruneSnapshots } from "../backup/snapshot.js";
 
@@ -56,7 +56,10 @@ export async function startupDb(
   const now = options.now ?? (() => new Date());
   const log = options.log ?? (() => {});
 
-  const lock = acquireDbLock(databasePath, now);
+  // Two-flag interlock (opener side): publish our presence, then refuse if a
+  // restore is in progress. Throws DatabaseBusyError before opening the file, so
+  // an opener never opens the database while restore is renaming underneath it.
+  const lock = acquireOpenLock(databasePath, now);
   let opened;
   try {
     opened = openDb(databasePath, { migrate: false, migrationsFolder });

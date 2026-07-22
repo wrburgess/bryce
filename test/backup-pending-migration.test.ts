@@ -280,6 +280,22 @@ describe("ordered-prefix migration model", () => {
     }
   });
 
+  it("rejects a candidate whose first-migration hash matches but timestamp is newer than head (finding #5)", () => {
+    const buildAB = makeMigrationsDir([migA, migB]);
+    try {
+      const files = readMigrationFiles({ migrationsFolder: buildAB.dir });
+      const a = files[0];
+      // Same hash as A, but a folderMillis newer than head (B's 2000). Drizzle
+      // decides "pending" from folderMillis, so on reopen it would treat every
+      // migration as applied and skip B — restoring a schema missing B's columns.
+      // Hash-only compatibility would wrongly ACCEPT this; folderMillis rejects it.
+      const tampered = [{ hash: a!.hash, folderMillis: 9999 }];
+      expect(migrationHistoryCompatibility(tampered, buildAB.dir).compatible).toBe(false);
+    } finally {
+      buildAB.cleanup();
+    }
+  });
+
   it("rejects a gapped or reordered history (hash mismatch at position)", () => {
     const buildABC = makeMigrationsDir([migA, migB, migC]);
     try {

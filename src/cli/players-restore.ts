@@ -5,7 +5,11 @@ import type { Db } from "../db/client.js";
 import { MIGRATIONS_FOLDER } from "../db/client.js";
 import { startupDb } from "../db/startup.js";
 import { PlayerBackupParseError, parsePlayerListBackup } from "../backup/player-list.js";
-import { SplitIdentityConflictError, restorePlayerListBackup } from "../watchlist/service.js";
+import {
+  AmbiguousImportTargetError,
+  SplitIdentityConflictError,
+  restorePlayerListBackup,
+} from "../watchlist/service.js";
 import { isMain } from "./main.js";
 
 /**
@@ -91,7 +95,7 @@ export async function runPlayersRestore(
     );
     return 0;
   } catch (err) {
-    if (err instanceof SplitIdentityConflictError) {
+    if (err instanceof SplitIdentityConflictError || err instanceof AmbiguousImportTargetError) {
       deps.write(`error: ${err.message}`);
       return 1;
     }

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { players } from "../src/db/schema.js";
 import { createSnapshot, listSnapshots } from "../src/backup/snapshot.js";
-import { parsePlayerListBackup } from "../src/backup/player-list.js";
+import { MAX_BACKUP_BYTES, parsePlayerListBackup } from "../src/backup/player-list.js";
 import { runBackup } from "../src/cli/backup.js";
 import { runRestore } from "../src/cli/restore.js";
 import { runPlayersBackup } from "../src/cli/players-backup.js";
@@ -152,6 +152,27 @@ describe("CLI logic in-process", () => {
         await runPlayersBackup([], { db: live.opened.db, databasePath: live.path, now: CLOCK, write }),
       ).toBe(1);
       expect(out[0]).toMatch(/requires --out/);
+    });
+
+    it("fails loud and writes nothing when the generated backup exceeds the size ceiling (finding #9)", async () => {
+      // One player with a notes field large enough to push the JSON over the
+      // parser's ceiling — the producer must refuse rather than write a file
+      // players:restore would always reject.
+      await insertPlayer(live.opened.db, {
+        externalId: 691185,
+        fullName: "Huge Notes",
+        notes: "x".repeat(MAX_BACKUP_BYTES + 100),
+      });
+      const outPath = join(backups.path, "too-big.json");
+      const code = await runPlayersBackup(["--out", outPath], {
+        db: live.opened.db,
+        databasePath: live.path,
+        now: CLOCK,
+        write,
+      });
+      expect(code).toBe(1);
+      expect(out[0]).toMatch(/over the .*-byte ceiling; nothing written/);
+      expect(existsSync(outPath)).toBe(false);
     });
   });
 

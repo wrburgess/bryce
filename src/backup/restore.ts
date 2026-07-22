@@ -1,7 +1,7 @@
 import { basename, dirname, join, resolve } from "node:path";
-import { chmodSync, existsSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, realpathSync, renameSync, rmSync, statSync } from "node:fs";
 import Database from "better-sqlite3";
-import { acquireDbLock, assertNotBusy } from "../db/lock.js";
+import { acquireRestoreLock } from "../db/lock.js";
 import { MIGRATIONS_FOLDER } from "../db/client.js";
 import { migrationHistoryCompatibility, readAppliedMigrations } from "../db/pending.js";
 import {
@@ -21,9 +21,12 @@ import {
  *      backup that folds any candidate WAL), CLOSE it, and validate THAT exact
  *      closed file — the validated bytes are the installed bytes;
  *   4. safety-Snapshot the current live database (abort before any swap if it fails);
- *   5. WAL-safe, rollback-capable swap: checkpoint(TRUNCATE) → move live+sidecars
- *      aside → rename the validated temp into place → fsync the directory → only
- *      then delete the held-aside originals. Any failure restores the originals.
+ *   5. WAL-safe swap with a SINGLE atomic rename: checkpoint(TRUNCATE) folds the
+ *      live WAL into the main file, then `renameSync(validatedTemp, liveDbPath)`
+ *      atomically REPLACES the live file (POSIX rename never leaves the path
+ *      absent), then stale live `-wal`/`-shm` are removed. The safety Snapshot —
+ *      not a move-aside copy — is the rollback source, so a crash mid-swap leaves
+ *      the live path present and either fully-old or fully-new, never blank.
  *
  * The restore CLI never opens or migrates the live database (that would re-apply
  * a bad migration and self-deadlock on the interlock) — it calls this service.
@@ -174,11 +177,6 @@ function validateMaterialized(path: string, migrationsFolder: string): void {
   }
 }
 
-interface HeldAside {
-  original: string;
-  aside: string;
-}
-
 /** Remove a database file and its WAL/SHM sidecars, best-effort. */
 function rmWithSidecars(path: string): void {
   for (const suffix of ["", "-wal", "-shm"]) {
@@ -199,22 +197,18 @@ export async function restoreSnapshot(args: RestoreArgs): Promise<RestoreResult>
   if (!existsSync(candidatePath)) throw new SnapshotNotFoundError(candidatePath);
   assertNotAlias(candidatePath, liveDbPath);
 
-  // Interlock: register this restore's presence, then refuse if ANY other live
-  // app process is registered against the database (DatabaseBusyError). Restore
-  // must run alone; the registry lets the server + jobs coexist normally but
-  // detects them here.
-  const lock = acquireDbLock(liveDbPath, now);
-  try {
-    assertNotBusy(liveDbPath);
-  } catch (err) {
-    lock?.release();
-    throw err;
-  }
+  // Two-flag interlock (restore side): publish an exclusive restore marker, then
+  // refuse if any live opener is registered (DatabaseBusyError). An opener that
+  // starts after this point publishes its presence then sees our marker and
+  // refuses to open — so no opener ever holds the file while we rename it.
+  const lock = acquireRestoreLock(liveDbPath, now);
 
   const liveDir = dirname(liveDbPath);
+  mkdirSync(liveDir, { recursive: true });
   const stamp = `${now().getTime()}-${process.pid}`;
   const tempInstall = join(liveDir, `.bryce-restore-${stamp}.db`);
-  const heldAside: HeldAside[] = [];
+  const liveExisted = existsSync(liveDbPath);
+  let renamed = false;
 
   try {
     // (3) Materialize a self-contained copy into the live directory, then validate it.
@@ -234,8 +228,9 @@ export async function restoreSnapshot(args: RestoreArgs): Promise<RestoreResult>
     chmodSync(tempInstall, SNAPSHOT_FILE_MODE);
 
     // (4) Safety-Snapshot the current live DB (abort before any swap if it fails).
+    // This Snapshot — not a move-aside copy — is the rollback source.
     let safetySnapshot: string | null = null;
-    if (existsSync(liveDbPath)) {
+    if (liveExisted) {
       const liveForBackup = new Database(liveDbPath);
       try {
         safetySnapshot = (await createSnapshot(liveForBackup, backupDir, now)).name;
@@ -244,9 +239,11 @@ export async function restoreSnapshot(args: RestoreArgs): Promise<RestoreResult>
       }
     }
 
-    // (5) WAL-safe, rollback-capable swap.
+    // (5) WAL-safe swap via a SINGLE atomic rename. Checkpoint(TRUNCATE) first so
+    // the live WAL is folded into (and truncated from) the main file — after this
+    // any lingering `-wal` is zero-byte and applies nothing on the next open.
     fault("checkpoint");
-    if (existsSync(liveDbPath)) {
+    if (liveExisted) {
       const ckpt = new Database(liveDbPath);
       try {
         ckpt.pragma("wal_checkpoint(TRUNCATE)");
@@ -255,33 +252,26 @@ export async function restoreSnapshot(args: RestoreArgs): Promise<RestoreResult>
       }
     }
 
-    // Move the current live main file and its sidecars aside (recoverable).
-    for (const suffix of ["", "-wal", "-shm"]) {
-      const original = liveDbPath + suffix;
-      if (existsSync(original)) {
-        const aside = `${original}.restore-old-${process.pid}`;
-        if (existsSync(aside)) rmSync(aside, { force: true });
-        renameSync(original, aside);
-        heldAside.push({ original, aside });
-      }
-    }
-
+    // The atomic replace: renameSync REPLACES liveDbPath in one step on POSIX, so
+    // the path is never absent (this closes the blank-DB window a move-aside would
+    // open between moving the old file away and renaming the new one in).
     fault("rename");
     renameSync(tempInstall, liveDbPath);
+    renamed = true;
 
     fault("dir-fsync");
     fsyncDir(liveDir);
     chmodSync(liveDbPath, SNAPSHOT_FILE_MODE);
 
-    // Committed: drop the held-aside originals.
-    for (const held of heldAside) {
+    // The old live sidecars are now stale — the installed file has none.
+    for (const suffix of ["-wal", "-shm"]) {
+      const stale = liveDbPath + suffix;
       try {
-        rmSync(held.aside, { force: true });
+        if (existsSync(stale)) rmSync(stale, { force: true });
       } catch {
-        // best-effort cleanup of the old file
+        // best-effort
       }
     }
-    heldAside.length = 0;
 
     // Retention is best-effort: a failed prune logs and continues (ADR 0042).
     try {
@@ -296,18 +286,20 @@ export async function restoreSnapshot(args: RestoreArgs): Promise<RestoreResult>
       installedPath: liveDbPath,
     };
   } catch (err) {
-    // Roll back: remove any partially-installed file (and its sidecars), then
-    // restore the held-aside originals.
-    rmWithSidecars(tempInstall);
-    for (const held of heldAside) {
-      try {
-        // If the rename had already put the new file at `original`, clear it first.
-        if (existsSync(held.original)) rmSync(held.original, { force: true });
-        renameSync(held.aside, held.original);
-      } catch {
-        // best-effort: leave the .restore-old file for manual recovery
-      }
+    if (!renamed) {
+      // The atomic swap never happened: the live file is untouched. Drop the
+      // validated temp (and its sidecars); nothing else changed.
+      rmWithSidecars(tempInstall);
+    } else if (!liveExisted) {
+      // Fresh-install case: the install rename completed, then a later step
+      // faulted. Leaving the installed DB behind while reporting failure would
+      // half-install a fresh database, so remove it and restore the "absent"
+      // pre-state (the caller can re-run once the fault is resolved).
+      rmWithSidecars(liveDbPath);
     }
+    // else (renamed && liveExisted): the atomic replace already completed and the
+    // restored data is valid and present; the safety Snapshot is the recovery
+    // source. We never leave the live path blank.
     throw err;
   } finally {
     lock?.release();
