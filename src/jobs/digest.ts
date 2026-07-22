@@ -5,6 +5,7 @@ import { assembleDigest } from "../digest/assemble.js";
 import { renderDigest, renderHeartbeat } from "../digest/render.js";
 import { hostDate, sleepWindow } from "../domain/season.js";
 import type { WindowSpec } from "../domain/window.js";
+import { resolveWindow } from "../domain/window.js";
 import type { DeliveryKind } from "../db/schema.js";
 import type { LookupResult, MailReceipt, Mailer } from "../mailer/types.js";
 import type { Db } from "../db/client.js";
@@ -19,6 +20,8 @@ import {
   settleSent,
 } from "./delivery-claim.js";
 import { loadActivePlayers, loadCalendars } from "./refresh.js";
+import type { DigestFreshnessState } from "./refresh-run.js";
+import { digestFreshnessFor } from "./refresh-run.js";
 
 export interface DigestDeps {
   db: Db;
@@ -57,6 +60,14 @@ export interface DigestResult {
    * describe content that was never selected.
    */
   window: string | null;
+  /**
+   * The freshness verdict the daily digest gated on (ADR 0043), or null. Only
+   * the scheduled 1d path (today's run and orphan recovery) reads it; an
+   * on-demand report never annotates, and neither a claim-refusal, a reconciled
+   * recovery, nor a heartbeat composes a dated digest to judge. It is the STATE,
+   * not suppression: a `stale`/`partial` digest still sends, annotated.
+   */
+  freshness: DigestFreshnessState | null;
 }
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -183,6 +194,7 @@ async function deliverDailyDigest(
       statLineCount: 0,
       playerCount: 0,
       window: null,
+      freshness: null,
     };
   }
 
@@ -210,8 +222,20 @@ async function deliverDailyDigest(
       statLineCount: 0,
       playerCount: 0,
       window: null,
+      freshness: null,
     };
   }
+
+  // Read the freshness watermark BEFORE assembly (ADR 0043, fixing the TOCTOU):
+  // resolve the same 1d window purely to get the CONTENT date (window.to =
+  // yesterday), judge freshness against it, THEN assemble. A refresh that lands
+  // between this read and the send can only make the reading conservatively
+  // MORE stale than reality — an annotated email, never a suppressed one — which
+  // is the hybrid-degrade contract. Anchoring on the content date (not the
+  // delivery slot) and on the run's START (not its finish) are the two
+  // correctness fixes ADR 0043 turns on.
+  const contentDate = resolveWindow("1d", now(), tz, null, asOf).to;
+  const freshness = digestFreshnessFor(db, contentDate, tz);
 
   // Pure assembly (src/digest/assemble.ts): what this Digest reports. A replay
   // assembles exactly what an ordinary run would — the window is the content,
@@ -225,7 +249,7 @@ async function deliverDailyDigest(
   // dropped from every future report and nobody learns the tables went stale —
   // which is exactly the silent staleness the classification exists to prevent.
   reportUnknownFields(assembly, warn);
-  const mail = renderDigest(assembly);
+  const mail = renderDigest(assembly, freshness);
   const { playerCount, statLineCount } = assembly;
   const window = assembly.window.label;
 
@@ -255,6 +279,7 @@ async function deliverDailyDigest(
       statLineCount,
       playerCount,
       window,
+      freshness: freshness.state,
     };
   }
 
@@ -277,6 +302,7 @@ async function deliverDailyDigest(
     statLineCount,
     playerCount,
     window,
+    freshness: freshness.state,
   };
 }
 
@@ -330,6 +356,10 @@ async function runOnDemandReport(
       statLineCount,
       playerCount,
       window,
+      // An on-demand report NEVER annotates freshness (ADR 0043): a human asked
+      // for a specific window and is watching — the daily proof-of-life gate is
+      // not his concern.
+      freshness: null,
     };
   }
 
@@ -340,6 +370,7 @@ async function runOnDemandReport(
     statLineCount,
     playerCount,
     window,
+    freshness: null,
   };
 }
 
@@ -377,6 +408,7 @@ async function runHeartbeat(
       statLineCount: 0,
       playerCount: watchedCount,
       window: null,
+      freshness: null,
     };
   }
 
@@ -390,6 +422,7 @@ async function runHeartbeat(
       statLineCount: 0,
       playerCount: watchedCount,
       window: null,
+      freshness: null,
     };
   }
 
@@ -417,6 +450,9 @@ async function runHeartbeat(
       statLineCount: 0,
       playerCount: watchedCount,
       window: null,
+      // The offseason heartbeat is the liveness signal, untouched by the
+      // freshness gate (ADR 0043): it composes no dated digest to judge.
+      freshness: null,
     };
   }
 
@@ -438,6 +474,7 @@ async function runHeartbeat(
     statLineCount: 0,
     playerCount: watchedCount,
     window: null,
+    freshness: null,
   };
 }
 

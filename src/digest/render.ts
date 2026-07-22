@@ -1,6 +1,7 @@
 import type { DigestAssembly, DigestRow } from "./assemble.js";
 import type { ResolvedWindow } from "../domain/window.js";
 import { isLongWindow } from "../domain/window.js";
+import type { DigestFreshness } from "../jobs/refresh-run.js";
 import type { Level } from "../mlb/levels.js";
 import { deriveRate } from "../stats/aggregate.js";
 import { formatOuts } from "./rates.js";
@@ -281,7 +282,30 @@ interface Table {
   rows: DigestRow[];
 }
 
-export function renderDigest(assembly: DigestAssembly): RenderedMail {
+/**
+ * The hybrid-degrade banner (ADR 0043): a one-line staleness/incompleteness
+ * warning prepended to a digest whose data a recent refresh could not vouch for.
+ * A `fresh` reading (or no reading passed at all — a preview, an on-demand
+ * report) yields null: no banner. The digest is NEVER suppressed; the warning
+ * annotates the same email that would have gone out silently.
+ */
+function freshnessBanner(
+  freshness: DigestFreshness,
+  contentDate: string,
+): { text: string; html: string } | null {
+  if (freshness.state === "fresh") return null;
+  const text =
+    freshness.state === "stale"
+      ? // Accurate whether the latest qualifying run FAILED, is still RUNNING, or
+        // none ever ran: a refresh may well have run — none SUCCEEDED for this day.
+        `⚠️ Data as of last successful refresh: ${freshness.asOf ?? "never"}. ` +
+        `No successful refresh has completed for ${contentDate} — stats may be non-final.`
+      : `⚠️ Last refresh was incomplete (${freshness.playersRefreshed} of ` +
+        `${freshness.playersTotal} watched players refreshed) — some players may be missing.`;
+  return { text, html: `<p>${escapeHtml(text)}</p>` };
+}
+
+export function renderDigest(assembly: DigestAssembly, freshness?: DigestFreshness): RenderedMail {
   const { window } = assembly;
   const title = windowTitle(window);
   const heading = title;
@@ -293,8 +317,14 @@ export function renderDigest(assembly: DigestAssembly): RenderedMail {
     { title: "Pitchers", columns: pitchingColumns(window), rows: assembly.pitchers },
   ].filter((t) => t.rows.length > 0);
 
-  const textParts: string[] = [heading, ""];
-  const htmlParts: string[] = [`<h1>${escapeHtml(heading)}</h1>`];
+  // The banner prepends to BOTH bodies (the subject is untouched — it names the
+  // content day, and a warning is not part of the day's identity).
+  const banner = freshness === undefined ? null : freshnessBanner(freshness, window.to);
+  const textParts: string[] = banner === null ? [heading, ""] : [banner.text, "", heading, ""];
+  const htmlParts: string[] =
+    banner === null
+      ? [`<h1>${escapeHtml(heading)}</h1>`]
+      : [banner.html, `<h1>${escapeHtml(heading)}</h1>`];
 
   if (tables.length === 0) {
     // Still sent: "send daily even when empty" survives the redesign (ADR 0030).

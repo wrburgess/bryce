@@ -133,6 +133,39 @@ During Offseason Sleep ([ADR 0031](../adr/0031-offseason-sleep-world-series-to-o
 the schedules keep firing but Refresh exits without API calls and Digest degrades to the weekly
 heartbeat — no plist changes needed across seasons.
 
+### Refresh freshness & the Refresh→Digest contract
+
+The two launchd jobs are **independent**, and a sleep/wake laptop runs them late and out of order.
+So Refresh records what it did and Digest reads it — the policy for missed and overlapping runs is
+deterministic ([ADR 0043](../adr/0043-persist-refresh-freshness-and-gate-digest.md)).
+
+- **Every whole-watch-list Refresh records a run** — start, finish, outcome (`ok` / `partial` /
+  `failed`), and counts — on its own `refresh_runs` row. A run **owns its row** (a stream, not a
+  shared slot), so two runs never corrupt each other's record.
+- **Overlapping runs.** On wake the nightly job may fire while a manual `run_refresh` (MCP) or
+  `POST /api/refresh` is mid-sweep. The second run takes a `BEGIN IMMEDIATE` claim and, finding a
+  **live lease**, no-ops with `skipped`, reason `already-running` — only one sweep runs at a time,
+  across processes. The lease is **renewed after every player**, so a healthy long sweep stays live;
+  a **crashed** run stops renewing and its lease expires after `REFRESH_LEASE_MS` (10 minutes), after
+  which the next run may claim and recover — a crash never wedges Refresh shut.
+- **Missed refresh (the whole point).** The daily Digest reads the freshness watermark **before it
+  assembles**, judged on the run's **start time** vs the **content date** (yesterday): only a Refresh
+  that *started after that day ended* is proven to have captured every one of its now-final games
+  ([ADR 0040](../adr/0040-exclude-in-progress-games-from-ingestion.md)'s forward-clock finality). If
+  no such run exists, the Digest **still sends** — never silently — with a one-line banner:
+  `⚠️ Data as of last successful refresh: <date|never>; no refresh has run since <date> — stats may
+  be non-final.` A `partial` refresh gets its own `⚠️ Last refresh was incomplete (N of M …)` banner.
+  The **next** Refresh corrects the underlying stat lines (ADR 0030's upsert), so the annotation is
+  self-healing. On-demand windows (7d/ytd/…) are never annotated — a human asked for a specific
+  report, not the daily proof-of-life.
+- **Observing freshness.** `GET /health` and the MCP `status` tool carry a `refresh` block —
+  `state` (`fresh` / `stale` / `running` / `partial` / `failed`), last start/finish, last success,
+  and player counts — or `null` before any refresh has run. A **crashed** run (expired lease) reports
+  its last terminal outcome, never a phantom `running`.
+- **Offseason caveat.** During Sleep, Refresh is a **pure no-op** and records nothing, so freshness
+  reads `stale` — expected: the weekly heartbeat, not a freshness row, is the offseason liveness
+  signal.
+
 ## Backup and restore
 
 Bryce keeps two **local, testable** recovery artifacts in `BACKUP_DIR` (default `backups/`,

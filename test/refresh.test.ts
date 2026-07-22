@@ -1,9 +1,10 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { players, seasonCalendar, statLines } from "../src/db/schema.js";
+import { players, refreshRuns, seasonCalendar, statLines } from "../src/db/schema.js";
 import type { RefreshDeps } from "../src/jobs/refresh.js";
 import { runRefresh } from "../src/jobs/refresh.js";
+import { SUPERSEDED_MESSAGE, claimRefreshRun } from "../src/jobs/refresh-run.js";
 import { MlbClient } from "../src/mlb/client.js";
 import {
   FakeNcaaApi,
@@ -14,6 +15,7 @@ import {
   fakeNcaaClient,
   insertCalendars2026,
   insertPlayer,
+  insertRefreshRun,
   makeGameLogBody,
   makeMlbTeam,
   makeNcaaGameLogHtml,
@@ -387,5 +389,165 @@ describe("runRefresh", () => {
     expect(lines[0]?.sportId).toBe(22);
     expect(lines[0]?.gameId).toBe(5001);
     expect(lines[0]?.statType).toBe("batting");
+  });
+});
+
+/**
+ * The persisted freshness run (ADR 0043, issue #34 AC #1). Every whole-watch-list
+ * Refresh records its start, completion, outcome and error state on its own row.
+ */
+describe("runRefresh records a freshness run (ADR 0043)", () => {
+  let opened: OpenedDb;
+  let api: FakeStatsApi;
+  let ncaaApi: FakeNcaaApi;
+  let clock: ReturnType<typeof fakeClock>;
+
+  const deps = (): RefreshDeps => ({
+    db: opened.db,
+    client: new MlbClient({ fetchImpl: api.fetch, delayMs: 0 }),
+    ncaaClient: fakeNcaaClient(ncaaApi),
+    now: clock.now,
+    tz: TEST_TZ,
+  });
+
+  beforeEach(() => {
+    opened = testDb();
+    clock = fakeClock(MID_SEASON);
+    api = new FakeStatsApi({
+      person: makePerson(),
+      teams: { 564: makeTeam(), 146: makeMlbTeam() },
+      seasons: { 1: makeSeasonBody(), 11: makeSeasonBody({ regularSeasonStartDate: "2026-03-27" }) },
+      gameLogs: {},
+    });
+    ncaaApi = new FakeNcaaApi();
+  });
+
+  afterEach(() => {
+    opened.close();
+  });
+
+  it("records a completed run as `ok` when every watched player is refreshed", async () => {
+    await insertPlayer(opened.db, { externalId: 691185 });
+
+    const summary = await runRefresh(deps());
+    expect(summary).toMatchObject({ skipped: false, playersRefreshed: 1 });
+    expect(summary.runId).not.toBeNull();
+
+    const runs = await opened.db.select().from(refreshRuns);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      status: "ok",
+      playersRefreshed: 1,
+      playersTotal: 1,
+      startedAt: MID_SEASON.replace("Z", ".000Z"),
+    });
+    expect(runs[0]?.finishedAt).not.toBeNull();
+    expect(runs[0]?.errorMessage).toBeNull();
+  });
+
+  it("records `partial` when a watched player is skipped", async () => {
+    // One refreshable player and one active MLB row with no externalId, which
+    // refreshOnePlayer skips (result null) — so 1 of 2 were refreshed.
+    await insertPlayer(opened.db, { externalId: 691185 });
+    await insertPlayer(opened.db, { externalId: null, level: "mlb", milbLevel: null, fullName: "No Id Guy" });
+
+    const summary = await runRefresh(deps());
+    expect(summary.playersRefreshed).toBe(1);
+
+    const runs = await opened.db.select().from(refreshRuns);
+    expect(runs[0]).toMatchObject({ status: "partial", playersRefreshed: 1, playersTotal: 2 });
+  });
+
+  it("records `failed` AND re-throws when a player fetch errors", async () => {
+    await insertPlayer(opened.db, { externalId: 691185 });
+    // Calendars still resolve; only the per-player person fetch explodes.
+    const realFetch = api.fetch;
+    const boomClient = new MlbClient({
+      fetchImpl: (url: string) =>
+        url.includes("/people/") ? Promise.reject(new Error("mlb person boom")) : realFetch(url),
+      delayMs: 0,
+    });
+
+    await expect(runRefresh({ ...deps(), client: boomClient })).rejects.toThrow(/mlb person boom/);
+
+    // The caller still sees the throw, but the run's OWN row records the failure.
+    const runs = await opened.db.select().from(refreshRuns);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "failed", playersRefreshed: 0 });
+    expect(runs[0]?.errorMessage).toContain("mlb person boom");
+    expect(runs[0]?.finishedAt).not.toBeNull();
+  });
+
+  it("records NOTHING during Offseason Sleep", async () => {
+    await insertPlayer(opened.db, { externalId: 691185, level: "mlb", milbLevel: null });
+    await insertCalendars2026(opened.db);
+    clock.set("2026-12-05T18:00:00Z");
+
+    const summary = await runRefresh(deps());
+    expect(summary).toMatchObject({ skipped: true, reason: "offseason-sleep", runId: null });
+    expect(await opened.db.select().from(refreshRuns)).toHaveLength(0);
+  });
+
+  it("aborts WITHOUT settling when its lease is superseded mid-sweep (ADR 0043 fencing)", async () => {
+    // Two watched players, so the sweep has two loop iterations. Player 0 is
+    // fetched; DURING that fetch a successor run B claims — reaping run A's row
+    // `failed` because A's lease has expired. At player 1's top-of-loop renew, A
+    // no longer owns its lease, so the sweep ABORTS: it must not settle its own
+    // row `ok` (B already stamped it `failed`), and B must remain the newest run.
+    await insertPlayer(opened.db, { externalId: 691185 });
+    await insertPlayer(opened.db, { externalId: 660271 });
+
+    let reaped = false;
+    // A far-future clock for B's claim so A's just-renewed lease reads as expired.
+    const bClaimAt = new Date("2026-07-19T17:11:00.000Z"); // MID_SEASON + 11 min
+    const fencingClient = new MlbClient({
+      fetchImpl: (url: string) => {
+        // On player 0's identity fetch (getPerson → `/people/691185?hydrate=…`),
+        // let a successor take over. The gameLog path is `/people/691185/stats?…`,
+        // so keying on the `?` right after the id isolates the identity call.
+        if (!reaped && url.includes("/people/691185?")) {
+          reaped = true;
+          const b = claimRefreshRun(opened.db, { now: bClaimAt, playersTotal: 2 });
+          if (!b.claimed) throw new Error("expected successor B to claim");
+        }
+        return api.fetch(url);
+      },
+      delayMs: 0,
+    });
+
+    const summary = await runRefresh({ ...deps(), client: fencingClient });
+    expect(summary).toMatchObject({ skipped: true, reason: "superseded" });
+    expect(summary.runId).not.toBeNull();
+
+    const runs = await opened.db.select().from(refreshRuns);
+    expect(runs).toHaveLength(2);
+    // Run A (its id is surfaced on the summary) was reaped `failed`, never `ok`.
+    const runA = runs.find((r) => r.id === summary.runId);
+    expect(runA).toMatchObject({ status: "failed", errorMessage: SUPERSEDED_MESSAGE });
+    // B is the sole `running` row — the watermark winner that took over.
+    const running = runs.filter((r) => r.status === "running");
+    expect(running).toHaveLength(1);
+    expect(running[0]?.id).not.toBe(summary.runId);
+    // Crucially, A never settled `ok`: no ok row exists at all.
+    expect(runs.some((r) => r.status === "ok")).toBe(false);
+  });
+
+  it("no-ops `already-running` under a concurrent live lease, recording no new run", async () => {
+    await insertPlayer(opened.db, { externalId: 691185 });
+    // A sibling run claimed moments ago (live lease at MID_SEASON).
+    await insertRefreshRun(opened.db, {
+      status: "running",
+      startedAt: MID_SEASON,
+      claimedAt: MID_SEASON,
+      finishedAt: null,
+    });
+
+    const summary = await runRefresh(deps());
+    expect(summary).toMatchObject({ skipped: true, reason: "already-running", runId: null });
+    // No API calls, and no second run row: the pre-existing running row stands alone.
+    expect(api.calls).toHaveLength(0);
+    const runs = await opened.db.select().from(refreshRuns);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]?.status).toBe("running");
   });
 });

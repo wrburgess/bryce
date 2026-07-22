@@ -2,6 +2,8 @@ import { count, desc, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { DeliveryKind, DeliveryStatus } from "../db/schema.js";
 import { digestDeliveries, players, statLines } from "../db/schema.js";
+import type { RefreshHealth } from "../jobs/refresh-run.js";
+import { refreshHealth } from "../jobs/refresh-run.js";
 
 /**
  * Health snapshot shared by the public GET /health route and the MCP `status`
@@ -25,9 +27,18 @@ export interface HealthSnapshot {
     status: DeliveryStatus;
     sentAt: string | null;
   } | null;
+  /**
+   * Ingestion freshness (ADR 0043), or null when no refresh has ever run. Its
+   * `state` is the DERIVED health vocabulary (fresh/stale/running/partial/
+   * failed) — distinct from the stored RefreshRunStatus, because fresh/stale are
+   * computed against `now`, which is why this snapshot now takes a clock. A
+   * crashed run (expired lease) reports its latest terminal outcome, never a
+   * phantom `running`.
+   */
+  refresh: RefreshHealth | null;
 }
 
-export async function healthSnapshot(db: Db): Promise<HealthSnapshot> {
+export async function healthSnapshot(db: Db, now: Date, tz: string): Promise<HealthSnapshot> {
   const playerCount = (
     await db.select({ n: count() }).from(players).where(eq(players.active, true))
   )[0];
@@ -57,5 +68,6 @@ export async function healthSnapshot(db: Db): Promise<HealthSnapshot> {
             status: last.status,
             sentAt: last.sentAt,
           },
+    refresh: refreshHealth(db, now, tz),
   };
 }

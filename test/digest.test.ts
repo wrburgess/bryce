@@ -127,6 +127,21 @@ describe("runDigest", () => {
     });
   });
 
+  it("the daily 1d digest carries a freshness verdict; an on-demand window carries none (ADR 0043)", async () => {
+    // The full freshness matrix lives in test/digest-freshness.test.ts; this
+    // pins the DigestResult shape change on the core paths. With no refresh run
+    // recorded, the daily digest reads stale (and still sends, annotated).
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+
+    const daily = await runDigest({ ...deps(), spec: "1d" });
+    expect(daily.action).toBe("sent");
+    expect(daily.freshness).toBe("stale");
+
+    const onDemand = await runDigest({ ...deps(), spec: "7d" });
+    expect(onDemand.freshness).toBeNull();
+  });
+
   it("recovers a previous day's FAILED digest slot after the date rolls", async () => {
     // A failed slot for a prior date used to be orphaned forever: claimDelivery
     // only ever looked at today's date, and novelty (which re-reported the lines

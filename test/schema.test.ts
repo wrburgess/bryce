@@ -412,4 +412,85 @@ describe("digest_deliveries claim columns and lock behaviour (ADR 0034)", () => 
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("adds refresh_runs (ADR 0043) without disturbing existing data, and its CHECKs enforce", () => {
+    // 0005 is one additive CREATE TABLE. The host self-heals its schema at
+    // openDb with live data in it (ADR 0028), so a pre-existing delivery must
+    // survive byte-for-byte, and the new table must be queryable with its
+    // invariants (status enum, finished-iff-terminal, non-negative counts) live.
+    const dir = mkdtempSync(join(tmpdir(), "bryce-migrate-"));
+    const sqlite = new Database(join(dir, "bryce.db"));
+    try {
+      for (const f of [
+        "0000_gray_brood.sql",
+        "0001_overconfident_sally_floyd.sql",
+        "0002_ambiguous_vapor.sql",
+        "0003_reconciled_at.sql",
+        "0004_steep_justin_hammer.sql",
+      ]) {
+        applyMigration(sqlite, f);
+      }
+      sqlite
+        .prepare(
+          `INSERT INTO digest_deliveries
+             (kind, date_covered, sent_at, player_count, stat_line_count, status, created_at)
+           VALUES ('digest', '2026-07-18', '2026-07-18T17:00:00.000Z', 3, 7, 'sent', '2026-07-18T17:00:00.000Z')`,
+        )
+        .run();
+
+      applyMigration(sqlite, "0005_yummy_tony_stark.sql");
+
+      // The pre-existing delivery is untouched by the additive migration.
+      const delivery = sqlite.prepare("SELECT * FROM digest_deliveries").get() as Record<string, unknown>;
+      expect(delivery).toMatchObject({
+        kind: "digest",
+        date_covered: "2026-07-18",
+        stat_line_count: 7,
+        status: "sent",
+      });
+
+      // refresh_runs exists and accepts a valid running row, then a settled one.
+      sqlite
+        .prepare(
+          `INSERT INTO refresh_runs (started_at, finished_at, status, claimed_at, created_at)
+           VALUES ('2026-07-19T07:00:00.000Z', NULL, 'running', '2026-07-19T07:00:00.000Z', '2026-07-19T07:00:00.000Z')`,
+        )
+        .run();
+      const run = sqlite.prepare("SELECT * FROM refresh_runs").get() as Record<string, unknown>;
+      expect(run).toMatchObject({ status: "running", finished_at: null, players_refreshed: 0 });
+
+      // A terminal status REQUIRES finished_at (the iff CHECK)...
+      expect(() =>
+        sqlite
+          .prepare(
+            `INSERT INTO refresh_runs (started_at, finished_at, status, claimed_at, created_at)
+             VALUES ('x', NULL, 'ok', 'x', 'x')`,
+          )
+          .run(),
+      ).toThrow(/CHECK constraint failed/);
+      // ...an unknown status is refused...
+      expect(() =>
+        sqlite
+          .prepare(
+            `INSERT INTO refresh_runs (started_at, finished_at, status, claimed_at, created_at)
+             VALUES ('x', 'y', 'bogus', 'x', 'x')`,
+          )
+          .run(),
+      ).toThrow(/CHECK constraint failed/);
+      // ...and a negative count is refused.
+      expect(() =>
+        sqlite
+          .prepare(
+            `INSERT INTO refresh_runs (started_at, finished_at, status, claimed_at, players_refreshed, created_at)
+             VALUES ('x', 'y', 'ok', 'x', -1, 'x')`,
+          )
+          .run(),
+      ).toThrow(/CHECK constraint failed/);
+
+      expect(sqlite.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+    } finally {
+      sqlite.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

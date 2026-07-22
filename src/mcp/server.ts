@@ -257,7 +257,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "run_refresh",
     {
       description:
-        "Run a refresh now: re-ingest the full current season for every active player, or just one player when personId (MLB/MiLB) or ncaaPlayerSeq (NCAA) is given. No-op during Offseason Sleep.",
+        "Run a refresh now: re-ingest the full current season for every active player, or just one player when personId (MLB/MiLB) or ncaaPlayerSeq (NCAA) is given. A whole-watch-list refresh records a freshness run (start, outcome, counts) the daily digest gates on; it no-ops (skipped, reason 'already-running') when another sweep already holds a live lease, and is a no-op (reason 'offseason-sleep') during Offseason Sleep. A single-player refresh records no freshness run. Observe freshness via GET /health or the status tool.",
       inputSchema: RefreshInputShape,
     },
     (args) =>
@@ -286,7 +286,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "sql_query",
     {
       description:
-        "Run a single read-only SQL query (SELECT/WITH/EXPLAIN) against the Bryce SQLite database for ad-hoc analysis. Tables: players, stat_lines, digest_deliveries, season_calendar. Writes are rejected and the connection itself is read-only. Rows are capped at 200. format (default 'json') is 'json' or 'csv'; 'csv' returns columns/rows as a CSV table, and a truncated result adds a second text part warning that the cap was hit.",
+        "Run a single read-only SQL query (SELECT/WITH/EXPLAIN) against the Bryce SQLite database for ad-hoc analysis. Tables: players, stat_lines, digest_deliveries, refresh_runs, season_calendar. Writes are rejected and the connection itself is read-only. Rows are capped at 200. format (default 'json') is 'json' or 'csv'; 'csv' returns columns/rows as a CSV table, and a truncated result adds a second text part warning that the cap was hit.",
       inputSchema: SqlQueryFormatShape,
     },
     (args) =>
@@ -311,11 +311,11 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "status",
     {
       description:
-        "Health snapshot: active player count, stored stat-line count, and the last digest/heartbeat delivery (same shape as GET /health).",
+        "Health snapshot: active player count, stored stat-line count, the last digest/heartbeat delivery, and ingestion freshness (refresh: fresh/stale/running/partial/failed, with last start/finish/success and player counts; null before any refresh). Same shape as GET /health.",
       inputSchema: {},
     },
     () =>
-      guarded(async () => jsonResult({ ...(await healthSnapshot(deps.db)) })),
+      guarded(async () => jsonResult({ ...(await healthSnapshot(deps.db, deps.now(), deps.tz)) })),
   );
 
   return server;
