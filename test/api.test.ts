@@ -482,6 +482,148 @@ describe("REST API", () => {
     });
   });
 
+  describe("Presentation/Export formats (ADR 0036)", () => {
+    const seedBatter = async () => {
+      const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+      await insertStatLine(opened.db, { playerId: player.id, gameId: 900500, gameDate: "2026-07-18" });
+      return player;
+    };
+
+    it("GET /api/digest/preview json is byte-identical with format omitted or =json", async () => {
+      const expected = {
+        window: { spec: "1d", from: "2026-07-18", to: "2026-07-18", label: "Jul 18", groupBy: "game" },
+        statLineCount: 0,
+        playerCount: 0,
+        batters: [],
+        pitchers: [],
+        unknownFields: [],
+        mail: {
+          subject: "MLB Daily Tracker: Sat, July 18, 2026",
+          html: "<h1>Bryce - Sat, July 18, 2026</h1>\n<p>No games in this window.</p>",
+          text: "Bryce - Sat, July 18, 2026\n\nNo games in this window.\n",
+        },
+      };
+      const omitted = await app().request("/api/digest/preview", { headers: AUTH });
+      const explicit = await app().request("/api/digest/preview?format=json", { headers: AUTH });
+      expect(omitted.headers.get("content-type")).toContain("application/json");
+      const omittedBody = await omitted.text();
+      expect(omittedBody).toBe(await explicit.text());
+      expect(JSON.parse(omittedBody)).toEqual(expected);
+    });
+
+    it("GET /api/digest/preview?format=html downloads a document", async () => {
+      await seedBatter();
+      const res = await app().request("/api/digest/preview?format=html", { headers: AUTH });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
+      expect(res.headers.get("content-disposition")).toBe(
+        'attachment; filename="bryce-digest-1d.html"',
+      );
+      expect((await res.text()).startsWith("<!doctype html>")).toBe(true);
+    });
+
+    it("GET /api/digest/preview?window=7d&format=md downloads markdown named for the window", async () => {
+      await seedBatter();
+      const res = await app().request("/api/digest/preview?window=7d&format=md", { headers: AUTH });
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
+      expect(res.headers.get("content-disposition")).toBe(
+        'attachment; filename="bryce-digest-7d.md"',
+      );
+      expect((await res.text()).startsWith("# Bryce -")).toBe(true);
+    });
+
+    it("GET /api/digest/preview?format=csv exports one table, named for table+window", async () => {
+      await seedBatter();
+      const batters = await app().request("/api/digest/preview?format=csv", { headers: AUTH });
+      expect(batters.headers.get("content-type")).toBe("text/csv; charset=utf-8");
+      expect(batters.headers.get("content-disposition")).toBe(
+        'attachment; filename="bryce-batters-1d.csv"',
+      );
+      expect(await batters.text()).toContain("M Acosta");
+
+      // Header-only when the chosen table has no rows.
+      const pitchers = await app().request("/api/digest/preview?format=csv&table=pitchers", {
+        headers: AUTH,
+      });
+      expect(pitchers.headers.get("content-disposition")).toBe(
+        'attachment; filename="bryce-pitchers-1d.csv"',
+      );
+      const body = await pitchers.text();
+      expect(body.startsWith("Player,Lvl,")).toBe(true);
+      expect(body).toContain("IP,ER,K");
+      expect(body.split("\r\n").filter((l) => l.length > 0)).toHaveLength(1);
+    });
+
+    it("accepts and IGNORES table for a Presentation format (html renders both tables)", async () => {
+      await seedBatter();
+      const pitcher = await insertPlayer(opened.db, { fullName: "Zack Wheeler", position: "P" });
+      await insertStatLine(opened.db, {
+        playerId: pitcher.id,
+        gameId: 900600,
+        gameDate: "2026-07-18",
+        statType: "pitching",
+        stats: { inningsPitched: "6.0", earnedRuns: 1, strikeOuts: 7 },
+      });
+      const res = await app().request("/api/digest/preview?format=html&table=pitchers", {
+        headers: AUTH,
+      });
+      const body = await res.text();
+      expect(body).toContain("<h2>Batters</h2>");
+      expect(body).toContain("<h2>Pitchers</h2>");
+    });
+
+    it("400s an invalid format", async () => {
+      const res = await app().request("/api/digest/preview?format=bogus", { headers: AUTH });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ error: "invalid-input" });
+    });
+
+    it("GET /api/stat-lines?format=csv downloads the fixed-header CSV; json unchanged", async () => {
+      await seedBatter();
+      const csv = await app().request("/api/stat-lines?format=csv", { headers: AUTH });
+      expect(csv.status).toBe(200);
+      expect(csv.headers.get("content-type")).toBe("text/csv; charset=utf-8");
+      expect(csv.headers.get("content-disposition")).toBe(
+        'attachment; filename="bryce-stat-lines.csv"',
+      );
+      const body = await csv.text();
+      expect(body.startsWith("id,playerId,playerName,")).toBe(true);
+      expect(body).toContain("Maximo Acosta");
+
+      const omitted = await app().request("/api/stat-lines", { headers: AUTH });
+      const explicit = await app().request("/api/stat-lines?format=json", { headers: AUTH });
+      expect(await omitted.text()).toBe(await explicit.text());
+    });
+
+    it("guards a dangerous player name end-to-end in digest and stat-lines CSV", async () => {
+      const player = await insertPlayer(opened.db, { fullName: "=DANGER" });
+      await insertStatLine(opened.db, { playerId: player.id, gameId: 900700, gameDate: "2026-07-18" });
+
+      const stat = await (await app().request("/api/stat-lines?format=csv", { headers: AUTH })).text();
+      expect(stat).toContain(",'=DANGER,");
+      expect(stat).not.toContain(",=DANGER,");
+
+      const digest = await (
+        await app().request("/api/digest/preview?format=csv", { headers: AUTH })
+      ).text();
+      expect(digest).toContain("'=DANGER");
+      // A bare formula must never START a cell (here, the first cell of a row).
+      expect(digest.split("\r\n").some((line) => line.startsWith("=DANGER"))).toBe(false);
+    });
+
+    it("400s from>to with a format, and 401s a format path without a token", async () => {
+      const bad = await app().request(
+        "/api/stat-lines?format=csv&from=2026-07-20&to=2026-07-01",
+        { headers: AUTH },
+      );
+      expect(bad.status).toBe(400);
+
+      const noAuth = await app().request("/api/stat-lines?format=csv");
+      expect(noAuth.status).toBe(401);
+    });
+  });
+
   describe("POST /api/digest/send", () => {
     it("sends the digest, records the delivery, and stamps nothing", async () => {
       const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });

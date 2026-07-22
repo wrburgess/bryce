@@ -252,6 +252,104 @@ export function renderDigest(assembly: DigestAssembly): RenderedMail {
   };
 }
 
+/**
+ * Escape a cell for a GFM table cell (ADR 0036). In order: `\` (so a later
+ * escape is not itself re-escaped), `|` (the column separator — an unescaped
+ * one would forge extra columns), CR/LF collapsed to a space (an embedded
+ * newline would forge extra ROWS), then `<`/`>` (so an HTML-like value renders
+ * as text, not markup, in a Markdown viewer that passes raw HTML through).
+ */
+function escapeMarkdownCell(s: string): string {
+  return s
+    .replaceAll("\\", "\\\\")
+    .replaceAll("|", "\\|")
+    .replace(/[\r\n]+/g, " ")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+/**
+ * One GFM table: a header row, an alignment separator (`---:` right, `:---`
+ * left, matching the column's own alignment), then one escaped data row per
+ * DigestRow. Column headers are fixed literals, so only data cells are escaped.
+ */
+function markdownTable(columns: Column[], rows: DigestRow[]): string {
+  const headerRow = `| ${columns.map((c) => c.header).join(" | ")} |`;
+  const separator = `| ${columns.map((c) => (c.align === "right" ? "---:" : ":---")).join(" | ")} |`;
+  const dataRows = rows.map(
+    (row) => `| ${columns.map((c) => escapeMarkdownCell(c.value(row))).join(" | ")} |`,
+  );
+  return [headerRow, separator, ...dataRows].join("\n");
+}
+
+/** Minimal inline table styling for the standalone HTML Presentation document. */
+const DIGEST_HTML_STYLE =
+  "body{font-family:-apple-system,Segoe UI,Helvetica,Arial,sans-serif;margin:1rem}" +
+  "h1{font-size:1.4rem}h2{font-size:1.1rem}" +
+  "table{border-collapse:collapse;margin-bottom:1rem}" +
+  "th,td{border:1px solid #ddd;padding:2px 8px}" +
+  "th{background:#f5f5f5}";
+
+/**
+ * The whole Digest as a Markdown Presentation (ADR 0036): a `# ` heading, then a
+ * `## Batters`/`## Pitchers` GFM table per NON-empty table. An empty table is
+ * omitted (mirrors renderDigest); if both are empty the body is the same "No
+ * games in this window." line the email carries.
+ */
+export function renderDigestMarkdown(assembly: DigestAssembly): string {
+  const { window } = assembly;
+  const parts: string[] = [`# Bryce - ${windowTitle(window)}`];
+
+  const tables: Table[] = [
+    { title: "Batters", columns: battingColumns(window), rows: assembly.batters },
+    { title: "Pitchers", columns: pitchingColumns(window), rows: assembly.pitchers },
+  ].filter((t) => t.rows.length > 0);
+
+  if (tables.length === 0) {
+    parts.push("", "No games in this window.");
+  }
+  for (const table of tables) {
+    parts.push("", `## ${table.title}`, "", markdownTable(table.columns, table.rows));
+  }
+  return parts.join("\n");
+}
+
+/**
+ * The whole Digest as a standalone HTML Presentation document (ADR 0036): a
+ * `<!doctype html>` page with a charset, a `<title>`, and minimal table CSS,
+ * wrapping the SAME `renderDigest().html` fragment the email sends — the tables
+ * are rendered (and escaped) exactly once, never re-implemented here.
+ */
+export function renderDigestHtmlDocument(assembly: DigestAssembly): string {
+  const title = escapeHtml(`Bryce - ${windowTitle(assembly.window)}`);
+  return (
+    "<!doctype html>\n" +
+    "<html>\n" +
+    `<head><meta charset="utf-8"><title>${title}</title><style>${DIGEST_HTML_STYLE}</style></head>\n` +
+    `<body>\n${renderDigest(assembly).html}\n</body>\n` +
+    "</html>\n"
+  );
+}
+
+/**
+ * One Digest table as an Export (ADR 0036): the window's own column headers and
+ * one stringified row per DigestRow, ready for the CSV writer. Header-only (an
+ * empty `rows`) when the table has no rows — the columns still come from the
+ * window, so an empty Export is a valid single-header file.
+ */
+export function digestTableRows(
+  assembly: DigestAssembly,
+  table: "batters" | "pitchers",
+): { headers: string[]; rows: string[][] } {
+  const { window } = assembly;
+  const columns = table === "batters" ? battingColumns(window) : pitchingColumns(window);
+  const source = table === "batters" ? assembly.batters : assembly.pitchers;
+  return {
+    headers: columns.map((c) => c.header),
+    rows: source.map((row) => columns.map((c) => c.value(row))),
+  };
+}
+
 export function renderHeartbeat(args: {
   date: string;
   playerCount: number;

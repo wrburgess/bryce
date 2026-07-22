@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { WINDOW_SPECS } from "../domain/window.js";
-import { StatLineQuerySchema } from "../queries/statLines.js";
+import { StatLineFilterShape, StatLineQuerySchema, refineFromTo } from "../queries/statLines.js";
 
 /**
  * Shared Zod input schemas for the REST routes and the MCP tools — one
@@ -96,5 +96,50 @@ export const SqlQueryInputSchema = z.object({
   sql: z.string().trim().min(1),
   params: z.array(z.union([z.string(), z.number(), z.null()])).max(50).default([]),
 });
+
+/**
+ * Presentation/Export `format` (ADR 0036). A per-surface STRING enum defaulting
+ * to `json`, so every existing caller is byte-identical — a non-`json` value
+ * only ADDS an alternative body. A string (never `z.coerce.boolean`) so there is
+ * no truthiness trap. `send_digest` deliberately keeps the plain
+ * `DigestInputShape` and never gains `format`/`table`.
+ *
+ * A Presentation (`html`/`md`) renders the WHOLE digest (both tables); an Export
+ * (`csv`) is ONE table, chosen by `table` (default `batters`, ignored for the
+ * presentation formats).
+ */
+export const DigestPreviewInputShape = {
+  ...DigestInputShape,
+  format: z.enum(["json", "html", "md", "csv"]).default("json"),
+  table: z.enum(["batters", "pitchers"]).default("batters"),
+};
+
+export const DigestPreviewInputSchema = z.object(DigestPreviewInputShape);
+
+export const DigestPreviewQueryInputSchema = z.object({
+  ...DigestQueryInputSchema.shape,
+  format: z.enum(["json", "html", "md", "csv"]).default("json"),
+  table: z.enum(["batters", "pitchers"]).default("batters"),
+});
+
+/**
+ * Stat-line query + `format`, composed from the raw filter shape so the MCP
+ * tool can advertise `StatLinesFormatShape` (a plain `ZodRawShape`) while the
+ * handler parses `StatLinesFormatSchema` — which re-applies the from<=to
+ * pairing via the shared `refineFromTo`.
+ */
+export const StatLinesFormatShape = {
+  ...StatLineFilterShape,
+  format: z.enum(["json", "csv"]).default("json"),
+};
+
+export const StatLinesFormatSchema = z.object(StatLinesFormatShape).superRefine(refineFromTo);
+
+export const SqlQueryFormatShape = {
+  ...SqlQueryInputSchema.shape,
+  format: z.enum(["json", "csv"]).default("json"),
+};
+
+export const SqlQueryFormatSchema = z.object(SqlQueryFormatShape);
 
 export { StatLineQuerySchema };

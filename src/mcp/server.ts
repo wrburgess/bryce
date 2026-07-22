@@ -5,7 +5,14 @@ import { ZodError } from "zod";
 import { players } from "../db/schema.js";
 import { runReadonlyQuery, ReadonlyQueryError } from "../db/readonly.js";
 import { assembleDigest } from "../digest/assemble.js";
-import { renderDigest } from "../digest/render.js";
+import {
+  digestTableRows,
+  renderDigest,
+  renderDigestHtmlDocument,
+  renderDigestMarkdown,
+} from "../digest/render.js";
+import { toCsv } from "../export/csv.js";
+import { sqlResultToCsv, statLinesToCsv } from "../export/tabular.js";
 import { runDigest } from "../jobs/digest.js";
 import { runRefresh, runRefreshForPlayer } from "../jobs/refresh.js";
 import { MlbApiError } from "../mlb/client.js";
@@ -30,12 +37,16 @@ import {
   DeactivateInputShape,
   DigestInputSchema,
   DigestInputShape,
+  DigestPreviewInputSchema,
+  DigestPreviewInputShape,
   PlayerSearchInputSchema,
   PlayersListInputSchema,
   RefreshInputSchema,
   RefreshInputShape,
-  SqlQueryInputSchema,
-  StatLineQuerySchema,
+  SqlQueryFormatSchema,
+  SqlQueryFormatShape,
+  StatLinesFormatSchema,
+  StatLinesFormatShape,
 } from "../api/schemas.js";
 
 /**
@@ -54,6 +65,16 @@ function jsonResult(payload: JsonPayload): CallToolResult {
     content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     structuredContent: payload,
   };
+}
+
+/**
+ * A non-JSON tool result: the rendered Presentation/Export string as a single
+ * text content part, with NO structuredContent (ADR 0036). A deliberate,
+ * documented divergence from `jsonResult` — an HTML/Markdown/CSV body is not a
+ * JSON object, so it must not be advertised as one.
+ */
+function textResult(text: string): CallToolResult {
+  return { content: [{ type: "text", text }] };
 }
 
 function errorResult(err: unknown): CallToolResult {
@@ -166,24 +187,36 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "stat_lines",
     {
       description:
-        "Query stored per-game stat lines, newest first. Filters: playerId (internal id), level (mlb/milb), from/to (YYYY-MM-DD, inclusive), limit (max 200).",
-      inputSchema: StatLineQuerySchema.shape,
+        "Query stored per-game stat lines, newest first. Filters: playerId (internal id), level (mlb/milb), from/to (YYYY-MM-DD, inclusive), limit (max 200). format (default 'json') is 'json' or 'csv'; 'csv' returns the rows as a CSV table (one column per field, stats as a JSON column) instead of JSON.",
+      inputSchema: StatLinesFormatShape,
     },
     (args) =>
-      guarded(async () => jsonResult({ statLines: await queryStatLines(deps.db, args) })),
+      guarded(async () => {
+        const input = StatLinesFormatSchema.parse(args);
+        const views = await queryStatLines(deps.db, args);
+        return input.format === "csv"
+          ? textResult(statLinesToCsv(views))
+          : jsonResult({ statLines: views });
+      }),
   );
 
   server.registerTool(
     "digest_preview",
     {
       description:
-        "Preview the digest for a date window, as the Batters and Pitchers tables the email would carry. window (default '1d') is one of 1d, 7d, 14d, 21d, ytd; an unsupported value is rejected. Every window ends on the last COMPLETED host date — yesterday, not today — so the result does not depend on the hour you ask. Rows group by player and by the LEVEL each game was played at, so a player promoted mid-window gets one row per level; a 1d window groups by game instead, so a doubleheader stays two rows. Regular season only. Read-only: sends nothing, claims nothing, and writes nothing — re-running a window always returns the same content.",
-      inputSchema: DigestInputShape,
+        "Preview the digest for a date window, as the Batters and Pitchers tables the email would carry. window (default '1d') is one of 1d, 7d, 14d, 21d, ytd; an unsupported value is rejected. Every window ends on the last COMPLETED host date — yesterday, not today — so the result does not depend on the hour you ask. Rows group by player and by the LEVEL each game was played at, so a player promoted mid-window gets one row per level; a 1d window groups by game instead, so a doubleheader stays two rows. Regular season only. Read-only: sends nothing, claims nothing, and writes nothing — re-running a window always returns the same content. format (default 'json') is one of json, html, md, csv: json is the structured preview; html/md render the WHOLE digest (both tables) as a document; csv exports ONE table, chosen by table (default 'batters', ignored for html/md).",
+      inputSchema: DigestPreviewInputShape,
     },
     (args) =>
       guarded(async () => {
-        const input = DigestInputSchema.parse(args);
+        const input = DigestPreviewInputSchema.parse(args);
         const assembly = await assembleDigest(deps.db, { ...deps, spec: input.window });
+        if (input.format === "html") return textResult(renderDigestHtmlDocument(assembly));
+        if (input.format === "md") return textResult(renderDigestMarkdown(assembly));
+        if (input.format === "csv") {
+          const dt = digestTableRows(assembly, input.table);
+          return textResult(toCsv(dt.headers, dt.rows));
+        }
         return jsonResult({
           window: assembly.window,
           statLineCount: assembly.statLineCount,
@@ -253,14 +286,24 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "sql_query",
     {
       description:
-        "Run a single read-only SQL query (SELECT/WITH/EXPLAIN) against the Bryce SQLite database for ad-hoc analysis. Tables: players, stat_lines, digest_deliveries, season_calendar. Writes are rejected and the connection itself is read-only. Rows are capped at 200.",
-      inputSchema: SqlQueryInputSchema.shape,
+        "Run a single read-only SQL query (SELECT/WITH/EXPLAIN) against the Bryce SQLite database for ad-hoc analysis. Tables: players, stat_lines, digest_deliveries, season_calendar. Writes are rejected and the connection itself is read-only. Rows are capped at 200. format (default 'json') is 'json' or 'csv'; 'csv' returns columns/rows as a CSV table, and a truncated result adds a second text part warning that the cap was hit.",
+      inputSchema: SqlQueryFormatShape,
     },
     (args) =>
       guarded(async () => {
-        const input = SqlQueryInputSchema.parse(args);
+        const input = SqlQueryFormatSchema.parse(args);
         const result = runReadonlyQuery(deps.readonlySqlite, input.sql, input.params);
-        return jsonResult({ ...result });
+        if (input.format !== "csv") return jsonResult({ ...result });
+        const content: CallToolResult["content"] = [
+          { type: "text", text: sqlResultToCsv(result) },
+        ];
+        if (result.truncated) {
+          content.push({
+            type: "text",
+            text: "warning: result truncated at 200 rows; narrow the query",
+          });
+        }
+        return { content };
       }),
   );
 

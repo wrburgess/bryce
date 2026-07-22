@@ -311,10 +311,18 @@ All under `https://bryce.example.com/api` with the same bearer header, JSON in/o
 | `POST /api/players/{personId}/deactivate` | Deactivate an MLB/MiLB player, keeping history |
 | `POST /api/players/ncaa/{seq}/deactivate` | Deactivate an NCAA player, keeping history |
 | `GET /api/players/search?q=NAME` | Name search with team/level resolution (MLB/MiLB) |
-| `GET /api/stat-lines?playerId=&level=&from=&to=&limit=` | Query stored stat lines |
-| `GET /api/digest/preview?force=true\|false` | What the next digest would report (read-only); `force` also shows what a forced send would carry |
+| `GET /api/stat-lines?playerId=&level=&from=&to=&limit=&format=json\|csv` | Query stored stat lines; `format=csv` downloads them as a CSV table |
+| `GET /api/digest/preview?force=true\|false&format=json\|html\|md\|csv&table=batters\|pitchers` | What the next digest would report (read-only); `force` also shows what a forced send would carry |
 | `POST /api/digest/send` `{"force": true}` (optional) | Run the digest job now; `force` re-sends today as a replay that records nothing |
 | `POST /api/refresh` `{"personId": N}` or `{"ncaaPlayerSeq": N}` (optional) | Refresh one player or everything |
+
+The optional **`format`** parameter (default `json`; [ADR 0036](../adr/0036-presentation-export-formats-digest-and-tabular.md))
+adds Presentation/Export bodies over the existing surfaces without changing the default JSON. On
+`digest/preview` it is one of `json`/`html`/`md`/`csv`: `html`/`md` render the whole digest (both
+tables) as a downloadable document, while `csv` exports one table (`table=batters|pitchers`, default
+`batters`, and ignored for `html`/`md`). On `stat-lines` it is `json`/`csv`. The same `format` argument
+works on the `digest_preview`, `stat_lines`, and `sql_query` MCP tools, where a non-JSON body is
+returned inline as text (`sql_query` CSV is MCP-only — there is no REST download for it).
 
 ## NCAA players
 

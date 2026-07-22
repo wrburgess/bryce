@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 import type { DigestAssembly, DigestRow } from "../src/digest/assemble.js";
-import { renderDigest, renderHeartbeat } from "../src/digest/render.js";
+import {
+  digestTableRows,
+  renderDigest,
+  renderDigestHtmlDocument,
+  renderDigestMarkdown,
+  renderHeartbeat,
+} from "../src/digest/render.js";
 import type { WindowSpec } from "../src/domain/window.js";
 import { resolveWindow } from "../src/domain/window.js";
 import { aggregate } from "../src/stats/aggregate.js";
@@ -225,6 +231,117 @@ describe("renderDigest — tables", () => {
     const mail = renderDigest(assemblyWith({ spec: "7d" }));
     expect(mail.text).toContain("No games in this window.");
     expect(mail.html).toContain("No games in this window.");
+  });
+});
+
+describe("renderDigestMarkdown", () => {
+  it("renders a heading, section headings, and a GFM alignment separator", () => {
+    const md = renderDigestMarkdown(
+      assemblyWith({ spec: "7d", batters: [harper7d], pitchers: [wheeler7d] }),
+    );
+    expect(md.startsWith("# Bryce - Last 7 Days (Jul 13-19)")).toBe(true);
+    expect(md).toContain("## Batters");
+    expect(md).toContain("## Pitchers");
+    // A left-aligned column separator and a right-aligned one both appear.
+    expect(md).toContain(":---");
+    expect(md).toContain("---:");
+    // Batters before Pitchers, mirroring renderDigest.
+    expect(md.indexOf("## Batters")).toBeLessThan(md.indexOf("## Pitchers"));
+  });
+
+  it("escapes a pipe in a data cell so it cannot forge a column", () => {
+    const md = renderDigestMarkdown(
+      assemblyWith({
+        spec: "7d",
+        batters: [row("Clean Name", "batting", [{ atBats: 1 }], { lvl: "AA|BB" })],
+      }),
+    );
+    expect(md).toContain("AA\\|BB");
+    expect(md).not.toContain("AA|BB");
+  });
+
+  it("collapses CR/LF in a cell to a space so it cannot forge a row", () => {
+    const md = renderDigestMarkdown(
+      assemblyWith({
+        spec: "7d",
+        batters: [row("Clean Name", "batting", [{ atBats: 1 }], { lvl: "a\r\nb" })],
+      }),
+    );
+    expect(md).toContain("a b");
+    expect(md).not.toContain("a\r\nb");
+  });
+
+  it("neutralises an HTML-like player name", () => {
+    const md = renderDigestMarkdown(
+      assemblyWith({ spec: "7d", batters: [row("<b>x</b>", "batting", [{ atBats: 1 }])] }),
+    );
+    expect(md).toContain("&lt;b&gt;x&lt;/b&gt;");
+    expect(md).not.toContain("<b>x</b>");
+  });
+
+  it("omits an empty table and, when both are empty, prints the empty-window line", () => {
+    const oneTable = renderDigestMarkdown(assemblyWith({ spec: "7d", batters: [harper7d] }));
+    expect(oneTable).toContain("## Batters");
+    expect(oneTable).not.toContain("## Pitchers");
+
+    const empty = renderDigestMarkdown(assemblyWith({ spec: "7d" }));
+    expect(empty).toContain("No games in this window.");
+    expect(empty).not.toContain("## ");
+  });
+});
+
+describe("renderDigestHtmlDocument", () => {
+  it("is a standalone document with a charset, title, and both tables", () => {
+    const html = renderDigestHtmlDocument(
+      assemblyWith({ spec: "7d", batters: [harper7d], pitchers: [wheeler7d] }),
+    );
+    expect(html.startsWith("<!doctype html>")).toBe(true);
+    expect(html).toContain('<meta charset="utf-8">');
+    expect(html).toContain("<title>Bryce - Last 7 Days (Jul 13-19)</title>");
+    expect(html).toContain("<h2>Batters</h2>");
+    expect(html).toContain("<h2>Pitchers</h2>");
+    // Wraps the SAME email fragment, so it carries a real <table>.
+    expect(html).toContain("<table");
+  });
+
+  it("renders a single table when the other is empty, and escapes content", () => {
+    const html = renderDigestHtmlDocument(
+      assemblyWith({ spec: "7d", batters: [row("<b>x</b>", "batting", [{ atBats: 1 }])] }),
+    );
+    expect(html).toContain("<h2>Batters</h2>");
+    expect(html).not.toContain("Pitchers");
+    expect(html).toContain("&lt;b&gt;");
+    expect(html).not.toContain("<b>x</b>");
+  });
+});
+
+describe("digestTableRows", () => {
+  it("uses the aggregated window's columns and stringifies each cell", () => {
+    const { headers, rows } = digestTableRows(
+      assemblyWith({ spec: "7d", batters: [harper7d] }),
+      "batters",
+    );
+    expect(headers.slice(0, 4)).toEqual(["Player", "Lvl", "GP", "Batting"]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.[0]).toBe("B Harper");
+    expect(rows[0]?.every((c) => typeof c === "string")).toBe(true);
+  });
+
+  it("uses the 1d window's game-grouped columns (Gm, no GP/Batting)", () => {
+    const { headers } = digestTableRows(assemblyWith({ spec: "1d", batters: [harper7d] }), "batters");
+    expect(headers.slice(0, 3)).toEqual(["Player", "Lvl", "Gm"]);
+    expect(headers).not.toContain("GP");
+    expect(headers).not.toContain("Batting");
+  });
+
+  it("is header-only when the requested table has no rows", () => {
+    const { headers, rows } = digestTableRows(
+      assemblyWith({ spec: "7d", batters: [harper7d] }),
+      "pitchers",
+    );
+    expect(headers[0]).toBe("Player");
+    expect(headers).toContain("ERA");
+    expect(rows).toEqual([]);
   });
 });
 
