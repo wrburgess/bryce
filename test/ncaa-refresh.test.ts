@@ -45,7 +45,7 @@ const pitchingPage = (fullName: string, schoolName: string) =>
     fullName,
     schoolName,
     rows: [
-      { date: "2026-03-13", opponentName: "Georgia", isHome: true, contestId: 6001, stats: { IP: "6.0", H: 4, ER: 1, BB: 2, SO: 8, W: 1 } },
+      { date: "2026-03-13", opponentName: "Georgia", isHome: true, contestId: 6001, stats: { GS: 1, IP: "6.0", H: 4, ER: 1, BB: 2, SO: 8, W: 1 } },
     ],
   });
 
@@ -311,8 +311,9 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
     // prose format hid this by never showing a slash line at all.
     expect(cells("C Guy").slice(0, 8)).toEqual(["C", "Guy", "NCAA", "2", ".429/.429/.000", "7", "3", "0"]);
     expect(cells("C Guy").slice(-1)).toEqual(["1"]); // E, merged from fielding
-    // Tail is QS S BS HLD RW RL. An NCAA row carries no gamesStarted, so RW/RL
-    // stay 0 (fail-closed) even when the page reports a decision.
+    // Tail is QS S BS HLD RW RL. C Guy started (GS 1, mapped from the NCAA page's
+    // GS column) and won, so his decision is a starter win → RW/RL 0, never
+    // surfaced as relief. A row that genuinely lacks GS fails closed the same way.
     expect(cells("C Guy", text.indexOf("Pitchers"))).toEqual(
       ["C", "Guy", "NCAA", "1", "6.0", "1", "8", "12.00", "2", "4", "0", "1.50", "1.00", "1", "0", "0", "0", "0", "0"],
     );
