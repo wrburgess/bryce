@@ -36,3 +36,40 @@ found"), because a blanket catch downstream of the new throw site collapsed it i
 old category.
 
 _(Reference: issue #16; findings on PR #10, fixed in 9e57c6d.)_
+
+## An assumed-absent source field must be verified against the real payload, not the adapter map (Reference: PR #62)
+
+**The case.** The July 2026 digest change (issue #54 / PR #62) added relief-decision columns —
+`RW` (relief win) / `RL` (relief loss) — which render on every pitcher row but credit a win/loss as
+relief only for an appearance with `gamesStarted == 0`. The design counted a decision as relief only
+when `gamesStarted` was **present and 0**, and treated its absence as fail-closed: an NCAA pitching row
+was taken to carry no start-status, so a missing `gamesStarted` was "unknown, not relief" and an NCAA
+reliever's decision was silently dropped. The premise — "the NCAA source has no usable games-started" —
+was carried from the adapter alone: `src/ncaa/normalize.ts`'s `PITCHING_HEADER_MAP` mapped `W`/`L`/`SV`
+but not `GS`.
+
+**What shipped and what the review caught.** The second-model Reviewer (Codex) raised the NCAA
+start-status handling in the plan critique — where a fail-closed path was chosen and the `GS` mapping
+deferred as out of scope — and then, in the PR review, pushed the direct fix: the page already carries
+the field, so map it. A grep of the bundled fixture `test/fixtures/ncaa/gamelog_pitching.html` settled
+it: the page carried a `<th>GS</th>` column all along — the NCAA source **did** report games-started per
+game; the adapter simply never mapped it, so it passed through unread as `stats.GS`. The fail-closed
+branch wasn't guarding a real gap; it was papering over a one-line mapping omission. The fix (commit
+`7765500`) added `GS -> gamesStarted` to `PITCHING_HEADER_MAP`, so NCAA relief decisions now classify
+like MLB/MiLB.
+
+**The rule it yields.** Before you build fail-closed, degraded, or deferred behavior on the premise that
+an external source omits a field, **confirm the premise against the real payload** — the bundled fixture
+or a live sample — never the adapter's own mapping table, which shows only the fields you chose to read,
+not the fields the source sends. "The source doesn't carry X" is a factual claim and is owed the same
+citation discipline as any "verified" claim (`rules/self-review.md`): cite the fixture line (or the live
+response) that actually shows the field absent. The unmapped-but-present field is the trap — missing from
+the map, present on the wire.
+
+**Symptom to watch for.** A fail-closed / "unknown" branch that only ever fires for one upstream source
+while the equivalent rows from every other source classify fine — often a sign the source *does* carry
+the field and the adapter just never mapped it. Grep the fixture for the column header before trusting
+the map.
+
+_(Reference: issue #54 / PR #62; the deferred-mapping premise was overturned by the second-model
+Reviewer's PR-level review after a fixture check, fixed in 7765500.)_
