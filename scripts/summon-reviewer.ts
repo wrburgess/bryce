@@ -132,12 +132,12 @@ function sleep(ms: number): Promise<void> {
 function waitUntil(pred: () => boolean, ms: number): Promise<boolean> {
   return new Promise((res) => {
     if (pred()) return res(true);
-    const start = Date.now();
+    const start = performance.now();
     const iv = setInterval(() => {
       if (pred()) {
         clearInterval(iv);
         res(true);
-      } else if (Date.now() - start >= ms) {
+      } else if (performance.now() - start >= ms) {
         clearInterval(iv);
         res(false);
       }

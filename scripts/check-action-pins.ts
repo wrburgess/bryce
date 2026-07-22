@@ -99,14 +99,25 @@ function main(args: string[]): number {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--root") {
-      root = args[++i] ?? ".";
+      const val = args[++i];
+      if (val === undefined) {
+        process.stderr.write("check_action_pins: usage error - missing argument: --root\n");
+        return 2;
+      }
+      root = val;
     } else if (arg !== undefined && arg.startsWith("--root=")) {
       root = arg.slice("--root=".length);
+    } else {
+      // Reject unknown flags / stray positionals rather than silently scanning
+      // the default root — a mis-invocation must fail loudly, not false-green.
+      process.stderr.write(`check_action_pins: usage error - invalid option: ${arg}\n`);
+      return 2;
     }
   }
   return run(root);
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-  process.exit(main(argv.slice(2)));
+  // Set exitCode (don't process.exit) so buffered stdout drains before exit.
+  process.exitCode = main(argv.slice(2));
 }

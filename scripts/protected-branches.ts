@@ -61,9 +61,17 @@ function main(args: string[]): number {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--file") {
-      file = args[++i] ?? "";
+      const val = args[++i];
+      if (val === undefined) {
+        process.stderr.write("protected-branches: usage error - missing argument: --file\n");
+        return 2;
+      }
+      file = val;
     } else if (arg !== undefined && arg.startsWith("--file=")) {
       file = arg.slice("--file=".length);
+    } else {
+      process.stderr.write(`protected-branches: usage error - invalid option: ${arg}\n`);
+      return 2;
     }
   }
 
@@ -81,5 +89,6 @@ function main(args: string[]): number {
 
 // Main-module guard: run the CLI only when executed directly, not when imported.
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-  process.exit(main(argv.slice(2)));
+  // Set exitCode (don't process.exit) so buffered stdout drains before exit.
+  process.exitCode = main(argv.slice(2));
 }

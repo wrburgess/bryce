@@ -20,7 +20,7 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
-import { argv, exit } from "node:process";
+import { argv } from "node:process";
 import { fromFile as protectedBranchesFromFile } from "./protected-branches.js";
 
 const CANONICAL = "AGENTS.md";
@@ -472,14 +472,25 @@ function main(args: string[]): number {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--root") {
-      root = args[++i] ?? ".";
+      const val = args[++i];
+      if (val === undefined) {
+        process.stderr.write("parity_check: usage error - missing argument: --root\n");
+        return 2;
+      }
+      root = val;
     } else if (arg !== undefined && arg.startsWith("--root=")) {
       root = arg.slice("--root=".length);
+    } else {
+      // Reject unknown flags / stray positionals rather than silently checking
+      // the default root — a mis-invocation must fail loudly, not false-green.
+      process.stderr.write(`parity_check: usage error - invalid option: ${arg}\n`);
+      return 2;
     }
   }
   return new ParityCheck(root).run();
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolvePath(process.argv[1])) {
-  exit(main(argv.slice(2)));
+  // Set exitCode (don't exit()) so buffered stdout drains before exit.
+  process.exitCode = main(argv.slice(2));
 }
