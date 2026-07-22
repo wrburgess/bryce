@@ -345,9 +345,12 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
     const nfc = "José Ramírez".normalize("NFC");
     // Simulate legacy data written before canonicalization existed: NFD in SQLite.
     const player = await insertNcaa({ fullName: nfd, schoolName: "LSU" });
-    ncaaApi.options.pages!["2649785:batting"] = battingPage(nfc, "LSU");
-    ncaaApi.options.pages!["2649785:pitching"] = pitchingPage(nfc, "LSU");
-    ncaaApi.options.pages!["2649785:fielding"] = fieldingPage(nfc, "LSU");
+    // The source delivers the name in NFD too — so convergence to NFC REQUIRES
+    // the ingestion normalization: without it the parsed NFD would equal the
+    // stored NFD and nothing would converge (this is the true feature guard).
+    ncaaApi.options.pages!["2649785:batting"] = battingPage(nfd, "LSU");
+    ncaaApi.options.pages!["2649785:pitching"] = pitchingPage(nfd, "LSU");
+    ncaaApi.options.pages!["2649785:fielding"] = fieldingPage(nfd, "LSU");
 
     await runRefresh(deps());
     const converged = (await opened.db.select().from(players).where(eq(players.id, player.id)))[0];
