@@ -5,14 +5,19 @@ on:
     branches: ["**"]
   pull_request:
 
+# Least-privilege GITHUB_TOKEN: this workflow only reads the repo and runs checks.
+permissions:
+  contents: read
+
 jobs:
   parity:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Actions pinned to full commit SHAs (not mutable tags); Renovate keeps them current.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
+        uses: ruby/setup-ruby@a30dfa457ad68707b8b910ac3a244714b61c0626 # v1.320.0
         with:
           ruby-version: "3.3"
           # No bundler: the checker is stdlib-only (ADR 0008).
@@ -30,3 +35,11 @@ jobs:
 
       - name: Structural parity check
         run: ruby scripts/parity_check.rb
+
+      # Supply-chain guard: fail if any workflow reintroduces an unpinned external
+      # `uses:` (mutable tag/branch) instead of a full commit SHA (issue #59).
+      - name: Action-pin guard self-test (offline, fixtures)
+        run: bash scripts/check_action_pins.test.sh
+
+      - name: Action-pin guard (external actions must be SHA-pinned)
+        run: ruby scripts/check_action_pins.rb
