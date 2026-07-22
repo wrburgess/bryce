@@ -383,3 +383,32 @@ describe("NCAA client", () => {
     ).rejects.toBeInstanceOf(UnsupportedNcaaSeasonError);
   });
 });
+
+describe("parseGameLogPage — identity name canonicalized (#65 / ADR 0039)", () => {
+  const oneRow = [
+    { date: "2026-03-13", opponentName: "Georgia", isHome: true, stats: { AB: 4, H: 2 } },
+  ];
+
+  it("HTML-entity-decodes the player name and stores it NFC", () => {
+    // The <title> carries an HTML entity; cheerio's .text() decodes it to ñ
+    // (a precomposed, already-NFC code point). The entity is pure-ASCII source,
+    // immune to any editor normalization.
+    const html = makeNcaaGameLogHtml({
+      fullName: "Wily Pe&ntilde;a",
+      schoolName: "LSU",
+      rows: oneRow,
+    });
+    const page = parseGameLogPage(html);
+    expect(page.fullName).toBe("Wily Peña".normalize("NFC"));
+  });
+
+  it("NFC-normalizes an NFD school name", () => {
+    const html = makeNcaaGameLogHtml({
+      fullName: "College Guy",
+      schoolName: "San José State".normalize("NFD"),
+      rows: oneRow,
+    });
+    const page = parseGameLogPage(html);
+    expect(page.schoolName).toBe("San José State".normalize("NFC"));
+  });
+});

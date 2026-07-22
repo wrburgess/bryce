@@ -102,4 +102,18 @@ describe("sqlResultToCsv", () => {
     const result: ReadonlyQueryResult = { columns: ["a"], rows: [], rowCount: 0, truncated: false };
     expect(sqlResultToCsv(result)).toBe("a\r\n");
   });
+
+  // #65 / ADR 0039: a stored name is already NFC; CSV must preserve it verbatim.
+  it("preserves an accented player name verbatim, unquoted", () => {
+    const csv = statLinesToCsv([view({ playerName: "Wily Peña".normalize("NFC") })]);
+    expect(csv).toContain("Wily Peña".normalize("NFC"));
+  });
+
+  it("keeps an apostrophe name intact and does not formula-guard it", () => {
+    const csv = statLinesToCsv([view({ playerName: "Shane O'Reilly" })]);
+    // Not a CSV metacharacter and not a LEADING formula lead, so it is emitted
+    // verbatim with no quoting and no guard "'" prefix.
+    expect(csv).toContain("Shane O'Reilly");
+    expect(csv).not.toContain("'Shane");
+  });
 });

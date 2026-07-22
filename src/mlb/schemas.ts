@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { canonicalizeName } from "../domain/names.js";
 
 /**
  * Zod contracts for the MLB Stats API responses we consume. Loose objects: the
@@ -36,7 +37,14 @@ export type GameLogResponse = z.infer<typeof GameLogResponseSchema>;
 
 export const PersonSchema = z.looseObject({
   id: z.number(),
-  fullName: z.string(),
+  /**
+   * The Player's IDENTITY name, canonicalized to NFC at this boundary (ADR
+   * 0039) so every MLB consumer — addPlayer, refreshPlayer, searchPlayers —
+   * sees one stable form. The per-split `GameLogSplitSchema.player.fullName`
+   * below is intentionally NOT transformed: it feeds the verbatim `raw`
+   * snapshot, which stays exactly as the source sent it.
+   */
+  fullName: z.string().transform(canonicalizeName),
   active: z.boolean().optional(),
   primaryPosition: z
     .looseObject({ abbreviation: z.string().optional(), name: z.string().optional() })

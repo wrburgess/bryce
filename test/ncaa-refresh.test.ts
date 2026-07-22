@@ -319,4 +319,43 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
     );
     expect(text.split("\n").filter((l) => l.startsWith("C Guy"))).toHaveLength(2);
   });
+
+  // #65 / ADR 0039 — the identity refresh compare must not churn a name when the
+  // source only changes Unicode normalization form.
+  it("does not rewrite the identity name when the source only changes NFC↔NFD", async () => {
+    const nfc = "José Ramírez".normalize("NFC");
+    const player = await insertNcaa({ fullName: nfc, schoolName: "LSU" });
+    // The source now delivers the SAME name in NFD; parse canonicalizes it back
+    // to NFC, so the byte-level compare sees no change.
+    const nfd = "José Ramírez".normalize("NFD");
+    ncaaApi.options.pages!["2649785:batting"] = battingPage(nfd, "LSU");
+    ncaaApi.options.pages!["2649785:pitching"] = pitchingPage(nfd, "LSU");
+    ncaaApi.options.pages!["2649785:fielding"] = fieldingPage(nfd, "LSU");
+
+    await runRefresh(deps());
+
+    const after = (await opened.db.select().from(players).where(eq(players.id, player.id)))[0];
+    // The stored bytes are unchanged NFC — the NFD source caused no name churn.
+    // (updatedAt intentionally still moves; only identity fields must be stable.)
+    expect(after?.fullName).toBe(nfc);
+  });
+
+  it("converges a legacy NFD name to NFC on refresh, then leaves it stable", async () => {
+    const nfd = "José Ramírez".normalize("NFD");
+    const nfc = "José Ramírez".normalize("NFC");
+    // Simulate legacy data written before canonicalization existed: NFD in SQLite.
+    const player = await insertNcaa({ fullName: nfd, schoolName: "LSU" });
+    ncaaApi.options.pages!["2649785:batting"] = battingPage(nfc, "LSU");
+    ncaaApi.options.pages!["2649785:pitching"] = pitchingPage(nfc, "LSU");
+    ncaaApi.options.pages!["2649785:fielding"] = fieldingPage(nfc, "LSU");
+
+    await runRefresh(deps());
+    const converged = (await opened.db.select().from(players).where(eq(players.id, player.id)))[0];
+    expect(converged?.fullName).toBe(nfc); // the legacy NFD value converged to NFC
+
+    // A second refresh leaves the identity name stable (idempotent).
+    await runRefresh(deps());
+    const stable = (await opened.db.select().from(players).where(eq(players.id, player.id)))[0];
+    expect(stable?.fullName).toBe(nfc);
+  });
 });

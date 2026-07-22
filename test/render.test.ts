@@ -488,3 +488,42 @@ describe("renderHeartbeat", () => {
     expect(mail.text).toContain("games resume ~TBD");
   });
 });
+
+describe("renderDigest — non-ASCII name fidelity (#65 / ADR 0039)", () => {
+  it("preserves an accent and an apostrophe in the rendered name, HTML and text", () => {
+    // Accent in the RETAINED surname so the by-design first-name abbreviation
+    // ("Ronald" -> "R") does not drop it (Reviewer MF1).
+    const acuna = row("Ronald Acuña Jr.".normalize("NFC"), "batting", [
+      { atBats: 4, hits: 2, plateAppearances: 4 },
+    ]);
+    const oreilly = row("Shane O'Reilly", "batting", [
+      { atBats: 3, hits: 1, plateAppearances: 3 },
+    ]);
+    const mail = renderDigest(assemblyWith({ spec: "7d", batters: [acuna, oreilly] }));
+
+    const acunaRendered = "R Acuña Jr.".normalize("NFC");
+    expect(mail.text).toContain(acunaRendered);
+    expect(mail.html).toContain(acunaRendered);
+    expect(mail.text).toContain("S O'Reilly");
+    expect(mail.html).toContain("S O'Reilly");
+    // The apostrophe is safe in an HTML text node — NOT entity-escaped.
+    expect(mail.html).not.toContain("O&#39;Reilly");
+    expect(mail.html).not.toContain("O&apos;Reilly");
+
+    // The Markdown Presentation surface (ADR 0037) preserves the accent too:
+    // escapeMarkdownCell touches `|`/newlines/link syntax, never letters.
+    const md = renderDigestMarkdown(assemblyWith({ spec: "7d", batters: [acuna, oreilly] }));
+    expect(md).toContain(acunaRendered);
+    expect(md).toContain("S O'Reilly");
+  });
+
+  it("renders a wide-character name intact without throwing (alignment out of scope)", () => {
+    const suzuki = row("Ichiro 鈴木".normalize("NFC"), "batting", [
+      { atBats: 4, hits: 3, plateAppearances: 4 },
+    ]);
+    const mail = renderDigest(assemblyWith({ spec: "7d", batters: [suzuki] }));
+    // Survives intact; we assert PRESENCE, never monospace column alignment.
+    expect(mail.text).toContain("I 鈴木");
+    expect(mail.html).toContain("I 鈴木");
+  });
+});
