@@ -37,7 +37,7 @@ export function createApp(deps: AppDeps): Hono {
 
   const app = new Hono();
 
-  app.get("/health", async (c) => c.json(await healthSnapshot(deps.db)));
+  app.get("/health", async (c) => c.json(await healthSnapshot(deps.db, deps.now(), deps.tz)));
 
   const auth = bearerAuth(token);
   app.use("/api/*", auth);

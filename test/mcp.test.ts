@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { digestDeliveries, players, statLines } from "../src/db/schema.js";
+import { digestDeliveries, players, refreshRuns, statLines } from "../src/db/schema.js";
 import { MlbClient } from "../src/mlb/client.js";
 import type { AppDeps } from "../src/server.js";
 import { createApp } from "../src/server.js";
@@ -18,6 +18,7 @@ import {
   insertCalendars2026,
   insertDelivery,
   insertPlayer,
+  insertRefreshRun,
   insertStatLine,
   makeGameLogBody,
   makeNcaaGameLogHtml,
@@ -720,5 +721,34 @@ describe("MCP server over Streamable HTTP", () => {
       status: "sending",
       sentAt: null,
     });
+  });
+
+  it("status reports refresh freshness null before any refresh has run", async () => {
+    const result = await call("status");
+    expect(result.structuredContent?.refresh).toBeNull();
+  });
+
+  it("status surfaces each refresh freshness state through the MCP tool (ADR 0042)", async () => {
+    // The app clock is MID_SEASON (2026-07-19 Chicago), so "today" is 07-19.
+    const cases: Array<{
+      row: Parameters<typeof insertRefreshRun>[1];
+      state: string;
+    }> = [
+      { row: { status: "ok", startedAt: "2026-07-19T07:00:00.000Z", finishedAt: "2026-07-19T07:20:00.000Z" }, state: "fresh" },
+      { row: { status: "ok", startedAt: "2026-07-18T07:00:00.000Z", finishedAt: "2026-07-18T07:20:00.000Z" }, state: "stale" },
+      { row: { status: "partial", startedAt: "2026-07-19T07:00:00.000Z", finishedAt: "2026-07-19T07:20:00.000Z" }, state: "partial" },
+      { row: { status: "failed", startedAt: "2026-07-19T07:00:00.000Z", finishedAt: "2026-07-19T07:20:00.000Z" }, state: "failed" },
+      { row: { status: "running", startedAt: "2026-07-19T16:59:00.000Z", claimedAt: "2026-07-19T16:59:00.000Z", finishedAt: null }, state: "running" },
+      // A crashed run whose lease expired two hours before the clock: NOT running.
+      { row: { status: "running", startedAt: "2026-07-19T15:00:00.000Z", claimedAt: "2026-07-19T15:00:00.000Z", finishedAt: null }, state: "stale" },
+    ];
+
+    for (const { row, state } of cases) {
+      await opened.db.delete(refreshRuns);
+      await insertRefreshRun(opened.db, row);
+      const result = await call("status");
+      const refresh = result.structuredContent?.refresh as Record<string, unknown> | null;
+      expect(refresh?.state, JSON.stringify(row)).toBe(state);
+    }
   });
 });

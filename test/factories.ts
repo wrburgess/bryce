@@ -4,8 +4,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Db, OpenedDb } from "../src/db/client.js";
 import { openDb } from "../src/db/client.js";
-import type { DigestDeliveryRow, PlayerRow, StatLineRow } from "../src/db/schema.js";
-import { digestDeliveries, players, seasonCalendar, statLines } from "../src/db/schema.js";
+import type { DigestDeliveryRow, PlayerRow, RefreshRunRow, StatLineRow } from "../src/db/schema.js";
+import { digestDeliveries, players, refreshRuns, seasonCalendar, statLines } from "../src/db/schema.js";
 import type { FetchLike } from "../src/mlb/client.js";
 import { MlbClient } from "../src/mlb/client.js";
 import type {
@@ -196,6 +196,39 @@ export async function insertDelivery(
     .returning();
   const row = rows[0];
   if (row === undefined) throw new Error("insertDelivery failed");
+  return row;
+}
+
+/**
+ * A refresh_runs row (ADR 0042). Defaults describe a completed `ok` run; a
+ * `running` status drops the default finishedAt to null so the row never
+ * violates the finished-iff-terminal CHECK, and `claimedAt` defaults to
+ * `startedAt` (a fresh claim's lease). Pass a stale `claimedAt` to model a
+ * crashed run whose lease expired.
+ */
+export async function insertRefreshRun(
+  db: Db,
+  overrides: Partial<typeof refreshRuns.$inferInsert> = {},
+): Promise<RefreshRunRow> {
+  const status = overrides.status ?? "ok";
+  const startedAt = overrides.startedAt ?? "2026-07-19T07:00:00.000Z";
+  const rows = await db
+    .insert(refreshRuns)
+    .values({
+      startedAt,
+      finishedAt: status === "running" ? null : "2026-07-19T07:05:00.000Z",
+      claimedAt: startedAt,
+      playersRefreshed: 1,
+      playersTotal: 1,
+      statLinesInserted: 0,
+      statLinesUpdated: 0,
+      createdAt: startedAt,
+      ...overrides,
+      status,
+    })
+    .returning();
+  const row = rows[0];
+  if (row === undefined) throw new Error("insertRefreshRun failed");
   return row;
 }
 

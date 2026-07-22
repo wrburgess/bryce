@@ -103,6 +103,41 @@ export const statLines = sqliteTable(
   ],
 );
 
+export const refreshRuns = sqliteTable("refresh_runs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  /**
+   * When the sweep CLAIMED its run — the freshness anchor (ADR 0042). Freshness
+   * is judged on the START, never the finish: a run that started after the
+   * content day ended captured every player under ADR 0040's forward-clock
+   * finality gate, whereas a midnight-straddling run started before is
+   * conservatively stale. Also `claimed_at`'s initial value: start == claim.
+   */
+  startedAt: text("started_at").notNull(),
+  /** Null WHILE running; stamped when the run settles (CHECK below enforces the iff). */
+  finishedAt: text("finished_at"),
+  /**
+   * The run state machine (ADR 0042). Each run owns its OWN row — a stream, not
+   * a shared slot — so a late-settling superseded run only writes its older row,
+   * and the freshness watermark is the latest by (started_at, id). Every member
+   * has a writing path (claim → running; settle → ok/partial/failed); no
+   * speculative state, so no consumer of RefreshRunStatus handles a case that
+   * cannot occur (rules/backend.md).
+   */
+  status: text("status", { enum: ["running", "ok", "partial", "failed"] }).notNull(),
+  /**
+   * The lease clock (ADR 0034's pattern), RENEWED after each player. A healthy
+   * long sweep keeps renewing and stays live; a crashed run stops and its lease
+   * expires after REFRESH_LEASE_MS, so another run may claim without waiting.
+   */
+  claimedAt: text("claimed_at").notNull(),
+  playersRefreshed: integer("players_refreshed").notNull().default(0),
+  playersTotal: integer("players_total").notNull().default(0),
+  statLinesInserted: integer("stat_lines_inserted").notNull().default(0),
+  statLinesUpdated: integer("stat_lines_updated").notNull().default(0),
+  errorMessage: text("error_message"),
+  createdAt: text("created_at").notNull(),
+});
+
 export const seasonCalendar = sqliteTable(
   "season_calendar",
   {
@@ -133,5 +168,13 @@ export type DigestDeliveryRow = typeof digestDeliveries.$inferSelect;
  */
 export type DeliveryStatus = DigestDeliveryRow["status"];
 export type DeliveryKind = DigestDeliveryRow["kind"];
+export type RefreshRunRow = typeof refreshRuns.$inferSelect;
+/**
+ * The refresh-run state machine's alphabet (ADR 0042). The DERIVED health
+ * vocabulary (fresh/stale/running/partial/failed) is a SEPARATE type in
+ * src/server/health.ts — never this one — because "fresh"/"stale" are computed
+ * against a clock, not stored.
+ */
+export type RefreshRunStatus = RefreshRunRow["status"];
 export type SeasonCalendarRow = typeof seasonCalendar.$inferSelect;
 export type NewSeasonCalendarRow = typeof seasonCalendar.$inferInsert;

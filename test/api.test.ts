@@ -104,7 +104,13 @@ describe("REST API", () => {
     it("keeps /health public", async () => {
       const res = await app().request("/health");
       expect(res.status).toBe(200);
-      expect(await res.json()).toEqual({ ok: true, players: 0, statLines: 0, lastDelivery: null });
+      expect(await res.json()).toEqual({
+        ok: true,
+        players: 0,
+        statLines: 0,
+        lastDelivery: null,
+        refresh: null,
+      });
     });
   });
 

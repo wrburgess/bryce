@@ -11,6 +11,7 @@ import {
   insertCalendars2026,
   insertDelivery,
   insertPlayer,
+  insertRefreshRun,
   insertStatLine,
   testAppDeps,
   testDb,
@@ -31,7 +32,13 @@ describe("GET /health", () => {
     const app = createApp(testAppDeps(opened));
     const res = await app.request("/health");
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ ok: true, players: 0, statLines: 0, lastDelivery: null });
+    expect(await res.json()).toEqual({
+      ok: true,
+      players: 0,
+      statLines: 0,
+      lastDelivery: null,
+      refresh: null,
+    });
   });
 
   it("reports active player count, stat line count and the last delivery", async () => {
@@ -167,5 +174,105 @@ describe("GET /health", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ status: "sent", attemptCount: 1 });
     expect(rows[0]?.sentAt).not.toBeNull();
+  });
+});
+
+/**
+ * The ingestion-freshness block of /health (ADR 0042, issue #34 AC #3): a
+ * DERIVED state distinguishing fresh / stale / running / partial / failed, so an
+ * operator can tell a healthy pipeline from a silently-stalled one. The app's
+ * clock is MID_SEASON (2026-07-19 Chicago), so "today" for the derivation is
+ * 2026-07-19.
+ */
+describe("GET /health refresh freshness (ADR 0042)", () => {
+  let opened: OpenedDb;
+
+  const health = async () => {
+    const app = createApp(testAppDeps(opened));
+    const body = (await (await app.request("/health")).json()) as Record<string, unknown>;
+    return body.refresh as Record<string, unknown> | null;
+  };
+
+  beforeEach(() => {
+    opened = testDb();
+  });
+
+  afterEach(() => {
+    opened.close();
+  });
+
+  it("is null when no refresh has ever run", async () => {
+    expect(await health()).toBeNull();
+  });
+
+  it("reports `fresh` when the latest ok run started today (host)", async () => {
+    await insertRefreshRun(opened.db, {
+      status: "ok",
+      startedAt: "2026-07-19T07:00:00.000Z",
+      finishedAt: "2026-07-19T07:20:00.000Z",
+      playersRefreshed: 4,
+      playersTotal: 4,
+    });
+    expect(await health()).toMatchObject({
+      state: "fresh",
+      lastStartedAt: "2026-07-19T07:00:00.000Z",
+      lastFinishedAt: "2026-07-19T07:20:00.000Z",
+      lastSuccessAt: "2026-07-19T07:20:00.000Z",
+      playersRefreshed: 4,
+      playersTotal: 4,
+    });
+  });
+
+  it("reports `stale` when the latest ok run is from a prior host date", async () => {
+    await insertRefreshRun(opened.db, {
+      status: "ok",
+      startedAt: "2026-07-18T07:00:00.000Z",
+      finishedAt: "2026-07-18T07:20:00.000Z",
+    });
+    expect(await health()).toMatchObject({ state: "stale", lastSuccessAt: "2026-07-18T07:20:00.000Z" });
+  });
+
+  it("reports `running` while a claim holds a live lease", async () => {
+    await insertRefreshRun(opened.db, {
+      status: "running",
+      startedAt: "2026-07-19T16:59:00.000Z",
+      claimedAt: "2026-07-19T16:59:00.000Z", // one minute before the app clock
+      finishedAt: null,
+    });
+    expect(await health()).toMatchObject({ state: "running", lastFinishedAt: null });
+  });
+
+  it("reports `partial` when the latest terminal run left players unrefreshed", async () => {
+    await insertRefreshRun(opened.db, {
+      status: "partial",
+      startedAt: "2026-07-19T07:00:00.000Z",
+      finishedAt: "2026-07-19T07:20:00.000Z",
+      playersRefreshed: 2,
+      playersTotal: 5,
+    });
+    expect(await health()).toMatchObject({ state: "partial", playersRefreshed: 2, playersTotal: 5 });
+  });
+
+  it("reports `failed` when the latest terminal run errored", async () => {
+    await insertRefreshRun(opened.db, {
+      status: "failed",
+      startedAt: "2026-07-19T07:00:00.000Z",
+      finishedAt: "2026-07-19T07:20:00.000Z",
+      playersRefreshed: 0,
+      playersTotal: 5,
+    });
+    expect(await health()).toMatchObject({ state: "failed" });
+  });
+
+  it("does NOT report `running` for a crashed run whose lease expired", async () => {
+    await insertRefreshRun(opened.db, {
+      status: "running",
+      startedAt: "2026-07-19T15:00:00.000Z",
+      claimedAt: "2026-07-19T15:00:00.000Z", // two hours before the app clock: expired
+      finishedAt: null,
+    });
+    const refresh = await health();
+    expect(refresh?.state).not.toBe("running");
+    expect(refresh?.state).toBe("stale");
   });
 });
