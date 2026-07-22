@@ -16,6 +16,7 @@
     "digest": "tsx src/cli/digest.ts",
     "seed": "tsx src/cli/seed.ts",
     "ncaa:probe": "tsx src/cli/ncaa-probe.ts",
+    "connector:smoke": "tsx src/cli/connector-smoke.ts",
     "db:migrate": "tsx src/cli/migrate.ts",
     "server": "tsx src/server.ts"
   },
