@@ -77,6 +77,14 @@ class ParityCheck
   GUIDES_DIR = "docs/guides"
   REQUIRED_GUIDES = ["docs/guides/usage.md"].freeze
 
+  # ADR log (ADR 0008 structural hygiene). Each decision file is `NNNN-slug.md`, and the NNNN number
+  # must be UNIQUE across the log. Two branches that each grab the next free number independently and
+  # then both merge is a real collision (issue #55: two `0036`s), invisible to a link check because
+  # both files exist — this catches it at PR time so the later branch renumbers before merge, not
+  # after. Gated on the docs/adr/ tree existing, so a minimal fixture bundle is unaffected.
+  ADR_DIR = "docs/adr"
+  ADR_FILENAME = /\A(\d+)-.+\.md\z/.freeze
+
   # Tier-1 Lean Core rule files (ADR 0004). Each must exist, be referenced by AGENTS.md so every tool
   # can reach the Lean Core, and declare its Patterns + Anti-Patterns sections. Checked only for a
   # bundle that ships a rules/ tree (the RULES_DIR gate) so a minimal fixture bundle is unaffected —
@@ -161,6 +169,7 @@ class ParityCheck
     check_skills
     check_guardrails
     check_guides
+    check_adr_numbers
     check_links
     report
     @errors.empty? ? 0 : 1
@@ -402,6 +411,29 @@ class ParityCheck
 
     REQUIRED_GUIDES.each do |rel|
       err("Required guide missing: #{rel} not found") unless exist?(rel)
+    end
+  end
+
+  # ADR numbering uniqueness (issue #55). Runs only when the bundle ships a docs/adr/ tree, so a
+  # minimal bundle is unaffected (the same gate stance as check_guides). Groups every `NNNN-slug.md`
+  # file by its number and reddens on any number shared by two or more files; filenames that don't
+  # match the `NNNN-slug.md` shape (e.g. a README) are ignored.
+  def check_adr_numbers
+    return unless Dir.exist?(path(ADR_DIR))
+
+    by_number = Hash.new { |h, k| h[k] = [] }
+    Dir.children(path(ADR_DIR)).sort.each do |name|
+      next unless File.file?(File.join(path(ADR_DIR), name))
+
+      m = ADR_FILENAME.match(name)
+      by_number[m[1]] << name unless m.nil?
+    end
+
+    by_number.each do |number, files|
+      next if files.length < 2
+
+      err("Duplicate ADR number #{number}: #{files.sort.inspect} share it - renumber all but one to " \
+          "the next free number and update its references")
     end
   end
 
