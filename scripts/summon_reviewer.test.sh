@@ -474,6 +474,14 @@ expect_status "plan mode without --input -> usage error" 1 "usage error" \
   "$TSX" "$SCRIPT" --mode plan --out "$TMP/noinput.md" --codex-bin "$FAKE_BIN"
 expect_status "unknown flag -> usage error" 1 "usage error" \
   "$TSX" "$SCRIPT" --mode work --out "$TMP/x.md" --nonsense
+# Strict numeric parsing (must-fix #8): reject trailing junk / non-finite floats
+# and non-integer --min-bytes rather than silently coercing them.
+expect_status "--timeout with trailing junk -> usage error" 1 "usage error" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/tjunk.md" --timeout 1junk --codex-bin "$FAKE_BIN"
+expect_status "--timeout Infinity -> usage error" 1 "usage error" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/tinf.md" --timeout Infinity --codex-bin "$FAKE_BIN"
+expect_status "--min-bytes non-integer -> usage error" 1 "usage error" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/mbfloat.md" --min-bytes 2.5 --codex-bin "$FAKE_BIN"
 
 # An unwritable --out must be caught up front with a distinct message. root
 # ignores chmod 000, so under root use a parent that is a regular file — an
