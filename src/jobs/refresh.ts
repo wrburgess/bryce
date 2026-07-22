@@ -159,7 +159,7 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   // (an out-of-season NCAA row, say) settles `partial` — freshness "≥1 watched
   // player not refreshed" (ADR 0042; #23 owns the per-player WHY).
   const status = playersRefreshed === activePlayers.length ? "ok" : "partial";
-  settleRefreshRun(db, {
+  const settled = settleRefreshRun(db, {
     runId,
     now: now(),
     status,
@@ -170,6 +170,21 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
       statLinesUpdated: updated,
     },
   });
+  // The settle is conditional on still owning the row. If it changed nothing, a
+  // successor reaped this run while it awaited the LAST player's refresh — the
+  // one window the per-iteration renew above cannot cover — so it lost ownership
+  // mid-final-write and must NOT claim success. Report `superseded`, exactly like
+  // a mid-loop loss; the successor's row is the freshness winner.
+  if (!settled) {
+    return {
+      skipped: true,
+      reason: "superseded",
+      playersRefreshed,
+      statLinesInserted: inserted,
+      statLinesUpdated: updated,
+      runId,
+    };
+  }
 
   return {
     skipped: false,

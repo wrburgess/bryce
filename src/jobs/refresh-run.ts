@@ -165,15 +165,22 @@ export interface SettleRefreshArgs {
 }
 
 /**
- * Stamp a run terminal: its status, `finished_at`, counts, and (on failure) the
- * error. A run settles its OWN row, so a late settle by a superseded run is
- * harmless — it touches nothing the winner owns.
+ * Stamp a run terminal — its status, `finished_at`, counts, and (on failure) the
+ * error — but ONLY while it still owns its row (`status = 'running'`). Ownership
+ * is checked ATOMICALLY with the settle, in one conditional UPDATE: a run reaped
+ * by a successor (its row already `failed`) settles NOTHING and this returns
+ * false. That is what stops a zombie — a run whose lease expired during a long
+ * await and was reaped, then resumed — from resurrecting its own row to `ok` and
+ * forging a `fresh` watermark over the winner's newer data.
+ *
+ * Returns true iff this run still owned its row and was settled.
  */
-export function settleRefreshRun(db: Db, args: SettleRefreshArgs): void {
+export function settleRefreshRun(db: Db, args: SettleRefreshArgs): boolean {
   const nowIso = args.now.toISOString();
-  db.transaction(
-    (tx) => {
-      tx.update(refreshRuns)
+  return db.transaction(
+    (tx): boolean => {
+      const result = tx
+        .update(refreshRuns)
         .set({
           finishedAt: nowIso,
           status: args.status,
@@ -183,8 +190,9 @@ export function settleRefreshRun(db: Db, args: SettleRefreshArgs): void {
           statLinesUpdated: args.counts.statLinesUpdated,
           errorMessage: args.errorMessage ?? null,
         })
-        .where(eq(refreshRuns.id, args.runId))
+        .where(and(eq(refreshRuns.id, args.runId), eq(refreshRuns.status, "running")))
         .run();
+      return result.changes > 0;
     },
     { behavior: "immediate" },
   );

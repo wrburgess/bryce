@@ -150,34 +150,41 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0042)", () => {
     expect(contender).toEqual({ claimed: false, reason: "already-running" });
   });
 
-  it("the OLD holder settling AFTER a takeover corrupts nothing: both rows keep their own outcome", () => {
-    // A claims, its lease expires, B takes over. Then BOTH settle — A late.
+  it("a reaped zombie's late settle is REFUSED, never resurrecting its row into a success", () => {
+    // A claims, its lease expires, B takes over (reaping A to `failed`). Then BOTH
+    // settle — A late. A's settle owns nothing, so it must change NOTHING and
+    // return false: a zombie cannot forge a success over B's newer data.
     const a = claimRefreshRun(opened.db, { now: at(T0), playersTotal: 2 });
     if (!a.claimed) throw new Error("expected A");
     const b = claimRefreshRun(opened.db, { now: at(PAST_LEASE), playersTotal: 3 });
     if (!b.claimed) throw new Error("expected B");
 
-    // B (the winner) settles ok; A (the resurrected zombie) settles late as partial.
-    settleRefreshRun(opened.db, {
-      runId: b.runId,
-      now: at("2026-07-19T07:12:00.000Z"),
-      status: "ok",
-      counts: { playersRefreshed: 3, playersTotal: 3, statLinesInserted: 5, statLinesUpdated: 1 },
-    });
-    settleRefreshRun(opened.db, {
-      runId: a.runId,
-      now: at("2026-07-19T07:20:00.000Z"),
-      status: "partial",
-      counts: { playersRefreshed: 1, playersTotal: 2, statLinesInserted: 2, statLinesUpdated: 0 },
-    });
+    // B (the winner) still owns its row → settles ok and returns true.
+    expect(
+      settleRefreshRun(opened.db, {
+        runId: b.runId,
+        now: at("2026-07-19T07:12:00.000Z"),
+        status: "ok",
+        counts: { playersRefreshed: 3, playersTotal: 3, statLinesInserted: 5, statLinesUpdated: 1 },
+      }),
+    ).toBe(true);
+    // A was reaped by B's claim, so its late settle owns nothing → false, no write.
+    expect(
+      settleRefreshRun(opened.db, {
+        runId: a.runId,
+        now: at("2026-07-19T07:20:00.000Z"),
+        status: "partial",
+        counts: { playersRefreshed: 1, playersTotal: 2, statLinesInserted: 2, statLinesUpdated: 0 },
+      }),
+    ).toBe(false);
 
     const rows = opened.db.select().from(refreshRuns).orderBy(desc(refreshRuns.startedAt), desc(refreshRuns.id)).all();
     expect(rows).toHaveLength(2);
-    // A's late settle only ever touched A's own row — B's ok is intact.
     const rowB = rows.find((r) => r.id === b.runId);
     const rowA = rows.find((r) => r.id === a.runId);
+    // B's ok is intact; A stays `failed` as reaped — never resurrected to `partial`.
     expect(rowB).toMatchObject({ status: "ok", playersRefreshed: 3, statLinesInserted: 5 });
-    expect(rowA).toMatchObject({ status: "partial", playersRefreshed: 1 });
+    expect(rowA).toMatchObject({ status: "failed", errorMessage: SUPERSEDED_MESSAGE });
 
     // The watermark is the LATEST by (started_at, id) — B, the real winner.
     const fresh = digestFreshnessFor(opened.db, "2026-07-18", TEST_TZ);
