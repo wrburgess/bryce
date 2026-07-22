@@ -60,6 +60,9 @@ class ParityCheck
     "docs/standards/development-lifecycle.md",
     "docs/guides/usage.md",
     "docs/guides/branch-protection.md",
+    "docs/cli/README.md",
+    "docs/api/README.md",
+    "docs/mcp/README.md",
   ].freeze
 
   # Usage guides (ADR 0008 surface finalization, issue #11). Checked only for a bundle that ships a
