@@ -108,7 +108,7 @@ GitHub "Dependabot alerts" (free GHSA/OSV feed; Dependency Graph enabled)
     { "matchUpdateTypes": ["major"], "automerge": false, "dependencyDashboardApproval": true }
   ],
   "lockFileMaintenance": { "enabled": true, "automerge": true, "schedule": ["before 6am on monday"] },
-  "vulnerabilityAlerts": { "labels": ["security"], "minimumReleaseAge": null }
+  "vulnerabilityAlerts": { "labels": ["security"], "minimumReleaseAge": null, "dependencyDashboardApproval": false }
 }
 ```
 
@@ -117,6 +117,10 @@ Precedence notes (later `packageRules` override earlier for an overlapping packa
 - **GitHub Actions** never auto-merge (rule 2); an Action **major** is additionally held (rule 4).
 - **Node** (nvm + engines) is grouped and held (rule 3); `.nvmrc`/`engines` are major-only (`22`)
   today, so no minor surfaces — the policy is explicit regardless.
+- `vulnerabilityAlerts.dependencyDashboardApproval: false` overrides rule 4 for **security** updates so
+  a **major** CVE fix opens a PR *immediately* (dashboard bypassed) yet is still not auto-merged
+  (rule 4's `automerge: false` stands) — without it, rule 4's `dependencyDashboardApproval` would hold
+  a major security fix on the dashboard (Copilot review finding on PR #61).
 - `internalChecksFilter: "strict"` enforces the cooldown before a branch/PR is created.
 - Explanatory text lives in each rule's `description` field (kept out of this snippet for brevity).
 

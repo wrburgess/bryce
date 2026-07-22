@@ -43,6 +43,7 @@
   },
   "vulnerabilityAlerts": {
     "labels": ["security"],
-    "minimumReleaseAge": null
+    "minimumReleaseAge": null,
+    "dependencyDashboardApproval": false
   }
 }
