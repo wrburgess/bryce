@@ -228,7 +228,7 @@ describe("assembleDigest — window selection", () => {
     // ending 2026-09-27; isInSeason honors postSeasonEnd. Today is 2026-07-20,
     // in season for everyone — so if the filter used today, BOTH asserts below
     // would include him and the test could not distinguish the fix.
-    const player = await insertPlayer(opened.db, {
+    await insertPlayer(opened.db, {
       fullName: "Walker Jenkins",
       level: "milb",
       milbLevel: "Triple-A",
