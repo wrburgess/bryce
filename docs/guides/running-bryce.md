@@ -64,7 +64,7 @@ missing.
 | `MLB_API_DELAY_MS` | no | `500` | Polite delay between MLB Stats API calls |
 | `NCAA_SCRAPE_DELAY_MS` | no | `3000` | Polite delay between stats.ncaa.org scrape requests |
 | `SERVER_PORT` | no | `3000` | HTTP server port (`/health`, `/api`, `/mcp`) |
-| `API_TOKEN` | for `/api` + `/mcp` | — | Bearer token guarding `/api/*` and `/mcp`; without it the server refuses to start those surfaces (`/health` stays public) |
+| `API_TOKEN` | for `/api` + `/mcp` | — | Bearer token guarding `/api/*` and `/mcp`; without it the server **fails closed and refuses to start at all** — nothing is served, including `/health` |
 
 ## Scheduling with launchd
 
@@ -279,42 +279,19 @@ secret — rotate it by editing `.env` and restarting the server (Cloudflare Acc
 tunnel is the second, independent layer per
 [ADR 0028](../adr/0028-local-macbook-hosting-cloudflare-tunnel.md)).
 
-### Connecting a Claude client to the remote MCP endpoint
+### Interfaces: MCP tools, REST routes, CLI
 
-The MCP tools are: `watchlist_list`, `watchlist_add`, `watchlist_add_ncaa`, `watchlist_deactivate`,
-`player_search`, `stat_lines`, `digest_preview`, `send_digest`, `run_refresh`, `sql_query` (read-only
-SQL, capped), and `status`. `watchlist_deactivate` and `run_refresh` accept either `personId`
-(MLB/MiLB) or `ncaaPlayerSeq` (NCAA).
+The full, canonical per-audience references live under `docs/` — this runbook does not restate them,
+so they never drift:
 
-- **claude.ai / Claude mobile** — Settings -> Connectors -> Add custom connector, URL
-  `https://bryce.example.com/mcp`. When the connector setup offers an auth header, use
-  `Authorization: Bearer $API_TOKEN`.
-- **Claude Code** —
-
-  ```sh
-  claude mcp add --transport http bryce https://bryce.example.com/mcp \
-    --header "Authorization: Bearer $API_TOKEN"
-  ```
-
-Then ask in plain language — "add Konnor Griffin to my watch list", "what did my guys do this
-week?", "preview today's digest" — and the tools do the rest.
-
-### REST API routes
-
-All under `https://bryce.example.com/api` with the same bearer header, JSON in/out:
-
-| Route | Purpose |
-|---|---|
-| `GET /api/players?active=true\|false\|all` | List watch-list players |
-| `POST /api/players` `{"personId": N}` | Add an MLB/MiLB player (first Refresh runs immediately) |
-| `POST /api/players/ncaa` `{"ncaaPlayerSeq": N}` | Add an NCAA player by stats_player_seq |
-| `POST /api/players/{personId}/deactivate` | Deactivate an MLB/MiLB player, keeping history |
-| `POST /api/players/ncaa/{seq}/deactivate` | Deactivate an NCAA player, keeping history |
-| `GET /api/players/search?q=NAME` | Name search with team/level resolution (MLB/MiLB) |
-| `GET /api/stat-lines?playerId=&level=&from=&to=&limit=` | Query stored stat lines |
-| `GET /api/digest/preview?force=true\|false` | What the next digest would report (read-only); `force` also shows what a forced send would carry |
-| `POST /api/digest/send` `{"force": true}` (optional) | Run the digest job now; `force` re-sends today as a replay that records nothing |
-| `POST /api/refresh` `{"personId": N}` or `{"ncaaPlayerSeq": N}` (optional) | Refresh one player or everything |
+- **[MCP Reference](../mcp/README.md)** — all eleven tools, their inputs and result shapes, and how
+  to connect a Claude client. **Claude Code** connects today with a static bearer header; the hosted
+  **claude.ai / Claude mobile** custom-connector flow is OAuth-based and **pending verification**
+  ([#37](https://github.com/wrburgess/bryce/issues/37)) — a static `Authorization: Bearer` header is
+  not yet confirmed to work there, so do not rely on it for the hosted apps.
+- **[REST API Reference](../api/README.md)** — all ten `/api` routes, the bearer scheme and 401
+  behavior, and the full `onError` status map.
+- **[CLI Reference](../cli/README.md)** — the same operations from the command line.
 
 ## NCAA players
 

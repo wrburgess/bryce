@@ -234,8 +234,8 @@ curl -H "Authorization: Bearer YOUR_API_TOKEN" http://localhost:3000/api/players
 
 The MCP server — the primary interface — is at `http://localhost:3000/mcp` with the same bearer
 token; point a Claude client at it and you can say "add Paul Skenes to my watch list" instead of
-using the CLI. Tool list, REST routes, and remote setup:
-[Running Bryce → The MCP server and REST API](running-bryce.md#the-mcp-server-and-rest-api).
+using the CLI. Tool list, REST routes, and remote setup: the [MCP](../mcp/README.md),
+[REST API](../api/README.md), and [CLI](../cli/README.md) reference pages.
 
 ## 11. Make it permanent (production)
 
@@ -246,7 +246,7 @@ set-and-forget daily email:
    digest that self-heal if the laptop was asleep.
 2. [Litestream backup to Cloudflare R2](running-bryce.md#backup-litestream-to-cloudflare-r2).
 3. [Cloudflare Tunnel](running-bryce.md#remote-access-cloudflare-tunnel) +
-   [connecting a Claude client to the remote MCP endpoint](running-bryce.md#connecting-a-claude-client-to-the-remote-mcp-endpoint)
+   [connecting a Claude client to the remote MCP endpoint](../mcp/README.md)
    — manage the watch list from your phone, from anywhere.
 
 ## Updating to a newer version later

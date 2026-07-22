@@ -166,7 +166,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "stat_lines",
     {
       description:
-        "Query stored per-game stat lines, newest first. Filters: playerId (internal id), level (mlb/milb), from/to (YYYY-MM-DD, inclusive), limit (max 200).",
+        "Query stored per-game stat lines, newest first. Filters: playerId (internal id), level (mlb/milb/ncaa), from/to (YYYY-MM-DD, inclusive), limit (max 200).",
       inputSchema: StatLineQuerySchema.shape,
     },
     (args) =>

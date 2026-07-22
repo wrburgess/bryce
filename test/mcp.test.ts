@@ -127,6 +127,47 @@ describe("MCP server over Streamable HTTP", () => {
     }
   });
 
+  it("describes every input field of every exposed tool schema", async () => {
+    const { tools } = await client.listTools();
+
+    // The `description` string a JSON-Schema property carries, or undefined.
+    const describedOf = (schema: unknown): string | undefined => {
+      if (typeof schema === "object" && schema !== null && "description" in schema) {
+        const value = (schema as { description: unknown }).description;
+        return typeof value === "string" ? value : undefined;
+      }
+      return undefined;
+    };
+    const propertiesOf = (name: string): Record<string, unknown> =>
+      (tools.find((t) => t.name === name)?.inputSchema.properties ?? {}) as Record<string, unknown>;
+
+    // Every tool that declares input fields is checked; only field-less `status` is exempt.
+    const toolsWithInputs = tools.filter(
+      (t) => Object.keys(t.inputSchema.properties ?? {}).length > 0,
+    );
+    expect(toolsWithInputs.map((t) => t.name).sort()).toEqual(
+      ALL_TOOLS.filter((n) => n !== "status").sort(),
+    );
+
+    // Every exposed field carries a genuinely informative description (`.describe()`
+    // reaching the wire) — a bare or trivial label fails here.
+    for (const tool of toolsWithInputs) {
+      for (const [field, schema] of Object.entries(tool.inputSchema.properties ?? {})) {
+        const description = describedOf(schema);
+        expect(typeof description, `${tool.name}.${field} description`).toBe("string");
+        expect((description ?? "").length, `${tool.name}.${field} description`).toBeGreaterThan(20);
+      }
+    }
+
+    // Semantic asserts: the descriptions must be authored correct, not merely present.
+    // `level` names all three affiliations (the schema allows ncaa, so the prose must too).
+    expect(describedOf(propertiesOf("stat_lines").level)).toMatch(/ncaa/i);
+    // The shared `force` description names the digest_preview no-op on both digest tools.
+    for (const name of ["digest_preview", "send_digest"]) {
+      expect(describedOf(propertiesOf(name).force), `${name}.force`).toMatch(/preview/i);
+    }
+  });
+
   it("401s the /mcp endpoint without (or with a wrong) token", async () => {
     const app = createApp(deps);
     const res = await app.request("/mcp", {
