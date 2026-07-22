@@ -165,6 +165,120 @@ cloudflared tunnel run --url http://localhost:3000 bryce
 laptop, database, and last send are alive. It is the only public route; everything else rides
 behind the token below.
 
+## Cloudflare Access in front of the tunnel
+
+The tunnel above is the transport; **Cloudflare Access** is the optional identity layer that can sit
+in front of it. Cloudflare documents Access as a way to protect an MCP server directly — *"You can
+secure Model Context Protocol (MCP) servers with Cloudflare Access"*
+([Secure MCP servers](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/secure-mcp-servers/)).
+The question this section answers is **how Access and Bryce's own bearer token coexist on `/mcp`**
+so a Claude connector can actually reach the server.
+
+### The decided topology: exempt `/mcp` from the interactive Access policy
+
+**Bryce runs `/mcp` behind the bearer token only — the `/mcp` path is exempted from the interactive
+(browser-login) Access policy.** Access still guards the other surfaces (a browser hitting the host,
+`/api` if you choose); `/mcp` is protected by the token middleware in
+[`src/server/auth.ts`](../../src/server/auth.ts) — fail-closed, constant-time SHA-256, and a 401 that
+never echoes the token.
+
+Why exempt rather than layer a second interactive check on `/mcp`:
+
+- The hosted-connector static-credential feature is a **single request header**. Anthropic's
+  `static_headers` type is *"Fixed credential (API key or bearer token) entered by an organization
+  administrator as a request header when adding the connector"* and is still **Beta**
+  ([Authentication for connectors](https://claude.com/docs/connectors/building/authentication)). It
+  is **not confirmed** that a hosted connector can additionally send the two
+  `CF-Access-Client-Id` / `CF-Access-Client-Secret` service-token headers. Exempting `/mcp` needs
+  only `Authorization`, so it works with the one header the beta is known to support.
+- It keeps **Claude Code's existing single-header command valid, unchanged** (see
+  [`docs/mcp/README.md`](../mcp/README.md) → *Claude Code*): `--header "Authorization: Bearer …"`.
+- It keeps the REST fallback (`/api`, same bearer) valid for scripted clients.
+
+**Trade-off, recorded honestly:** `/mcp` then has **bearer-only** protection at the edge, not the
+defense-in-depth of Access-identity **plus** token. That is an accepted reduction: the token
+middleware is itself fail-closed and leak-free, and the tunnel still terminates at Cloudflare. Other
+paths keep Access. If you later add IP-conditional access, Anthropic's hosted surfaces egress from
+`160.79.104.0/21`
+([Authentication for connectors](https://claude.com/docs/connectors/building/authentication) →
+*Network reference*: *"Anthropic's outbound traffic to your server originates from
+`160.79.104.0/21`"*) — but with `/mcp` exempted there is no IP filter in front of it today, so that
+range is **informational** here.
+
+### Rejected alternative: a service-token (Service Auth) policy on `/mcp`
+
+The alternative was a **Service Auth** Access policy on `/mcp`, where every client presents a
+service token as two headers — *"add the following to the headers of any HTTP request:
+`CF-Access-Client-Id: <CLIENT_ID>` `CF-Access-Client-Secret: <CLIENT_SECRET>`"*, and *"Make sure to
+set the policy action to **Service Auth**; otherwise, Access will prompt for an identity provider
+login"*
+([Service tokens](https://developers.cloudflare.com/cloudflare-one/identity/service-tokens/)). This
+was **rejected** because it would force **three** headers on every caller
+(`Authorization` + the two CF headers), which:
+
+- breaks the unchanged Claude Code / REST single-header commands, and
+- depends on the **unproven** ability of a hosted connector to send more than the one
+  `static_headers` request header.
+
+If a future verification proves the hosted connector can send all three headers, revisit this — a
+Service Auth policy would restore defense-in-depth on `/mcp`.
+
+### Verify the connector path locally first
+
+Before touching Access at all, prove the server answers a real MCP client end to end with the
+connector smoke diagnostic ([`src/cli/connector-smoke.ts`](../../src/cli/connector-smoke.ts)):
+
+```sh
+API_TOKEN=... MCP_URL=https://your-host.example.com/mcp npm run connector:smoke
+```
+
+It drives the real MCP SDK client over Streamable HTTP: `initialize` → `tools/list` (asserts the
+exact eleven tools) → `status` → `digest_preview` (read-only — sends nothing, writes nothing), then
+confirms a **no-bearer** request still returns `401 {"error":"unauthorized"}`. It reads config from
+the environment only, refuses a non-`https` URL for any non-loopback host, never follows a redirect
+on an authenticated request, and **never prints a secret** (the token and any `CF_ACCESS_*` values
+are redacted from all output). Set `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SECRET` (both or
+neither) to also send the Cloudflare service-token headers while an Access policy is still in front.
+It exits non-zero on any failed assertion, so launchd or a shell can gate on it.
+
+An **opt-in** `npm run connector:smoke -- --mutate` exercises the write path — but only against a
+designated, **already-inactive** `SMOKE_PERSON_ID` sentinel (it refuses a blank, absent, or
+currently-active id), deactivating it as an idempotent no-op. It **writes to the target DB and is
+staging-only, never production**, and it never calls `send_digest`.
+
+### Manual Verification Stage (the gate that closes [#37](https://github.com/wrburgess/bryce/issues/37))
+
+The hosted claude.ai web + iPhone connector path **cannot** be proven by the CI test suite — it needs
+a real browser, a real Cloudflare account, and the live tunnel. Until the HC runs the checklist below
+and records the result, the hosted path is **pending verification** and **#37 stays open**. This is a
+runbook the HC executes by hand, then fills in.
+
+1. **Add the connector.** On **claude.ai web** and again on **iPhone**, add Bryce as a custom
+   connector by URL (`https://your-host.example.com/mcp`). Note whether the **request-header field is
+   present** in the add-connector UI — that field is the `static_headers` beta; its presence tells you
+   the beta is available for this account. If it is absent (OAuth-only), record *"static-header path
+   unsupported for this account"* — that is a legitimate outcome (it justifies the Phase-2 OAuth path
+   as new scope), not a failure of this runbook.
+2. **Apply the `/mcp` Access exemption** (a bypass / non-interactive policy on the `/mcp` path per
+   the decided topology above); confirm the connector reaches Bryce.
+3. **Record the two-path + rotation matrix** — for each row, write down the HTTP **status**, response
+   **body**, and which **source** returned it (Access vs. Bryce's token middleware):
+
+   | Case | Expected |
+   |---|---|
+   | Valid bearer on `/mcp` | `200`, tools respond |
+   | Missing / wrong bearer on `/mcp` | `401 {"error":"unauthorized"}` (from Bryce) |
+   | Valid vs. invalid Access identity on a still-protected path (e.g. `/api` or the browser host) | Access allows / blocks per policy |
+   | Bearer rotation | edit `API_TOKEN`, restart: the **old** token now `401`s, the **new** token `200`s |
+
+4. **Exercise it end to end on both surfaces:** on web and on iPhone, do one **discovery** (list the
+   tools), one **read** (e.g. "what did my guys do this week?"), and one **mutation** (e.g. add or
+   deactivate a player).
+5. **Close out.** Replace every placeholder in this section (`your-host.example.com`, the recorded
+   statuses) with the real values, update the proven/unsupported status line in
+   [`docs/mcp/README.md`](../mcp/README.md) → *claude.ai / Claude mobile*, then close
+   [#37](https://github.com/wrburgess/bryce/issues/37).
+
 ## Stuck deliveries and duplicate emails
 
 Bryce can send the **same content twice**, in one specific situation, on purpose. Read this once so a
@@ -290,9 +404,12 @@ so they never drift:
 
 - **[MCP Reference](../mcp/README.md)** — all eleven tools, their inputs and result shapes, and how
   to connect a Claude client. **Claude Code** connects today with a static bearer header; the hosted
-  **claude.ai / Claude mobile** custom-connector flow is OAuth-based and **pending verification**
+  **claude.ai / Claude mobile** custom-connector flow is **pending verification**
   ([#37](https://github.com/wrburgess/bryce/issues/37)) — a static `Authorization: Bearer` header is
-  not yet confirmed to work there, so do not rely on it for the hosted apps.
+  not yet confirmed to work there, so do not rely on it for the hosted apps. The decided Cloudflare
+  Access topology and the manual proof that closes #37 are in
+  [*Cloudflare Access in front of the tunnel*](#cloudflare-access-in-front-of-the-tunnel) above;
+  smoke-test any endpoint first with `npm run connector:smoke`.
 - **[REST API Reference](../api/README.md)** — all ten `/api` routes, the bearer scheme and 401
   behavior, and the full `onError` status map.
 - **[CLI Reference](../cli/README.md)** — the same operations from the command line.

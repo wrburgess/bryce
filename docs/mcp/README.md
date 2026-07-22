@@ -161,6 +161,18 @@ Health snapshot, the same shape as `GET /health`.
 Point a client at the `/mcp` endpoint (locally `http://localhost:3000/mcp`, or your tunnel host such
 as `https://your-host.example.com/mcp`), authenticating with the bearer token.
 
+**Smoke-test the endpoint first.** Before wiring any client, confirm the server answers a real MCP
+client end to end:
+
+```sh
+API_TOKEN=... MCP_URL=https://your-host.example.com/mcp npm run connector:smoke
+```
+
+It runs `initialize` → `tools/list` (asserts all eleven tools) → `status` → a read-only
+`digest_preview`, then checks that a no-bearer request still `401`s — and never prints a secret. See
+[Running Bryce → Cloudflare Access](../guides/running-bryce.md#cloudflare-access-in-front-of-the-tunnel)
+for the full flag set and the Cloudflare Access topology.
+
 ### Claude Code — works today
 
 Static bearer headers are supported, so a single command registers the server:
@@ -173,12 +185,37 @@ claude mcp add --transport http bryce https://your-host.example.com/mcp \
 Then ask in plain language — "add Konnor Griffin to my watch list", "what did my guys do this
 week?", "preview today's digest" — and the tools do the rest.
 
-### claude.ai / Claude mobile — pending verification ([#37](https://github.com/wrburgess/bryce/issues/37))
+### claude.ai web + iPhone — how to verify ([#37](https://github.com/wrburgess/bryce/issues/37))
 
-The hosted custom-connector flow (Settings → Connectors → Add custom connector) is **OAuth-based**,
-so passing a **static `Authorization: Bearer` header is not yet confirmed to work** against Bryce's
-token middleware. This path is tracked in issue #37 and is **not** documented here as working until
-that verification lands — do not assume the bearer token alone connects the hosted apps.
+This path is **pending verification** — do **not** assume the bearer token alone connects the hosted
+apps until the live test below is recorded. Here is how to add the connector and, in the same steps,
+find out whether it can work for your account.
+
+1. **Open the connector settings.** On **claude.ai web**: Settings → Connectors → **Add custom
+   connector**. On **iPhone**: the Claude app's Settings → Connectors → add a custom connector. Both
+   hosted surfaces share one connector backend, so what works on one should work on the other.
+2. **Enter the URL:** `https://your-host.example.com/mcp` (your tunnel host, not localhost — the
+   hosted apps reach Bryce over the internet).
+3. **Look for a request-header field — this is the tell.** Anthropic's static-credential feature
+   (`static_headers`) is *"Fixed credential (API key or bearer token) entered by an organization
+   administrator as a request header when adding the connector"* and is currently **Beta**
+   ([Authentication for connectors](https://claude.com/docs/connectors/building/authentication)).
+   - **If the add-connector screen lets you enter a request header**, the beta is available for your
+     account: enter `Authorization` with value `Bearer <your API_TOKEN>`. That is the single header
+     Bryce's `/mcp` needs once the path is exempted from the interactive Cloudflare Access policy.
+   - **If there is no header field and it only offers an OAuth sign-in**, the static-header path is
+     **not available for your account**. Bryce's `/mcp` speaks a static bearer token, not the hosted
+     OAuth flow, so record this as *"static-header path unsupported"* — it is the documented signal
+     that the Phase-2 OAuth work is needed, not a misconfiguration.
+4. **Apply the Cloudflare Access exemption on `/mcp`** and run the discovery + read + mutation checks.
+   The full step-by-step (including the two-path + bearer-rotation matrix to record) is the
+   **Manual Verification Stage** in
+   [Running Bryce → Cloudflare Access](../guides/running-bryce.md#manual-verification-stage-the-gate-that-closes-37).
+
+**Proven status:** *pending the live test above.* The HC updates this line to "verified working via
+the static-header path" or "static-header path unsupported; OAuth required (Phase 2)" once the Manual
+Verification Stage is recorded, and only then is [#37](https://github.com/wrburgess/bryce/issues/37)
+closed.
 
 ## See also
 
