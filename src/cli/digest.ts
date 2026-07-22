@@ -1,7 +1,7 @@
 import { loadConfig } from "../config.js";
 import { loadDotEnv } from "../env.js";
 import type { Db } from "../db/client.js";
-import { openDb } from "../db/client.js";
+import { startupDb } from "../db/startup.js";
 import type { WindowSpec } from "../domain/window.js";
 import { WINDOW_SPECS, parseWindowSpec } from "../domain/window.js";
 import type { Mailer } from "../mailer/types.js";
@@ -83,7 +83,10 @@ export async function runDigestCli(argv: string[], deps: DigestCliDeps): Promise
 export async function main(): Promise<number> {
   loadDotEnv();
   const config = loadConfig();
-  const { db, close } = openDb(config.databasePath);
+  const { db, close } = await startupDb(config.databasePath, {
+    backupDir: config.backupDir,
+    keepLast: config.backupKeepLast,
+  });
   try {
     return await runDigestCli(process.argv.slice(2), {
       db,

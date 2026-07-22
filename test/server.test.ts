@@ -178,13 +178,13 @@ describe("GET /health", () => {
 });
 
 /**
- * The ingestion-freshness block of /health (ADR 0042, issue #34 AC #3): a
+ * The ingestion-freshness block of /health (ADR 0043, issue #34 AC #3): a
  * DERIVED state distinguishing fresh / stale / running / partial / failed, so an
  * operator can tell a healthy pipeline from a silently-stalled one. The app's
  * clock is MID_SEASON (2026-07-19 Chicago), so "today" for the derivation is
  * 2026-07-19.
  */
-describe("GET /health refresh freshness (ADR 0042)", () => {
+describe("GET /health refresh freshness (ADR 0043)", () => {
   let opened: OpenedDb;
 
   const health = async () => {

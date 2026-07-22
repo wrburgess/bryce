@@ -61,6 +61,8 @@ missing.
 |---|---|---|---|
 | `DATABASE_PATH` | no | `data/bryce.db` | SQLite file; created and migrated automatically |
 | `BRYCE_TZ` | no | `America/Chicago` | Host timezone for "today" (digest windows, season math) |
+| `BACKUP_DIR` | no | `backups` | Directory for local Snapshots and Player List Backups (gitignored) |
+| `BACKUP_KEEP_LAST` | no | `10` | Newest Snapshots retention keeps (positive integer; `<1`/non-integer fails closed) |
 | `MAILER_PROVIDER` | no | `postmark` | `postmark`, `smtp` (Forward Email), or `console` |
 | `POSTMARK_SERVER_TOKEN` | with postmark | — | Postmark server token |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | with smtp | port `465` | SMTP relay credentials |
@@ -135,7 +137,7 @@ heartbeat — no plist changes needed across seasons.
 
 The two launchd jobs are **independent**, and a sleep/wake laptop runs them late and out of order.
 So Refresh records what it did and Digest reads it — the policy for missed and overlapping runs is
-deterministic ([ADR 0042](../adr/0042-persist-refresh-freshness-and-gate-digest.md)).
+deterministic ([ADR 0043](../adr/0043-persist-refresh-freshness-and-gate-digest.md)).
 
 - **Every whole-watch-list Refresh records a run** — start, finish, outcome (`ok` / `partial` /
   `failed`), and counts — on its own `refresh_runs` row. A run **owns its row** (a stream, not a
@@ -163,6 +165,110 @@ deterministic ([ADR 0042](../adr/0042-persist-refresh-freshness-and-gate-digest.
 - **Offseason caveat.** During Sleep, Refresh is a **pure no-op** and records nothing, so freshness
   reads `stale` — expected: the weekly heartbeat, not a freshness row, is the offseason liveness
   signal.
+
+## Backup and restore
+
+Bryce keeps two **local, testable** recovery artifacts in `BACKUP_DIR` (default `backups/`,
+gitignored), **complementary to** the off-box Litestream **Replica** below
+([ADR 0042](../adr/0042-snapshot-and-player-backup-complement-litestream.md)):
+
+- a **Snapshot** — a consistent whole-database point-in-time copy, the rollback point before a risky
+  change (above all, a migration); and
+- a **Player List Backup** — a portable JSON serialization of every Player row, the recovery
+  counterpart to the one thing no Refresh can rebuild: the human's roster choices and notes.
+
+The **Snapshot** and the **Replica** are not redundant: the Snapshot is the local, unit-tested
+rollback (it can undo a bad migration); the Replica is the continuous off-box guard against hardware
+loss (it faithfully replicates a bad migration's corruption too). Keep both.
+
+### Automatic and manual Snapshots
+
+Every entrypoint (server, refresh, digest, seed, migrate) now takes an **automatic Snapshot before any
+pending migration applies** — the known-good state to roll back to if the migration goes wrong. A
+schema-less first run has nothing to lose, so it is skipped; a failed pre-migration Snapshot **aborts**
+the migration. Take one on demand with `npm run db:backup` (Snapshot + prune to `BACKUP_KEEP_LAST`).
+
+Schedule a nightly Snapshot with launchd, same shape as the Refresh/Digest jobs above:
+
+`~/Library/LaunchAgents/com.bryce.backup.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.bryce.backup</string>
+  <key>WorkingDirectory</key><string>/Users/YOU/code/bryce</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string><string>-lc</string>
+    <string>npm run db:backup >> logs/backup.log 2>&1</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
+</dict>
+</plist>
+```
+
+```sh
+launchctl load ~/Library/LaunchAgents/com.bryce.backup.plist
+```
+
+Snapshots are owner-only (`0600`) and named `bryce-YYYYMMDDTHHMMSSZ-NNN.db` (UTC). Retention keeps the
+newest `BACKUP_KEEP_LAST`; an off-box home for Snapshots is deliberately deferred (the Replica remains
+the off-box story).
+
+### Player List Backups
+
+```sh
+npm run players:backup -- --out backups/players.json     # write every Player row (network-free)
+npm run players:restore -- --in  backups/players.json     # re-import, all-or-nothing, network-free
+```
+
+Restore upserts on each Player's natural identity (MLB `external_id` or NCAA `stats_player_seq`), so
+existing rows keep their `id` and their **Stat Line** history is untouched; a promotion (NCAA -> pro)
+stays one row and gains `external_id` without losing its `ncaa_player_seq`. It never re-pulls from the
+sources.
+
+### Restore runbook
+
+Restore is the **destructive** recovery op. It refuses (`error: database is in use by pid …`) while
+any cooperating Bryce process holds the database, and it never opens or migrates the live database
+itself — but **Litestream does not cooperate with that interlock**, so you must stop everything by
+hand first:
+
+1. **Stop the app and all scheduled jobs and replication.** Unload the launchd agents and stop
+   Litestream so nothing is writing the file:
+
+   ```sh
+   launchctl unload ~/Library/LaunchAgents/com.bryce.refresh.plist
+   launchctl unload ~/Library/LaunchAgents/com.bryce.digest.plist
+   launchctl unload ~/Library/LaunchAgents/com.bryce.backup.plist
+   # stop the server process (Ctrl-C or its launchd/label), and:
+   brew services stop litestream   # or stop the litestream replicate job
+   ```
+
+2. **Pick the Snapshot** to restore from `backups/` (newest is last lexically).
+
+3. **If you are rolling back a bad migration, fix or revert the offending migration FIRST** — before
+   the restore, or at least before the next app start. Restore rolls `__drizzle_migrations` back to the
+   Snapshot's state, so a still-present bad migration file **re-applies on the very next `openDb`** and
+   re-breaks the database. This step is mandatory, not optional (it is proven by a paired test).
+
+4. **Restore:**
+
+   ```sh
+   npm run db:restore -- --from backups/bryce-20260722T030000Z-000.db
+   ```
+
+   It validates the candidate (integrity check, foreign-key check, expected tables, migration
+   compatibility), writes a **safety Snapshot** of the current database, then atomically swaps the
+   validated file into place and clears stale WAL sidecars. On any validation failure it swaps
+   nothing and leaves the live database untouched.
+
+5. **Restart** the server and reload the launchd agents (and restart Litestream). The next `openDb`
+   applies any now-corrected pending migrations cleanly.
 
 ## Backup: Litestream to Cloudflare R2
 

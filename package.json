@@ -18,6 +18,10 @@
     "ncaa:probe": "tsx src/cli/ncaa-probe.ts",
     "connector:smoke": "tsx src/cli/connector-smoke.ts",
     "db:migrate": "tsx src/cli/migrate.ts",
+    "db:backup": "tsx src/cli/backup.ts",
+    "db:restore": "tsx src/cli/restore.ts",
+    "players:backup": "tsx src/cli/players-backup.ts",
+    "players:restore": "tsx src/cli/players-restore.ts",
     "server": "tsx src/server.ts"
   },
   "dependencies": {

@@ -20,7 +20,7 @@ const PAST_LEASE = "2026-07-19T07:11:00.000Z"; // +11 min
 
 const at = (iso: string) => new Date(iso);
 
-describe("claimRefreshRun / settleRefreshRun (ADR 0042)", () => {
+describe("claimRefreshRun / settleRefreshRun (ADR 0043)", () => {
   let opened: OpenedDb;
 
   beforeEach(() => {
@@ -213,7 +213,7 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0042)", () => {
   });
 });
 
-describe("digestFreshnessFor boundary (ADR 0042)", () => {
+describe("digestFreshnessFor boundary (ADR 0043)", () => {
   let opened: OpenedDb;
   const CONTENT_DATE = "2026-07-18"; // a 1d digest run on 07-19 covers 07-18
 
@@ -324,7 +324,7 @@ describe("digestFreshnessFor boundary (ADR 0042)", () => {
   });
 });
 
-describe("refreshHealth derivation (ADR 0042)", () => {
+describe("refreshHealth derivation (ADR 0043)", () => {
   let opened: OpenedDb;
 
   beforeEach(() => {
@@ -364,7 +364,7 @@ describe("refreshHealth derivation (ADR 0042)", () => {
   });
 });
 
-describe("refresh run claim across two file-db connections (ADR 0042)", () => {
+describe("refresh run claim across two file-db connections (ADR 0043)", () => {
   it("a second connection sees the durable running row and is refused", () => {
     const file = testFileDb();
     const second = openDb(file.path);

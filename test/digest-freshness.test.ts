@@ -20,7 +20,7 @@ import {
 } from "./factories.js";
 
 /**
- * The Refresh→Digest freshness contract (ADR 0042, issue #34 AC #2). The daily
+ * The Refresh→Digest freshness contract (ADR 0043, issue #34 AC #2). The daily
  * 1d digest reads the freshness watermark BEFORE assembly, anchored on the
  * content date (window.to = yesterday) and on each refresh run's START. A
  * stale/partial reading annotates the email — it NEVER suppresses it.
@@ -32,7 +32,7 @@ import {
 const STALE_BANNER = "No successful refresh has completed for";
 const PARTIAL_BANNER = "Last refresh was incomplete";
 
-describe("digest freshness gate (ADR 0042)", () => {
+describe("digest freshness gate (ADR 0043)", () => {
   let opened: OpenedDb;
   let mailer: CapturingMailer;
   let clock: ReturnType<typeof fakeClock>;

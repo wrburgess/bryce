@@ -1,7 +1,7 @@
 import { loadConfig } from "../config.js";
 import { loadDotEnv } from "../env.js";
 import type { Db } from "../db/client.js";
-import { openDb } from "../db/client.js";
+import { startupDb } from "../db/startup.js";
 import type { MlbClient } from "../mlb/client.js";
 import { MlbClient as MlbClientImpl } from "../mlb/client.js";
 import type { NcaaClient } from "../ncaa/client.js";
@@ -247,7 +247,10 @@ async function runList(deps: SeedDeps): Promise<number> {
 export async function main(): Promise<number> {
   loadDotEnv();
   const config = loadConfig();
-  const { db, close } = openDb(config.databasePath);
+  const { db, close } = await startupDb(config.databasePath, {
+    backupDir: config.backupDir,
+    keepLast: config.backupKeepLast,
+  });
   try {
     const client = new MlbClientImpl({ delayMs: config.mlbApiDelayMs });
     const ncaaClient = new NcaaClientImpl({ delayMs: config.ncaaScrapeDelayMs });

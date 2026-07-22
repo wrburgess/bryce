@@ -413,7 +413,7 @@ describe("digest_deliveries claim columns and lock behaviour (ADR 0034)", () => 
     }
   });
 
-  it("adds refresh_runs (ADR 0042) without disturbing existing data, and its CHECKs enforce", () => {
+  it("adds refresh_runs (ADR 0043) without disturbing existing data, and its CHECKs enforce", () => {
     // 0005 is one additive CREATE TABLE. The host self-heals its schema at
     // openDb with live data in it (ADR 0028), so a pre-existing delivery must
     // survive byte-for-byte, and the new table must be queryable with its

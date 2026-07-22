@@ -28,7 +28,7 @@ export interface HealthSnapshot {
     sentAt: string | null;
   } | null;
   /**
-   * Ingestion freshness (ADR 0042), or null when no refresh has ever run. Its
+   * Ingestion freshness (ADR 0043), or null when no refresh has ever run. Its
    * `state` is the DERIVED health vocabulary (fresh/stale/running/partial/
    * failed) — distinct from the stored RefreshRunStatus, because fresh/stale are
    * computed against `now`, which is why this snapshot now takes a clock. A

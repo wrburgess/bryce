@@ -93,6 +93,34 @@ single tabular result: a query (**Stat Lines**, ad-hoc SQL) or *one* of a **Dige
 (Batters or Pitchers, never both at once). Carries data, not formatting.
 _Avoid_: "download" (that is the delivery, not the artifact), "dump"
 
+**Backup**:
+An artifact captured for *recovery* — reconstructing lost or corrupted state — as opposed to an
+**Export** or **Presentation**, which render data for *consumption*. Takes two forms: a **Snapshot**
+and a **Player List Backup**.
+_Avoid_: "dump"; "export" for this sense (an **Export** is a spreadsheet artifact, never a restore point)
+
+**Snapshot**:
+A consistent, self-contained copy of the *entire database* at one instant, kept as a point-in-time
+rollback — above all, the known-good state to return to before a risky change such as a migration.
+_Avoid_: "dump"; "replica" (a **Replica** is continuous and off-box; a **Snapshot** is discrete and local)
+
+**Player List Backup**:
+A portable, versioned serialization of *every* **Player** row — active and inactive — for re-import
+onto a fresh install or after a bad edit; the recovery counterpart to the irreplaceable roster choices.
+_Avoid_: "roster file"; "player export" (an **Export** is for a spreadsheet, this is for restore)
+
+**Replica**:
+The *continuous*, off-box copy of the live database streamed to remote storage — the guard against
+hardware loss, complementary to a **Snapshot** and distinct from it.
+_Avoid_: "backup" (a **Replica** tracks the live file continuously, corruption included; a **Snapshot**
+is a chosen instant)
+
+**Restore**:
+Reconstructing database state by applying a **Backup** — swapping a **Snapshot** into place, or
+re-importing a **Player List Backup**.
+_Avoid_: overloading the delivery-ledger sense ("guarantee restored across the date boundary",
+[ADR 0034](../adr/0034-digest-delivery-claim-at-least-once.md)) or a **Replica**'s remote recovery
+
 ## Relationships
 
 - A **Player** has exactly one **Level** at a time; promotion or demotion *changes* his Level, it
@@ -120,6 +148,14 @@ _Avoid_: "download" (that is the delivery, not the artifact), "dump"
 - **Presentation = document, Export = table.** A **Presentation** renders a whole **Digest** (both
   tables) as one human-readable artifact; an **Export** carries exactly one table — a query result,
   or one of the Digest's two tables — for a spreadsheet.
+- A **Snapshot** captures the whole database — every **Player**, **Stat Line**, and delivery record —
+  at one instant; a **Player List Backup** captures only the **Player** rows.
+- A **Player List Backup** protects the one thing no **Refresh** can rebuild — the human's **Player**
+  choices (who is watched, notes, active state). **Stat Line** history is costly to re-pull (source
+  rate limits; NCAA seasons may be unavailable to re-scrape) but is in principle re-derivable; the
+  choices are not.
+- A **Snapshot** is the local rollback point before a risky change; a **Replica** is the continuous
+  off-box copy guarding against hardware loss — complementary, not substitutes.
 
 ## Example dialogue
 
@@ -150,3 +186,9 @@ _Avoid_: "download" (that is the delivery, not the artifact), "dump"
   "presentation and export" set — resolved: a **Presentation** is a human-readable rendering of a
   **Digest** (HTML/PDF/Markdown); an **Export** is raw rows for a spreadsheet (CSV/Excel) over any
   tabular result. Two concepts, not five loose formats.
+- **"backup" vs "export"** (issue #67) — a **Backup** exists for *recovery* (a **Snapshot** or a
+  **Player List Backup**, re-importable), while an **Export** exists for *consumption* (raw rows for a
+  spreadsheet). Resolved: different purposes, different artifacts — never conflate them.
+- **"player list"** (issue #67's phrasing) — resolved: a **Player List Backup** captures *every*
+  **Player** row, active and inactive, which is broader than the **Watch List** (the active subset
+  only); inactive Players carry history and past choices worth restoring.

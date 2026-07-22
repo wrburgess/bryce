@@ -4,7 +4,7 @@ import { Hono } from "hono";
 import { createApiRoutes } from "./api/routes.js";
 import { loadConfig } from "./config.js";
 import { loadDotEnv } from "./env.js";
-import { openDb } from "./db/client.js";
+import { startupDb } from "./db/startup.js";
 import { openReadonlyDb } from "./db/readonly.js";
 import { createMailer } from "./mailer/index.js";
 import { buildMcpServer } from "./mcp/server.js";
@@ -61,8 +61,26 @@ export function createApp(deps: AppDeps): Hono {
 if (isMain(import.meta.url)) {
   loadDotEnv();
   const config = loadConfig();
-  const { db } = openDb(config.databasePath);
-  // openDb has just created/migrated the file, so fileMustExist is satisfied.
+  // startupDb registers this process in the interlock registry, self-heals the
+  // schema, and takes a pre-migration Snapshot when one is pending (ADR 0042).
+  const started = await startupDb(config.databasePath, {
+    backupDir: config.backupDir,
+    keepLast: config.backupKeepLast,
+  });
+  const db = started.db;
+  // Release the interlock registration on shutdown (best-effort; a crash's stale
+  // entry self-heals via pid-liveness on the next startup/restore). The signal
+  // handlers must ALSO exit: registering a SIGINT/SIGTERM listener overrides
+  // Node's default terminate-on-signal, so without the explicit exit the server
+  // would become un-killable.
+  process.once("exit", () => started.lock?.release());
+  const shutdown = (): void => {
+    started.lock?.release();
+    process.exit(0);
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+  // startupDb has just created/migrated the file, so fileMustExist is satisfied.
   const { sqlite: readonlySqlite } = openReadonlyDb(config.databasePath);
   const app = createApp({
     db,

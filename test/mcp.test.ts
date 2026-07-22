@@ -728,7 +728,7 @@ describe("MCP server over Streamable HTTP", () => {
     expect(result.structuredContent?.refresh).toBeNull();
   });
 
-  it("status surfaces each refresh freshness state through the MCP tool (ADR 0042)", async () => {
+  it("status surfaces each refresh freshness state through the MCP tool (ADR 0043)", async () => {
     // The app clock is MID_SEASON (2026-07-19 Chicago), so "today" is 07-19.
     const cases: Array<{
       row: Parameters<typeof insertRefreshRun>[1];

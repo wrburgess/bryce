@@ -61,7 +61,7 @@ export interface DigestResult {
    */
   window: string | null;
   /**
-   * The freshness verdict the daily digest gated on (ADR 0042), or null. Only
+   * The freshness verdict the daily digest gated on (ADR 0043), or null. Only
    * the scheduled 1d path (today's run and orphan recovery) reads it; an
    * on-demand report never annotates, and neither a claim-refusal, a reconciled
    * recovery, nor a heartbeat composes a dated digest to judge. It is the STATE,
@@ -226,14 +226,14 @@ async function deliverDailyDigest(
     };
   }
 
-  // Read the freshness watermark BEFORE assembly (ADR 0042, fixing the TOCTOU):
+  // Read the freshness watermark BEFORE assembly (ADR 0043, fixing the TOCTOU):
   // resolve the same 1d window purely to get the CONTENT date (window.to =
   // yesterday), judge freshness against it, THEN assemble. A refresh that lands
   // between this read and the send can only make the reading conservatively
   // MORE stale than reality — an annotated email, never a suppressed one — which
   // is the hybrid-degrade contract. Anchoring on the content date (not the
   // delivery slot) and on the run's START (not its finish) are the two
-  // correctness fixes ADR 0042 turns on.
+  // correctness fixes ADR 0043 turns on.
   const contentDate = resolveWindow("1d", now(), tz, null, asOf).to;
   const freshness = digestFreshnessFor(db, contentDate, tz);
 
@@ -356,7 +356,7 @@ async function runOnDemandReport(
       statLineCount,
       playerCount,
       window,
-      // An on-demand report NEVER annotates freshness (ADR 0042): a human asked
+      // An on-demand report NEVER annotates freshness (ADR 0043): a human asked
       // for a specific window and is watching — the daily proof-of-life gate is
       // not his concern.
       freshness: null,
@@ -451,7 +451,7 @@ async function runHeartbeat(
       playerCount: watchedCount,
       window: null,
       // The offseason heartbeat is the liveness signal, untouched by the
-      // freshness gate (ADR 0042): it composes no dated digest to judge.
+      // freshness gate (ADR 0043): it composes no dated digest to judge.
       freshness: null,
     };
   }

@@ -109,7 +109,7 @@ export const refreshRuns = sqliteTable(
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     /**
-     * When the sweep CLAIMED its run — the freshness anchor (ADR 0042). Freshness
+     * When the sweep CLAIMED its run — the freshness anchor (ADR 0043). Freshness
      * is judged on the START, never the finish: a run that started after the
      * content day ended captured every player under ADR 0040's forward-clock
      * finality gate, whereas a midnight-straddling run started before is
@@ -119,7 +119,7 @@ export const refreshRuns = sqliteTable(
     /** Null WHILE running; stamped when the run settles (CHECK below enforces the iff). */
     finishedAt: text("finished_at"),
     /**
-     * The run state machine (ADR 0042). Each run owns its OWN row — a stream, not
+     * The run state machine (ADR 0043). Each run owns its OWN row — a stream, not
      * a shared slot — so a late-settling superseded run only writes its older row,
      * and the freshness watermark is the latest by (started_at, id). Every member
      * has a writing path (claim → running; settle → ok/partial/failed); no
@@ -194,7 +194,7 @@ export type DeliveryStatus = DigestDeliveryRow["status"];
 export type DeliveryKind = DigestDeliveryRow["kind"];
 export type RefreshRunRow = typeof refreshRuns.$inferSelect;
 /**
- * The refresh-run state machine's alphabet (ADR 0042). The DERIVED health
+ * The refresh-run state machine's alphabet (ADR 0043). The DERIVED health
  * vocabulary (fresh/stale/running/partial/failed) is a SEPARATE type in
  * src/server/health.ts — never this one — because "fresh"/"stale" are computed
  * against a clock, not stored.

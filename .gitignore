@@ -11,5 +11,8 @@ dist/
 *.db-wal
 *.db-shm
 
+# Local Snapshots + Player List Backups (recovery artifacts, never committed)
+backups/
+
 # Misc
 *.log

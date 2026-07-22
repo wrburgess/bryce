@@ -200,7 +200,7 @@ export async function insertDelivery(
 }
 
 /**
- * A refresh_runs row (ADR 0042). Defaults describe a completed `ok` run; a
+ * A refresh_runs row (ADR 0043). Defaults describe a completed `ok` run; a
  * `running` status drops the default finishedAt to null so the row never
  * violates the finished-iff-terminal CHECK, and `claimedAt` defaults to
  * `startedAt` (a fresh claim's lease). Pass a stale `claimedAt` to model a

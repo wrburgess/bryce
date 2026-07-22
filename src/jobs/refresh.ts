@@ -30,9 +30,9 @@ export interface RefreshSummary {
   /**
    * Why the sweep did not run normally, or null when it did. `offseason-sleep`
    * is the pure no-op (ADR 0031); `already-running` is a concurrent sweep
-   * holding a live lease (ADR 0042) — neither records a run. `superseded` is a
+   * holding a live lease (ADR 0043) — neither records a run. `superseded` is a
    * run whose lease expired mid-sweep: a successor reaped its row and took over,
-   * so it aborts WITHOUT settling (ADR 0042 fencing) rather than clobber the
+   * so it aborts WITHOUT settling (ADR 0043 fencing) rather than clobber the
    * successor's newer data.
    */
   reason: "offseason-sleep" | "already-running" | "superseded" | null;
@@ -89,7 +89,7 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
     };
   }
 
-  // Claim a run AFTER the sleep check (ADR 0042). A refusal means another sweep
+  // Claim a run AFTER the sleep check (ADR 0043). A refusal means another sweep
   // holds a live lease — the wake-time overlap of the launchd job and a manual
   // run — so this one no-ops rather than double-sweeping.
   const claim = claimRefreshRun(db, { now: now(), playersTotal: activePlayers.length });
@@ -114,7 +114,7 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
     await refreshNcaaCalendar(deps, season, activePlayers);
 
     for (const player of activePlayers) {
-      // Renew + ownership check BEFORE this player's fetch/write (ADR 0042
+      // Renew + ownership check BEFORE this player's fetch/write (ADR 0043
       // fencing). A healthy long sweep keeps its lease live here; a run whose
       // lease expired was reaped `failed` by the successor that took over, so
       // renew returns false and we ABORT the sweep immediately — never settling
@@ -157,7 +157,7 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
 
   // `ok` only when every watched player was refreshed; a single skipped player
   // (an out-of-season NCAA row, say) settles `partial` — freshness "≥1 watched
-  // player not refreshed" (ADR 0042; #23 owns the per-player WHY).
+  // player not refreshed" (ADR 0043; #23 owns the per-player WHY).
   const status = playersRefreshed === activePlayers.length ? "ok" : "partial";
   const settled = settleRefreshRun(db, {
     runId,
@@ -542,7 +542,7 @@ export async function upsertStatLines(db: Db, rows: NewStatLineRow[]): Promise<v
  * A Player's first Refresh, run at seed time (adding a Player IS his first
  * Refresh) — skipped during Offseason Sleep, exactly like the nightly job.
  *
- * It records NO freshness run (ADR 0042). A freshness run is a claim over the
+ * It records NO freshness run (ADR 0043). A freshness run is a claim over the
  * WHOLE watch list — the guarantee the daily Digest gates on; a single-player
  * backfill sweeps one player and would settle a misleading `partial` (one of N
  * refreshed) that has nothing to do with the pipeline's freshness.

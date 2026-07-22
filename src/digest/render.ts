@@ -283,7 +283,7 @@ interface Table {
 }
 
 /**
- * The hybrid-degrade banner (ADR 0042): a one-line staleness/incompleteness
+ * The hybrid-degrade banner (ADR 0043): a one-line staleness/incompleteness
  * warning prepended to a digest whose data a recent refresh could not vouch for.
  * A `fresh` reading (or no reading passed at all — a preview, an on-demand
  * report) yields null: no banner. The digest is NEVER suppressed; the warning

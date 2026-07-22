@@ -5,7 +5,7 @@ import { refreshRuns } from "../db/schema.js";
 import { hostDate } from "../domain/season.js";
 
 /**
- * The durable refresh run (ADR 0042), mirroring the delivery claim of ADR 0034.
+ * The durable refresh run (ADR 0043), mirroring the delivery claim of ADR 0034.
  *
  * A Refresh is claim -> sweep -> settle. The claim is a `running` row in
  * `refresh_runs`, taken inside a single `BEGIN IMMEDIATE` transaction so the
@@ -209,7 +209,7 @@ export interface DigestFreshness {
 }
 
 /**
- * The freshness of the data a digest for `contentDate` would carry (ADR 0042).
+ * The freshness of the data a digest for `contentDate` would carry (ADR 0043).
  *
  * `contentDate` is the digest's content day — `assembly.window.to`, yesterday.
  * The QUALIFYING run is the latest TERMINAL run whose `started_at` host-date is
@@ -247,7 +247,7 @@ export function digestFreshnessFor(db: Db, contentDate: string, tz: string): Dig
 }
 
 /**
- * The DERIVED health vocabulary (ADR 0042) — distinct from the stored
+ * The DERIVED health vocabulary (ADR 0043) — distinct from the stored
  * RefreshRunStatus because `fresh`/`stale` are computed against `now`, not
  * written. Kept here beside the query that produces it so the two never drift.
  */
@@ -264,7 +264,7 @@ export interface RefreshHealth {
 }
 
 /**
- * The refresh block of the health snapshot (ADR 0042), or null when no run has
+ * The refresh block of the health snapshot (ADR 0043), or null when no run has
  * ever been recorded. Ordering is (started_at desc, id desc):
  *   - a LIVE `running` lease ⇒ `running`;
  *   - otherwise the latest TERMINAL run decides — `failed`→`failed`,

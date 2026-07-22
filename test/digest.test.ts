@@ -127,7 +127,7 @@ describe("runDigest", () => {
     });
   });
 
-  it("the daily 1d digest carries a freshness verdict; an on-demand window carries none (ADR 0042)", async () => {
+  it("the daily 1d digest carries a freshness verdict; an on-demand window carries none (ADR 0043)", async () => {
     // The full freshness matrix lives in test/digest-freshness.test.ts; this
     // pins the DigestResult shape change on the core paths. With no refresh run
     // recorded, the daily digest reads stale (and still sends, annotated).

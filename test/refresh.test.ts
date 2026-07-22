@@ -393,10 +393,10 @@ describe("runRefresh", () => {
 });
 
 /**
- * The persisted freshness run (ADR 0042, issue #34 AC #1). Every whole-watch-list
+ * The persisted freshness run (ADR 0043, issue #34 AC #1). Every whole-watch-list
  * Refresh records its start, completion, outcome and error state on its own row.
  */
-describe("runRefresh records a freshness run (ADR 0042)", () => {
+describe("runRefresh records a freshness run (ADR 0043)", () => {
   let opened: OpenedDb;
   let api: FakeStatsApi;
   let ncaaApi: FakeNcaaApi;
@@ -488,7 +488,7 @@ describe("runRefresh records a freshness run (ADR 0042)", () => {
     expect(await opened.db.select().from(refreshRuns)).toHaveLength(0);
   });
 
-  it("aborts WITHOUT settling when its lease is superseded mid-sweep (ADR 0042 fencing)", async () => {
+  it("aborts WITHOUT settling when its lease is superseded mid-sweep (ADR 0043 fencing)", async () => {
     // Two watched players, so the sweep has two loop iterations. Player 0 is
     // fetched; DURING that fetch a successor run B claims — reaping run A's row
     // `failed` because A's lease has expired. At player 1's top-of-loop renew, A

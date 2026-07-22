@@ -20,6 +20,15 @@ const EnvSchema = z
      * fix; the "real env wins" rule is correct and unchanged.
      */
     BRYCE_TZ: z.string().trim().min(1).default("America/Chicago"),
+    /** Directory holding local Snapshots (whole-DB point-in-time copies). */
+    BACKUP_DIR: z.string().trim().min(1).default("backups"),
+    /**
+     * How many newest Snapshots retention keeps. A positive integer: <1, a
+     * fraction, or a non-number is a config error (fail closed, never silently
+     * default), so a mis-set value can never widen retention to "keep zero" and
+     * delete every Snapshot.
+     */
+    BACKUP_KEEP_LAST: z.coerce.number().int().positive().default(10),
     MAILER_PROVIDER: z.enum(["postmark", "smtp", "console"]).default("postmark"),
     POSTMARK_SERVER_TOKEN: z.string().optional(),
     SMTP_HOST: z.string().optional(),
@@ -72,6 +81,8 @@ const EnvSchema = z
 export interface Config {
   databasePath: string;
   tz: string;
+  backupDir: string;
+  backupKeepLast: number;
   mailerProvider: "postmark" | "smtp" | "console";
   postmarkServerToken: string | null;
   smtpHost: string | null;
@@ -110,6 +121,8 @@ export function loadConfig(
   return {
     databasePath: parsed.DATABASE_PATH,
     tz: parsed.BRYCE_TZ,
+    backupDir: parsed.BACKUP_DIR,
+    backupKeepLast: parsed.BACKUP_KEEP_LAST,
     mailerProvider: parsed.MAILER_PROVIDER,
     postmarkServerToken: clean(parsed.POSTMARK_SERVER_TOKEN),
     smtpHost: clean(parsed.SMTP_HOST),
