@@ -581,6 +581,9 @@ describe("MCP server over Streamable HTTP", () => {
     expect(csv.structuredContent).toBeUndefined();
     expect(csv.content[0]?.text.startsWith("id,playerId,playerName,")).toBe(true);
     expect(csv.content[0]?.text).toContain("Maximo Acosta");
+    // The JSON `stats` blob (commas + quotes) stays RFC-4180-quoted end-to-end:
+    // JSON.stringify's `{"…":…}` is wrapped and its inner quotes doubled.
+    expect(csv.content[0]?.text).toContain('"{""');
 
     expect((await call("stat_lines", { format: "xml" })).isError).toBe(true);
     const badRange = await call("stat_lines", { format: "csv", from: "2026-07-20", to: "2026-07-01" });

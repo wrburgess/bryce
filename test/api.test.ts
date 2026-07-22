@@ -593,7 +593,18 @@ describe("REST API", () => {
 
       const omitted = await app().request("/api/stat-lines", { headers: AUTH });
       const explicit = await app().request("/api/stat-lines?format=json", { headers: AUTH });
-      expect(await omitted.text()).toBe(await explicit.text());
+      const omittedText = await omitted.text();
+      expect(omittedText).toBe(await explicit.text());
+      // Anchor the wrapper + row shape to today's contract, so a REST-wrapper-only
+      // added field (e.g. { statLines, extra }) can't false-green past the matchObject
+      // test above or the omitted==explicit check.
+      const parsed = JSON.parse(omittedText) as { statLines: Array<Record<string, unknown>> };
+      expect(Object.keys(parsed)).toEqual(["statLines"]);
+      expect(Object.keys(parsed.statLines[0]!).sort()).toEqual([
+        "gameDate", "gameId", "gameNumber", "gameType", "id", "isHome", "leagueName",
+        "level", "milbLevel", "opponentName", "playerId", "playerName", "sportId",
+        "statType", "stats", "teamName",
+      ]);
     });
 
     it("guards a dangerous player name end-to-end in digest and stat-lines CSV", async () => {
