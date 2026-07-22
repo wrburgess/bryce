@@ -1,9 +1,17 @@
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { ZodError } from "zod";
 import { players } from "../db/schema.js";
 import { assembleDigest } from "../digest/assemble.js";
-import { renderDigest } from "../digest/render.js";
+import {
+  digestTableRows,
+  renderDigest,
+  renderDigestHtmlDocument,
+  renderDigestMarkdown,
+} from "../digest/render.js";
+import { toCsv } from "../export/csv.js";
+import { statLinesToCsv } from "../export/tabular.js";
 import { runDigest } from "../jobs/digest.js";
 import { runRefresh, runRefreshForPlayer } from "../jobs/refresh.js";
 import { MlbApiError } from "../mlb/client.js";
@@ -24,12 +32,13 @@ import {
   AddNcaaPlayerInputSchema,
   AddPlayerInputSchema,
   DigestInputSchema,
-  DigestQueryInputSchema,
+  DigestPreviewQueryInputSchema,
   NcaaPlayerSeqSchema,
   PersonIdSchema,
   PlayerSearchInputSchema,
   PlayersListInputSchema,
   RefreshInputSchema,
+  StatLinesFormatSchema,
 } from "./schemas.js";
 
 /**
@@ -37,6 +46,18 @@ import {
  * every behavior lives in the shared service layer the MCP tools also use.
  * Mounted under /api behind the bearer middleware (src/server/auth.ts).
  */
+
+/**
+ * A non-JSON Presentation/Export body as a downloadable file (ADR 0037): set a
+ * charset-tagged Content-Type and an `attachment` disposition with a
+ * deterministic filename, then return the rendered string. Stays under `/api`,
+ * so it inherits the same bearer auth as every other route.
+ */
+function fileResponse(c: Context, body: string, contentType: string, filename: string): Response {
+  c.header("Content-Type", `${contentType}; charset=utf-8`);
+  c.header("Content-Disposition", `attachment; filename="${filename}"`);
+  return c.body(body);
+}
 
 export function createApiRoutes(deps: ServiceDeps): Hono {
   const api = new Hono();
@@ -104,15 +125,50 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
   });
 
   api.get("/stat-lines", async (c) => {
-    return c.json({ statLines: await queryStatLines(deps.db, c.req.query()) });
+    // `format` (json|csv) is validated here; queryStatLines re-parses the raw
+    // query (stripping `format`) and re-checks from<=to as defense in depth.
+    const query = StatLinesFormatSchema.parse(c.req.query());
+    const views = await queryStatLines(deps.db, c.req.query());
+    if (query.format === "csv") {
+      return fileResponse(c, statLinesToCsv(views), "text/csv", "bryce-stat-lines.csv");
+    }
+    return c.json({ statLines: views });
   });
 
   api.get("/digest/preview", async (c) => {
-    // An unsupported `window` is a ZodError -> 400 via onError. `force` is
-    // still accepted and still means nothing here: a preview neither claims nor
-    // sends, and window selection makes its CONTENT identical either way.
-    const query = DigestQueryInputSchema.parse(c.req.query());
+    // An unsupported `window` or `format` is a ZodError -> 400 via onError.
+    // `force` is still accepted and still means nothing here: a preview neither
+    // claims nor sends, and window selection makes its CONTENT identical either
+    // way. `table` is accepted for every format but used only by csv — a
+    // Presentation (html/md) always renders both tables.
+    const query = DigestPreviewQueryInputSchema.parse(c.req.query());
     const assembly = await assembleDigest(deps.db, { ...deps, spec: query.window });
+    const spec = assembly.window.spec;
+    if (query.format === "html") {
+      return fileResponse(
+        c,
+        renderDigestHtmlDocument(assembly),
+        "text/html",
+        `bryce-digest-${spec}.html`,
+      );
+    }
+    if (query.format === "md") {
+      return fileResponse(
+        c,
+        renderDigestMarkdown(assembly),
+        "text/markdown",
+        `bryce-digest-${spec}.md`,
+      );
+    }
+    if (query.format === "csv") {
+      const dt = digestTableRows(assembly, query.table);
+      return fileResponse(
+        c,
+        toCsv(dt.headers, dt.rows),
+        "text/csv",
+        `bryce-${query.table}-${spec}.csv`,
+      );
+    }
     return c.json({
       window: assembly.window,
       statLineCount: assembly.statLineCount,

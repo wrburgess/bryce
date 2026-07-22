@@ -508,6 +508,189 @@ describe("MCP server over Streamable HTTP", () => {
     expect(await opened.db.select().from(players)).toHaveLength(1);
   });
 
+  // --- Presentation/Export formats (ADR 0037, issue #55) -------------------
+
+  it("advertises format/table on digest_preview ONLY, and format on the tabular tools", async () => {
+    const { tools } = await client.listTools();
+    const props = (name: string): string[] => {
+      const tool = tools.find((t) => t.name === name);
+      const schema = tool?.inputSchema as { properties?: Record<string, unknown> } | undefined;
+      return Object.keys(schema?.properties ?? {});
+    };
+    expect(props("digest_preview")).toEqual(expect.arrayContaining(["format", "table"]));
+    expect(props("stat_lines")).toContain("format");
+    expect(props("sql_query")).toContain("format");
+    // send_digest keeps the bare digest shape — it must not gain format/table.
+    expect(props("send_digest")).not.toContain("format");
+    expect(props("send_digest")).not.toContain("table");
+    // Only digest carries a table; the tabular tools do not.
+    expect(props("stat_lines")).not.toContain("table");
+  });
+
+  it("digest_preview json is byte-identical with format omitted or format=json", async () => {
+    const expected = {
+      window: { spec: "1d", from: "2026-07-18", to: "2026-07-18", label: "Jul 18", groupBy: "game" },
+      statLineCount: 0,
+      playerCount: 0,
+      batters: [],
+      pitchers: [],
+      unknownFields: [],
+      mail: {
+        subject: "MLB Daily Tracker - Sat, July 18, 2026",
+        html: "<h1>Sat, July 18, 2026</h1>\n<p>No games in this window.</p>",
+        text: "Sat, July 18, 2026\n\nNo games in this window.\n",
+      },
+    };
+    const omitted = await call("digest_preview");
+    const explicit = await call("digest_preview", { format: "json" });
+    expect(omitted.structuredContent).toEqual(expected);
+    expect(explicit.structuredContent).toEqual(expected);
+    // The serialized text part is identical too — adding format=json changed nothing.
+    expect(omitted.content[0]?.text).toBe(explicit.content[0]?.text);
+  });
+
+  it("digest_preview html/md return the rendered document as text, no structuredContent", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+
+    const html = await call("digest_preview", { format: "html" });
+    expect(html.structuredContent).toBeUndefined();
+    expect(html.content[0]?.text.startsWith("<!doctype html>")).toBe(true);
+    expect(html.content[0]?.text).toContain("<h2>Batters</h2>");
+
+    const md = await call("digest_preview", { format: "md" });
+    expect(md.structuredContent).toBeUndefined();
+    expect(md.content[0]?.text.startsWith("# ")).toBe(true);
+    expect(md.content[0]?.text).not.toContain("Bryce - ");
+    expect(md.content[0]?.text).toContain("## Batters");
+  });
+
+  it("digest_preview csv exports one table, chosen by table (default batters)", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+
+    const batters = await call("digest_preview", { format: "csv" });
+    expect(batters.structuredContent).toBeUndefined();
+    expect(batters.content[0]?.text.startsWith("Player,Lvl,")).toBe(true);
+    expect(batters.content[0]?.text).toContain("PA,H,BB,K"); // batting columns
+    expect(batters.content[0]?.text).toContain("M Acosta");
+
+    const pitchers = await call("digest_preview", { format: "csv", table: "pitchers" });
+    expect(pitchers.content[0]?.text).toContain("IP,ER,K,K/9"); // pitching columns
+    expect(pitchers.content[0]?.text).not.toContain("Batting");
+  });
+
+  it("digest_preview rejects an invalid format or table", async () => {
+    expect((await call("digest_preview", { format: "xml" })).isError).toBe(true);
+    expect((await call("digest_preview", { format: "csv", table: "fielders" })).isError).toBe(true);
+  });
+
+  it("stat_lines json is byte-identical with format omitted or format=json", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const line = await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 900500,
+      gameDate: "2026-07-18",
+    });
+    const expected = {
+      statLines: [
+        {
+          id: line.id,
+          playerId: player.id,
+          playerName: "Maximo Acosta",
+          level: "milb",
+          milbLevel: "Triple-A",
+          gameId: 900500,
+          statType: "batting",
+          gameDate: "2026-07-18",
+          gameNumber: 1,
+          gameType: "R",
+          isHome: true,
+          opponentName: "Charlotte Knights",
+          teamName: "Jacksonville Jumbo Shrimp",
+          sportId: 11,
+          leagueName: "International League",
+          stats: {
+            hits: 2,
+            atBats: 4,
+            homeRuns: 1,
+            doubles: 0,
+            triples: 0,
+            runs: 1,
+            rbi: 3,
+            stolenBases: 0,
+            baseOnBalls: 0,
+            strikeOuts: 1,
+          },
+        },
+      ],
+    };
+    const omitted = await call("stat_lines");
+    const explicit = await call("stat_lines", { format: "json" });
+    expect(omitted.structuredContent).toEqual(expected);
+    expect(explicit.structuredContent).toEqual(expected);
+    expect(omitted.content[0]?.text).toBe(explicit.content[0]?.text);
+  });
+
+  it("stat_lines csv returns the fixed-header CSV; rejects invalid format and from>to", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameId: 900500, gameDate: "2026-07-18" });
+
+    const csv = await call("stat_lines", { format: "csv" });
+    expect(csv.structuredContent).toBeUndefined();
+    expect(csv.content[0]?.text.startsWith("id,playerId,playerName,")).toBe(true);
+    expect(csv.content[0]?.text).toContain("Maximo Acosta");
+    // The JSON `stats` blob (commas + quotes) stays RFC-4180-quoted end-to-end:
+    // JSON.stringify's `{"…":…}` is wrapped and its inner quotes doubled.
+    expect(csv.content[0]?.text).toContain('"{""');
+
+    expect((await call("stat_lines", { format: "xml" })).isError).toBe(true);
+    const badRange = await call("stat_lines", { format: "csv", from: "2026-07-20", to: "2026-07-01" });
+    expect(badRange.isError).toBe(true);
+    expect(badRange.content[0]?.text).toContain("from must be <= to");
+  });
+
+  it("sql_query json is byte-identical with format omitted or format=json", async () => {
+    await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const expected = {
+      columns: ["full_name"],
+      rows: [["Maximo Acosta"]],
+      rowCount: 1,
+      truncated: false,
+    };
+    const args = { sql: "SELECT full_name FROM players WHERE full_name = ?", params: ["Maximo Acosta"] };
+    const omitted = await call("sql_query", args);
+    const explicit = await call("sql_query", { ...args, format: "json" });
+    expect(omitted.structuredContent).toEqual(expected);
+    expect(explicit.structuredContent).toEqual(expected);
+    expect(omitted.content[0]?.text).toBe(explicit.content[0]?.text);
+  });
+
+  it("sql_query csv guards a dangerous cell value and a dangerous column alias", async () => {
+    const result = await call("sql_query", {
+      sql: `SELECT '=danger' AS "=evil", '@bad' AS plain`,
+      format: "csv",
+    });
+    expect(result.structuredContent).toBeUndefined();
+    expect(result.content).toHaveLength(1);
+    expect(result.content[0]?.text).toBe("'=evil,plain\r\n'=danger,'@bad\r\n");
+  });
+
+  it("sql_query csv adds a truncation warning part only when the row cap is hit", async () => {
+    const over = await call("sql_query", {
+      sql: "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < 201) SELECT n FROM c",
+      format: "csv",
+    });
+    expect(over.content).toHaveLength(2);
+    expect(over.content[1]?.text).toBe("warning: result truncated at 200 rows; narrow the query");
+
+    const atCap = await call("sql_query", {
+      sql: "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < 200) SELECT n FROM c",
+      format: "csv",
+    });
+    expect(atCap.content).toHaveLength(1);
+  });
+
   it("status matches the /health shape", async () => {
     await insertPlayer(opened.db);
     const result = await call("status");

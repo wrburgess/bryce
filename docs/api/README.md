@@ -76,16 +76,24 @@ Query stored per-game Stat Lines, newest first. Query params (all optional excep
 | `level` | `mlb`, `milb`, or `ncaa`. |
 | `from` / `to` | Inclusive `YYYY-MM-DD` bounds; `from > to` is rejected. |
 | `limit` | Max rows, `1`–`200`, default `50`. |
+| `format` | `json` (default) or `csv`. `csv` downloads the rows as a CSV **Export** ([ADR 0037](../adr/0037-presentation-export-formats-digest-and-tabular.md)) — `Content-Type: text/csv`, `Content-Disposition: attachment; filename="bryce-stat-lines.csv"`, one column per field with `stats` as a JSON column. |
 
-Returns `{ "statLines": [...] }`.
+Returns `{ "statLines": [...] }` for `json`; a CSV file body for `csv`.
 
 ### `GET /api/digest/preview`
 
 Preview what a Digest would report for a Window, without sending or claiming anything (read-only).
 Query: `window=` (one of `1d`/`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`, default `1d`) and `force=true|false` (default
 `false`). **`force` is accepted but a no-op here** — a preview never claims or sends, and window
-selection makes its content identical either way. Returns
+selection makes its content identical either way. For `format=json` (the default) returns
 `{ window, statLineCount, playerCount, batters, pitchers, unknownFields, mail }`.
+
+`format` ([ADR 0037](../adr/0037-presentation-export-formats-digest-and-tabular.md)) is one of
+`json`/`html`/`md`/`csv`. `html` and `md` render the **whole** Digest (both tables) as a downloadable
+**Presentation** document; `csv` exports **one** table as an **Export**, chosen by
+`table=batters|pitchers` (default `batters`, ignored for `html`/`md`). A non-`json` response is a file
+download — `Content-Type: text/html|text/markdown|text/csv` with `Content-Disposition: attachment`
+(filenames `bryce-digest-<window>.html|.md`, `bryce-<table>-<window>.csv`).
 
 ### `POST /api/digest/send`
 

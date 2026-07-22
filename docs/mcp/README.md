@@ -84,18 +84,25 @@ Search MLB/MiLB players by name, each hit resolved to a current team and level.
 Query stored per-game Stat Lines, newest first.
 
 - **Inputs:** `playerId` (internal Bryce `players.id`, not the personId), `level` (`mlb`/`milb`/`ncaa`),
-  `from`/`to` (inclusive `YYYY-MM-DD`; `from > to` is rejected), `limit` (`1`–`200`, default `50`) —
-  all optional.
-- **Success:** `{ "statLines": [...] }`.
+  `from`/`to` (inclusive `YYYY-MM-DD`; `from > to` is rejected), `limit` (`1`–`200`, default `50`),
+  `format` (`json` default, or `csv`) — all optional.
+- **Success:** `{ "statLines": [...] }` for `json`; for `csv`, a CSV **Export** returned inline as a
+  text part (no `structuredContent`) — one column per field, `stats` as a JSON column
+  ([ADR 0037](../adr/0037-presentation-export-formats-digest-and-tabular.md)).
 - **Side effects:** none.
 
 ### `digest_preview`
 
 Preview the Digest for a Window as the Batters and Pitchers tables the email would carry.
 
-- **Inputs:** `window` (`1d`/`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`, default `1d`; an unsupported value is rejected)
-  and `force` — **accepted but ignored here**, because a preview never claims or sends.
-- **Success:** `{ window, statLineCount, playerCount, batters, pitchers, unknownFields, mail }`.
+- **Inputs:** `window` (`1d`/`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`, default `1d`; an unsupported value is rejected),
+  `force` — **accepted but ignored here**, because a preview never claims or sends — and `format`
+  (`json` default, or `html`/`md`/`csv`) with `table` (`batters` default, or `pitchers`; used only by
+  `csv`).
+- **Success:** for `json`, `{ window, statLineCount, playerCount, batters, pitchers, unknownFields, mail }`.
+  For `html`/`md` a whole-Digest **Presentation** (both tables) and for `csv` a one-table **Export**
+  (`table` selects it), each returned inline as a text part with no `structuredContent`
+  ([ADR 0037](../adr/0037-presentation-export-formats-digest-and-tabular.md)).
 - **Side effects:** none — sends nothing, claims nothing, writes nothing; re-running a Window returns
   the same content.
 
@@ -131,9 +138,13 @@ Run a single read-only SQL query for ad-hoc analysis.
 
 - **Inputs:** `sql` — one `SELECT`/`WITH`/`EXPLAIN` statement (writes are rejected and the connection
   itself is read-only); `params` — positional bind values for `?` placeholders (up to 50 strings,
-  numbers, or nulls). Tables: `players`, `stat_lines`, `digest_deliveries`, `season_calendar`.
-- **Success:** `{ columns, rows, rowCount, truncated }`; rows are capped at 200 (`truncated: true`
-  when the cap is hit).
+  numbers, or nulls); `format` (`json` default, or `csv`). Tables: `players`, `stat_lines`,
+  `digest_deliveries`, `season_calendar`.
+- **Success:** for `json`, `{ columns, rows, rowCount, truncated }`. For `csv`, the result rows as a
+  CSV **Export** returned inline as a text part (no `structuredContent`); when the 200-row cap is hit,
+  a **second text part** carries a truncation warning so the CSV table itself stays uncorrupted
+  ([ADR 0037](../adr/0037-presentation-export-formats-digest-and-tabular.md)). `csv` is **MCP-only** —
+  there is no REST download for `sql_query` (a GET carrying SQL/params in the URL would leak them).
 - **Side effects:** none — the connection cannot write.
 
 ### `status`

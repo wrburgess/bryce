@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { WINDOW_SPECS } from "../domain/window.js";
-import { StatLineQuerySchema } from "../queries/statLines.js";
+import { StatLineFilterShape, StatLineQuerySchema, refineFromTo } from "../queries/statLines.js";
 
 /**
  * Shared Zod input schemas for the REST routes and the MCP tools — one
@@ -142,5 +142,65 @@ export const SqlQueryInputSchema = z.object({
       "Positional bind parameters for the '?' placeholders in sql, in order; up to 50 strings, numbers, or nulls.",
     ),
 });
+
+/**
+ * Presentation/Export `format` (ADR 0037). A per-surface STRING enum defaulting
+ * to `json`, so every existing caller is byte-identical — a non-`json` value
+ * only ADDS an alternative body. A string (never `z.coerce.boolean`) so there is
+ * no truthiness trap. `send_digest` deliberately keeps the plain
+ * `DigestInputShape` and never gains `format`/`table`.
+ *
+ * A Presentation (`html`/`md`) renders the WHOLE digest (both tables); an Export
+ * (`csv`) is ONE table, chosen by `table` (default `batters`, ignored for the
+ * presentation formats).
+ */
+const DIGEST_FORMAT_DESCRIPTION =
+  "Output format (default 'json'): 'json' is the structured preview; 'html'/'md' render the WHOLE digest (both tables) as a Presentation document; 'csv' exports ONE table (chosen by table).";
+const DIGEST_TABLE_DESCRIPTION =
+  "Which table a 'csv' Export returns: 'batters' (default) or 'pitchers'. Ignored by json/html/md, which cover the whole digest.";
+
+export const DigestPreviewInputShape = {
+  ...DigestInputShape,
+  format: z.enum(["json", "html", "md", "csv"]).default("json").describe(DIGEST_FORMAT_DESCRIPTION),
+  table: z.enum(["batters", "pitchers"]).default("batters").describe(DIGEST_TABLE_DESCRIPTION),
+};
+
+export const DigestPreviewInputSchema = z.object(DigestPreviewInputShape);
+
+export const DigestPreviewQueryInputSchema = z.object({
+  ...DigestQueryInputSchema.shape,
+  format: z.enum(["json", "html", "md", "csv"]).default("json").describe(DIGEST_FORMAT_DESCRIPTION),
+  table: z.enum(["batters", "pitchers"]).default("batters").describe(DIGEST_TABLE_DESCRIPTION),
+});
+
+/**
+ * Stat-line query + `format`, composed from the raw filter shape so the MCP
+ * tool can advertise `StatLinesFormatShape` (a plain `ZodRawShape`) while the
+ * handler parses `StatLinesFormatSchema` — which re-applies the from<=to
+ * pairing via the shared `refineFromTo`.
+ */
+export const StatLinesFormatShape = {
+  ...StatLineFilterShape,
+  format: z
+    .enum(["json", "csv"])
+    .default("json")
+    .describe(
+      "Output format (default 'json'): 'json' returns the rows as structured JSON; 'csv' returns them as a CSV table (one column per field, stats as a JSON column).",
+    ),
+};
+
+export const StatLinesFormatSchema = z.object(StatLinesFormatShape).superRefine(refineFromTo);
+
+export const SqlQueryFormatShape = {
+  ...SqlQueryInputSchema.shape,
+  format: z
+    .enum(["json", "csv"])
+    .default("json")
+    .describe(
+      "Output format (default 'json'): 'json' returns { columns, rows, rowCount, truncated }; 'csv' returns the result rows as a CSV table (MCP-only, with a truncation-warning part when the row cap is hit).",
+    ),
+};
+
+export const SqlQueryFormatSchema = z.object(SqlQueryFormatShape);
 
 export { StatLineQuerySchema };
