@@ -66,6 +66,15 @@ function windowTitle(window: ResolvedWindow): string {
   return window.spec === "1d" ? formatSubjectDate(window.to) : window.label;
 }
 
+/**
+ * Escape the four characters that are unsafe in the two contexts a name reaches
+ * in this renderer: an element text node and a double-quoted attribute value.
+ * A raw apostrophe (`O'Reilly`) is deliberately NOT escaped — it is safe in both
+ * of those contexts, and every value here is emitted in one of them (`<td>`
+ * text, `text-align: "..."`), never in a single-quoted attribute. Non-ASCII
+ * letters (accents, wide characters) pass through untouched — the digest is a
+ * UTF-8 mail part (#65 / ADR 0039).
+ */
 export function escapeHtml(s: string): string {
   return s
     .replaceAll("&", "&amp;")
@@ -81,7 +90,14 @@ interface Column {
   value: (row: DigestRow) => string;
 }
 
-/** "Bryce Harper" -> "B Harper"; a single-word name is left alone. */
+/**
+ * "Bryce Harper" -> "B Harper"; a single-word name is left alone. The first
+ * name is reduced to its initial BY DESIGN, so an accent living in the first
+ * name ("Acuña Jr." -> "A Jr.") is legitimately dropped with the rest of that
+ * token — that is abbreviation, not corruption. The accent is preserved
+ * wherever it lands in a retained token ("Ronald Acuña Jr." -> "R Acuña Jr.");
+ * #65's fidelity fixtures assert that rendered form.
+ */
 function abbreviate(fullName: string): string {
   const parts = fullName.trim().split(/\s+/);
   return parts.length < 2 ? fullName : `${parts[0]![0]} ${parts.slice(1).join(" ")}`;
@@ -213,6 +229,15 @@ function mlbDividerIndex(rows: DigestRow[]): number | null {
 
 function textTable(columns: Column[], rows: DigestRow[], dividerAfter: number | null = null): string[] {
   const cells = rows.map((row) => columns.map((col) => col.value(row)));
+  // Column widths use String#length (UTF-16 code units), which equals the
+  // monospace display width for the Latin (incl. NFC-accented) names both
+  // sources actually emit. It would UNDER-count an East-Asian wide glyph
+  // (`鈴木`.length === 2, but it occupies 4 columns), misaligning that one
+  // row. That case is deliberately out of scope (#65 / ADR 0039): the MLB and
+  // NCAA sources return Latin transliterations only, the HTML part (the primary
+  // artifact) aligns via <td> regardless of glyph width, and a full
+  // East-Asian-width table would align characters the data cannot contain. Such
+  // a name still round-trips intact — only its plain-text column may be ragged.
   const widths = columns.map((col, i) =>
     cells.reduce((max, rowCells) => Math.max(max, rowCells[i]!.length), col.header.length),
   );

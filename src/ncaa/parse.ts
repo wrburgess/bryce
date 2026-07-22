@@ -2,6 +2,7 @@ import * as cheerio from "cheerio";
 import type { Cheerio } from "cheerio";
 import type { AnyNode } from "domhandler";
 import { z } from "zod";
+import { canonicalizeName } from "../domain/names.js";
 
 /**
  * Parse a stats.ncaa.org game-log page into validated rows (ADR 0032, ADR
@@ -45,11 +46,16 @@ const MDY = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
 export function parseGameLogPage(html: string): NcaaGameLogPage {
   const $ = cheerio.load(html);
 
-  const fullName = squish($("title").first().text());
+  // canonicalizeName (not squish) for the two IDENTITY fields: cheerio's
+  // .text() already decodes HTML entities and UTF-8 (Pe&ntilde;a -> "Peña"),
+  // and NFC normalization at this boundary (ADR 0039) keeps the stored form
+  // stable so the identity-refresh compare never flip-flops. It subsumes
+  // squish's whitespace collapse.
+  const fullName = canonicalizeName($("title").first().text());
   if (fullName.length === 0) {
     throw new Error("NCAA game-log page: could not extract player name");
   }
-  const schoolName = squish($(".card-header a").first().text());
+  const schoolName = canonicalizeName($(".card-header a").first().text());
   if (schoolName.length === 0) {
     throw new Error("NCAA game-log page: could not extract school name");
   }

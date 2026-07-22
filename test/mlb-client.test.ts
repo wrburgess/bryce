@@ -260,3 +260,24 @@ function loadFixtureFirstPerson(): Record<string, unknown> {
   if (person === undefined) throw new Error("fixture person missing");
   return person;
 }
+
+describe("MlbClient — identity name canonicalized to NFC at the boundary (#65 / ADR 0039)", () => {
+  // NFD spelling forced from a literal, so the fixture is genuinely NFD
+  // regardless of the source byte form (Reviewer SC3/SC4). Injection is at the
+  // FETCH layer so the PersonSchema transform actually runs.
+  const NFD_ACUNA = "Ronald Acuña Jr.".normalize("NFD");
+  const NFC_ACUNA = "Ronald Acuña Jr.".normalize("NFC");
+
+  it("findPerson returns an NFC fullName even when the API sends NFD", async () => {
+    const { client } = clientWithBody({ people: [makePerson({ fullName: NFD_ACUNA })] });
+    const person = await client.findPerson(691185);
+    expect(person?.fullName).toBe(NFC_ACUNA);
+  });
+
+  it("searchPeople canonicalizes each hit's fullName", async () => {
+    const api = new FakeStatsApi({ searchResults: [makePerson({ fullName: NFD_ACUNA })] });
+    const people = await clientFor(api).searchPeople("acuna");
+    expect(people).toHaveLength(1);
+    expect(people[0]?.fullName).toBe(NFC_ACUNA);
+  });
+});
