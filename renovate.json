@@ -1,0 +1,48 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    ":dependencyDashboard",
+    ":semanticCommits"
+  ],
+  "timezone": "America/Chicago",
+  "schedule": ["before 6am on monday"],
+  "minimumReleaseAge": "7 days",
+  "internalChecksFilter": "strict",
+  "packageRules": [
+    {
+      "description": "Auto-merge patch and minor updates for app dependencies after green CI plus the release-age cooldown.",
+      "matchDepTypes": ["dependencies", "devDependencies"],
+      "matchUpdateTypes": ["patch", "minor"],
+      "automerge": true
+    },
+    {
+      "description": "GitHub Actions updates always require human review: CI runs the very workflow revision under review, and the release-age cooldown does not apply to digest updates.",
+      "matchManagers": ["github-actions"],
+      "automerge": false
+    },
+    {
+      "description": "Node runtime (.nvmrc via the nvm manager and engines.node via the npm manager) is grouped and held for review; it is an environment change, never auto-merged.",
+      "matchManagers": ["nvm", "npm"],
+      "matchDepNames": ["node"],
+      "groupName": "node",
+      "automerge": false
+    },
+    {
+      "description": "Hold every major upgrade for manual review on the Dependency Dashboard; no PR is opened until it is approved there.",
+      "matchUpdateTypes": ["major"],
+      "automerge": false,
+      "dependencyDashboardApproval": true
+    }
+  ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": true,
+    "schedule": ["before 6am on monday"]
+  },
+  "vulnerabilityAlerts": {
+    "labels": ["security"],
+    "minimumReleaseAge": null
+  }
+}
