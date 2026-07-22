@@ -26,9 +26,11 @@ exclusion holds across the launchd CLI and the long-lived server. Two difference
 claim, each load-bearing:
 
 - **Each run owns its OWN row — a stream, not a shared slot.** Two runs never contend for one
-  identity, so a superseded run that settles late only ever writes its older row; it cannot corrupt
-  the winner's. The freshness watermark is "the latest run by `(started_at, id)`", read fresh, never a
-  single mutable cell.
+  identity. A run that loses its lease is **reaped** to `failed` by the successor's claim, and both the
+  per-player renew and the final `settleRefreshRun` are **conditional on still owning the row**
+  (`WHERE status = 'running'`), so a reaped run that resumes writes nothing to its row and can never
+  resurrect itself to `ok`. The freshness watermark is "the latest run by `(started_at, id)`", read
+  fresh, never a single mutable cell, and never forgeable by a zombie.
 - **The lease is RENEWED after every player.** A fixed lease cannot tell a crashed run from a slow
   one. Renewal keeps a healthy long sweep live (and blocking a concurrent run); a crashed run stops
   renewing and its lease expires after `REFRESH_LEASE_MS`, so the next run recovers without wedging
@@ -74,6 +76,12 @@ last terminal outcome, never a phantom `running`. The block is `null` before any
   watch-list-wide freshness claim.
 - **Offseason** reads `stale` by design; the heartbeat is the liveness signal.
 - Additive migration (`0005`), no backfill, reversible; no change to existing tables.
+- **Write coordination beyond the watermark is deferred to #81.** This ADR makes the freshness
+  *watermark* zombie-proof (a reaped or superseded run can never settle a success), but the underlying
+  `stat_lines`/`players` writes are not fully fenced: a reaped run can still write stale rows for the
+  players it touches before its next ownership check, and `runRefreshForPlayer` takes no claim. Both are
+  the pre-existing eventual-consistency behavior of ADR 0030 (idempotent upserts, self-corrected by the
+  next Refresh), not introduced here; an ingestion-wide write-fence is tracked in #81.
 
 **Rejected:** gating on `finished_at` (cannot prove finality across a midnight straddle); **blocking**
 a stale digest instead of annotating (a silently missing digest is strictly worse than an annotated
