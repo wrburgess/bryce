@@ -2,9 +2,12 @@
 
 The command-line entry points to Bryce's pipeline, run as npm scripts on the host (a Mac with Node
 22). Each is a thin presenter over the same service layer the [REST API](../api/README.md) and
-[MCP tools](../mcp/README.md) use, and each prints deterministic, ASCII-only `key=value` lines and
-exits non-zero on failure. Domain terms below — **Player**, **Refresh**, **Digest**, **Window**,
-**Offseason Sleep** — are defined in [`docs/domain/CONTEXT.md`](../domain/CONTEXT.md).
+[MCP tools](../mcp/README.md) use. Each job's **summary** is a deterministic `key=value` line and
+every command exits non-zero on failure — but the output is not purely ASCII `key=value`: `digest`
+with `MAILER_PROVIDER=console` prints the full rendered email above its summary, and `seed`/`list`
+echo upstream player names that may contain non-ASCII characters (e.g. `José`). Domain terms below —
+**Player**, **Refresh**, **Digest**, **Window**, **Offseason Sleep** — are defined in
+[`docs/domain/CONTEXT.md`](../domain/CONTEXT.md).
 
 There is no `--help` handler: this page is the reference. Arguments after `npm run <script>` must
 follow a `--` separator so npm forwards them to the script rather than consuming them itself.
@@ -40,9 +43,11 @@ state, so re-running a Window always sends the same content.
 - Both `--window 7d` and `--window=7d` are accepted. An unsupported window (e.g. `30d`) **fails
   closed**: the command exits `1`, writes an `error: unsupported --window value; supported: …` line
   to stderr, and sends nothing.
-- `--force` applies only to the daily `1d` slot: it is a **test replay** that overrides the
-  already-sent-today guard (and, in Offseason Sleep, the weekly-heartbeat rule) and records nothing.
-  It does not jump an in-flight claim held by another run. The full semantics — and the three
+- `--force` applies only to the daily `1d` slot: it overrides the already-sent-today guard (and, in
+  Offseason Sleep, the weekly-heartbeat rule). When it overrides one of those, the send is a
+  **write-free replay** (no delivery row is created or changed); but forcing when today's slot does
+  not exist yet, or over a failed/expired slot, sends and **records a delivery row normally**. It
+  never jumps an in-flight claim held by another run. The full semantics — and the three
   consequences worth knowing — are in
   [Running Bryce → Forcing a test send](../guides/running-bryce.md#forcing-a-test-send) and
   [ADR 0034](../adr/0034-digest-delivery-claim-at-least-once.md).
@@ -72,8 +77,10 @@ One required subcommand (`add` | `deactivate` | `list`), then flags:
 | `deactivate` | `--person-id N` \| `--ncaa-seq N` | Remove a Player from the Watch List; his row and full history are kept. |
 | `list` | — | Print every Player row (active and inactive) plus a `total=` line. |
 
-Adding a Player runs his **first Refresh** immediately — his whole current season is backfilled —
-unless the pipeline is in Offseason Sleep, in which case the add succeeds and the Refresh is skipped.
+Adding a **new** Player runs his **first Refresh** immediately — his whole current season is
+backfilled — unless the pipeline is in Offseason Sleep, in which case the add succeeds and the
+Refresh is skipped. Re-adding a Player already on the Watch List is a no-op update with no Refresh;
+use `refresh` to re-pull his season.
 
 ## `ncaa:probe` — validate the NCAA scrape on this host
 

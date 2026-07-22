@@ -46,10 +46,11 @@ List Watch List players.
 Add an MLB/MiLB Player by MLB Stats API personId.
 
 - **Inputs:** `personId` — the MLB Stats API personId.
-- **Success:** `{ "action": "added" | "updated", "player": {...}, "refresh": {...} }`.
-- **Side effects:** inserts (or updates) the Player and runs his **first Refresh** immediately —
+- **Success:** `{ "action": "added" | "updated", "player": {...}, "refresh": {...} | null }`.
+- **Side effects:** a **newly added** Player is inserted and his **first Refresh** runs immediately —
   writing his current-season Stat Lines — unless the pipeline is in Offseason Sleep, when the Refresh
-  is skipped.
+  is skipped. Re-adding a Player already on the Watch List returns `action: "updated"` with
+  `refresh: null` and runs **no** Refresh; use `run_refresh` to re-pull his season.
 
 ### `watchlist_add_ncaa`
 
@@ -57,8 +58,9 @@ Add an NCAA Player by stats.ncaa.org `stats_player_seq`.
 
 - **Inputs:** `ncaaPlayerSeq` — the `stats_player_seq`.
 - **Success:** `{ "action": "added" | "updated", "player": {...}, "refresh": {...} }`.
-- **Side effects:** resolves his name and school from his game-log page, then the same first Refresh
-  as `watchlist_add` (skipped during Offseason Sleep).
+- **Side effects:** for a **newly added** Player, resolves his name and school from his game-log page,
+  then the same first Refresh as `watchlist_add` (skipped during Offseason Sleep); re-adding a Player
+  already on the Watch List is a no-op update (`refresh: null`) with no Refresh.
 
 ### `watchlist_deactivate`
 
@@ -102,9 +104,11 @@ Preview the Digest for a Window as the Batters and Pitchers tables the email wou
 Run the Digest job now for a Window.
 
 - **Inputs:** `window` (as above; an unsupported value is rejected and nothing is sent) and `force`
-  (default `false`). `force` applies only to the daily `1d` slot: it is a **test replay** overriding
-  the already-sent-today guard (and, in Offseason Sleep, the weekly-heartbeat rule), sending without
-  recording. It does not override an in-flight claim held by another run.
+  (default `false`). `force` applies only to the daily `1d` slot: it overrides the already-sent-today
+  guard (and, in Offseason Sleep, the weekly-heartbeat rule). Overriding one of those makes the send a
+  **write-free replay**; but forcing when today's slot does not exist yet, or over a failed/expired
+  slot, sends and **records a delivery row normally**. It never overrides an in-flight claim held by
+  another run.
 - **Success:** the run result, e.g. `{ kind, action, statLineCount, playerCount, window, reason }`
   where `action` is `sent` / `skipped` / `failed`.
 - **Side effects:** may send mail and record a delivery row for the daily slot; the report writes no

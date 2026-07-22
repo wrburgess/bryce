@@ -28,9 +28,11 @@ npm run digest -- --force   # test send: re-send today's digest even if it alrea
 
 ### Forcing a test send
 
-`--force` overrides only the "already sent today" bookkeeping, and a forced run is a **replay**: it
-sends the mail and writes nothing at all — no delivery row is created or changed, and no Stat Line is
-marked reported. Three consequences worth knowing before you use it:
+`--force` overrides only the "already sent today" bookkeeping, and a forced run that overrides that
+guard (or, in Offseason Sleep, the weekly-heartbeat rule) is a **replay**: it sends the mail and
+writes nothing at all — no delivery row is created or changed, and no Stat Line is marked reported.
+Forcing when today's slot does not exist yet, or over a failed/expired slot, is **not** a replay — it
+sends and records a delivery row normally. Three consequences worth knowing before you use it:
 
 - A line that arrived *after* the real send is **included** in the forced email but stays unreported,
   so the next real digest still carries it. A test send never consumes anything.

@@ -14,7 +14,7 @@ export const NcaaPlayerSeqSchema = z.coerce.number().int().positive();
 
 export const AddPlayerInputSchema = z.object({
   personId: PersonIdSchema.describe(
-    "MLB Stats API personId of the MLB/MiLB player to add; his full current season is backfilled on add.",
+    "MLB Stats API personId of the MLB/MiLB player to add. A newly added player's full current season is backfilled immediately; re-adding an existing player is a no-op update (action 'updated', refresh null) with no backfill — use run_refresh to re-pull his season.",
   ),
 });
 
@@ -105,7 +105,7 @@ export const DigestInputShape = {
     .boolean()
     .default(false)
     .describe(
-      "send_digest only: daily-slot test replay overriding the already-sent-today guard; accepted but ignored by digest_preview.",
+      "send_digest only: forces the daily 1d slot past its already-sent-today (or Offseason heartbeat) guard. Overriding one of those makes the send a write-free replay; forcing with no slot yet today, or over a failed slot, sends and records a delivery row normally. Accepted but ignored by digest_preview.",
     ),
   window: WindowSchema,
 };
