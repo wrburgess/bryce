@@ -20,10 +20,10 @@ vendored into a Host App), so run these **from a clone of upstream ai-config**:
 
 ```bash
 # Preview what would be copied (writes nothing):
-ruby bin/ai-config-sync --dry-run /path/to/host-app
+bin/ai-config-sync --dry-run /path/to/host-app
 
 # Vendor the bundle in:
-ruby bin/ai-config-sync /path/to/host-app
+bin/ai-config-sync /path/to/host-app
 ```
 
 - The Host App owns **plain files** at their expected paths (real files, never symlinks).
@@ -114,11 +114,11 @@ shim, and the native-discovery tools reach the same body by the documented "read
 
 ## 5. Keep the bundle green in-host
 
-A vendored copy must keep the shipped [`parity_check.rb`](../../scripts/parity_check.rb) **green
+A vendored copy must keep the shipped [`parity-check.ts`](../../scripts/parity-check.ts) **green
 in-host**. Run it any time after vendoring or customizing:
 
 ```bash
-ruby scripts/parity_check.rb
+npx tsx scripts/parity-check.ts
 ```
 
 Because the Host App runs the same structural check this repo does
@@ -131,7 +131,7 @@ vendoring installer — and a Customization must not break them:
 - **Content is copied faithfully.** `ai-config-sync` never rewrites files on copy — that would drift the
   Adapters from the Canonical Source and break the re-sync `git diff` a host uses to reconcile.
 
-Both are guarded by `test_vendored_copy_passes_parity_check`, which runs `parity_check.rb --root DEST`
+Both are guarded by `test_vendored_copy_passes_parity_check`, which runs `parity-check.ts --root DEST`
 against a vendored copy of the real bundle. Before changing what `ai-config-sync` copies, remember:
 dropping a link target or rewriting content on copy would break a host silently.
 
@@ -142,7 +142,7 @@ Updating is a **re-run of the sync followed by a manual merge**
 ai-config, since the script is not vendored:
 
 ```bash
-ruby bin/ai-config-sync /path/to/host-app
+bin/ai-config-sync /path/to/host-app
 ```
 
 - Baseline files are overwritten; **`PROJECT.md` and an existing `bin/setup` are preserved** (pass

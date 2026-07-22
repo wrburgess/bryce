@@ -85,9 +85,9 @@ never self-merges; a human disposes on the PR.
      and/or list. These strings are **unenforced** (CI stays green if they drift), so update every one by
      discipline — grep the tree for the current count word and the phrase "set of" to catch stragglers.
    - **Pin the floor + add its self-test** if the Skill is a baseline member: add its name to
-     `REQUIRED_SKILLS` in [`scripts/parity_check.rb`](../../scripts/parity_check.rb) (the one line that
-     grows per Skill) and a matching self-test in [`test/parity_check_test.rb`](../../test/parity_check_test.rb)
-     asserting **both** the non-zero exit **and** the specific error string — per the floor-then-shape rule
+     `REQUIRED_SKILLS` in [`scripts/parity-check.ts`](../../scripts/parity-check.ts) (the one line that
+     grows per Skill) and a matching parity self-test asserting **both** the non-zero exit **and** the
+     specific error string — per the floor-then-shape rule
      in [`authoring-the-bundle.md`](../../docs/guides/authoring-the-bundle.md); no new floor entry ships
      without its self-test.
 

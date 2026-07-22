@@ -1,31 +1,20 @@
-#!/usr/bin/env ruby
-# frozen_string_literal: true
-
+#!/usr/bin/env bash
+#
 # bin/protected-branches — print the protected-branch list authored in PROJECT.md, one per line.
 #
-# The git hooks (bin/guard-protected-branch, .claude/hooks/enforce-branch-creation.sh) read a
-# generated sidecar (.githooks/protected-branches); bin/install-git-hooks regenerates that sidecar by
-# running this script. Parsing logic lives in scripts/protected_branches.rb so it is tested once.
+# Thin shim over the TypeScript CLI (scripts/protected-branches.ts, run via tsx — ADR 0039). This
+# path is kept deliberately: the parity check's GUARDRAIL_FILES invariant requires it, and callers
+# (docs, ad-hoc use) still reach the list through `bin/protected-branches`. All parsing logic lives in
+# scripts/protected-branches.ts so it is unit-tested once and reused by the parity check.
 #
 # Usage:
-#   ruby bin/protected-branches [--file PROJECT.md]
+#   bin/protected-branches [--file PROJECT.md]
 #     --file PATH   PROJECT.md to read (default: ./PROJECT.md).
 #
 # Exit status: 0 on success (even when the list is empty — callers apply a fail-closed default);
 #              1 when the file does not exist.
 
-require "optparse"
-require_relative "../scripts/protected_branches"
+set -euo pipefail
 
-file = "PROJECT.md"
-OptionParser.new do |opts|
-  opts.banner = "Usage: ruby bin/protected-branches [--file PROJECT.md]"
-  opts.on("--file PATH", "PROJECT.md to read (default: ./PROJECT.md)") { |v| file = v }
-end.parse!(ARGV)
-
-unless File.file?(file)
-  warn "protected-branches: no such file: #{file}"
-  exit 1
-end
-
-puts ProtectedBranches.from_file(file)
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "$REPO_ROOT/node_modules/.bin/tsx" "$REPO_ROOT/scripts/protected-branches.ts" "$@"

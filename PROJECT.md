@@ -10,7 +10,7 @@ does not edit `AGENTS.md` to change them.
 > (WAL + Litestream) for storage, Vitest for tests; hosted on the HC's MacBook behind a Cloudflare
 > Tunnel. Stack/storage/interface/hosting decisions: ADRs 0025–0028.
 
-> Section headings below are a contract: the parity check (`scripts/parity_check.rb`) asserts each of
+> Section headings below are a contract: the parity check (`scripts/parity-check.ts`) asserts each of
 > the five `##` sections is present. Rename them and the check fails.
 
 ## Quality Checks
@@ -20,7 +20,7 @@ this table — they never hardcode a stack's commands.
 
 | Purpose | Command |
 |---------|---------|
-| Structural parity | `ruby scripts/parity_check.rb` |
+| Structural parity | `npx tsx scripts/parity-check.ts` |
 | Reviewer summon self-test | `bash scripts/summon_reviewer.test.sh` |
 | Branch-guard self-test | `bash .claude/hooks/enforce-branch-creation.test.sh` |
 | Typecheck | `npm run typecheck` |
@@ -33,11 +33,11 @@ raw `npm audit`, so a reviewed, non-exploitable advisory can be allowlisted with
 ([#51](https://github.com/wrburgess/bryce/pull/51)) instead of failing the gate — and this is the
 exact command CI runs (`.github/workflows/app.yml`).
 
-Until the TypeScript application is scaffolded (Phase 1 of the digest build), the npm rows have
-nothing to inspect and are reported `not_run` with that stated reason. A check whose command runs
-but has nothing applicable to inspect is reported `pass`/`not_run` with a stated reason — checks are
-**not applicable, not skipped**, so rigor is unchanged. The structural parity check applies from day
-one.
+The TypeScript application is scaffolded (the `src/` tree ships), so the npm rows — typecheck, lint,
+tests, dependency audit — are **active checks** an agent runs and gets green before declaring work
+done, alongside the structural parity check that applies from day one. If a specific change touches
+nothing a given check inspects, that check may report `pass`/`not_run` with a stated reason — checks
+are **not applicable, not skipped**, so rigor is unchanged.
 
 ## Attribution & Model Declaration
 
@@ -103,7 +103,7 @@ definitions.
 - **Reviewer (second-model review of plans and PRs):** the **primary** Reviewer is **Codex**
   (harness) running **GPT-5.6** (model — set in Codex settings; per ADR 0024 the harness and model
   are named separately, matching the Attribution table above). The AC summons it — not the HC —
-  through the **local Codex CLI**, wrapped by [`scripts/summon_reviewer.rb`](scripts/summon_reviewer.rb).
+  through the **local Codex CLI**, wrapped by [`scripts/summon-reviewer.ts`](scripts/summon-reviewer.ts).
   These are the **complete, runnable** invocations — every required flag is present, and the summon
   self-test executes these exact lines out of this file, so a command documented here that does not
   run turns the gate red rather than silently failing in a lifecycle run:
@@ -111,10 +111,10 @@ definitions.
 ```sh
 # Plans (Stage 2) - the plan text is piped to the CLI's `exec` subcommand under an
 # adversarial plan-critique prompt.
-ruby scripts/summon_reviewer.rb --mode plan --input PLAN_FILE --out OUT_FILE --ac AC_NAME
+npx tsx scripts/summon-reviewer.ts --mode plan --input PLAN_FILE --out OUT_FILE --ac AC_NAME
 
 # PRs / work (Stage 4) - the CLI's `review` subcommand reviews the branch's diff against its base.
-ruby scripts/summon_reviewer.rb --mode work --base BRANCH --out OUT_FILE --ac AC_NAME
+npx tsx scripts/summon-reviewer.ts --mode work --base BRANCH --out OUT_FILE --ac AC_NAME
 ```
 
   - `PLAN_FILE` — the plan text to critique (plan mode only). `OUT_FILE` — where the review body is
@@ -165,5 +165,5 @@ ruby scripts/summon_reviewer.rb --mode work --base BRANCH --out OUT_FILE --ac AC
 > **Trimmed surfaces (host Customization):** the Generic Baseline's intake pipeline (`scout`, `clip`,
 > `follow`, `restock` and the Watchlist / Learnings Log / Manual-drop inbox / Tool Roster artifacts
 > under `docs/reference/`) is not vendored in this host — Bryce is an application repo, not a
-> config-research repo. The vendored `scripts/parity_check.rb` `REQUIRED_SKILLS` floor and CI workflow
+> config-research repo. The vendored `scripts/parity-check.ts` `REQUIRED_SKILLS` floor and CI workflow
 > reflect the trimmed, nine-skill set.

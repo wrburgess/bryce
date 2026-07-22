@@ -20,12 +20,16 @@ abspath() { if [[ -d "$1" ]]; then (cd "$1" && pwd); else printf '%s' "$1"; fi; 
 # when the extraction yields something — a parse miss must never blank the list (the guard would then
 # fall back to its safe default, but keeping the committed sidecar is better).
 regenerate_sidecar() {
-  if ! command -v ruby >/dev/null 2>&1; then
-    echo "Note: ruby not found; keeping existing ${HOOKS_PATH}/protected-branches."
+  # The derivation runs via tsx (ADR 0039). Git hooks run in git's environment on a fresh clone
+  # BEFORE `npm ci`, so tsx may be absent — degrade safely by keeping the committed sidecar, the
+  # same fail-closed stance the old `command -v ruby` guard took.
+  local tsx="${REPO_ROOT}/node_modules/.bin/tsx"
+  if [[ ! -x "$tsx" ]]; then
+    echo "Note: tsx not found (run npm ci); keeping existing ${HOOKS_PATH}/protected-branches."
     return
   fi
   local derived
-  derived="$(ruby "${REPO_ROOT}/bin/protected-branches" --file "${REPO_ROOT}/PROJECT.md" 2>/dev/null || true)"
+  derived="$("$tsx" "${REPO_ROOT}/scripts/protected-branches.ts" --file "${REPO_ROOT}/PROJECT.md" 2>/dev/null || true)"
   if [[ -n "$derived" ]]; then
     printf '%s\n' "$derived" > "${REPO_ROOT}/${HOOKS_PATH}/protected-branches"
     echo "Regenerated ${HOOKS_PATH}/protected-branches from PROJECT.md."

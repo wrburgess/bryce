@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# Tests for summon_reviewer.rb (the Reviewer summon — issue #39).
+# Tests for summon-reviewer.ts (the Reviewer summon — issue #39).
 #
 # Run:  bash scripts/summon_reviewer.test.sh
 # Exit: 0 if every case passes, 1 otherwise.
 #
-# These drive the REAL Ruby script against a FAKE `codex` executable built in a
+# These drive the REAL TypeScript script (via tsx) against a FAKE `codex` executable built in a
 # temp dir. The whole suite is therefore offline and deterministic — which is
 # possible precisely because the script under test never touches the network and
 # never calls the lifecycle host (the AC posts the result).
@@ -36,19 +36,20 @@
 #     smart quotes and CJK cannot put a non-ASCII byte on the script's stdout,
 #     on the OK path or the failure path — while the body file keeps the original
 #     UTF-8 bytes untouched. The same run classifies identically under LANG=C.
-#   - Usage and output-path errors exit 1 with a readable message, never a Ruby
+#   - Usage and output-path errors exit 1 with a readable message, never a raw
 #     backtrace.
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRIPT="$SCRIPT_DIR/summon_reviewer.rb"
+SCRIPT="$SCRIPT_DIR/summon-reviewer.ts"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+TSX="$REPO_ROOT/node_modules/.bin/tsx"
 PROJECT_MD="$REPO_ROOT/PROJECT.md"
 LIFECYCLE_MD="$REPO_ROOT/docs/standards/development-lifecycle.md"
 ASSESS_MD="$REPO_ROOT/skills/assess/SKILL.md"
 
-command -v ruby >/dev/null 2>&1 || { echo "tests require ruby"; exit 1; }
+[ -x "$TSX" ] || { echo "tests require tsx (run: npm ci)"; exit 1; }
 [ -f "$SCRIPT" ] || { echo "missing script under test: $SCRIPT"; exit 1; }
 
 TMP="$(mktemp -d)"
@@ -184,6 +185,10 @@ case "$behavior" in
   # reaped at once but the read never sees EOF, so the drain hits its cap with a
   # complete review it cannot return.
   holds_pipe)   cat "$here/body"; ( sleep 8 ) & ;;
+  # Like holds_pipe, but the grandchild IGNORES SIGTERM (trap '' TERM) and would write a survival
+  # marker if it outlived the summon. Only the KILL fallback in the drain-timeout cleanup can remove
+  # a TERM-proof survivor, so the marker's absence is the proof that the KILL path ran.
+  holds_pipe_hard) cat "$here/body"; ( trap '' TERM; sleep 15; : > "$here/child-survived" ) & ;;
   banner)       printf '[2026-07-20] OpenAI Codex v0.51.0\n' ;;
   # Exactly $FLOOR bytes, then one byte more than that, as the floor's two sides.
   at_floor)     head -c "$(cat "$here/floor")" /dev/zero | tr '\0' 'x' ;;
@@ -224,7 +229,7 @@ echo "Happy paths (both modes reach the CLI):"
 make_fake_codex ok
 OUT="$TMP/work-body.md"
 expect_status "work mode -> exit 0, OK status line" 0 "summon_reviewer: OK - work review" \
-  ruby "$SCRIPT" --mode work --base main --out "$OUT" --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --base main --out "$OUT" --codex-bin "$FAKE_BIN"
 cmp -s "$OUT" "$FAKE_BODY"
 report "work mode -> body file is the CLI's bytes, byte-for-byte" $?
 grep -qF -- "review --base main" "$FAKE_LOG"
@@ -235,7 +240,7 @@ PLAN="$TMP/plan.md"
 OUT="$TMP/plan-body.md"
 printf '## Implementation Plan\n1. Add the widget reaper.\n' > "$PLAN"
 expect_status "plan mode -> exit 0, OK status line" 0 "summon_reviewer: OK - plan review" \
-  ruby "$SCRIPT" --mode plan --input "$PLAN" --out "$OUT" --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode plan --input "$PLAN" --out "$OUT" --codex-bin "$FAKE_BIN"
 grep -qF "Add the widget reaper." "$OUT"
 report "plan mode -> plan text reached the CLI on stdin" $?
 grep -qxF "exec" "$FAKE_LOG"
@@ -246,47 +251,47 @@ echo "Failure ladder (each classification distinct and reachable):"
 
 OUT="$TMP/notfound.md"
 expect_status "missing codex binary -> FAILED (not_found)" 1 "FAILED (not_found)" \
-  ruby "$SCRIPT" --mode work --out "$OUT" --codex-bin /nonexistent/codex
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --codex-bin /nonexistent/codex
 [ ! -e "$OUT" ]
 report "missing codex binary -> no body file created" $?
 
 expect_status "bare name not on PATH -> FAILED (not_found)" 1 "FAILED (not_found)" \
-  ruby "$SCRIPT" --mode work --out "$TMP/notfound2.md" --codex-bin definitely-not-a-real-codex
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/notfound2.md" --codex-bin definitely-not-a-real-codex
 
 make_fake_codex login_fail
 OUT="$TMP/noauth.md"
 expect_status "login status fails -> FAILED (not_authenticated)" 1 "FAILED (not_authenticated)" \
-  ruby "$SCRIPT" --mode work --out "$OUT" --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --codex-bin "$FAKE_BIN"
 ! grep -qE '^(review|exec)' "$FAKE_LOG"
 report "login status fails -> review subcommand never spawned" $?
 
 make_fake_codex review_fail
 expect_status "review exits non-zero -> FAILED (exit_nonzero)" 1 "FAILED (exit_nonzero)" \
-  ruby "$SCRIPT" --mode work --out "$TMP/nonzero.md" --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/nonzero.md" --codex-bin "$FAKE_BIN"
 
 # A child killed by a signal reports NO exit code. Classifying that on `exitstatus.zero?` would read
 # nil as 0 and pass partial output off as a clean review — so it must classify as a failure.
 make_fake_codex signaled
 OUT="$TMP/signaled.md"
 expect_status "review killed by a signal -> FAILED (exit_nonzero)" 1 "FAILED (exit_nonzero)" \
-  ruby "$SCRIPT" --mode work --out "$OUT" --timeout 20 --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --timeout 20 --codex-bin "$FAKE_BIN"
 [ ! -e "$OUT" ]
 report "review killed by a signal -> partial output is not written" $?
 
 make_fake_codex empty
 OUT="$TMP/empty.md"
 expect_status "exit 0 with empty stdout -> FAILED (empty_output)" 1 "FAILED (empty_output)" \
-  ruby "$SCRIPT" --mode work --out "$OUT" --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --codex-bin "$FAKE_BIN"
 [ ! -e "$OUT" ]
 report "empty output -> no body file created" $?
 
 make_fake_codex whitespace
 expect_status "exit 0 with whitespace-only stdout -> FAILED (empty_output)" 1 "FAILED (empty_output)" \
-  ruby "$SCRIPT" --mode work --out "$TMP/blank.md" --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/blank.md" --codex-bin "$FAKE_BIN"
 
 make_fake_codex slow
 expect_status "child outlives --timeout -> FAILED (timeout)" 1 "FAILED (timeout)" \
-  ruby "$SCRIPT" --mode work --out "$TMP/slow.md" --timeout 1 --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/slow.md" --timeout 1 --codex-bin "$FAKE_BIN"
 # The fake's GRANDCHILD would touch the marker 3s in. Wait past that: the direct
 # child dies under any kill, so only a kill of the whole process group stops the
 # grandchild. A surviving marker means an orphan outlived the summon.
@@ -300,7 +305,7 @@ make_fake_codex just_late
 OUT="$TMP/just-late.md"
 expect_bounded "child exits just past the deadline -> reaped, not timed out" 10 0 \
   "summon_reviewer: OK - work review" \
-  ruby "$SCRIPT" --mode work --out "$OUT" --timeout 1 --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --timeout 1 --codex-bin "$FAKE_BIN"
 cmp -s "$OUT" "$FAKE_BODY"
 report "child exits just past the deadline -> its review is kept intact" $?
 
@@ -311,11 +316,23 @@ make_fake_codex holds_pipe
 OUT="$TMP/held.md"
 expect_bounded "stdout held open past the drain cap -> FAILED (drain_timeout)" 30 1 \
   "FAILED (drain_timeout)" \
-  ruby "$SCRIPT" --mode work --out "$OUT" --timeout 20 --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --timeout 20 --codex-bin "$FAKE_BIN"
 ! grep -qF "empty_output" "$STDOUT_FILE"
 report "drain timeout -> not misreported as empty_output" $?
 [ ! -e "$OUT" ]
 report "drain timeout -> no body file created" $?
+
+# Hardening: a pipe-holding grandchild that IGNORES SIGTERM must still be removed by the KILL
+# fallback in the drain-timeout cleanup — a TERM-proof survivor would otherwise outlive the summon
+# and (here) write a marker at 15s. The cleanup escalates TERM -> KILL well before then.
+make_fake_codex holds_pipe_hard
+OUT="$TMP/held-hard.md"
+expect_bounded "TERM-ignoring pipe holder -> FAILED (drain_timeout)" 30 1 \
+  "FAILED (drain_timeout)" \
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --timeout 20 --codex-bin "$FAKE_BIN"
+sleep 3
+[ ! -e "$FAKE_MARKER" ]
+report "TERM-ignoring pipe holder -> KILL fallback removed it, no orphan marker" $?
 
 # A CLI that never drains stdin must not be able to hang the summon. The payload
 # is far larger than any pipe buffer (16KB macOS / 64KB Linux), so a synchronous
@@ -325,7 +342,7 @@ BIG_PLAN="$TMP/big-plan.md"
 head -c 400000 /dev/zero | tr '\0' 'p' > "$BIG_PLAN"
 expect_bounded "CLI never reads a 400KB stdin -> FAILED (timeout), no hang" 25 1 \
   "FAILED (timeout)" \
-  ruby "$SCRIPT" --mode plan --input "$BIG_PLAN" --out "$TMP/big.md" --timeout 2 \
+  "$TSX" "$SCRIPT" --mode plan --input "$BIG_PLAN" --out "$TMP/big.md" --timeout 2 \
     --codex-bin "$FAKE_BIN"
 
 # ---------------------------------------------------------------------------
@@ -337,10 +354,10 @@ echo "Substance floor (a banner is not a review):"
 make_fake_codex banner
 OUT="$TMP/banner.md"
 expect_status "banner-only stdout -> FAILED (insufficient_output)" 1 "FAILED (insufficient_output)" \
-  ruby "$SCRIPT" --mode work --out "$OUT" --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --codex-bin "$FAKE_BIN"
 [ ! -e "$OUT" ]
 report "banner-only stdout -> no body file created" $?
-run_summon ruby "$SCRIPT" --mode work --out "$OUT" --codex-bin "$FAKE_BIN"
+run_summon "$TSX" "$SCRIPT" --mode work --out "$OUT" --codex-bin "$FAKE_BIN"
 ! grep -qF "summon_reviewer: OK" "$STDOUT_FILE"
 report "banner-only stdout -> never reported as an OK review" $?
 
@@ -348,33 +365,33 @@ report "banner-only stdout -> never reported as an OK review" $?
 # exactly that long is a review (>=), not a near miss.
 make_fake_codex at_floor 40
 expect_status "body exactly --min-bytes -> accepted" 0 "summon_reviewer: OK - work review, 40 bytes" \
-  ruby "$SCRIPT" --mode work --out "$TMP/at-floor.md" --min-bytes 40 --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/at-floor.md" --min-bytes 40 --codex-bin "$FAKE_BIN"
 
 make_fake_codex under_floor 40
 expect_status "body one byte under --min-bytes -> FAILED (insufficient_output)" 1 \
   "FAILED (insufficient_output)" \
-  ruby "$SCRIPT" --mode work --out "$TMP/under-floor.md" --min-bytes 40 --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/under-floor.md" --min-bytes 40 --codex-bin "$FAKE_BIN"
 
 make_fake_codex at_floor 41
 expect_status "body one byte over --min-bytes -> accepted" 0 "summon_reviewer: OK - work review, 41 bytes" \
-  ruby "$SCRIPT" --mode work --out "$TMP/over-floor.md" --min-bytes 40 --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/over-floor.md" --min-bytes 40 --codex-bin "$FAKE_BIN"
 
 # The floor is an opinion, not a law: a caller that wants the old behavior can
 # turn it off, and a short body then classifies exactly as it used to.
 make_fake_codex banner
 expect_status "--min-bytes 0 -> the floor is disabled" 0 "summon_reviewer: OK - work review" \
-  ruby "$SCRIPT" --mode work --out "$TMP/nofloor.md" --min-bytes 0 --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/nofloor.md" --min-bytes 0 --codex-bin "$FAKE_BIN"
 
 echo "Failure ladder, continued:"
 
 make_fake_codex ok
 OUT="$TMP/self.md"
 expect_status "--ac codex -> FAILED (self_review)" 1 "FAILED (self_review)" \
-  ruby "$SCRIPT" --mode work --out "$OUT" --ac codex --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --ac codex --codex-bin "$FAKE_BIN"
 [ ! -e "$FAKE_LOG" ]
 report "--ac codex -> the CLI is never spawned at all" $?
 expect_status "--ac CoDeX -> FAILED (self_review), case-insensitive" 1 "FAILED (self_review)" \
-  ruby "$SCRIPT" --mode work --out "$OUT" --ac CoDeX --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --ac CoDeX --codex-bin "$FAKE_BIN"
 
 # ---------------------------------------------------------------------------
 echo "Encoding safety (ASCII-only stdout; body bytes untouched):"
@@ -383,7 +400,7 @@ make_fake_codex ok
 OUT="$TMP/unicode.md"
 write_unicode_body "$FAKE_BODY"
 expect_status "unicode review body -> exit 0, OK status line" 0 "summon_reviewer: OK - work review" \
-  ruby "$SCRIPT" --mode work --out "$OUT" --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --codex-bin "$FAKE_BIN"
 pure_ascii "$STDOUT_FILE"
 report "unicode review body -> script stdout is pure ASCII" $?
 cmp -s "$OUT" "$FAKE_BODY"
@@ -397,7 +414,7 @@ PLAN="$TMP/plan-unicode.md"
 OUT="$TMP/plan-unicode-body.md"
 printf '## Plan \xe2\x80\x94 stage one\n1. Ship the \xe2\x80\x9creaper\xe2\x80\x9d. \xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\n' > "$PLAN"
 expect_status "unicode plan text -> exit 0, OK status line" 0 "summon_reviewer: OK - plan review" \
-  ruby "$SCRIPT" --mode plan --input "$PLAN" --out "$OUT" --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode plan --input "$PLAN" --out "$OUT" --codex-bin "$FAKE_BIN"
 grep -qF "$(printf 'Ship the \xe2\x80\x9creaper\xe2\x80\x9d')" "$OUT"
 report "unicode plan text -> reached the CLI stdin byte-intact" $?
 pure_ascii "$STDOUT_FILE"
@@ -406,7 +423,7 @@ report "unicode plan text -> script stdout is still pure ASCII" $?
 make_fake_codex unicode_fail
 printf 'fatal \xe2\x80\x94 sandbox denied \xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\n' > "$FAKE_BODY"
 expect_status "unicode on the failure path -> FAILED (exit_nonzero)" 1 "FAILED (exit_nonzero)" \
-  ruby "$SCRIPT" --mode work --out "$TMP/unicode-fail.md" --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/unicode-fail.md" --codex-bin "$FAKE_BIN"
 pure_ascii "$STDOUT_FILE"
 report "unicode CLI stderr -> detail lines stay pure ASCII" $?
 
@@ -414,7 +431,7 @@ make_fake_codex ok
 OUT="$TMP/clocale.md"
 write_unicode_body "$FAKE_BODY"
 expect_status "LANG=C LC_ALL=C run -> classification unchanged" 0 "summon_reviewer: OK - work review" \
-  env LANG=C LC_ALL=C ruby "$SCRIPT" --mode work --out "$OUT" --codex-bin "$FAKE_BIN"
+  env LANG=C LC_ALL=C "$TSX" "$SCRIPT" --mode work --out "$OUT" --codex-bin "$FAKE_BIN"
 cmp -s "$OUT" "$FAKE_BODY"
 report "LANG=C LC_ALL=C run -> body bytes still untouched" $?
 
@@ -427,18 +444,18 @@ UNI_DIR="$TMP/$(printf 'out\xe2\x80\x94dir')"
 mkdir -p "$UNI_DIR"
 make_fake_codex ok
 expect_status "non-ASCII --out on the OK path -> exit 0" 0 "summon_reviewer: OK - work review" \
-  ruby "$SCRIPT" --mode work --out "$UNI_DIR/review.md" --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$UNI_DIR/review.md" --codex-bin "$FAKE_BIN"
 pure_ascii_both
 report "non-ASCII --out -> stdout AND stderr stay pure ASCII" $?
 
 expect_status "non-ASCII --out in a missing directory -> write error" 1 "cannot write output" \
-  ruby "$SCRIPT" --mode work --out "$TMP/$(printf 'nope\xe2\x80\x94dir')/review.md" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/$(printf 'nope\xe2\x80\x94dir')/review.md" \
     --codex-bin "$FAKE_BIN"
 pure_ascii_both
 report "non-ASCII --out path error -> stdout AND stderr stay pure ASCII" $?
 
 expect_status "non-ASCII --input that does not exist -> usage error" 1 "usage error" \
-  ruby "$SCRIPT" --mode plan --input "$TMP/$(printf 'plan\xe2\x80\x94missing.md')" \
+  "$TSX" "$SCRIPT" --mode plan --input "$TMP/$(printf 'plan\xe2\x80\x94missing.md')" \
     --out "$TMP/uni-input.md" --codex-bin "$FAKE_BIN"
 pure_ascii_both
 report "non-ASCII --input error -> stdout AND stderr stay pure ASCII" $?
@@ -448,15 +465,15 @@ echo "Usage and output-path errors (readable, never a backtrace):"
 
 make_fake_codex ok
 expect_status "missing --mode -> usage error" 1 "usage error" \
-  ruby "$SCRIPT" --out "$TMP/nomode.md" --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --out "$TMP/nomode.md" --codex-bin "$FAKE_BIN"
 expect_status "--mode bogus -> usage error" 1 "usage error" \
-  ruby "$SCRIPT" --mode bogus --out "$TMP/bogus.md" --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode bogus --out "$TMP/bogus.md" --codex-bin "$FAKE_BIN"
 expect_status "missing --out -> usage error" 1 "usage error" \
-  ruby "$SCRIPT" --mode work --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --codex-bin "$FAKE_BIN"
 expect_status "plan mode without --input -> usage error" 1 "usage error" \
-  ruby "$SCRIPT" --mode plan --out "$TMP/noinput.md" --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode plan --out "$TMP/noinput.md" --codex-bin "$FAKE_BIN"
 expect_status "unknown flag -> usage error" 1 "usage error" \
-  ruby "$SCRIPT" --mode work --out "$TMP/x.md" --nonsense
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/x.md" --nonsense
 
 # An unwritable --out must be caught up front with a distinct message. root
 # ignores chmod 000, so under root use a parent that is a regular file — an
@@ -469,9 +486,9 @@ else
   BAD_OUT="$TMP/locked/review.md"
 fi
 expect_status "unwritable --out -> distinct write error" 1 "cannot write output" \
-  ruby "$SCRIPT" --mode work --out "$BAD_OUT" --codex-bin "$FAKE_BIN"
-! grep -qE '\.rb:[0-9]+:in' "$STDERR_FILE"
-report "unwritable --out -> no Ruby backtrace" $?
+  "$TSX" "$SCRIPT" --mode work --out "$BAD_OUT" --codex-bin "$FAKE_BIN"
+! grep -qE '\.ts:[0-9]+' "$STDERR_FILE" && ! grep -qE '^[[:space:]]+at ' "$STDERR_FILE"
+report "unwritable --out -> no interpreter backtrace" $?
 chmod 755 "$TMP/locked" 2>/dev/null
 
 # ---------------------------------------------------------------------------
@@ -483,7 +500,7 @@ echo "The documented invocation (PROJECT.md is the only source the skills read):
 # becomes the fallback path forever. These cases lift the literal lines out of
 # PROJECT.md, substitute the placeholders, and run them.
 doc_invocation() {  # doc_invocation <mode>  -> echoes the documented arg list
-  grep -F -- "ruby scripts/summon_reviewer.rb --mode $1 " "$PROJECT_MD" | head -1 |
+  grep -F -- "npx tsx scripts/summon-reviewer.ts --mode $1 " "$PROJECT_MD" | head -1 |
     sed -e 's/^[[:space:]]*//' -e 's/`//g'
 }
 
@@ -502,11 +519,11 @@ else
   report "PROJECT.md documents a plan-mode invocation" $?
   # shellcheck disable=SC2086
   PLAN_ARGS="$(printf '%s' "$PLAN_CMD" |
-    sed -e "s#^ruby scripts/summon_reviewer.rb##" \
+    sed -e "s#^npx tsx scripts/summon-reviewer.ts##" \
         -e "s#PLAN_FILE#$DOC_PLAN#" -e "s#OUT_FILE#$DOC_OUT#" -e "s#AC_NAME#claude#")"
   expect_status "PROJECT.md's plan-mode command runs (exit 0, not a usage error)" 0 \
     "summon_reviewer: OK - plan review" \
-    ruby "$SCRIPT" $PLAN_ARGS --codex-bin "$FAKE_BIN"
+    "$TSX" "$SCRIPT" $PLAN_ARGS --codex-bin "$FAKE_BIN"
 
   make_fake_codex ok
   DOC_OUT="$TMP/doc-review-work.md"
@@ -515,11 +532,11 @@ else
   report "PROJECT.md documents a work-mode invocation" $?
   # shellcheck disable=SC2086
   WORK_ARGS="$(printf '%s' "$WORK_CMD" |
-    sed -e "s#^ruby scripts/summon_reviewer.rb##" \
+    sed -e "s#^npx tsx scripts/summon-reviewer.ts##" \
         -e "s#OUT_FILE#$DOC_OUT#" -e "s#AC_NAME#claude#" -e "s#BRANCH#main#")"
   expect_status "PROJECT.md's work-mode command runs (exit 0, not a usage error)" 0 \
     "summon_reviewer: OK - work review" \
-    ruby "$SCRIPT" $WORK_ARGS --codex-bin "$FAKE_BIN"
+    "$TSX" "$SCRIPT" $WORK_ARGS --codex-bin "$FAKE_BIN"
 
   # The `--ac` guard only ever fires when the AC is Codex, which is exactly the
   # case an undocumented flag would leave unreachable: default `--ac claude`

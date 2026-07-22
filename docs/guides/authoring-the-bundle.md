@@ -6,11 +6,11 @@ These are lessons captured as they were learned; extend as the bundle grows.
 
 ## Parity checks: gate on the tree, assert a floor, then check every present member
 
-New structural checks in [`scripts/parity_check.rb`](../../scripts/parity_check.rb) follow one shape,
-established by `check_rules`, `check_guardrails`, and `check_skills`:
+New structural checks in [`scripts/parity-check.ts`](../../scripts/parity-check.ts) follow one shape,
+established by `checkRules`, `checkGuardrails`, and `checkSkills`:
 
-1. **Gate on the surface existing.** `return unless Dir.exist?(path(SURFACE_DIR))` (or the presence of a
-   signalling file, e.g. the guardrail sidecar). A bundle that does not ship the surface must **no-op**,
+1. **Gate on the surface existing.** `if (!this.dirExists(SURFACE_DIR)) return;` (or gate on the presence
+   of a signalling file, e.g. the guardrail sidecar). A bundle that does not ship the surface must **no-op**,
    so minimal / partial fixtures and downstream bundles are never reddened by a check for something they
    deliberately omit.
 2. **Assert a `REQUIRED_*` floor.** A small hardcoded list (e.g. `REQUIRED_RULES`, `REQUIRED_SKILLS`)
@@ -19,18 +19,20 @@ established by `check_rules`, `check_guardrails`, and `check_skills`:
    hardcoded per-member list. Because the shape is enforced on whatever is present, members a later issue
    adds are **covered by construction**, with no edit to the check.
 
-Keep the checker **stdlib-only** (no gems, no bundler — [ADR 0008](../adr/0008-structural-parity-check-not-model-in-the-loop.md)),
-assert **section/heading presence, not content**, so a host freely extends a file's body without
-reddening CI, and keep all `puts`/`warn` output **ASCII** (`rules/scripting.md`). Every new check needs a
-matching self-test in [`test/parity_check_test.rb`](../../test/parity_check_test.rb): one happy path plus
-one case per failure mode, each asserting **both** the non-zero exit **and** the specific error string, so
-the check can never become a silent false green.
+Keep the checker lean — Node built-ins plus the shared `scripts/protected-branches.ts` module, run via
+`tsx` ([ADR 0039](../adr/0039-repo-tooling-unifies-on-typescript-remove-ruby.md); the structural-not-model
+stance of [ADR 0008](../adr/0008-structural-parity-check-not-model-in-the-loop.md) is unchanged) — assert
+**section/heading presence, not content**, so a host freely extends a file's body without reddening CI,
+and keep all stdout/stderr output **ASCII** (`rules/scripting.md`). Every new check needs a matching
+self-test — a fixture bundle driven through `--root` (one happy path plus one case per failure mode, each
+asserting **both** the non-zero exit **and** the specific error string) — so the check can never become a
+silent false green.
 
 ### Content checks: match forbidden tokens on word boundaries, not raw substrings
 
 A check that scans a file's *content* for forbidden tokens — as the skills content-neutrality check
 does (every lifecycle body must reference `PROJECT.md`, and no host-specific proper noun may appear in
-any body) — must **not** use a naive `String#include?`. A pure-alphabetic token like `rspec` is a
+any body) — must **not** use a naive `String.includes`. A pure-alphabetic token like `rspec` is a
 substring of the innocent word `underspecified`, so raw-substring matching is a false positive waiting
 to happen. Split the matcher by token shape:
 
