@@ -28,7 +28,7 @@ const baseConfig: Config = {
 const message = {
   to: "hc@example.com",
   from: "bryce@example.com",
-  subject: "MLB Daily Tracker: Sun, July 19, 2026",
+  subject: "MLB Daily Tracker - Sun, July 19, 2026",
   html: "<p>2-4, HR</p>",
   text: "2-4, HR\n",
 };
@@ -81,7 +81,7 @@ describe("PostmarkMailer", () => {
     expect(body).toMatchObject({
       From: "bryce@example.com",
       To: "hc@example.com",
-      Subject: "MLB Daily Tracker: Sun, July 19, 2026",
+      Subject: "MLB Daily Tracker - Sun, July 19, 2026",
       HtmlBody: "<p>2-4, HR</p>",
       TextBody: "2-4, HR\n",
     });
@@ -317,7 +317,7 @@ describe("SmtpMailer", () => {
     expect(sent[0]).toMatchObject({
       from: "bryce@example.com",
       to: "hc@example.com",
-      subject: "MLB Daily Tracker: Sun, July 19, 2026",
+      subject: "MLB Daily Tracker - Sun, July 19, 2026",
       html: "<p>2-4, HR</p>",
       text: "2-4, HR\n",
     });
@@ -358,7 +358,7 @@ describe("ConsoleMailer", () => {
     const mailer = new ConsoleMailer((line) => lines.push(line));
     await mailer.send(message);
     expect(mailer.sent).toHaveLength(1);
-    expect(lines[0]).toBe("mail to=hc@example.com from=bryce@example.com subject=MLB Daily Tracker: Sun, July 19, 2026");
+    expect(lines[0]).toBe("mail to=hc@example.com from=bryce@example.com subject=MLB Daily Tracker - Sun, July 19, 2026");
     expect(lines[1]).toContain("2-4, HR");
   });
 

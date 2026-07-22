@@ -21,7 +21,7 @@ import { hostDate } from "./season.js";
  * literal-typed enum — the Zod schemas behind the REST and MCP surfaces — get
  * one without a cast.
  */
-export const WINDOW_SPECS = ["1d", "7d", "14d", "21d", "ytd"] as const;
+export const WINDOW_SPECS = ["1d", "7d", "14d", "21d", "28d", "35d", "60d", "ytd"] as const;
 
 export type WindowSpec = (typeof WINDOW_SPECS)[number];
 
@@ -31,7 +31,16 @@ const SPAN_DAYS: Readonly<Record<Exclude<WindowSpec, "ytd">, number>> = {
   "7d": 7,
   "14d": 14,
   "21d": 21,
+  "28d": 28,
+  "35d": 35,
+  "60d": 60,
 };
+
+/** True for windows >= 21 days (21d/28d/35d/60d/ytd), by spec identity — ytd is
+ * long even when its from..to span is under 21 real days early in a season. */
+export function isLongWindow(spec: WindowSpec): boolean {
+  return spec === "ytd" || SPAN_DAYS[spec] >= 21;
+}
 
 export interface ResolvedWindow {
   spec: WindowSpec;

@@ -50,6 +50,12 @@ describe("digest CLI", () => {
       expect(parseWindow(["--force", "--window", "21d"])).toBe("21d");
     });
 
+    it("accepts the new long windows", () => {
+      expect(parseWindow(["--window", "28d"])).toBe("28d");
+      expect(parseWindow(["--window=35d"])).toBe("35d");
+      expect(parseWindow(["--window", "60d"])).toBe("60d");
+    });
+
     it("returns null for an unsupported window so the CLI fails closed", () => {
       // Null is distinct from the 1d default: "you asked for something I do not
       // support" must not silently become "here is the daily report".
@@ -117,7 +123,7 @@ describe("digest CLI", () => {
       expect(await runDigestCli(["--window", "7d"], deps())).toBe(0);
       expect(output[0]).toContain("statLines=2");
       expect(output[0]).toContain("window=Last 7 Days (Jul 12-18)");
-      expect(mailer.sent[0]?.subject).toBe("MLB Daily Tracker: Last 7 Days (Jul 12-18)");
+      expect(mailer.sent[0]?.subject).toBe("MLB Daily Tracker - Last 7 Days (Jul 12-18)");
 
       expect(await runDigestCli(["--force"], deps())).toBe(0);
       expect(output[1]).toContain("statLines=1");
@@ -130,7 +136,7 @@ describe("digest CLI", () => {
       // Nothing was claimed either: it failed closed before touching anything.
       expect(output).toEqual([]);
       expect(errors).toEqual([
-        "error: unsupported --window value; supported: 1d, 7d, 14d, 21d, ytd",
+        "error: unsupported --window value; supported: 1d, 7d, 14d, 21d, 28d, 35d, 60d, ytd",
       ]);
     });
 

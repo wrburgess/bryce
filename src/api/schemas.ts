@@ -92,7 +92,7 @@ const WindowSchema = z
   .enum(WINDOW_SPECS)
   .default("1d")
   .describe(
-    "Date window the report covers: 1d (default), 7d, 14d, 21d, or ytd; every window ends on the last completed host date.",
+    "Date window the report covers: 1d (default), 7d, 14d, 21d, 28d, 35d, 60d, or ytd; every window ends on the last completed host date.",
   );
 
 /**

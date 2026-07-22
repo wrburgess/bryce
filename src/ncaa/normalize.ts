@@ -44,6 +44,11 @@ const BATTING_HEADER_MAP: Record<string, string> = {
 
 const PITCHING_HEADER_MAP: Record<string, string> = {
   IP: "inningsPitched",
+  // The page carries a per-game GS (games started) column. Mapping it lets the
+  // digest classify relief decisions (RW/RL) for NCAA pitchers: a decision is
+  // relief only when gamesStarted is present and 0, so without this mapping an
+  // NCAA reliever's win would be silently dropped rather than counted.
+  GS: "gamesStarted",
   H: "hits",
   R: "runs",
   ER: "earnedRuns",

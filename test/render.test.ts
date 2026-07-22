@@ -29,6 +29,8 @@ function row(
     gameNumber: null,
     agg: aggregate(statType, splits),
     qualityStarts: 0,
+    reliefWins: 0,
+    reliefLosses: 0,
     ...overrides,
   };
 }
@@ -63,6 +65,18 @@ const wheeler7d = row(
     { inningsPitched: "6.2", earnedRuns: 2, strikeOuts: 8, baseOnBalls: 2, hits: 5 },
   ],
   { qualityStarts: 2 },
+);
+
+// A reliever, so the S/BS/HLD counters and the RW/RL decisions all read
+// non-trivially: S 2, BS 1, HLD 3, RW 1, RL 0.
+const reliever7d = row(
+  "Relief Guy",
+  "pitching",
+  [
+    { inningsPitched: "1.0", earnedRuns: 0, saves: 2, holds: 3 },
+    { inningsPitched: "1.0", earnedRuns: 1, blownSaves: 1 },
+  ],
+  { reliefWins: 1, reliefLosses: 0 },
 );
 
 const idleRow = row("Idle Player", "batting", []);
@@ -122,11 +136,33 @@ describe("renderDigest — tables", () => {
     expect(mail.text).not.toContain(".375");
   });
 
-  it("renders quality starts as a count", () => {
+  it("renders quality starts as a count, mid-row now that RW/RL end the line", () => {
+    // The pitching row ends "… QS S BS HLD RW RL", so the quality-start count is
+    // no longer the last cell — RL is. Wheeler has QS 2 but no relief decisions.
     const mail = renderDigest(assemblyWith({ spec: "7d", pitchers: [wheeler7d] }));
-    expect(mail.text).toMatch(/\s2\s*$/m);
-    const dataLine = mail.text.split("\n").find((l) => l.includes("Z Wheeler"));
-    expect(dataLine?.trimEnd().endsWith("2")).toBe(true);
+    const lines = mail.text.split("\n");
+    const header = lines.find((l) => l.startsWith("Player"))!;
+    expect(header.trimEnd()).toMatch(/QS\s+S\s+BS\s+HLD\s+RW\s+RL$/);
+    const dataLine = lines.find((l) => l.includes("Z Wheeler"))!;
+    expect(dataLine.trimEnd().endsWith("0")).toBe(true); // RL, not the QS count
+    expect(dataLine.trim().split(/\s+/)).toEqual([
+      "Z", "Wheeler", "MLB", "2", "13.0", "4", "16", "11.08", "3", "9", "0", "2.77", "0.92",
+      "2", "0", "0", "0", "0", "0",
+    ]);
+  });
+
+  it("renders BS, RW and RL cells from a built row, in the new tail order", () => {
+    const mail = renderDigest(assemblyWith({ spec: "7d", pitchers: [reliever7d] }));
+    const header = mail.text.split("\n").find((l) => l.startsWith("Player"))!;
+    expect(header.trimEnd()).toMatch(/WHIP\s+QS\s+S\s+BS\s+HLD\s+RW\s+RL$/);
+    const cells = (mail.text.split("\n").find((l) => l.includes("R Guy")) ?? "").trim().split(/\s+/);
+    // Player Lvl GP IP ER K K/9 BB HA HRA ERA WHIP QS S BS HLD RW RL
+    expect(cells).toEqual([
+      "R", "Guy", "MLB", "2", "2.0", "1", "0", "0.00", "0", "0", "0", "4.50", "0.00",
+      "0", "2", "1", "3", "1", "0",
+    ]);
+    // The same three counters reach the HTML cells too.
+    expect(mail.html).toContain("R Guy");
   });
 
   it("sums innings through outs and renders baseball notation", () => {
@@ -145,19 +181,22 @@ describe("renderDigest — tables", () => {
     expect(dataLine).toContain("11.08");
   });
 
-  it("puts the window label in the subject for a range window", () => {
+  it("puts the window label in the dash subject, and a bare heading, for a range window", () => {
     const mail = renderDigest(assemblyWith({ spec: "7d" }));
-    expect(mail.subject).toBe("MLB Daily Tracker: Last 7 Days (Jul 13-19)");
-    expect(mail.text).toContain("Bryce - Last 7 Days (Jul 13-19)");
+    // Subject now uses " - ", not ": ".
+    expect(mail.subject).toBe("MLB Daily Tracker - Last 7 Days (Jul 13-19)");
+    // The body heading is the bare title — no "Bryce - " prefix.
+    expect(mail.text.split("\n")[0]).toBe("Last 7 Days (Jul 13-19)");
+    expect(mail.text).not.toContain("Bryce - ");
   });
 
-  it("keeps the established full-date subject for a 1d window", () => {
-    // The daily artifact's subject format is unchanged. The DATE is the last
-    // completed day (07-19 for a run on 07-20), because the title names the
-    // content, not the run.
+  it("keeps the full-date title for a 1d window, in the new dash subject and bare heading", () => {
+    // The DATE is the last completed day (07-19 for a run on 07-20), because the
+    // title names the content, not the run.
     const mail = renderDigest(assemblyWith({ spec: "1d" }));
-    expect(mail.subject).toBe("MLB Daily Tracker: Sun, July 19, 2026");
-    expect(mail.text).toContain("Bryce - Sun, July 19, 2026");
+    expect(mail.subject).toBe("MLB Daily Tracker - Sun, July 19, 2026");
+    expect(mail.text.split("\n")[0]).toBe("Sun, July 19, 2026");
+    expect(mail.text).not.toContain("Bryce - ");
   });
 
   it("emits an HTML table, not a list", () => {
@@ -225,6 +264,80 @@ describe("renderDigest — tables", () => {
     const mail = renderDigest(assemblyWith({ spec: "7d" }));
     expect(mail.text).toContain("No games in this window.");
     expect(mail.html).toContain("No games in this window.");
+  });
+
+  it("adds BB% and K% right after PA on a long (>=21d) window, absent on short ones", () => {
+    const long = renderDigest(assemblyWith({ spec: "21d", batters: [harper7d] }));
+    const header = long.text.split("\n").find((l) => l.startsWith("Player"))!;
+    expect(header).toMatch(/PA\s+BB%\s+K%\s+H\b/);
+    // Derived from SUMMED counters: 1 BB / 9 PA = 11.1%, 2 K / 9 PA = 22.2%.
+    const dataLine = long.text.split("\n").find((l) => l.includes("B Harper"))!;
+    expect(dataLine).toContain("11.1");
+    expect(dataLine).toContain("22.2");
+    expect(long.html).toContain("BB%");
+    expect(long.html).toContain("K%");
+
+    for (const spec of ["1d", "7d", "14d"] as const) {
+      const short = renderDigest(assemblyWith({ spec, batters: [harper7d] }));
+      expect(short.text, spec).not.toContain("BB%");
+      expect(short.text, spec).not.toContain("K%");
+    }
+  });
+
+  it("draws the MLB / Other-Levels rule after the LAST MLB row when a table mixes levels", () => {
+    const mlbA = row("Bryce Harper", "batting", [{ atBats: 4, hits: 2 }]);
+    const mlbB = row("Kyle Schwarber", "batting", [{ atBats: 4, hits: 1 }]);
+    const aaa = row("Farm Hand", "batting", [{ atBats: 3, hits: 1 }], { lvl: "AAA", lvlRank: 1 });
+    const mail = renderDigest(assemblyWith({ spec: "7d", batters: [mlbA, mlbB, aaa] }));
+
+    const lines = mail.text.split("\n");
+    const ruleIdx = lines.findIndex((l) => /^-{3,}$/.test(l));
+    const harperIdx = lines.findIndex((l) => l.includes("B Harper"));
+    const schwarberIdx = lines.findIndex((l) => l.includes("K Schwarber"));
+    const farmIdx = lines.findIndex((l) => l.includes("F Hand"));
+    expect(harperIdx).toBeLessThan(ruleIdx);
+    expect(schwarberIdx).toBeLessThan(ruleIdx); // after BOTH MLB rows
+    expect(ruleIdx).toBeLessThan(farmIdx); // before the non-MLB row
+    // The HTML draws the same rule as a full-width colspan <hr> row.
+    expect(mail.html).toContain("<hr");
+    expect(mail.html).toContain("colspan");
+  });
+
+  it("draws no divider when every row is MLB", () => {
+    const mail = renderDigest(
+      assemblyWith({
+        spec: "7d",
+        batters: [row("Bryce Harper", "batting", [{ atBats: 4 }]), row("Kyle Schwarber", "batting", [{ atBats: 3 }])],
+      }),
+    );
+    expect(mail.text.split("\n").some((l) => /^-{3,}$/.test(l))).toBe(false);
+    expect(mail.html).not.toContain("<hr");
+  });
+
+  it("draws no divider when every row is below MLB", () => {
+    const aaa = row("Farm A", "batting", [{ atBats: 2 }], { lvl: "AAA", lvlRank: 1 });
+    const aa = row("Farm B", "batting", [{ atBats: 2 }], { lvl: "AA", lvlRank: 2 });
+    const mail = renderDigest(assemblyWith({ spec: "7d", batters: [aaa, aa] }));
+    expect(mail.text.split("\n").some((l) => /^-{3,}$/.test(l))).toBe(false);
+    expect(mail.html).not.toContain("<hr");
+  });
+
+  it("decides the divider independently for each table", () => {
+    // Batters mix MLB + AAA (one rule); pitchers are all MLB (no rule).
+    const mlbBatter = row("Bryce Harper", "batting", [{ atBats: 4, hits: 2 }]);
+    const aaaBatter = row("Farm Hand", "batting", [{ atBats: 3, hits: 1 }], { lvl: "AAA", lvlRank: 1 });
+    const mlbPitcher = row("Ace One", "pitching", [{ inningsPitched: "6.0", earnedRuns: 1 }]);
+    const mlbPitcher2 = row("Ace Two", "pitching", [{ inningsPitched: "5.0", earnedRuns: 2 }]);
+    const mail = renderDigest(
+      assemblyWith({
+        spec: "7d",
+        batters: [mlbBatter, aaaBatter],
+        pitchers: [mlbPitcher, mlbPitcher2],
+      }),
+    );
+    const ruleCount = mail.text.split("\n").filter((l) => /^-{3,}$/.test(l)).length;
+    expect(ruleCount).toBe(1); // only the batters table draws one
+    expect(mail.html.match(/<hr/g)?.length).toBe(1);
   });
 });
 
