@@ -512,8 +512,15 @@ if (isMain(import.meta.url)) {
   main()
     .then((code) => process.exit(code))
     .catch((err: unknown) => {
-      // No secret can reach here without env context, but keep it a clean line.
-      process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
+      // Route even the top-level failure through the same secret redactor as
+      // runSmoke, so no configured secret value can ever reach stderr.
+      const sanitize = makeSanitizer([
+        clean(process.env.API_TOKEN),
+        clean(process.env.CF_ACCESS_CLIENT_ID),
+        clean(process.env.CF_ACCESS_CLIENT_SECRET),
+      ]);
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`${sanitize(`error: ${message}`)}\n`);
       process.exit(1);
     });
 }
