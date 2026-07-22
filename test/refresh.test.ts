@@ -13,7 +13,6 @@ import {
   fakeClock,
   fakeNcaaClient,
   insertCalendars2026,
-  insertDelivery,
   insertPlayer,
   makeGameLogBody,
   makeMlbTeam,
@@ -93,7 +92,6 @@ describe("runRefresh", () => {
     expect(first?.sportId).toBe(11);
     expect(first?.opponentName).toBe("Charlotte Knights");
     expect((first?.stats as Record<string, unknown>).hits).toBe(1);
-    expect(first?.digestDeliveryId).toBeNull();
 
     // Season calendar cached for the swept sports that are published.
     const cals = await opened.db.select().from(seasonCalendar);
@@ -184,7 +182,7 @@ describe("runRefresh", () => {
     expect(after.map((r) => r.createdAt)).toEqual(before.map((r) => r.createdAt));
   });
 
-  it("a correction updates the row quietly: stats change, digest_delivery_id preserved", async () => {
+  it("a correction updates the row quietly: stats change, created_at preserved", async () => {
     const player = await insertPlayer(opened.db, { externalId: 691185 });
     const original = makeSplit({
       game: { gamePk: 900001, gameNumber: 1 },
@@ -193,12 +191,13 @@ describe("runRefresh", () => {
     api.options.gameLogs = { "11:hitting": makeGameLogBody("hitting", [original]) };
     await runRefresh(deps());
 
-    // The line gets reported by a digest.
-    const delivery = await insertDelivery(opened.db);
-    await opened.db
-      .update(statLines)
-      .set({ digestDeliveryId: delivery.id })
+    // Capture when the row was first stored: a correction must not make it
+    // look newly created.
+    const [stored] = await opened.db
+      .select()
+      .from(statLines)
       .where(eq(statLines.playerId, player.id));
+    const originalCreatedAt = stored?.createdAt;
 
     // Official scorer changes a hit to two.
     const corrected = makeSplit({
@@ -214,7 +213,7 @@ describe("runRefresh", () => {
       .where(eq(statLines.playerId, player.id));
     expect(rows).toHaveLength(1);
     expect((rows[0]?.stats as Record<string, unknown>).hits).toBe(2);
-    expect(rows[0]?.digestDeliveryId).toBe(delivery.id);
+    expect(rows[0]?.createdAt).toBe(originalCreatedAt);
   });
 
   it("a call-up CHANGES the Player row — never creates a second Player", async () => {

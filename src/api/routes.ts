@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { ZodError } from "zod";
 import { players } from "../db/schema.js";
-import { assembleDigest, previewDeliveryId } from "../digest/assemble.js";
+import { assembleDigest } from "../digest/assemble.js";
 import { renderDigest } from "../digest/render.js";
 import { runDigest } from "../jobs/digest.js";
 import { runRefresh, runRefreshForPlayer } from "../jobs/refresh.js";
@@ -108,23 +108,19 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
   });
 
   api.get("/digest/preview", async (c) => {
+    // An unsupported `window` is a ZodError -> 400 via onError. `force` is
+    // still accepted and still means nothing here: a preview neither claims nor
+    // sends, and window selection makes its CONTENT identical either way.
     const query = DigestQueryInputSchema.parse(c.req.query());
-    const assembly = await assembleDigest(deps.db, {
-      ...deps,
-      includeDeliveryId: previewDeliveryId(deps.db, deps, query.force === "true"),
-    });
-    const mail = renderDigest({
-      date: assembly.date,
-      lines: assembly.lines,
-      noNewStats: assembly.noNewStats,
-    });
+    const assembly = await assembleDigest(deps.db, { ...deps, spec: query.window });
     return c.json({
-      date: assembly.date,
-      statLineCount: assembly.reportedIds.length,
+      window: assembly.window,
+      statLineCount: assembly.statLineCount,
       playerCount: assembly.playerCount,
-      lines: assembly.lines,
-      noNewStats: assembly.noNewStats,
-      mail,
+      batters: assembly.batters,
+      pitchers: assembly.pitchers,
+      unknownFields: assembly.unknownFields,
+      mail: renderDigest(assembly),
     });
   });
 
@@ -141,6 +137,7 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
       tz: deps.tz,
       to: deps.digestTo,
       from: deps.digestFrom,
+      spec: body.window,
       force: body.force,
     });
     return c.json(result, result.action === "failed" ? 502 : 200);

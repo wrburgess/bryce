@@ -1,8 +1,10 @@
 import { and, desc, eq } from "drizzle-orm";
 import { digestDeliveries } from "../db/schema.js";
+import type { DigestAssembly } from "../digest/assemble.js";
 import { assembleDigest } from "../digest/assemble.js";
 import { renderDigest, renderHeartbeat } from "../digest/render.js";
 import { hostDate, sleepWindow } from "../domain/season.js";
+import type { WindowSpec } from "../domain/window.js";
 import type { DeliveryKind } from "../db/schema.js";
 import type { LookupResult, MailReceipt, Mailer } from "../mailer/types.js";
 import type { Db } from "../db/client.js";
@@ -10,6 +12,8 @@ import type { ClaimRefusal, ClaimResult, Tx } from "./delivery-claim.js";
 import {
   claimDelivery,
   deliveryKey,
+  findOrphanedDigestDate,
+  reportKey,
   settleFailed,
   settleReconciled,
   settleSent,
@@ -23,6 +27,8 @@ export interface DigestDeps {
   tz: string;
   to: string;
   from: string;
+  /** Which date window this run reports. */
+  spec: WindowSpec;
   /**
    * Operator override of the once-a-day / once-a-week bookkeeping (testing).
    * When force is what let the run proceed, the run is a REPLAY: it sends and
@@ -30,6 +36,12 @@ export interface DigestDeps {
    * in-flight claim, and never overrides the Offseason Sleep decision.
    */
   force?: boolean;
+  /**
+   * Operator-visible channel for things the run noticed but did not act on.
+   * Defaults to stderr; injected in tests so the warning can be asserted rather
+   * than merely printed.
+   */
+  warn?: (message: string) => void;
 }
 
 export interface DigestResult {
@@ -38,6 +50,13 @@ export interface DigestResult {
   reason: string | null;
   statLineCount: number;
   playerCount: number;
+  /**
+   * The resolved window label, or null when this run never assembled one — a
+   * heartbeat (which covers no window at all) or a digest that was refused
+   * before assembly. Reporting a label for a run that composed nothing would
+   * describe content that was never selected.
+   */
+  window: string | null;
 }
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
@@ -58,36 +77,104 @@ const RECONCILED = "reconciled-already-accepted";
 const FORCED = "forced";
 
 /**
- * The Digest (ADR 0030): report every Stat Line not yet reported by a previous
- * Digest — novelty-driven, no date windows — and send daily even when empty.
- * During Offseason Sleep (ADR 0031) a weekly heartbeat replaces it.
+ * The Digest: report every Stat Line in a DATE WINDOW, and send daily even when
+ * empty. During Offseason Sleep (ADR 0031) a weekly heartbeat replaces it.
+ *
+ * Selection is by window, not by novelty (superseding ADR 0030): the run
+ * consumes nothing and stamps nothing, so re-running a window is always safe
+ * and always reports the same content.
  *
  * Delivery runs claim -> assemble -> send -> settle (ADR 0034): the slot is
  * reserved durably BEFORE the provider is called, so two concurrent invocations
  * cannot both send, and a run that dies after acceptance leaves a `sending` row
- * whose lease heals it instead of a silently missing digest.
+ * whose lease heals it instead of a silently missing digest. The delivery slot
+ * is still keyed by the RUN's host date; the content covers the window ending
+ * the day before.
  *
  * `deps.force` is a testing affordance over the de-duplication bookkeeping. A
  * run that only proceeded BECAUSE of it is a replay: it sends and skips BOTH
  * settles, so no production delivery state can be degraded by a test send.
  */
-export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
+export async function runDigest(input: DigestDeps): Promise<DigestResult> {
+  // ONE clock read for the whole run. Every later `now()` returns this instant.
+  //
+  // The run reads the clock for sleep, the slot date, the claim, assembly, the
+  // In Season filter and settlement. Read live, those can straddle midnight: a
+  // run starting at 23:59:59.9 claims yesterday's slot and then assembles
+  // today's window, so the same content goes out under two different slots on
+  // two consecutive days. Freezing the anchor makes slot identity and content
+  // identity provably the same decision.
+  //
+  // Settlement timestamps are the one thing that may legitimately want the real
+  // completion time; they are recorded from this anchor deliberately, because a
+  // delivery's row should describe the run, not the instant the write landed.
+  const runAt = input.now();
+  const deps: DigestDeps = { ...input, now: () => runAt };
+  const warn = input.warn ?? ((m: string) => process.stderr.write(`${m}\n`));
   const { db, now, tz } = deps;
   const activePlayers = await loadActivePlayers(db);
   const calendars = await loadCalendars(db);
   const sleep = sleepWindow(calendars, activePlayers, now(), tz);
 
+  // An ON-DEMAND report is not the scheduled artifact, and the two differ in
+  // both directions.
+  //
+  // It takes no claim. The claim exists so the DAILY digest cannot go out twice
+  // for one date; its slot is keyed `(kind, date_covered)` with no room for a
+  // window. Sharing that slot means a 7d request after the day's 1d report is
+  // refused `already-sent-today`, and a failed 7d attempt is silently completed
+  // by the next 1d run — the wrong content settling the wrong slot. An operator
+  // who asks for a window explicitly is not deduplicating anything; he asked.
+  //
+  // It also ignores Offseason Sleep. Sleep stops the daily artifact mailing
+  // nothing every day for months. Answering an explicit "give me my season to
+  // date" with a liveness heartbeat is not that, it is refusing the question.
+  if (deps.spec !== "1d") {
+    return runOnDemandReport(deps, warn);
+  }
+
+  const today = hostDate(now(), tz);
+
+  // Catch up ONE orphaned prior day BEFORE deciding today's run — and before the
+  // sleep check, deliberately. `claimDelivery` already re-claims a failed or
+  // stale slot correctly, but only ever sees the date it is handed, so once
+  // midnight passes, yesterday's failed digest is never retried and its
+  // notification is lost (ADR 0034's recovery guarantee, which novelty selection
+  // used to provide for free across dates). A digest that failed on the season's
+  // last day would then never recover, because the next run is already asleep —
+  // so recovery must run whether or not TODAY is sleeping. The recovered run
+  // assembles ITS date's window (asOf), never today's, and never forces. One per
+  // run bounds catch-up to a single extra email; a multi-day backlog drains a
+  // day at a time rather than arriving as a burst.
+  const orphan = findOrphanedDigestDate(db, today, now().getTime());
+  if (orphan !== null) {
+    await deliverDailyDigest(deps, orphan, orphan, false, warn);
+  }
+
+  // Only TODAY's run is replaced by the offseason heartbeat; the recovery above
+  // is for an in-season day that still owes its digest.
   if (sleep.sleeping) {
     return runHeartbeat(deps, activePlayers.length, sleep.nextOpeningDay);
   }
 
-  const today = hostDate(now(), tz);
-  const claim = claimDelivery(db, {
-    kind: "digest",
-    dateCovered: today,
-    now: now(),
-    force: deps.force,
-  });
+  return deliverDailyDigest(deps, today, today, deps.force === true, warn);
+}
+
+/**
+ * One daily digest: claim the (digest, dateCovered) slot, reconcile a recovered
+ * claim, assemble the 1d window as of `asOf`, send, settle. Shared by today's
+ * run (dateCovered = asOf = today) and by recovery of an orphaned prior day
+ * (dateCovered = asOf = that day).
+ */
+async function deliverDailyDigest(
+  deps: DigestDeps,
+  dateCovered: string,
+  asOf: string,
+  force: boolean,
+  warn: (message: string) => void,
+): Promise<DigestResult> {
+  const { db, now, tz } = deps;
+  const claim = claimDelivery(db, { kind: "digest", dateCovered, now: now(), force });
   if (!claim.claimed) {
     return {
       kind: "digest",
@@ -95,6 +182,7 @@ export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
       reason: claim.reason,
       statLineCount: 0,
       playerCount: 0,
+      window: null,
     };
   }
 
@@ -114,40 +202,42 @@ export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
   // accidental protection that would evaporate the day someone adds one. The
   // explicit guard is the one to keep; the test pins the behaviour, not either
   // mechanism.
-  if (!claim.replay && (await reconciled(deps, "digest", today, claim))) {
+  if (!claim.replay && (await reconciled(deps, "digest", dateCovered, claim))) {
     return {
       kind: "digest",
       action: "skipped",
       reason: RECONCILED,
       statLineCount: 0,
       playerCount: 0,
+      window: null,
     };
   }
 
-  // Pure assembly (src/digest/assemble.ts): what this Digest would report.
-  // ONLY a replay widens the novelty predicate. An ordinary claim's row can
-  // never have lines stamped with it — settleSent is the sole writer of
-  // digest_delivery_id and a `sent` row is never re-claimed — so passing its id
-  // would add an OR branch that provably matches nothing, and would read as
-  // though an ordinary run might re-include reported lines when it cannot.
-  const includeDeliveryId = claim.replay ? claim.replayOfDeliveryId : null;
-  const assembly = await assembleDigest(db, { now, tz, includeDeliveryId });
-  const mail = renderDigest({
-    date: assembly.date,
-    lines: assembly.lines,
-    noNewStats: assembly.noNewStats,
-  });
-  const { reportedIds, playerCount } = assembly;
+  // Pure assembly (src/digest/assemble.ts): what this Digest reports. A replay
+  // assembles exactly what an ordinary run would — the window is the content,
+  // and it does not depend on what any previous delivery reported. `asOf`
+  // anchors the window on the slot's own date, so a recovered prior day reports
+  // its day, not today's.
+  const assembly = await assembleDigest(db, { now, tz, spec: "1d", asOf });
+
+  // Fail-closed has two halves. Excluding an unrecognised stat key is the safe
+  // one; SAYING SO is the other. Without this an upstream field addition is
+  // dropped from every future report and nobody learns the tables went stale —
+  // which is exactly the silent staleness the classification exists to prevent.
+  reportUnknownFields(assembly, warn);
+  const mail = renderDigest(assembly);
+  const { playerCount, statLineCount } = assembly;
+  const window = assembly.window.label;
 
   let receipt: MailReceipt;
   try {
     receipt = await deps.mailer.send(
       { to: deps.to, from: deps.from, ...mail },
-      { deliveryKey: deliveryKey("digest", today) },
+      { deliveryKey: deliveryKey("digest", dateCovered) },
     );
   } catch (err) {
-    // Send failed: settle the claim as failed, leave every line unmarked — the
-    // next run re-claims the slot, retries, and nothing is lost (ADR 0030).
+    // Send failed: settle the claim as failed. A later run re-claims the slot
+    // and retries the same window, which reports the same content.
     // A REPLAY holds no claim and settles nothing: settling one as `failed`
     // would wipe sent_at off a genuinely delivered digest.
     if (!claim.replay) {
@@ -155,38 +245,38 @@ export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
         deliveryId: claim.deliveryId,
         errorMessage: errorMessage(err),
         playerCount,
-        statLineCount: reportedIds.length,
+        statLineCount,
       });
     }
     return {
       kind: "digest",
       action: "failed",
       reason: errorMessage(err),
-      statLineCount: reportedIds.length,
+      statLineCount,
       playerCount,
+      window,
     };
   }
 
-  // Send succeeded: one transaction marks the delivery and every reported line.
-  // A REPLAY marks nothing — including any genuinely new line it happened to
-  // carry, which the next real digest therefore still reports.
+  // Send succeeded: record the delivery. No Stat Line is touched — a window
+  // consumes nothing, so there is no line state to write.
   if (!claim.replay) {
     settleSent(db, {
       deliveryId: claim.deliveryId,
       now: now(),
       playerCount,
-      statLineCount: reportedIds.length,
+      statLineCount,
       providerMessageId: receipt.providerMessageId,
-      reportedIds,
     });
   }
 
   return {
     kind: "digest",
     action: "sent",
-    reason: sendReason(deps.force === true, claim),
-    statLineCount: reportedIds.length,
+    reason: sendReason(force, claim),
+    statLineCount,
     playerCount,
+    window,
   };
 }
 
@@ -198,6 +288,59 @@ export async function runDigest(deps: DigestDeps): Promise<DigestResult> {
 function sendReason(forced: boolean, claim: Extract<ClaimResult, { claimed: true }>): string | null {
   if (forced) return FORCED;
   return !claim.replay && claim.recovered ? RECOVERED : null;
+}
+
+/**
+ * An on-demand windowed report: assemble, render, send. No claim, no delivery
+ * row, no settlement, nothing written anywhere.
+ *
+ * This is the whole of option B. The delivery machinery in ADR 0034 protects
+ * ONE guarantee — the daily digest goes out at most once per date — and its
+ * slot key has no room for a window. Rather than widen that key and owe
+ * crash-recovery for every window an operator might ask for, an explicit
+ * request simply opts out of bookkeeping it never needed.
+ *
+ * What that costs: an on-demand report that dies mid-send is not retried
+ * automatically. A human asked for it and is watching; he asks again. What it
+ * buys: a 7d request can never be refused because a 1d one already went out,
+ * and can never be silently completed by one.
+ */
+async function runOnDemandReport(
+  deps: DigestDeps,
+  warn: (message: string) => void,
+): Promise<DigestResult> {
+  const { db, now, tz } = deps;
+  const assembly = await assembleDigest(db, { now, tz, spec: deps.spec });
+  reportUnknownFields(assembly, warn);
+
+  const mail = renderDigest(assembly);
+  const { playerCount, statLineCount } = assembly;
+  const window = assembly.window.label;
+
+  try {
+    await deps.mailer.send(
+      { to: deps.to, from: deps.from, ...mail },
+      { deliveryKey: reportKey(assembly.window.spec, assembly.window.to) },
+    );
+  } catch (err) {
+    return {
+      kind: "digest",
+      action: "failed",
+      reason: errorMessage(err),
+      statLineCount,
+      playerCount,
+      window,
+    };
+  }
+
+  return {
+    kind: "digest",
+    action: "sent",
+    reason: null,
+    statLineCount,
+    playerCount,
+    window,
+  };
 }
 
 /**
@@ -233,6 +376,7 @@ async function runHeartbeat(
       reason: claim.reason,
       statLineCount: 0,
       playerCount: watchedCount,
+      window: null,
     };
   }
 
@@ -245,6 +389,7 @@ async function runHeartbeat(
       reason: RECONCILED,
       statLineCount: 0,
       playerCount: watchedCount,
+      window: null,
     };
   }
 
@@ -271,6 +416,7 @@ async function runHeartbeat(
       reason: errorMessage(err),
       statLineCount: 0,
       playerCount: watchedCount,
+      window: null,
     };
   }
 
@@ -283,7 +429,6 @@ async function runHeartbeat(
       playerCount: watchedCount,
       statLineCount: 0,
       providerMessageId: receipt.providerMessageId,
-      reportedIds: [],
     });
   }
   return {
@@ -292,6 +437,7 @@ async function runHeartbeat(
     reason: sendReason(deps.force === true, claim),
     statLineCount: 0,
     playerCount: watchedCount,
+    window: null,
   };
 }
 
@@ -370,6 +516,23 @@ function heartbeatWithinWeek(tx: Tx, nowMs: number): ClaimRefusal | null {
     return "heartbeat-sent-within-week";
   }
   return null;
+}
+
+/**
+ * Fail-closed has two halves. Excluding an unrecognised stat key is the safe
+ * one; SAYING SO is the other. Without this an upstream field addition is
+ * dropped from every future report and nobody learns the tables went stale.
+ */
+function reportUnknownFields(
+  assembly: DigestAssembly,
+  warn: (message: string) => void,
+): void {
+  if (assembly.unknownFields.length === 0) return;
+  warn(
+    `digest: ${assembly.unknownFields.length} unclassified stat field(s) excluded ` +
+      `from ${assembly.window.label}: ${assembly.unknownFields.join(", ")}. ` +
+      `Classify them in src/stats/fields.ts.`,
+  );
 }
 
 function errorMessage(err: unknown): string {

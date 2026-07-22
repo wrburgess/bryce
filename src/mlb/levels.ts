@@ -10,7 +10,15 @@ export interface LevelInfo {
   milbLevel: string | null;
 }
 
-/** Every sportId the Refresh sweeps for an MLB/MiLB Player. */
+/**
+ * Every sportId the Refresh sweeps for an MLB/MiLB Player.
+ *
+ * DECLARATION ORDER IS LOAD-BEARING. `LADDER` below derives from this array,
+ * so `levelRank` — and therefore the sort order of every row in the digest —
+ * follows it. The order here is the level ladder, top down: MLB, Triple-A,
+ * Double-A, High-A, Single-A, Rookie. Reordering this for tidiness would
+ * silently reorder the digest.
+ */
 export const SPORT_IDS = [1, 11, 12, 13, 14, 16] as const;
 
 /** MLB Stats API sportId for College Baseball (NCAA) — no data source in Phase 1. */
@@ -46,4 +54,35 @@ export function sportIdForLevel(level: Level, milbLevel: string | null): number 
   if (level === "ncaa") return NCAA_SPORT_ID;
   if (milbLevel === null) return null;
   return MILB_LEVEL_TO_SPORT_ID[milbLevel] ?? null;
+}
+
+/**
+ * Display abbreviation for the level a GAME was played at (windowed Digest
+ * spec). Derived from the stat line's sportId, never from players.level —
+ * a player's level is where he is today, and a window can span a promotion.
+ *
+ * sportId 16 covers every rookie/complex league, so league_name is the only
+ * thing separating the Dominican Summer League from the domestic complexes.
+ */
+const SPORT_ID_ABBREV: Record<number, string> = {
+  1: "MLB",
+  11: "AAA",
+  12: "AA",
+  13: "A+",
+  14: "A",
+  16: "R",
+  [NCAA_SPORT_ID]: "NCAA",
+};
+
+const LADDER: readonly number[] = [...SPORT_IDS, NCAA_SPORT_ID];
+
+export function levelAbbrev(sportId: number, leagueName: string | null): string {
+  if (sportId === 16 && leagueName === "Dominican Summer League") return "DSL";
+  return SPORT_ID_ABBREV[sportId] ?? "?";
+}
+
+/** Sort rank: MLB first, NCAA last, unknown ids after everything. */
+export function levelRank(sportId: number): number {
+  const index = LADDER.indexOf(sportId);
+  return index === -1 ? LADDER.length : index;
 }

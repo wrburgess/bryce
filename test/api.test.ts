@@ -1,4 +1,4 @@
-import { eq, isNull } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { digestDeliveries, players, statLines } from "../src/db/schema.js";
@@ -390,37 +390,65 @@ describe("REST API", () => {
   });
 
   describe("GET /api/digest/preview", () => {
-    it("previews without sending, marking, or recording anything", async () => {
+    it("previews without sending, stamping, or recording anything", async () => {
       const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
       await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
       const res = await app().request("/api/digest/preview", { headers: AUTH });
       expect(res.status).toBe(200);
       const body = (await res.json()) as {
-        date: string;
+        window: { spec: string; from: string; to: string; label: string };
         statLineCount: number;
         playerCount: number;
+        batters: Array<{ player: { fullName: string }; lvl: string }>;
         mail: { subject: string; text: string };
       };
-      expect(body.date).toBe("2026-07-19");
+      // Absent window means 1d, anchored on the last COMPLETED host date.
+      expect(body.window).toMatchObject({ spec: "1d", from: "2026-07-18", to: "2026-07-18" });
       expect(body.statLineCount).toBe(1);
       expect(body.playerCount).toBe(1);
-      expect(body.mail.subject).toBe("MLB Daily Tracker: Sun, July 19, 2026");
-      expect(body.mail.text).toContain("Maximo Acosta");
+      expect(body.batters[0]).toMatchObject({ lvl: "AAA" });
+      expect(body.batters[0]?.player.fullName).toBe("Maximo Acosta");
+      expect(body.mail.subject).toBe("MLB Daily Tracker: Sat, July 18, 2026");
+      expect(body.mail.text).toContain("M Acosta");
 
-      // Read-only: no send, no delivery row, no marking.
+      // Read-only: no send, no delivery row, no stamping.
       expect(mailer.sent).toHaveLength(0);
       expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
-      const unmarked = await opened.db
-        .select()
-        .from(statLines)
-        .where(isNull(statLines.digestDeliveryId));
-      expect(unmarked).toHaveLength(1);
     });
 
-    it("forces with ?force=true, and ?force=false does NOT force", async () => {
-      // The coercion trap: under z.coerce.boolean() the STRING "false" is
-      // truthy, so ?force=false would force. The schema uses a string enum.
+    it("selects by ?window, and rejects an unsupported one", async () => {
+      const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+      await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+      await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-14" });
+
+      const read = async (url: string) => {
+        const res = await app().request(url, { headers: AUTH });
+        expect(res.status).toBe(200);
+        return (await res.json()) as {
+          window: { spec: string; from: string; label: string };
+          statLineCount: number;
+        };
+      };
+
+      const week = await read("/api/digest/preview?window=7d");
+      expect(week.window).toMatchObject({ spec: "7d", from: "2026-07-12" });
+      expect(week.statLineCount).toBe(2);
+
+      const day = await read("/api/digest/preview?window=1d");
+      expect(day.statLineCount).toBe(1);
+      expect((await read("/api/digest/preview")).statLineCount).toBe(1); // default
+
+      // Fails closed: an unsupported window is a 400, never a different report.
+      const bogus = await app().request("/api/digest/preview?window=30d", { headers: AUTH });
+      expect(bogus.status).toBe(400);
+      expect(await bogus.json()).toMatchObject({ error: "invalid-input" });
+    });
+
+    it("is unchanged by ?force, which a window makes meaningless — but still validates it", async () => {
+      // The coercion trap survives even though force no longer changes the
+      // content: under z.coerce.boolean() the STRING "false" is truthy, so
+      // ?force=false would force. The schema uses a string enum.
       const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
       await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
       await app().request("/api/digest/send", { method: "POST", headers: AUTH });
@@ -432,16 +460,17 @@ describe("REST API", () => {
         return (await res.json()) as { statLineCount: number; mail: { text: string } };
       };
 
-      const forced = await read("/api/digest/preview?force=true");
-      expect(forced.statLineCount).toBe(1);
-      expect(forced.mail.text).toContain("Maximo Acosta");
-
-      const notForced = await read("/api/digest/preview?force=false");
-      expect(notForced.statLineCount).toBe(0);
-      expect(notForced.mail.text).toContain("No new stat lines today.");
-
-      const omitted = await read("/api/digest/preview");
-      expect(omitted.statLineCount).toBe(0);
+      // Selection is by window, so a preview after a real send still reports
+      // the window's content — the blocker force used to exist for is gone.
+      for (const url of [
+        "/api/digest/preview?force=true",
+        "/api/digest/preview?force=false",
+        "/api/digest/preview",
+      ]) {
+        const body = await read(url);
+        expect(body.statLineCount).toBe(1);
+        expect(body.mail.text).toContain("M Acosta");
+      }
 
       // A junk value is rejected, never treated as truthy.
       const bogus = await app().request("/api/digest/preview?force=maybe", { headers: AUTH });
@@ -454,7 +483,7 @@ describe("REST API", () => {
   });
 
   describe("POST /api/digest/send", () => {
-    it("sends the digest, marks lines, and records the delivery", async () => {
+    it("sends the digest, records the delivery, and stamps nothing", async () => {
       const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
       await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
@@ -469,15 +498,37 @@ describe("REST API", () => {
 
       expect(mailer.sent).toHaveLength(1);
       expect(mailer.sent[0]?.to).toBe("hc@example.com");
-      expect(mailer.sent[0]?.text).toContain("Maximo Acosta");
+      expect(mailer.sent[0]?.text).toContain("M Acosta");
       const deliveries = await opened.db.select().from(digestDeliveries);
       expect(deliveries).toHaveLength(1);
       expect(deliveries[0]).toMatchObject({ kind: "digest", status: "sent", dateCovered: "2026-07-19" });
-      const unmarked = await opened.db
-        .select()
-        .from(statLines)
-        .where(isNull(statLines.digestDeliveryId));
-      expect(unmarked).toHaveLength(0);
+    });
+
+    it("sends the requested {window}, and rejects an unsupported one without sending", async () => {
+      const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+      await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
+      await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-14" });
+
+      const sent = await app().request("/api/digest/send", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ window: "7d" }),
+      });
+      expect(sent.status).toBe(200);
+      expect(await sent.json()).toMatchObject({
+        action: "sent",
+        statLineCount: 2,
+        window: "Last 7 Days (Jul 12-18)",
+      });
+      expect(mailer.sent[0]?.subject).toBe("MLB Daily Tracker: Last 7 Days (Jul 12-18)");
+
+      const bogus = await app().request("/api/digest/send", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ window: "30d" }),
+      });
+      expect(bogus.status).toBe(400);
+      expect(mailer.sent).toHaveLength(1); // fail closed: nothing else went out
     });
 
     it("re-sends with {force:true} after a same-day send, recording nothing new", async () => {
@@ -503,7 +554,7 @@ describe("REST API", () => {
 
       // The same content went out twice, and the delivery row never moved.
       expect(mailer.sent).toHaveLength(2);
-      expect(mailer.sent[1]?.text).toContain("Maximo Acosta");
+      expect(mailer.sent[1]?.text).toContain("M Acosta");
       expect(mailer.sent[1]?.text).toBe(mailer.sent[0]?.text);
       const after = await opened.db.select().from(digestDeliveries);
       expect(after).toHaveLength(1);
@@ -662,10 +713,7 @@ describe("REST API", () => {
 
     const res = await app().request("/api/digest/send", { method: "POST", headers: AUTH });
     expect(await res.json()).toMatchObject({ action: "sent", statLineCount: 0 });
-    const unmarked = await opened.db
-      .select()
-      .from(statLines)
-      .where(eq(statLines.playerId, gone.id));
-    expect(unmarked[0]?.digestDeliveryId).toBeNull();
+    const kept = await opened.db.select().from(statLines).where(eq(statLines.playerId, gone.id));
+    expect(kept).toHaveLength(1); // his history is kept, just never selected
   });
 });

@@ -25,6 +25,17 @@ export function formatIp(ip: unknown): string {
   return typeof ip === "string" && ipToOuts(ip) !== null ? ip.trim() : "0.0";
 }
 
+/**
+ * The inverse of ipToOuts: 19 -> "6.1", 42 -> "14.0", null -> "0.0". Summed
+ * outs are what a window's IP must render from — "6.1" + "6.2" is 13.0 innings,
+ * which no arithmetic on the notation itself produces.
+ */
+export function formatOuts(outs: number | null): string {
+  if (outs === null || !Number.isFinite(outs) || outs <= 0) return "0.0";
+  const whole = Math.trunc(outs / 3);
+  return `${whole}.${outs % 3}`;
+}
+
 /** numerator / innings, where innings = outs / 3; "-" when no outs were recorded. */
 function rate(numerator: number, outs: number | null, digits: number): string {
   if (outs === null || outs === 0) return "-";

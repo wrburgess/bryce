@@ -705,12 +705,15 @@ export interface FaultOptions {
    * Where the process "dies":
    * - `before-settle` — the settle transaction never starts (death right after
    *   provider acceptance);
-   * - `after-delivery-update` — inside the transaction, after the delivery row
-   *   was updated and before the Stat Lines are marked;
-   * - `after-line-update` — inside the transaction, after both statements ran
-   *   but before COMMIT.
+   * - `in-settle` — inside the transaction, after its statement ran but before
+   *   COMMIT.
+   *
+   * There were once two intra-transaction points, because the settle wrote the
+   * delivery row AND stamped every reported Stat Line, and a fault could land
+   * between them. A window stamps nothing, so the settle is a single statement
+   * and only one point inside it exists to die at.
    */
-  failAt: "before-settle" | "after-delivery-update" | "after-line-update";
+  failAt: "before-settle" | "in-settle";
   /**
    * Transactions to let through untouched first. Every runDigest invocation
    * opens exactly two: the claim, then the settle — so the default of 1 targets
@@ -747,36 +750,10 @@ export function faultingDb(db: Db, options: FaultOptions): Db {
           throw new InjectedFault("process died before the settle transaction");
         }
         return realTransaction((tx: unknown) => {
-          const result = fn(faultingTx(tx, options.failAt));
-          if (options.failAt === "after-line-update") {
-            throw new InjectedFault("process died after marking stat lines, before COMMIT");
-          }
-          return result;
+          fn(tx);
+          throw new InjectedFault("process died inside the settle, before COMMIT");
         }, config);
       };
     },
   }) as Db;
-}
-
-/** Counts `update` calls inside the settle txn so a fault can land between them. */
-function faultingTx(tx: unknown, failAt: FaultOptions["failAt"]): unknown {
-  let updates = 0;
-  return new Proxy(tx as object, {
-    get(target, prop) {
-      // No receiver: a getter must never run with the proxy as `this`.
-      const value: unknown = Reflect.get(target, prop);
-      if (prop !== "update") {
-        return typeof value === "function" ? value.bind(target) : value;
-      }
-      const realUpdate = (value as (...args: unknown[]) => unknown).bind(target);
-      return (...args: unknown[]): unknown => {
-        updates += 1;
-        // Statement 1 updates digest_deliveries, statement 2 marks stat_lines.
-        if (failAt === "after-delivery-update" && updates === 2) {
-          throw new InjectedFault("process died after the delivery update");
-        }
-        return realUpdate(...args);
-      };
-    },
-  });
 }

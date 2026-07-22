@@ -4,7 +4,7 @@ import { eq } from "drizzle-orm";
 import { ZodError } from "zod";
 import { players } from "../db/schema.js";
 import { runReadonlyQuery, ReadonlyQueryError } from "../db/readonly.js";
-import { assembleDigest, previewDeliveryId } from "../digest/assemble.js";
+import { assembleDigest } from "../digest/assemble.js";
 import { renderDigest } from "../digest/render.js";
 import { runDigest } from "../jobs/digest.js";
 import { runRefresh, runRefreshForPlayer } from "../jobs/refresh.js";
@@ -177,28 +177,21 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "digest_preview",
     {
       description:
-        "Preview what the next digest would report (unreported stat lines plus the in-season no-new-stats tail). Read-only: sends nothing, marks nothing. force (default false) shows what a forced send would report — today's digest slot re-included even though its lines were already reported. Preview never claims and never sends, so force here cannot disturb an in-flight claim, and it does not override the Offseason Sleep decision.",
+        "Preview the digest for a date window, as the Batters and Pitchers tables the email would carry. window (default '1d') is one of 1d, 7d, 14d, 21d, ytd; an unsupported value is rejected. Every window ends on the last COMPLETED host date — yesterday, not today — so the result does not depend on the hour you ask. Rows group by player and by the LEVEL each game was played at, so a player promoted mid-window gets one row per level; a 1d window groups by game instead, so a doubleheader stays two rows. Regular season only. Read-only: sends nothing, claims nothing, and writes nothing — re-running a window always returns the same content.",
       inputSchema: DigestInputShape,
     },
     (args) =>
       guarded(async () => {
         const input = DigestInputSchema.parse(args);
-        const assembly = await assembleDigest(deps.db, {
-          ...deps,
-          includeDeliveryId: previewDeliveryId(deps.db, deps, input.force),
-        });
-        const mail = renderDigest({
-          date: assembly.date,
-          lines: assembly.lines,
-          noNewStats: assembly.noNewStats,
-        });
+        const assembly = await assembleDigest(deps.db, { ...deps, spec: input.window });
         return jsonResult({
-          date: assembly.date,
-          statLineCount: assembly.reportedIds.length,
+          window: assembly.window,
+          statLineCount: assembly.statLineCount,
           playerCount: assembly.playerCount,
-          lines: assembly.lines,
-          noNewStats: assembly.noNewStats,
-          mail,
+          batters: assembly.batters,
+          pitchers: assembly.pitchers,
+          unknownFields: assembly.unknownFields,
+          mail: renderDigest(assembly),
         });
       }),
   );
@@ -207,7 +200,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "send_digest",
     {
       description:
-        "Run the digest job now: send the digest email (or offseason heartbeat) and mark reported lines. Never double-sends for a covered date. force (default false) is a TEST send: it overrides only the already-sent-today guard and the heartbeat's weekly rule, re-sending today's content as a replay that records nothing (no delivery row is written or changed, and no stat line is marked). It does NOT override an in-flight claim held by another run — that still returns claimed-by-another-run — and it does NOT override the Offseason Sleep decision, so forcing during the offseason sends a heartbeat, never a digest.",
+        "Run the digest job now for a date window. window (default '1d') is one of 1d, 7d, 14d, 21d, ytd; an unsupported value is rejected and nothing is sent. The report writes NO stat-line state, so re-running a window is always safe and sends the same content. The daily '1d' window is the SCHEDULED artifact: it claims a once-per-date slot (so it never double-sends for a covered date, and a failed prior day is recovered on the next run), and during Offseason Sleep it becomes the weekly heartbeat. Any OTHER window (7d/14d/21d/ytd) is an on-demand report: it takes no slot, and it answers even during Offseason Sleep — an explicit 'season to date' is a question, not the daily liveness signal. force (default false) applies only to the daily slot: it is a TEST send overriding the already-sent-today guard and the heartbeat's weekly rule, sending as a replay that records nothing. It does NOT override an in-flight claim held by another run — that still returns claimed-by-another-run.",
       inputSchema: DigestInputShape,
     },
     (args) =>
@@ -220,6 +213,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
           tz: deps.tz,
           to: deps.digestTo,
           from: deps.digestFrom,
+          spec: input.window,
           force: input.force,
         });
         return jsonResult({ ...result });

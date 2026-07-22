@@ -65,3 +65,48 @@ describe("createApp fail-closed auth (rules/security.md: deny by default)", () =
     }
   });
 });
+
+describe("BRYCE_TZ config (ambient TZ must never win)", () => {
+  const base = { MAILER_PROVIDER: "console" };
+
+  it("reads the host timezone from BRYCE_TZ", () => {
+    expect(loadConfig({ ...base, BRYCE_TZ: "America/New_York" }).tz).toBe("America/New_York");
+  });
+
+  it("defaults to America/Chicago when BRYCE_TZ is absent", () => {
+    expect(loadConfig(base).tz).toBe("America/Chicago");
+  });
+
+  it("ignores TZ entirely — an ambient TZ=UTC must not become the host timezone", () => {
+    // The 2026-07-20 production bug: a terminal exporting TZ=UTC defeated
+    // .env's TZ=America/Chicago, and every host date shifted after 19:00 CDT.
+    // Silence warnings here: this test asserts timezone resolution behavior,
+    // not warning generation (the latter is covered by the warning tests below).
+    expect(loadConfig({ ...base, TZ: "UTC" }, () => {}).tz).toBe("America/Chicago");
+    expect(loadConfig({ ...base, TZ: "UTC", BRYCE_TZ: "America/Chicago" }).tz).toBe(
+      "America/Chicago",
+    );
+  });
+
+  it("warns when TZ is set but BRYCE_TZ is not, so a stale .env is visible", () => {
+    const warnings: string[] = [];
+    loadConfig({ ...base, TZ: "America/Denver" }, (m) => warnings.push(m));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("BRYCE_TZ");
+    expect(warnings[0]).toContain("America/Denver");
+  });
+
+  it("does not warn once BRYCE_TZ is set", () => {
+    const warnings: string[] = [];
+    loadConfig({ ...base, TZ: "America/Denver", BRYCE_TZ: "America/Denver" }, (m) =>
+      warnings.push(m),
+    );
+    expect(warnings).toEqual([]);
+  });
+
+  it("does not warn when TZ is whitespace-only (empty after trim)", () => {
+    const warnings: string[] = [];
+    loadConfig({ ...base, TZ: "   " }, (m) => warnings.push(m));
+    expect(warnings).toEqual([]);
+  });
+});

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { WINDOW_SPECS } from "../domain/window.js";
 import { StatLineQuerySchema } from "../queries/statLines.js";
 
 /**
@@ -61,24 +62,34 @@ export const RefreshInputSchema = z.object(RefreshInputShape).superRefine((input
 });
 
 /**
- * Digest force flag (raw shape exposed for the MCP tool schemas, beside
- * RefreshInputShape). Typed JSON in, so a real boolean: an MCP client sending
- * `force: "yes"` should be told it is wrong, not silently obeyed.
+ * Which date window the report covers. An unsupported value is REJECTED rather
+ * than defaulted, on every surface — the window is the content, so quietly
+ * sending a different report than the operator asked for is the failure this
+ * fails closed against. Absent means `1d`, the daily artifact.
+ */
+const WindowSchema = z.enum(WINDOW_SPECS).default("1d");
+
+/**
+ * Digest inputs (raw shape exposed for the MCP tool schemas, beside
+ * RefreshInputShape). Typed JSON in, so `force` is a real boolean: an MCP
+ * client sending `force: "yes"` should be told it is wrong, not silently obeyed.
  */
 export const DigestInputShape = {
   force: z.boolean().default(false),
+  window: WindowSchema,
 };
 
 export const DigestInputSchema = z.object(DigestInputShape);
 
 /**
- * The GET-query form of the same flag. Deliberately an enum of the two literal
+ * The GET-query form. `force` is deliberately an enum of the two literal
  * strings and NOT `z.coerce.boolean()`: coercion is JS truthiness, under which
  * the string "false" is TRUE — so `?force=false` would force. Same reason
  * PlayersListInputSchema keeps `active` as string literals.
  */
 export const DigestQueryInputSchema = z.object({
   force: z.enum(["true", "false"]).default("false"),
+  window: WindowSchema,
 });
 
 export const SqlQueryInputSchema = z.object({
