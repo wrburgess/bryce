@@ -516,8 +516,10 @@ describe("runDigest", () => {
     expect(cells(text, "M Acosta")[2]).toBe("AAA");
     expect(cells(text, "D Guy")[2]).toBe("AA");
     // The pitcher's whole row, including the derived single-game rates and the
-    // QS S BS HLD RW RL tail. His win has no gamesStarted (MLB game logs on a
-    // start still omit it here), so RW stays 0 — never miscounted as relief.
+    // QS S BS HLD RW RL tail. This fixture's win row carries no gamesStarted, so
+    // the fail-closed rule leaves RW 0 — an appearance counts as relief only when
+    // gamesStarted is present and 0. (A realistic MLB start, gamesStarted:1, is
+    // exercised in digest-preview.test.ts.)
     expect(cells(text, "P Skenes")).toEqual(
       ["P", "Skenes", "MLB", "6.0", "1", "8", "12.00", "2", "4", "0", "1.50", "1.00", "1", "0", "0", "0", "0", "0"],
     );
