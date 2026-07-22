@@ -5,18 +5,21 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { digestDeliveries, players } from "../src/db/schema.js";
 import type { AppDeps } from "../src/server.js";
 import { createApp } from "../src/server.js";
 import type { McpConnector, SmokeEnv, SmokeFetch, SmokeIo } from "../src/cli/connector-smoke.js";
 import {
+  DEFAULT_TIMEOUT_MS,
   EXIT_CHECK_FAILED,
   EXIT_CONFIG,
   adaptClient,
   assertSafeUrl,
   authHeaders,
+  cfHeaders,
+  checkNoBearer401,
   makeSafeFetch,
   makeSanitizer,
   normalizeMcpUrl,
@@ -24,6 +27,7 @@ import {
   runSmoke,
   SmokeConfigError,
   SmokeSecurityError,
+  toAscii,
 } from "../src/cli/connector-smoke.js";
 import {
   CapturingMailer,
@@ -221,6 +225,117 @@ describe("connector smoke", () => {
       expect(seen?.signal).toBeInstanceOf(AbortSignal);
       expect(seen?.method).toBe("POST");
     });
+    it("preserves the caller's abort signal alongside its own timeout (never overrides it)", async () => {
+      const caller = new AbortController();
+      let seen: RequestInit | undefined;
+      const base: SmokeFetch = (_url, init) => {
+        seen = init;
+        return Promise.resolve(new Response("{}", { status: 200 }));
+      };
+      await makeSafeFetch(base)("https://x.example/mcp", { method: "POST", signal: caller.signal });
+      // The signal handed to the base fetch is a combined one: aborting the caller aborts it too.
+      expect(seen?.signal).toBeInstanceOf(AbortSignal);
+      expect(seen?.signal?.aborted).toBe(false);
+      caller.abort();
+      expect(seen?.signal?.aborted).toBe(true);
+    });
+  });
+
+  describe("cfHeaders", () => {
+    it("returns both CF Access headers when the pair is set, and {} otherwise", () => {
+      const withCf = parseConfig(
+        baseEnv({ CF_ACCESS_CLIENT_ID: "cf-id-abc123", CF_ACCESS_CLIENT_SECRET: "cf-secret-xyz789" }),
+      );
+      expect(cfHeaders(withCf)).toEqual({
+        "CF-Access-Client-Id": "cf-id-abc123",
+        "CF-Access-Client-Secret": "cf-secret-xyz789",
+      });
+      expect(cfHeaders(parseConfig(baseEnv()))).toEqual({});
+    });
+    it("is the CF source authHeaders reuses", () => {
+      const withCf = parseConfig(
+        baseEnv({ CF_ACCESS_CLIENT_ID: "cf-id-abc123", CF_ACCESS_CLIENT_SECRET: "cf-secret-xyz789" }),
+      );
+      expect(authHeaders(withCf)).toEqual({
+        Authorization: `Bearer ${TEST_API_TOKEN}`,
+        ...cfHeaders(withCf),
+      });
+    });
+  });
+
+  describe("checkNoBearer401", () => {
+    // A no-op Response the probe can read: a real 401 with the fixed unauthorized body.
+    const unauthorized = () => Promise.resolve(new Response('{"error":"unauthorized"}', { status: 401 }));
+
+    it("carries both CF service-token headers but NEVER Authorization when CF is configured", async () => {
+      const config = parseConfig(
+        baseEnv({ CF_ACCESS_CLIENT_ID: "cf-id-abc123", CF_ACCESS_CLIENT_SECRET: "cf-secret-xyz789" }),
+      );
+      let seen: Record<string, string> = {};
+      const recording: SmokeFetch = (_url, init) => {
+        seen = headersToRecord(init?.headers);
+        return unauthorized();
+      };
+      const result = await checkNoBearer401(config, recording);
+      expect(result.ok).toBe(true);
+      expect(seen["cf-access-client-id"]).toBe("cf-id-abc123");
+      expect(seen["cf-access-client-secret"]).toBe("cf-secret-xyz789");
+      expect(seen.authorization).toBeUndefined();
+    });
+
+    it("sends neither CF header (and no Authorization) when CF is not configured", async () => {
+      const config = parseConfig(baseEnv());
+      let seen: Record<string, string> = {};
+      const recording: SmokeFetch = (_url, init) => {
+        seen = headersToRecord(init?.headers);
+        return unauthorized();
+      };
+      await checkNoBearer401(config, recording);
+      expect(seen["cf-access-client-id"]).toBeUndefined();
+      expect(seen["cf-access-client-secret"]).toBeUndefined();
+      expect(seen.authorization).toBeUndefined();
+    });
+
+    it("bounds a stalled body read: aborts within the timeout and fails instead of hanging", async () => {
+      vi.useFakeTimers();
+      try {
+        const config = parseConfig(baseEnv());
+        // A Response whose .text() resolves ONLY if its signal aborts — otherwise it hangs forever.
+        const stalled: SmokeFetch = (_url, init) => {
+          const signal = init?.signal;
+          const res = {
+            status: 401,
+            text: () =>
+              new Promise<string>((_resolve, reject) => {
+                signal?.addEventListener("abort", () => reject(new Error("aborted")));
+              }),
+          } as unknown as Response;
+          return Promise.resolve(res);
+        };
+        const pending = checkNoBearer401(config, stalled);
+        // Let the probe settle on `await res.text()` (fetch resolved, abort listener attached)
+        // before the fake clock moves, so the timeout is what unblocks it.
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(DEFAULT_TIMEOUT_MS + 1);
+        const result = await pending;
+        expect(result.name).toBe("no-bearer-401");
+        expect(result.ok).toBe(false);
+        expect(result.detail).toContain("request failed");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe("toAscii", () => {
+    it("escapes non-ASCII to lowercase, zero-padded \\uXXXX and leaves ASCII untouched", () => {
+      expect(toAscii("café")).toBe("caf\\u00e9");
+      expect(toAscii("plain ASCII 123 !@#")).toBe("plain ASCII 123 !@#");
+      // A control char is ASCII and must pass through unchanged.
+      expect(toAscii("a\tb\n")).toBe("a\tb\n");
+      // Every emitted escape is exactly four lowercase hex digits.
+      expect(toAscii("→")).toMatch(/^\\u[0-9a-f]{4}$/);
+    });
   });
 
   // --- Read-only happy path -------------------------------------------------
@@ -322,6 +437,19 @@ describe("connector smoke", () => {
     // The failure is still surfaced (redacted), never silently swallowed.
     expect(all).toContain("[REDACTED]");
     expect(out.some((l) => l.startsWith("FAIL connect"))).toBe(true);
+  });
+
+  it("ASCII-normalizes runtime output: a non-ASCII tool error never puts a raw multi-byte char on stdout/stderr", async () => {
+    // A connector whose failure carries non-ASCII bytes (a server-supplied error / IDN path).
+    const nonAscii: McpConnector = () => Promise.reject(new Error("boom café résumé →"));
+    const { deps, out, err } = harness(makeApp(), baseEnv(), [], nonAscii);
+
+    expect(await runSmoke(deps)).toBe(EXIT_CHECK_FAILED);
+    const all = [...out, ...err].join("\n");
+    // Not a single character with code point > 127 reached either stream.
+    expect([...all].every((c) => c.charCodeAt(0) <= 127)).toBe(true);
+    // The failure is still surfaced, just escaped (the accented chars become \\uXXXX), never swallowed.
+    expect(out.some((l) => l.startsWith("FAIL connect") && l.includes("\\u00e9"))).toBe(true);
   });
 
   // --- The --mutate write path ---------------------------------------------

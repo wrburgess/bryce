@@ -36,7 +36,7 @@ export const ALL_TOOLS = [
 
 export const DEFAULT_MCP_URL = "http://localhost:3000/mcp";
 const REDACTED = "[REDACTED]";
-const DEFAULT_TIMEOUT_MS = 15000;
+export const DEFAULT_TIMEOUT_MS = 15000;
 const SMOKE_CLIENT_NAME = "bryce-connector-smoke";
 const SMOKE_CLIENT_VERSION = "0.1.0";
 
@@ -196,14 +196,20 @@ export function parseConfig(env: SmokeEnv): SmokeConfig {
   };
 }
 
+/** The Cloudflare Access service-token headers when both are set, else `{}`. */
+export function cfHeaders(config: SmokeConfig): Record<string, string> {
+  if (config.cfAccessClientId !== null && config.cfAccessClientSecret !== null) {
+    return {
+      "CF-Access-Client-Id": config.cfAccessClientId,
+      "CF-Access-Client-Secret": config.cfAccessClientSecret,
+    };
+  }
+  return {};
+}
+
 /** The outgoing auth headers: the bearer, plus CF Access service headers if set. */
 export function authHeaders(config: SmokeConfig): Record<string, string> {
-  const headers: Record<string, string> = { Authorization: `Bearer ${config.apiToken}` };
-  if (config.cfAccessClientId !== null && config.cfAccessClientSecret !== null) {
-    headers["CF-Access-Client-Id"] = config.cfAccessClientId;
-    headers["CF-Access-Client-Secret"] = config.cfAccessClientSecret;
-  }
-  return headers;
+  return { Authorization: `Bearer ${config.apiToken}`, ...cfHeaders(config) };
 }
 
 /**
@@ -222,6 +228,20 @@ export function makeSanitizer(secrets: Array<string | null>): (text: string) => 
 }
 
 /**
+ * Escape every non-ASCII character to a lowercase `\uXXXX` sequence so a bundled
+ * script's stdout/stderr stays pure ASCII (rules/scripting.md): a Host App or CI
+ * runner on a non-UTF-8 locale raises `invalid byte sequence` the instant it greps
+ * output carrying a raw multi-byte char (e.g. a server-supplied error or an IDN
+ * URL path). ASCII bytes — control chars included — pass through untouched.
+ */
+export function toAscii(text: string): string {
+  // \x00 is intentional: the range is the ASCII byte set (control chars included) we KEEP;
+  // only code points above it are escaped.
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/[^\x00-\x7F]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/**
  * Wrap a base fetch so an authenticated request never follows a redirect (which
  * would forward Authorization/CF headers cross-origin) and never hangs: manual
  * redirect handling + a bounded per-request AbortController timeout.
@@ -230,8 +250,11 @@ export function makeSafeFetch(baseFetch: SmokeFetch, timeoutMs = DEFAULT_TIMEOUT
   return async (url, init) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // Additive, never a replacement: honor any caller-supplied signal (e.g. the
+    // no-bearer probe's full-read bound) alongside this fetch's time-to-headers timeout.
+    const signal = init?.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
     try {
-      const res = await baseFetch(url, { ...init, redirect: "manual", signal: controller.signal });
+      const res = await baseFetch(url, { ...init, redirect: "manual", signal });
       if (res.type === "opaqueredirect" || (res.status >= 300 && res.status <= 399)) {
         const status = res.status === 0 ? "opaqueredirect" : String(res.status);
         throw new SmokeSecurityError(
@@ -296,29 +319,43 @@ async function checkDigestPreview(client: SmokeMcpClient): Promise<CheckResult> 
 }
 
 /** A request with no bearer must 401 with the fixed body, and never echo the token. */
-async function checkNoBearer401(config: SmokeConfig, fetchImpl: SmokeFetch): Promise<CheckResult> {
+export async function checkNoBearer401(config: SmokeConfig, fetchImpl: SmokeFetch): Promise<CheckResult> {
   const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
-  let res: Response;
+  // Unlike the SDK's long-lived SSE stream — bounded only to time-to-headers, since a hard
+  // total bound would sever a legitimate MCP session — this probe is a one-shot request, so
+  // its own controller bounds the FULL read (headers AND `res.text()`). A stalled body then
+  // aborts within DEFAULT_TIMEOUT_MS instead of hanging. The probe carries the CF service-token
+  // headers (so Cloudflare admits it in Service-Auth mode and Bryce is what returns the 401) but
+  // deliberately sends NO Authorization.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
   try {
-    res = await fetchImpl(config.mcpUrl, {
+    const res = await fetchImpl(config.mcpUrl, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        ...cfHeaders(config),
+      },
       body,
+      signal: controller.signal,
     });
+    const text = await res.text();
+    const bodyMatches = text.replace(/\s+/g, "") === '{"error":"unauthorized"}';
+    const tokenAbsent = !text.includes(config.apiToken);
+    if (res.status === 401 && bodyMatches && tokenAbsent) {
+      return { name: "no-bearer-401", ok: true, detail: "401 {\"error\":\"unauthorized\"}, token absent" };
+    }
+    const problems: string[] = [];
+    if (res.status !== 401) problems.push(`status=${res.status} (want 401)`);
+    if (!bodyMatches) problems.push("body is not the fixed unauthorized payload");
+    if (!tokenAbsent) problems.push("token appeared in the response");
+    return { name: "no-bearer-401", ok: false, detail: problems.join("; ") };
   } catch (err) {
     return { name: "no-bearer-401", ok: false, detail: `request failed: ${describeError(err)}` };
+  } finally {
+    clearTimeout(timer);
   }
-  const text = await res.text();
-  const bodyMatches = text.replace(/\s+/g, "") === '{"error":"unauthorized"}';
-  const tokenAbsent = !text.includes(config.apiToken);
-  if (res.status === 401 && bodyMatches && tokenAbsent) {
-    return { name: "no-bearer-401", ok: true, detail: "401 {\"error\":\"unauthorized\"}, token absent" };
-  }
-  const problems: string[] = [];
-  if (res.status !== 401) problems.push(`status=${res.status} (want 401)`);
-  if (!bodyMatches) problems.push("body is not the fixed unauthorized payload");
-  if (!tokenAbsent) problems.push("token appeared in the response");
-  return { name: "no-bearer-401", ok: false, detail: problems.join("; ") };
 }
 
 /**
@@ -403,9 +440,11 @@ export async function runSmoke(deps: SmokeDeps): Promise<number> {
     clean(env.CF_ACCESS_CLIENT_ID),
     clean(env.CF_ACCESS_CLIENT_SECRET),
   ]);
+  // Redact secrets first, then ASCII-normalize — so no secret ever reaches an
+  // output sink and the sink only ever sees pure-ASCII bytes.
   const io: SmokeIo = {
-    write: (line) => deps.io.write(sanitize(line)),
-    writeError: (line) => deps.io.writeError(sanitize(line)),
+    write: (line) => deps.io.write(toAscii(sanitize(line))),
+    writeError: (line) => deps.io.writeError(toAscii(sanitize(line))),
   };
 
   let config: SmokeConfig;
@@ -520,7 +559,8 @@ if (isMain(import.meta.url)) {
         clean(process.env.CF_ACCESS_CLIENT_SECRET),
       ]);
       const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`${sanitize(`error: ${message}`)}\n`);
+      // Same order as runSmoke: redact secrets, then ASCII-normalize.
+      process.stderr.write(`${toAscii(sanitize(`error: ${message}`))}\n`);
       process.exit(1);
     });
 }
