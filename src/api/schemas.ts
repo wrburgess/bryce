@@ -52,6 +52,51 @@ export const PlayersListInputSchema = z.object({
     .describe(
       "Watch-list filter: 'true' (default) for active players only, 'false' for deactivated, 'all' for both.",
     ),
+  tags: z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .describe(
+      "Optional tag selector: comma-separated tags are AND (e.g. 'level:aaa,status:rostered' = AAA players on the roster). A bare namespace (e.g. 'prospect') matches any value in it. Only players matching every token are returned.",
+    ),
+});
+
+/**
+ * A manual-tag write body — SYNTAX only (namespace/value are non-empty strings).
+ * The tag SERVICE owns the semantics (a manual write to a derived namespace, or
+ * an unknown value, is a typed error there), so the two errors stay reachable on
+ * every surface. Used verbatim as the REST POST body.
+ */
+export const TagWriteBodyShape = {
+  namespace: z
+    .string()
+    .trim()
+    .min(1)
+    .describe("Tag namespace, e.g. 'status'. Manual writes are allowed only to non-derived namespaces."),
+  value: z.string().trim().min(1).describe("Tag value within the namespace, e.g. 'rostered' or 'scouted'."),
+};
+
+export const TagWriteBodySchema = z.object(TagWriteBodyShape);
+
+/**
+ * The MCP tag-write shape: the write body PLUS external player addressing —
+ * exactly one of personId/ncaaPlayerSeq (mirrors DeactivateInputShape).
+ */
+export const TagWriteInputShape = {
+  ...DeactivateInputShape,
+  ...TagWriteBodyShape,
+};
+
+export const TagWriteInputSchema = z.object(TagWriteInputShape).superRefine((input, ctx) => {
+  const count = (input.personId !== undefined ? 1 : 0) + (input.ncaaPlayerSeq !== undefined ? 1 : 0);
+  if (count !== 1) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["personId"],
+      message: "provide exactly one of personId or ncaaPlayerSeq",
+    });
+  }
 });
 
 export const PlayerSearchInputSchema = z.object({

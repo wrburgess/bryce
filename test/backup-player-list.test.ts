@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { players, statLines } from "../src/db/schema.js";
+import { playerTags, players, statLines } from "../src/db/schema.js";
 import {
   MAX_BACKUP_BYTES,
   PlayerBackupParseError,
@@ -17,7 +17,7 @@ import {
   restorePlayerListBackup,
 } from "../src/watchlist/service.js";
 import { makeBackupEntry, makeBackupEnvelope, makeTempDir } from "./backup-helpers.js";
-import { fakeClock, insertPlayer, insertStatLine, testDb } from "./factories.js";
+import { fakeClock, insertPlayer, insertPlayerTag, insertStatLine, testDb } from "./factories.js";
 
 const NOW = new Date("2026-07-22T12:00:00.000Z");
 
@@ -370,5 +370,70 @@ describe("parsePlayerListBackup: strict validation", () => {
   it("rejects a payload over the size ceiling before parsing", () => {
     const huge = "a".repeat(MAX_BACKUP_BYTES + 1);
     expect(() => parsePlayerListBackup(huge)).toThrow(/size ceiling/);
+  });
+});
+
+describe("manual-tag backup round-trip (Phase A of #29)", () => {
+  let opened: OpenedDb;
+
+  beforeEach(() => {
+    opened = testDb();
+  });
+
+  afterEach(() => {
+    opened.close();
+  });
+
+  it("export carries ONLY manual tags, never derived ones", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    await insertPlayerTag(opened.db, { playerId: player.id, namespace: "status", value: "rostered", source: "manual" });
+    await insertPlayerTag(opened.db, { playerId: player.id, namespace: "level", value: "aaa", source: "derived" });
+
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+    expect(backup.players[0]?.tags).toEqual([{ namespace: "status", value: "rostered" }]);
+  });
+
+  it("a tagless roster omits the tags key entirely (v1 back-compat)", async () => {
+    await insertPlayer(opened.db, { externalId: 691185 });
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+    expect("tags" in (backup.players[0] ?? {})).toBe(false);
+    // The pre-#30 strict parser still round-trips the serialized envelope.
+    expect(() => parsePlayerListBackup(JSON.stringify(backup))).not.toThrow();
+  });
+
+  it("restore rebuilds derived tags AND re-applies the entry's manual tags", () => {
+    const row = {
+      ...makeBackupEntry({ externalId: 691185, level: "milb", milbLevel: "Triple-A", position: "SS" }),
+      tags: [{ namespace: "status", value: "rostered" }],
+    };
+    restorePlayerListBackup(opened.db, parse([row]), NOW);
+
+    const restored = opened.db.select().from(players).where(eq(players.externalId, 691185)).all()[0];
+    const tags = opened.db
+      .select()
+      .from(playerTags)
+      .where(eq(playerTags.playerId, restored?.id ?? -1))
+      .all();
+    const keys = new Set(tags.map((t) => `${t.namespace}:${t.value}:${t.source}`));
+    // Manual tag round-tripped...
+    expect(keys.has("status:rostered:manual")).toBe(true);
+    // ...and derived tags rebuilt from the restored identity columns.
+    expect(keys.has("level:aaa:derived")).toBe(true);
+    expect(keys.has("pos:ss:derived")).toBe(true);
+    expect(keys.has("prospect:prospect:derived")).toBe(true);
+  });
+
+  it("a v1 entry with no tags field restores derived tags and no manual tags", () => {
+    const row = makeBackupEntry({ externalId: 691185, level: "milb", milbLevel: "Triple-A", position: "SS" });
+    restorePlayerListBackup(opened.db, parse([row]), NOW);
+
+    const restored = opened.db.select().from(players).where(eq(players.externalId, 691185)).all()[0];
+    const tags = opened.db
+      .select()
+      .from(playerTags)
+      .where(eq(playerTags.playerId, restored?.id ?? -1))
+      .all();
+    expect(tags.every((t) => t.source === "derived")).toBe(true);
+    expect(tags.some((t) => t.namespace === "level" && t.value === "aaa")).toBe(true);
   });
 });

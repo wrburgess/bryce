@@ -1,11 +1,23 @@
+import { eq } from "drizzle-orm";
+import { ZodError } from "zod";
 import { loadConfig } from "../config.js";
 import { loadDotEnv } from "../env.js";
 import type { Db } from "../db/client.js";
+import type { PlayerRow } from "../db/schema.js";
+import { players } from "../db/schema.js";
 import { startupDb } from "../db/startup.js";
 import type { MlbClient } from "../mlb/client.js";
 import { MlbClient as MlbClientImpl } from "../mlb/client.js";
 import type { NcaaClient } from "../ncaa/client.js";
 import { NcaaClient as NcaaClientImpl } from "../ncaa/client.js";
+import {
+  ManualWriteToDerivedNamespaceError,
+  UnknownTagError,
+  addManualTag,
+  listTags,
+  removeManualTag,
+  syncAllDerivedTags,
+} from "../tags/service.js";
 import {
   PlayerNotFoundError,
   UnknownNcaaPlayerError,
@@ -28,7 +40,11 @@ import { isMain } from "./main.js";
  *   add --search "name" [--pick i]   search by name; --pick chooses (1-based)
  *   deactivate --person-id N   remove from the Watch List (history kept)
  *   deactivate --ncaa-seq N    remove an NCAA player from the Watch List
- *   list                       print every player row
+ *   list [--tags EXPR]         print every player row, optionally tag-filtered
+ *   tag add --person-id N|--ncaa-seq N --tag ns:value      add a manual tag
+ *   tag remove --person-id N|--ncaa-seq N --tag ns:value   remove a manual tag
+ *   tag list --person-id N|--ncaa-seq N                    list a player's tags
+ *   tag rebuild                re-derive every player's derived tags (backfill)
  */
 
 export interface SeedDeps {
@@ -49,9 +65,13 @@ export async function runSeed(argv: string[], deps: SeedDeps): Promise<number> {
     case "deactivate":
       return runDeactivate(flags, deps);
     case "list":
-      return runList(deps);
+      return runList(flags, deps);
+    case "tag":
+      return runTag(rest, flags, deps);
     default:
-      deps.write("error: usage: seed <add|deactivate|list> [--person-id N] [--search NAME] [--pick I]");
+      deps.write(
+        "error: usage: seed <add|deactivate|list|tag> [--person-id N] [--ncaa-seq N] [--search NAME] [--pick I] [--tags EXPR] [--tag ns:value]",
+      );
       return 1;
   }
 }
@@ -229,8 +249,19 @@ async function runDeactivate(flags: Map<string, string>, deps: SeedDeps): Promis
   return 0;
 }
 
-async function runList(deps: SeedDeps): Promise<number> {
-  const rows = await listPlayers(deps.db, "all");
+async function runList(flags: Map<string, string>, deps: SeedDeps): Promise<number> {
+  const tagsFlag = flags.get("tags");
+  const tagSelector = tagsFlag !== undefined && tagsFlag.length > 0 ? tagsFlag : undefined;
+  let rows;
+  try {
+    rows = await listPlayers(deps.db, "all", tagSelector);
+  } catch (err) {
+    if (err instanceof ZodError) {
+      deps.write(`error: ${err.issues[0]?.message ?? "invalid --tags selector"}`);
+      return 1;
+    }
+    throw err;
+  }
   for (const p of rows) {
     const base =
       `player id=${p.id} personId=${p.externalId ?? "-"} name=${p.fullName} ` +
@@ -241,6 +272,124 @@ async function runList(deps: SeedDeps): Promise<number> {
     deps.write(`${base}${suffix}`);
   }
   deps.write(`total=${rows.length}`);
+  return 0;
+}
+
+/** Resolve --person-id / --ncaa-seq to a Player row; print an error and return null on miss. */
+async function resolveTagPlayer(flags: Map<string, string>, deps: SeedDeps): Promise<PlayerRow | null> {
+  const ncaaSeqFlag = flags.get("ncaa-seq");
+  if (ncaaSeqFlag !== undefined) {
+    const seq = Number.parseInt(ncaaSeqFlag, 10);
+    if (!Number.isInteger(seq) || seq <= 0) {
+      deps.write(`error: invalid --ncaa-seq ${ncaaSeqFlag}`);
+      return null;
+    }
+    const row = (await deps.db.select().from(players).where(eq(players.ncaaPlayerSeq, seq)))[0];
+    if (row === undefined) {
+      deps.write(`error: ${new PlayerNotFoundError({ ncaaPlayerSeq: seq }).message}`);
+      return null;
+    }
+    return row;
+  }
+  const personIdFlag = flags.get("person-id");
+  const personId = personIdFlag !== undefined ? Number.parseInt(personIdFlag, 10) : Number.NaN;
+  if (!Number.isInteger(personId) || personId <= 0) {
+    deps.write("error: tag requires --person-id N or --ncaa-seq N");
+    return null;
+  }
+  const row = (await deps.db.select().from(players).where(eq(players.externalId, personId)))[0];
+  if (row === undefined) {
+    deps.write(`error: ${new PlayerNotFoundError(personId).message}`);
+    return null;
+  }
+  return row;
+}
+
+/** Parse `--tag ns:value` into its parts, or null when malformed. */
+function parseTagFlag(raw: string | undefined): { namespace: string; value: string } | null {
+  if (raw === undefined || raw.length === 0) return null;
+  const colon = raw.indexOf(":");
+  if (colon <= 0 || colon === raw.length - 1) return null;
+  return { namespace: raw.slice(0, colon), value: raw.slice(colon + 1) };
+}
+
+async function runTag(rest: string[], flags: Map<string, string>, deps: SeedDeps): Promise<number> {
+  const sub = rest[0];
+  switch (sub) {
+    case "add":
+      return runTagAdd(flags, deps);
+    case "remove":
+      return runTagRemove(flags, deps);
+    case "list":
+      return runTagList(flags, deps);
+    case "rebuild":
+      return runTagRebuild(deps);
+    default:
+      deps.write(
+        "error: usage: seed tag <add|remove|list|rebuild> [--person-id N|--ncaa-seq N] [--tag ns:value]",
+      );
+      return 1;
+  }
+}
+
+async function runTagAdd(flags: Map<string, string>, deps: SeedDeps): Promise<number> {
+  const player = await resolveTagPlayer(flags, deps);
+  if (player === null) return 1;
+  const tag = parseTagFlag(flags.get("tag"));
+  if (tag === null) {
+    deps.write("error: tag add requires --tag ns:value");
+    return 1;
+  }
+  try {
+    const created = addManualTag(deps.db, player.id, tag.namespace, tag.value, deps.now());
+    deps.write(
+      `tag added playerId=${player.id} namespace=${created.namespace} value=${created.value} source=${created.source}`,
+    );
+    return 0;
+  } catch (err) {
+    if (err instanceof ManualWriteToDerivedNamespaceError || err instanceof UnknownTagError) {
+      deps.write(`error: ${err.message}`);
+      return 1;
+    }
+    throw err;
+  }
+}
+
+async function runTagRemove(flags: Map<string, string>, deps: SeedDeps): Promise<number> {
+  const player = await resolveTagPlayer(flags, deps);
+  if (player === null) return 1;
+  const tag = parseTagFlag(flags.get("tag"));
+  if (tag === null) {
+    deps.write("error: tag remove requires --tag ns:value");
+    return 1;
+  }
+  try {
+    removeManualTag(deps.db, player.id, tag.namespace, tag.value);
+    deps.write(`tag removed playerId=${player.id} namespace=${tag.namespace} value=${tag.value}`);
+    return 0;
+  } catch (err) {
+    if (err instanceof ManualWriteToDerivedNamespaceError) {
+      deps.write(`error: ${err.message}`);
+      return 1;
+    }
+    throw err;
+  }
+}
+
+async function runTagList(flags: Map<string, string>, deps: SeedDeps): Promise<number> {
+  const player = await resolveTagPlayer(flags, deps);
+  if (player === null) return 1;
+  const tags = listTags(deps.db, player.id);
+  for (const t of tags) {
+    deps.write(`tag playerId=${player.id} namespace=${t.namespace} value=${t.value} source=${t.source}`);
+  }
+  deps.write(`total=${tags.length}`);
+  return 0;
+}
+
+function runTagRebuild(deps: SeedDeps): number {
+  const count = syncAllDerivedTags(deps.db, deps.now());
+  deps.write(`rebuilt derived tags players=${count}`);
   return 0;
 }
 

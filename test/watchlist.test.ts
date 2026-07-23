@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { players, statLines } from "../src/db/schema.js";
+import { playerTags, players, statLines } from "../src/db/schema.js";
 import { MlbApiError, MlbClient } from "../src/mlb/client.js";
 import { NcaaApiError, UnsupportedNcaaSeasonError } from "../src/ncaa/client.js";
 import type { WatchlistDeps } from "../src/watchlist/service.js";
@@ -109,6 +109,37 @@ describe("watch-list service", () => {
       )[0];
       const lines = await opened.db.select().from(statLines);
       expect(lines.filter((l) => l.playerId === winterAdd?.id)).toHaveLength(0);
+    });
+
+    it("derives tags on add via the completed first Refresh", async () => {
+      const result = await addPlayer(deps(), 691185);
+      const tags = await opened.db
+        .select()
+        .from(playerTags)
+        .where(eq(playerTags.playerId, result.player.id));
+      const keys = new Set(tags.map((t) => `${t.namespace}:${t.value}`));
+      expect(keys.has("level:aaa")).toBe(true);
+      expect(keys.has("pos:ss")).toBe(true);
+      expect(keys.has("prospect:prospect")).toBe(true);
+    });
+
+    it("derives tags even under Offseason Sleep, when the first Refresh is skipped", async () => {
+      await insertCalendars2026(opened.db);
+      await addPlayer(deps(), 691185); // a watched level exists before winter
+      clock.set(OFFSEASON);
+
+      api.options.person = makePerson({ id: 700000, fullName: "Winter Add" });
+      const result = await addPlayer(deps(), 700000);
+      expect(result.refresh).toEqual({ skipped: true, inserted: 0, updated: 0 });
+
+      // Tags still land from the inserted identity columns (SC1: the add-path sync).
+      const tags = await opened.db
+        .select()
+        .from(playerTags)
+        .where(eq(playerTags.playerId, result.player.id));
+      const keys = new Set(tags.map((t) => `${t.namespace}:${t.value}`));
+      expect(keys.has("level:aaa")).toBe(true);
+      expect(keys.has("pos:ss")).toBe(true);
     });
 
     it("duplicate add is a no-op update: same row, re-activated, no second refresh", async () => {

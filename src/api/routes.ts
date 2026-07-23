@@ -19,6 +19,14 @@ import { NcaaApiError, UnsupportedNcaaSeasonError } from "../ncaa/client.js";
 import { queryStatLines } from "../queries/statLines.js";
 import type { ServiceDeps } from "../server/deps.js";
 import {
+  ManualWriteToDerivedNamespaceError,
+  UnknownTagError,
+  addManualTag,
+  listTags,
+  removeManualTag,
+} from "../tags/service.js";
+import type { PlayerRef } from "../watchlist/service.js";
+import {
   PlayerNotFoundError,
   UnknownNcaaPlayerError,
   UnknownPersonError,
@@ -39,6 +47,7 @@ import {
   PlayersListInputSchema,
   RefreshInputSchema,
   StatLinesFormatSchema,
+  TagWriteBodySchema,
 } from "./schemas.js";
 
 /**
@@ -73,6 +82,11 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     ) {
       return c.json({ error: err.message }, 404);
     }
+    if (err instanceof ManualWriteToDerivedNamespaceError || err instanceof UnknownTagError) {
+      // Client/validation errors (a manual write to a derived namespace, or an
+      // unknown namespace/value) — the tag service owns the semantics.
+      return c.json({ error: err.message }, 400);
+    }
     if (err instanceof MlbApiError || err instanceof NcaaApiError) {
       // Upstream (MLB Stats API / stats.ncaa.org) failure: a bad gateway.
       return c.json({ error: err.message }, 502);
@@ -89,10 +103,60 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     throw err;
   });
 
+  /** Resolve an external ref (personId or ncaaPlayerSeq) to a row, or 404. */
+  async function resolvePlayer(ref: PlayerRef) {
+    const where =
+      typeof ref === "number"
+        ? eq(players.externalId, ref)
+        : eq(players.ncaaPlayerSeq, ref.ncaaPlayerSeq);
+    const row = (await deps.db.select().from(players).where(where))[0];
+    if (row === undefined) throw new PlayerNotFoundError(ref);
+    return row;
+  }
+
   api.get("/players", async (c) => {
     const query = PlayersListInputSchema.parse(c.req.query());
     const filter = query.active === "all" ? "all" : query.active === "true" ? "active" : "inactive";
-    return c.json({ players: await listPlayers(deps.db, filter) });
+    return c.json({ players: await listPlayers(deps.db, filter, query.tags) });
+  });
+
+  // NCAA tag routes are registered BEFORE the personId (`:id`) variants so the
+  // literal `ncaa` segment is never captured as an :id (same ordering as the
+  // deactivate routes below).
+  api.get("/players/ncaa/:seq/tags", async (c) => {
+    const player = await resolvePlayer({ ncaaPlayerSeq: NcaaPlayerSeqSchema.parse(c.req.param("seq")) });
+    return c.json({ tags: listTags(deps.db, player.id) });
+  });
+
+  api.post("/players/ncaa/:seq/tags", async (c) => {
+    const player = await resolvePlayer({ ncaaPlayerSeq: NcaaPlayerSeqSchema.parse(c.req.param("seq")) });
+    const body = TagWriteBodySchema.parse(await c.req.json());
+    const tag = addManualTag(deps.db, player.id, body.namespace, body.value, deps.now());
+    return c.json({ tag }, 201);
+  });
+
+  api.delete("/players/ncaa/:seq/tags/:namespace/:value", async (c) => {
+    const player = await resolvePlayer({ ncaaPlayerSeq: NcaaPlayerSeqSchema.parse(c.req.param("seq")) });
+    removeManualTag(deps.db, player.id, c.req.param("namespace"), c.req.param("value"));
+    return c.json({ removed: true });
+  });
+
+  api.get("/players/:id/tags", async (c) => {
+    const player = await resolvePlayer(PersonIdSchema.parse(c.req.param("id")));
+    return c.json({ tags: listTags(deps.db, player.id) });
+  });
+
+  api.post("/players/:id/tags", async (c) => {
+    const player = await resolvePlayer(PersonIdSchema.parse(c.req.param("id")));
+    const body = TagWriteBodySchema.parse(await c.req.json());
+    const tag = addManualTag(deps.db, player.id, body.namespace, body.value, deps.now());
+    return c.json({ tag }, 201);
+  });
+
+  api.delete("/players/:id/tags/:namespace/:value", async (c) => {
+    const player = await resolvePlayer(PersonIdSchema.parse(c.req.param("id")));
+    removeManualTag(deps.db, player.id, c.req.param("namespace"), c.req.param("value"));
+    return c.json({ removed: true });
   });
 
   api.post("/players", async (c) => {

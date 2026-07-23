@@ -340,13 +340,13 @@ describe("connector smoke", () => {
 
   // --- Read-only happy path -------------------------------------------------
 
-  it("happy path: exact 11 tools, healthy status, read-only preview, no-bearer 401 — no mail, no write", async () => {
+  it("happy path: exact 14 tools, healthy status, read-only preview, no-bearer 401 — no mail, no write", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
     const { deps, out, err } = harness(makeApp(), baseEnv());
 
     expect(await runSmoke(deps)).toBe(0);
-    expect(out).toContain("PASS tools/list - all 11 tools present");
+    expect(out).toContain("PASS tools/list - all 14 tools present");
     expect(out.some((l) => l.startsWith("PASS status"))).toBe(true);
     expect(out.some((l) => l.startsWith("PASS digest_preview"))).toBe(true);
     expect(out.some((l) => l.startsWith("PASS no-bearer-401"))).toBe(true);

@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { players, refreshRuns, seasonCalendar, statLines } from "../src/db/schema.js";
+import { playerTags, players, refreshRuns, seasonCalendar, statLines } from "../src/db/schema.js";
 import type { RefreshDeps } from "../src/jobs/refresh.js";
 import { runRefresh } from "../src/jobs/refresh.js";
 import { SUPERSEDED_MESSAGE, claimRefreshRun } from "../src/jobs/refresh-run.js";
@@ -99,6 +99,26 @@ describe("runRefresh", () => {
     const cals = await opened.db.select().from(seasonCalendar);
     expect(cals.map((c) => c.sportId).sort((a, b) => a - b)).toEqual([1, 11]);
     expect(cals.find((c) => c.sportId === 1)?.postSeasonEnd).toBe("2026-10-31");
+  });
+
+  it("re-derives a player's tags from his refreshed level/position (the sweep moves level:)", async () => {
+    // Inserted as Rookie, but the refresh resolves his current team to Triple-A
+    // (makePerson/makeTeam) — proving the wired syncDerivedTags re-derives from
+    // the UPDATED columns, not the stale ones.
+    const player = await insertPlayer(opened.db, {
+      externalId: 691185,
+      level: "milb",
+      milbLevel: "Rookie",
+      position: null,
+    });
+    await runRefresh(deps());
+
+    const tags = await opened.db.select().from(playerTags).where(eq(playerTags.playerId, player.id));
+    const keys = new Set(tags.map((t) => `${t.namespace}:${t.value}`));
+    expect(keys.has("level:aaa")).toBe(true);
+    expect(keys.has("level:rookie")).toBe(false);
+    expect(keys.has("pos:ss")).toBe(true);
+    expect(keys.has("prospect:prospect")).toBe(true);
   });
 
   it("sweeps all 6 sportIds x all three stat groups per player", async () => {

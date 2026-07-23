@@ -31,14 +31,17 @@ and responses are JSON.
 
 ## Routes
 
-All ten routes live under `/api`. Request/response bodies are JSON; inputs are validated by the same
-shared Zod schemas the MCP tools use (`src/api/schemas.ts`, `src/queries/statLines.ts`), so a
+All sixteen routes live under `/api`. Request/response bodies are JSON; inputs are validated by the
+same shared Zod schemas the MCP tools use (`src/api/schemas.ts`, `src/queries/statLines.ts`), so a
 malformed input is rejected identically on both surfaces.
 
 ### `GET /api/players`
 
 List Watch List players. Query: `active=true|false|all` (default `true` — active only; `false` for
-deactivated; `all` for both). Returns `{ "players": [...] }`.
+deactivated; `all` for both), plus optional `tags=` — a comma-separated **AND** selector (e.g.
+`tags=level:aaa,status:rostered`), where a bare namespace (e.g. `tags=prospect`) matches any value in
+it; only players matching every token are returned. A malformed selector is a **400**. Returns
+`{ "players": [...] }`.
 
 ### `POST /api/players`
 
@@ -65,6 +68,19 @@ personId, not the internal row id). Returns `{ "player": {...} }`.
 
 Name search over MLB/MiLB players via the MLB Stats API, each hit resolved to a current team and
 level. Query: `q=NAME` (required, non-blank). Returns `{ "results": [...] }`.
+
+### Player tags
+
+Manual-tag management, addressed by **personId** (`:id`) for MLB/MiLB or **`stats_player_seq`**
+(`:seq`) for NCAA — the same external addressing as the sibling player routes. Tag semantics live in
+the service: a manual write to a derived namespace (`level`/`pos`/`prospect`), or an unknown
+namespace/value, is a **400**; an unknown Player is a **404**.
+
+| Route | Meaning |
+|---|---|
+| `GET /api/players/:id/tags`, `GET /api/players/ncaa/:seq/tags` | List **every** tag (derived + manual), ordered by namespace, value, source. Returns `{ "tags": [...] }`. |
+| `POST /api/players/:id/tags`, `POST /api/players/ncaa/:seq/tags` | Add a manual tag. Body `{ "namespace": "status", "value": "rostered" }`. Idempotent; returns **201** `{ "tag": {...} }`. |
+| `DELETE /api/players/:id/tags/:namespace/:value`, `DELETE /api/players/ncaa/:seq/tags/:namespace/:value` | Remove a manual tag (no-op if absent). Returns `{ "removed": true }`. |
 
 ### `GET /api/stat-lines`
 
@@ -116,8 +132,9 @@ Errors are shaped by a single `onError` handler; the status is chosen by error t
 | Condition | Status | Body |
 |---|---|---|
 | Missing / wrong bearer token | **401** | `{ "error": "unauthorized" }` |
-| Zod validation failure (bad input) | **400** | `{ "error": "invalid-input", "issues": [...] }` |
+| Zod validation failure (bad input, incl. a malformed `tags` selector) | **400** | `{ "error": "invalid-input", "issues": [...] }` |
 | Malformed JSON body (`SyntaxError`) | **400** | `{ "error": "invalid-input", "issues": [{ "message": ... }] }` |
+| Manual write to a derived tag namespace / unknown tag namespace or value | **400** | `{ "error": "<message>" }` |
 | Unknown person / unknown NCAA player / player not found | **404** | `{ "error": "<message>" }` |
 | MLB Stats API or stats.ncaa.org upstream failure | **502** | `{ "error": "<message>" }` |
 | No bundled NCAA season lookup for the requested year | **503** | `{ "error": "<message>" }` |

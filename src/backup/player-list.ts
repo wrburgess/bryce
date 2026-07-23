@@ -1,7 +1,9 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, rmSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
+import { playerTags } from "../db/schema.js";
 import { canonicalizeName } from "../domain/names.js";
 import { listPlayers } from "../watchlist/service.js";
 import { fsyncDir } from "./snapshot.js";
@@ -28,6 +30,19 @@ const ISO_8601 =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 const isoTimestamp = z.string().regex(ISO_8601, "must be an ISO-8601 timestamp");
 
+/**
+ * A MANUAL tag carried in a backup entry (Phase A of #29). Only `source='manual'`
+ * tags are backed up — derived tags rebuild on the next Refresh, so they carry no
+ * information a restore needs. Optional and additive: a v1 backup with no `tags`
+ * field restores exactly as before.
+ */
+const backupTagSchema = z
+  .object({
+    namespace: z.string().min(1),
+    value: z.string().min(1),
+  })
+  .strict();
+
 const playerEntrySchema = z
   .object({
     // The source-local primary key: carried for provenance, NEVER authoritative
@@ -45,6 +60,7 @@ const playerEntrySchema = z
     notes: z.string().nullable().default(null),
     createdAt: isoTimestamp.optional(),
     updatedAt: isoTimestamp.optional(),
+    tags: z.array(backupTagSchema).optional(),
   })
   .strict()
   .superRefine((row, ctx) => {
@@ -149,24 +165,41 @@ export async function createPlayerListBackup(
   now: () => Date = () => new Date(),
 ): Promise<PlayerListBackup> {
   const rows = await listPlayers(db, "all");
+  // One query for every MANUAL tag, grouped by player (never a query per player):
+  // derived tags are not backed up — they rebuild on the next Refresh.
+  const manualTags = await db.select().from(playerTags).where(eq(playerTags.source, "manual"));
+  const tagsByPlayer = new Map<number, Array<{ namespace: string; value: string }>>();
+  for (const t of manualTags) {
+    const list = tagsByPlayer.get(t.playerId) ?? [];
+    list.push({ namespace: t.namespace, value: t.value });
+    tagsByPlayer.set(t.playerId, list);
+  }
   return {
     version: PLAYER_BACKUP_VERSION,
     exportedAt: now().toISOString(),
-    players: rows.map((r) => ({
-      id: r.id,
-      externalId: r.externalId,
-      ncaaPlayerSeq: r.ncaaPlayerSeq,
-      fullName: r.fullName,
-      level: r.level,
-      milbLevel: r.milbLevel,
-      teamName: r.teamName,
-      position: r.position,
-      schoolName: r.schoolName,
-      active: r.active,
-      notes: r.notes,
-      createdAt: r.createdAt,
-      updatedAt: r.updatedAt,
-    })),
+    players: rows.map((r) => {
+      const base = {
+        id: r.id,
+        externalId: r.externalId,
+        ncaaPlayerSeq: r.ncaaPlayerSeq,
+        fullName: r.fullName,
+        level: r.level,
+        milbLevel: r.milbLevel,
+        teamName: r.teamName,
+        position: r.position,
+        schoolName: r.schoolName,
+        active: r.active,
+        notes: r.notes,
+        createdAt: r.createdAt,
+        updatedAt: r.updatedAt,
+      };
+      const tags = tagsByPlayer.get(r.id);
+      // Omit the key entirely when there are no manual tags, so a tagless roster
+      // serializes byte-identically to a pre-#30 backup (back-compat).
+      if (tags === undefined) return base;
+      tags.sort((a, b) => a.namespace.localeCompare(b.namespace) || a.value.localeCompare(b.value));
+      return { ...base, tags };
+    }),
   };
 }
 

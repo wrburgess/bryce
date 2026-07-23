@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { PlayerRow } from "../db/schema.js";
-import { players } from "../db/schema.js";
+import { playerTags, players } from "../db/schema.js";
 import type { PlayerBackupEntry } from "../backup/player-list.js";
 import { canonicalizeName } from "../domain/names.js";
 import { hostDate } from "../domain/season.js";
@@ -12,6 +12,7 @@ import type { Person } from "../mlb/schemas.js";
 import type { NcaaClient } from "../ncaa/client.js";
 import { NcaaApiError, UnsupportedNcaaSeasonError } from "../ncaa/client.js";
 import { parseGameLogPage } from "../ncaa/parse.js";
+import { parseTagSelector, playerIdsMatchingTags, syncDerivedTags } from "../tags/service.js";
 
 /**
  * Watch-list service: the one home for add/deactivate/list/search semantics,
@@ -148,6 +149,12 @@ export async function addPlayer(deps: WatchlistDeps, personId: number): Promise<
     { db, client, ncaaClient: deps.ncaaClient, now, tz: deps.tz },
     inserted.id,
   );
+  // SC1: a completed Refresh already synced tags via refreshPlayer; only derive
+  // here when the first Refresh was SKIPPED (Offseason Sleep), so tags still
+  // land from the inserted identity columns and we avoid double-derivation.
+  if (refresh === null || refresh.skipped) {
+    syncDerivedTags(db, inserted.id, now());
+  }
   return { action: "added", player: inserted, refresh };
 }
 
@@ -226,6 +233,11 @@ export async function addNcaaPlayer(
   }
 
   const refresh = await runRefreshForPlayer({ db, client: deps.client, ncaaClient, now, tz }, inserted.id);
+  // SC1: mirror addPlayer — only derive here when the first Refresh was SKIPPED
+  // (Offseason Sleep); a completed Refresh already synced via refreshNcaaPlayer.
+  if (refresh === null || refresh.skipped) {
+    syncDerivedTags(db, inserted.id, now());
+  }
   return { action: "added", player: inserted, refresh };
 }
 
@@ -258,16 +270,28 @@ export async function deactivatePlayer(
   return updated;
 }
 
-/** Watch-list rows ordered by id; active-only by default. */
-export async function listPlayers(db: Db, filter: PlayerListFilter = "active"): Promise<PlayerRow[]> {
-  if (filter === "all") {
-    return db.select().from(players).orderBy(players.id);
-  }
-  return db
-    .select()
-    .from(players)
-    .where(eq(players.active, filter === "active"))
-    .orderBy(players.id);
+/**
+ * Watch-list rows ordered by id; active-only by default. An optional
+ * `tagSelector` (comma = AND) intersects the result with the players matching
+ * every token — one aggregate tag query, never a query per player. A malformed
+ * selector throws a ZodError (400 / exit 1 on every surface).
+ */
+export async function listPlayers(
+  db: Db,
+  filter: PlayerListFilter = "active",
+  tagSelector?: string,
+): Promise<PlayerRow[]> {
+  const rows =
+    filter === "all"
+      ? await db.select().from(players).orderBy(players.id)
+      : await db
+          .select()
+          .from(players)
+          .where(eq(players.active, filter === "active"))
+          .orderBy(players.id);
+  if (tagSelector === undefined) return rows;
+  const matching = new Set(playerIdsMatchingTags(db, parseTagSelector(tagSelector)));
+  return rows.filter((r) => matching.has(r.id));
 }
 
 /**
@@ -375,6 +399,7 @@ export function restorePlayerListBackup(
           ? null
           : canonicalizeName(row.schoolName);
 
+      let playerId: number;
       if (existing !== undefined) {
         // Coalesce natural ids so a backup can ADD an id without erasing one the
         // existing row already holds (the promotion case keeps ncaa_player_seq).
@@ -395,9 +420,10 @@ export function restorePlayerListBackup(
           })
           .where(eq(players.id, existing.id))
           .run();
+        playerId = existing.id;
         updated += 1;
       } else {
-        tx
+        const insertedRow = tx
           .insert(players)
           .values({
             externalId: row.externalId ?? null,
@@ -413,8 +439,32 @@ export function restorePlayerListBackup(
             createdAt: row.createdAt ?? nowIso,
             updatedAt: nowIso,
           })
-          .run();
+          .returning()
+          .get();
+        playerId = insertedRow.id;
         inserted += 1;
+      }
+
+      // Derive INSIDE the transaction (MF4): derived tags are rebuildable state,
+      // recomputed per upserted row from the identity columns just written — so
+      // the import stays all-or-nothing with no post-commit failure gap.
+      syncDerivedTags(tx, playerId, now);
+      // Re-apply the entry's MANUAL tags by the restored id. A direct insert
+      // preserves exact fidelity (the backup is authoritative for manual tags);
+      // onConflictDoNothing keeps a re-import idempotent. A v1 backup with no
+      // `tags` field leaves this a no-op (back-compat).
+      for (const tag of row.tags ?? []) {
+        tx
+          .insert(playerTags)
+          .values({
+            playerId,
+            namespace: tag.namespace,
+            value: tag.value,
+            source: "manual",
+            createdAt: nowIso,
+          })
+          .onConflictDoNothing()
+          .run();
       }
     }
 
