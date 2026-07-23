@@ -108,12 +108,17 @@ function makeField(key: FieldKey, value: string | null, status: FieldStatus): Fi
 }
 
 // Lines of a section: everything AFTER the heading line up to the next `## ` H2 (or EOF).
-// Returns null when the heading is absent, so callers can tell "no section" from "empty section".
-function sectionBody(lines: string[], heading: string): string[] | null {
-  const start = lines.findIndex((l) => l.trim() === heading);
-  if (start === -1) return null;
+// Returns null when the heading is absent. Returns the DUPLICATE_SECTION sentinel when the heading
+// appears more than once — a vendoring that leaves two `## Human Gates` (or two `## Lifecycle Host`)
+// sections must not let a safe first section mask an unsafe second: every declaration the duplicated
+// section carries is reported `duplicate`, not read from the first occurrence alone.
+const DUPLICATE_SECTION = Symbol("duplicate-section");
+function sectionBody(lines: string[], heading: string): string[] | null | typeof DUPLICATE_SECTION {
+  const starts = lines.flatMap((l, i) => (l.trim() === heading ? [i] : []));
+  if (starts.length === 0) return null;
+  if (starts.length > 1) return DUPLICATE_SECTION;
 
-  const rest = lines.slice(start + 1);
+  const rest = lines.slice((starts[0] as number) + 1);
   const end = rest.findIndex((l) => l.startsWith("## ")); // the next H2 ends the section
   return end === -1 ? rest : rest.slice(0, end);
 }
@@ -143,7 +148,15 @@ function firstBackticked(text: string): string | null {
   return token === "" ? null : token;
 }
 
-function extractGateRows(body: string[] | null): Record<"planApproval" | "merge", Field> {
+function extractGateRows(
+  body: string[] | null | typeof DUPLICATE_SECTION,
+): Record<"planApproval" | "merge", Field> {
+  if (body === DUPLICATE_SECTION) {
+    return {
+      planApproval: makeField("planApproval", null, "duplicate"),
+      merge: makeField("merge", null, "duplicate"),
+    };
+  }
   if (body === null) {
     return {
       planApproval: makeField("planApproval", null, "absent"),
@@ -179,8 +192,9 @@ function extractGateRows(body: string[] | null): Record<"planApproval" | "merge"
   return { planApproval: read("planApproval"), merge: read("merge") };
 }
 
-function extractFloor(body: string[] | null): Field {
+function extractFloor(body: string[] | null | typeof DUPLICATE_SECTION): Field {
   const key: FieldKey = "reviewerFloor";
+  if (body === DUPLICATE_SECTION) return makeField(key, null, "duplicate");
   if (body === null) return makeField(key, null, "absent");
 
   const bullets = body.filter((l) => l.trim().startsWith(FLOOR_PREFIX));
@@ -193,8 +207,9 @@ function extractFloor(body: string[] | null): Field {
   return value === null ? makeField(key, null, "unparseable") : makeField(key, value, "parsed");
 }
 
-function extractDisposition(gatesBody: string[] | null): Field {
+function extractDisposition(gatesBody: string[] | null | typeof DUPLICATE_SECTION): Field {
   const key: FieldKey = "ruleDisposition";
+  if (gatesBody === DUPLICATE_SECTION) return makeField(key, null, "duplicate");
   if (gatesBody === null) return makeField(key, null, "absent");
 
   const headings = gatesBody
@@ -259,11 +274,20 @@ export function cliName(key: FieldKey): string {
   return LABELS[key].toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }
 
+// A parsed value is user-derived (it comes from PROJECT.md), so a malformed declaration could carry a
+// non-ASCII byte. Script output must be ASCII (rules/scripting.md / ADR 0011), and a diagnostic must
+// survive a non-UTF-8 runner, so any parsed value is escaped to `\uXXXX` before it is emitted — never
+// written raw to stdout or into a parity error message.
+export function asciiSafe(value: string | null): string {
+  if (value === null) return "none";
+  return value.replace(/[^\x20-\x7e]/g, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
 // The lines the direct-run CLI prints: `name: value (status)`, one per declaration. ASCII only.
 export function report(fields: HumanGates): string[] {
   return FIELD_KEYS.map((key) => {
     const field = fields[key];
-    return `${cliName(key)}: ${field.value ?? "none"} (${field.status})`;
+    return `${cliName(key)}: ${asciiSafe(field.value)} (${field.status})`;
   });
 }
 

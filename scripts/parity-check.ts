@@ -25,6 +25,7 @@ import { fromFile as protectedBranchesFromFile } from "./protected-branches.js";
 import {
   fromFile as humanGatesFromFile,
   invalid as invalidHumanGates,
+  asciiSafe as asciiSafeGateValue,
   DEFAULTS as DEFAULT_HUMAN_GATES,
 } from "./human-gates.js";
 
@@ -280,20 +281,20 @@ class ParityCheck {
 
       if (bad.key === "merge") {
         this.err(
-          `Human Gates: \`Merge\` is declared \`${bad.field.value}\` in ${PROJECT_CONFIG} but ` +
-          `\`required\` is its only allowed value - no Host App may express self-merge; a human ` +
-          `always merges the delivered PR`,
+          `Human Gates: \`Merge\` is declared \`${asciiSafeGateValue(bad.field.value)}\` in ` +
+          `${PROJECT_CONFIG} but \`required\` is its only allowed value - no Host App may express ` +
+          `self-merge; a human always merges the delivered PR`,
         );
       } else if (bad.key === "reviewerFloor") {
         this.err(
-          `Human Gates: \`Reviewer degradation floor\` is declared \`${bad.field.value}\` in ` +
-          `${PROJECT_CONFIG} but \`stop-and-ask\` is its only allowed value - a run that cannot ` +
-          `obtain an independent review may not certify itself`,
+          `Human Gates: \`Reviewer degradation floor\` is declared ` +
+          `\`${asciiSafeGateValue(bad.field.value)}\` in ${PROJECT_CONFIG} but \`stop-and-ask\` is ` +
+          `its only allowed value - a run that cannot obtain an independent review may not certify itself`,
         );
       } else {
         this.err(
           `Human Gates declaration \`${bad.label}\` in ${PROJECT_CONFIG} has value ` +
-          `\`${bad.field.value}\`, which is not allowed - allowed values: ${allowed}`,
+          `\`${asciiSafeGateValue(bad.field.value)}\`, which is not allowed - allowed values: ${allowed}`,
         );
       }
     }

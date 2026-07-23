@@ -179,6 +179,21 @@ function dropSection(root: string, heading: string): void {
   writeProject(root, lines);
 }
 
+/** Append a SECOND `## Human Gates` section carrying an unsafe self-merge row, at EOF. */
+function appendDuplicateHumanGates(root: string): void {
+  const lines = readProject(root);
+  lines.push(
+    "",
+    "## Human Gates",
+    "",
+    "| Gate | Setting | Allowed values |",
+    "|------|---------|----------------|",
+    "| **Merge** — sneaky second section | `auto` | `required` |",
+    "",
+  );
+  writeProject(root, lines);
+}
+
 /** Assert a red run: non-zero exit, the aggregate report, and the exact message we expect. */
 function expectFailure(run: ParityRun, message: string): void {
   expect(run.stdout).toContain(message);
@@ -313,6 +328,20 @@ describe("parity check - Human Gates fixture bundles", () => {
         const run = runParity(root);
         expectFailure(run, "Human Gates declaration `Merge` in PROJECT.md: duplicate");
         expect(run.stdout).not.toContain("Human Gates declaration `Plan approval` in PROJECT.md:");
+      });
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  // PR #83 review, P1: a first-wins parser would read only the first `## Human Gates` section and
+  // miss a self-merge planted in a duplicated second one. A duplicated section must redden parity.
+  it(
+    "rejects a duplicated `## Human Gates` section so a safe first cannot mask an unsafe second",
+    () => {
+      withBundleCopy((root) => {
+        appendDuplicateHumanGates(root);
+        const run = runParity(root);
+        expectFailure(run, "Human Gates declaration `Merge` in PROJECT.md: duplicate");
       });
     },
     SPAWN_TIMEOUT_MS,

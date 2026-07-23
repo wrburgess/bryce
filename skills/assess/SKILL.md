@@ -121,8 +121,13 @@ HC can discuss before choosing. Use this template:
 Option [X] because [rationale].
 
 ### Next Step
-HC: send this assessment to the Reviewer, then reply with your chosen option and run the plan skill
-(`devise`) for the same issue.
+The assessment still gets an independent Reviewer pass — HC: send this assessment to the Reviewer
+(there is no assess-mode summon the AC can run, so this routing stays the HC's). The **option pick**
+then follows the *Plan approval* gate ([`PROJECT.md`](../../PROJECT.md) → *Human Gates*): under
+`required`, the HC replies with a chosen option and runs the plan skill (`devise`); under `auto` —
+this host's setting — the AC proceeds on its own recommended option and runs `devise` directly, naming
+in the posted plan that it self-selected under `auto`. The HC can reply on the issue to redirect at
+any time.
 ```
 
 Sign the comment with the attribution footer from [`PROJECT.md`](../../PROJECT.md) → *Attribution &

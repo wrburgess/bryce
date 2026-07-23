@@ -7,6 +7,7 @@ import {
   invalid,
   report,
   cliName,
+  asciiSafe,
   ALLOWED,
   DEFAULTS,
   FIELD_KEYS,
@@ -515,5 +516,82 @@ describe("emitted output is ASCII-only", () => {
       "reviewer-degradation-floor: none (absent)",
       "rule-suggestion-disposition: none (absent)",
     ]);
+  });
+});
+
+describe("extract - a duplicated policy section can never false-green (PR #83 review, P1)", () => {
+  // A vendoring that leaves two `## Human Gates` (or two `## Lifecycle Host`) sections must not let a
+  // safe first section mask an unsafe second: `findIndex` would read only the first. Every declaration
+  // the duplicated section carries reports `duplicate`, so `invalid()` is non-empty and parity reddens.
+  const safeGates = [
+    "## Human Gates",
+    "",
+    GATE_HEADER,
+    GATE_SEPARATOR,
+    planRow("`auto`"),
+    mergeRow("`required`"),
+    "",
+    "### Rule-suggestion disposition",
+    "",
+    ...dispositionSentence("`autonomous-fold`"),
+    "",
+  ];
+  const unsafeGates = [
+    "## Human Gates",
+    "",
+    GATE_HEADER,
+    GATE_SEPARATOR,
+    planRow("`auto`"),
+    mergeRow("`auto`"), // self-merge, the exact thing the boundary must reject
+    "",
+    "### Rule-suggestion disposition",
+    "",
+    ...dispositionSentence("`autonomous-fold`"),
+    "",
+  ];
+
+  it("reports every gate-table + disposition field as duplicate when `## Human Gates` appears twice", () => {
+    const text = ["# fixture", "", ...safeGates, ...unsafeGates].join("\n");
+    const gates = extract(text);
+    expectField(gates, "planApproval", null, "duplicate", "required");
+    expectField(gates, "merge", null, "duplicate", "required");
+    expectField(gates, "ruleDisposition", null, "duplicate", "present-to-hc");
+  });
+
+  it("does NOT let a safe first section hide a self-merge in the second (the security case)", () => {
+    const text = ["# fixture", "", ...safeGates, ...unsafeGates].join("\n");
+    const bad = invalid(extract(text)).map((b) => b.key);
+    // Both gate rows and the disposition are flagged; a first-wins parser would have reported none.
+    expect(bad).toContain("merge");
+    expect(bad).toContain("planApproval");
+    expect(bad).toContain("ruleDisposition");
+  });
+
+  it("reports the floor as duplicate when `## Lifecycle Host` appears twice", () => {
+    const host = ["## Lifecycle Host", "", floorBullet("`stop-and-ask`"), ""];
+    const hostSoftened = ["## Lifecycle Host", "", floorBullet("`flag-in-SOW`"), ""];
+    const text = ["# fixture", "", ...host, ...hostSoftened, ...safeGates].join("\n");
+    expectField(extract(text), "reviewerFloor", null, "duplicate", "stop-and-ask");
+  });
+});
+
+describe("asciiSafe - user-derived values are ASCII-escaped before emission (PR #83 review, P2)", () => {
+  it("escapes a non-ASCII value to `\\uXXXX`", () => {
+    expect(asciiSafe("café")).toBe("caf\\u00e9");
+    expect(asciiSafe("—")).toBe("\\u2014");
+    expect(asciiSafe("ño")).toMatch(ASCII);
+  });
+
+  it("passes an ASCII value through unchanged and maps null to `none`", () => {
+    expect(asciiSafe("stop-and-ask")).toBe("stop-and-ask");
+    expect(asciiSafe(null)).toBe("none");
+  });
+
+  it("keeps report() output ASCII even when a parsed value contains a non-ASCII byte", () => {
+    // A malformed declaration whose backticked value is non-ASCII must not leak a raw byte to stdout.
+    const text = projectMd({ merge: "`autö`" });
+    const lines = report(extract(text));
+    for (const line of lines) expect(line).toMatch(ASCII);
+    expect(lines.some((l) => l.includes("\\u00f6"))).toBe(true);
   });
 });
