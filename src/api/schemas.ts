@@ -24,6 +24,133 @@ export const AddNcaaPlayerInputSchema = z.object({
   ),
 });
 
+/**
+ * Batch-add (issue #68 / ADR 0045). A batch of *typed identity entries* staged
+ * in ONE call. A personId and an ncaaPlayerSeq are indistinguishable positive
+ * integers, so each entry is an explicit discriminated `{personId}` /
+ * `{ncaaPlayerSeq}` / `{name}` — never positional. A `name` is an MLB-only
+ * people-search convenience (there is no NCAA name search, ADR 0032) that must
+ * resolve to *exactly one* hit; an NCAA player enters a batch only by
+ * stats_player_seq. Unlike single-add (ADR 0030), no first Refresh runs inline:
+ * identity resolves now, the season backfills at the next Refresh.
+ */
+
+/**
+ * Per-call entry cap. This is a LATENCY bound, not a byte-DoS bound like
+ * MAX_BACKUP_BYTES: resolving one NCAA stats_player_seq fetches a game-log page
+ * at the NCAA client's ~3 s politeness interval, so an all-NCAA batch of N costs
+ * ~3 N seconds. 25 entries is a worst case ~75 s, comfortably under the ~100 s
+ * Cloudflare-edge timeout (ADR 0045). MLB entries are far cheaper (teams cached).
+ */
+export const MAX_BATCH_ENTRIES = 25;
+const BATCH_STRING_MAX = 120;
+
+/** One typed identity entry: exactly one of personId, ncaaPlayerSeq, or name. */
+export const BatchAddEntrySchema = z
+  .object({
+    personId: PersonIdSchema.optional().describe("MLB Stats API personId (MLB/MiLB)."),
+    ncaaPlayerSeq: NcaaPlayerSeqSchema.optional().describe(
+      "stats.ncaa.org stats_player_seq (NCAA).",
+    ),
+    name: z
+      .string()
+      .trim()
+      .min(1)
+      .max(BATCH_STRING_MAX)
+      .optional()
+      .describe("MLB/MiLB player name to resolve via people search; must match exactly one player."),
+  })
+  .strict()
+  .superRefine((val, ctx) => {
+    const present =
+      (val.personId !== undefined ? 1 : 0) +
+      (val.ncaaPlayerSeq !== undefined ? 1 : 0) +
+      (val.name !== undefined ? 1 : 0);
+    if (present !== 1) {
+      ctx.addIssue({
+        code: "custom",
+        message: "each entry must carry exactly one of personId, ncaaPlayerSeq, or name",
+      });
+    }
+  });
+
+/** The parsed, normalized entry (name trimmed) echoed back in each outcome. */
+export type BatchAddEntry = z.infer<typeof BatchAddEntrySchema>;
+
+/**
+ * The raw object shape (exposed for the MCP tool schema, like RefreshInputShape)
+ * BEFORE the in-batch duplicate refinement is layered on for the service. The
+ * `list` field is the #70 named-list seam: accepted and validated for shape,
+ * but unused today (there is one Watch List — ADR 0045).
+ */
+export const BatchAddInputBase = z
+  .object({
+    entries: z
+      .array(BatchAddEntrySchema)
+      .min(1)
+      .max(MAX_BATCH_ENTRIES)
+      .describe(
+        `The batch of 1 to ${MAX_BATCH_ENTRIES} typed identity entries to stage; each is exactly one of personId, ncaaPlayerSeq, or name. Their seasons backfill at the next refresh, not inline.`,
+      ),
+    list: z
+      .string()
+      .trim()
+      .min(1)
+      .max(BATCH_STRING_MAX)
+      .optional()
+      .describe(
+        "Reserved named-list target (issue #70). Accepted and shape-validated but IGNORED today — there is one Watch List; a value never changes behavior.",
+      ),
+  })
+  .strict();
+
+/**
+ * The full input schema the service parses. Adds in-batch duplicate detection
+ * across THREE independent identity spaces — a personId N and an ncaaPlayerSeq N
+ * are DIFFERENT humans, never a duplicate; names compare trimmed + lowercased.
+ * A duplicate (like an over-cap, blank, or untyped entry) fails the whole call
+ * as a usage error BEFORE any network or write (ADR 0045: Zod-strict at the
+ * boundary, domain-soft on resolution).
+ */
+export const BatchAddInputSchema = BatchAddInputBase.superRefine((val, ctx) => {
+  const seenPersonId = new Set<number>();
+  const seenNcaaSeq = new Set<number>();
+  const seenName = new Set<string>();
+  val.entries.forEach((entry, i) => {
+    if (entry.personId !== undefined) {
+      if (seenPersonId.has(entry.personId)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["entries", i],
+          message: `duplicate personId ${entry.personId} in batch`,
+        });
+      }
+      seenPersonId.add(entry.personId);
+    }
+    if (entry.ncaaPlayerSeq !== undefined) {
+      if (seenNcaaSeq.has(entry.ncaaPlayerSeq)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["entries", i],
+          message: `duplicate ncaaPlayerSeq ${entry.ncaaPlayerSeq} in batch`,
+        });
+      }
+      seenNcaaSeq.add(entry.ncaaPlayerSeq);
+    }
+    if (entry.name !== undefined) {
+      const key = entry.name.trim().toLowerCase();
+      if (seenName.has(key)) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["entries", i],
+          message: `duplicate name "${entry.name}" in batch`,
+        });
+      }
+      seenName.add(key);
+    }
+  });
+});
+
 /** Deactivate addressing: exactly one of personId or ncaaPlayerSeq (ADR 0032). */
 export const DeactivateInputShape = {
   personId: PersonIdSchema.optional().describe(

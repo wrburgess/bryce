@@ -34,6 +34,7 @@ const ALL_TOOLS = [
   "watchlist_list",
   "watchlist_add",
   "watchlist_add_ncaa",
+  "watchlist_batch_add",
   "watchlist_deactivate",
   "player_search",
   "stat_lines",
@@ -120,7 +121,7 @@ describe("MCP server over Streamable HTTP", () => {
     };
   }
 
-  it("exposes exactly the eleven tools", async () => {
+  it("exposes exactly the twelve tools", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...ALL_TOOLS].sort());
     for (const tool of tools) {
@@ -248,6 +249,47 @@ describe("MCP server over Streamable HTTP", () => {
     // Not misreported as a missing player, and nothing written.
     expect(result.content[0]?.text).not.toContain("no NCAA player");
     expect(await opened.db.select().from(players)).toHaveLength(0);
+  });
+
+  it("watchlist_batch_add stages a batch and returns a structured summary (no inline backfill)", async () => {
+    const result = await call("watchlist_batch_add", {
+      entries: [{ personId: 691185 }, { ncaaPlayerSeq: 2649785 }],
+    });
+    expect(result.isError).toBeUndefined();
+    const sc = result.structuredContent as {
+      summary: { added: number; total: number };
+      entries: Array<{ status: string }>;
+    };
+    expect(sc.summary).toMatchObject({ added: 2, total: 2 });
+    expect(sc.entries.map((e) => e.status)).toEqual(["added", "added"]);
+    // Text part carries the same JSON.
+    expect(JSON.parse(result.content[0]?.text ?? "{}")).toMatchObject({ summary: { added: 2 } });
+
+    // Staged identity only — two rows, no stat lines (deferred to the next refresh).
+    expect(await opened.db.select().from(players)).toHaveLength(2);
+    expect(await opened.db.select().from(statLines)).toHaveLength(0);
+  });
+
+  it("watchlist_batch_add reports an in-batch duplicate as a structured tool error, writing nothing", async () => {
+    const result = await call("watchlist_batch_add", {
+      entries: [{ personId: 5 }, { personId: 5 }],
+    });
+    expect(result.isError).toBe(true);
+    expect(await opened.db.select().from(players)).toHaveLength(0);
+  });
+
+  it("watchlist_batch_add keeps a soft per-entry failure inside the structured result", async () => {
+    api.options.searchResults = [];
+    const result = await call("watchlist_batch_add", {
+      entries: [{ personId: 691185 }, { name: "Nobody At All" }],
+    });
+    expect(result.isError).toBeUndefined();
+    const sc = result.structuredContent as {
+      summary: { added: number; unresolved: number };
+      entries: Array<{ status: string; reason?: string }>;
+    };
+    expect(sc.summary).toMatchObject({ added: 1, unresolved: 1 });
+    expect(sc.entries[1]).toMatchObject({ status: "unresolved", reason: "name_no_match" });
   });
 
   it("run_refresh reports an NCAA upstream failure as a structured tool error", async () => {

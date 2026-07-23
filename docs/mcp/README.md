@@ -1,7 +1,7 @@
 # MCP Reference
 
 The MCP server is Bryce's **primary interface** ([ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)):
-eleven tools over the same service layer and Zod schemas the [REST API](../api/README.md) and
+twelve tools over the same service layer and Zod schemas the [REST API](../api/README.md) and
 [CLI](../cli/README.md) use, so a Claude client (web, mobile, or CLI) is the front end and there is
 no web UI. It is mounted at `/mcp` over Streamable HTTP, behind the bearer token. Domain terms —
 **Player**, **Refresh**, **Digest**, **Window**, **Offseason Sleep** — are defined in
@@ -61,6 +61,31 @@ Add an NCAA Player by stats.ncaa.org `stats_player_seq`.
 - **Side effects:** for a **newly added** Player, resolves his name and school from his game-log page,
   then the same first Refresh as `watchlist_add` (skipped during Offseason Sleep); re-adding a Player
   already on the Watch List is a no-op update (`refresh: null`) with no Refresh.
+
+### `watchlist_batch_add`
+
+Batch-add up to **25** Players in one call ([#68](https://github.com/wrburgess/bryce/issues/68),
+[ADR 0045](../adr/0045-batch-add-stages-by-identity-best-effort-defers-backfill.md)).
+
+- **Inputs:** `entries` — an array of 1 to 25 **typed identity entries**, each **exactly one** of
+  `personId` (MLB/MiLB), `ncaaPlayerSeq` (NCAA), or `name` (an MLB-only people-search convenience that
+  must resolve to *exactly one* Player — there is no NCAA name search). An optional `list` is accepted
+  but ignored today (the [#70](https://github.com/wrburgess/bryce/issues/70) named-list seam).
+- **Success:** `{ "summary": { added, updated, unresolved, failed, total }, "entries": [ ... ] }`. Each
+  entry is a discriminated outcome on `status`: `added` / `updated` carry the `player`; `unresolved`
+  carries a `reason` (`person_not_found` · `name_no_match` · `name_ambiguous` · `ncaa_not_found`) and,
+  for `name_ambiguous` only, a `candidates` array; `failed` carries a `reason`
+  (`unsupported_season` · `upstream_error`) and a display `message`.
+- **Deferred backfill (unlike `watchlist_add`):** each Player's **identity** is resolved and his row is
+  staged **now**, but **no first Refresh runs inline** — his Stat Lines appear at the next `run_refresh`
+  (or the nightly Refresh), which sweeps the active Watch List and backfills him. Batch-add records
+  **no** freshness run, so it does not affect the digest freshness gate. Run `run_refresh` afterward to
+  backfill early.
+- **Shape is strict, resolution is soft:** a bad **shape** — empty, over the 25 cap, an untyped or
+  multi-key entry, an unknown key, or an **in-batch duplicate** (a `personId` N and an `ncaaPlayerSeq`
+  N are *different* Players, never a duplicate) — is rejected as an input error **before any network or
+  write**, and is the *only* thing that fails the whole call. Every other problem is a per-entry
+  outcome; one entry failing never aborts the others (batch-add is deliberately non-transactional).
 
 ### `watchlist_deactivate`
 
@@ -168,7 +193,7 @@ client end to end:
 API_TOKEN=... MCP_URL=https://your-host.example.com/mcp npm run connector:smoke
 ```
 
-It runs `initialize` → `tools/list` (asserts all eleven tools) → `status` → a read-only
+It runs `initialize` → `tools/list` (asserts all twelve tools) → `status` → a read-only
 `digest_preview`, then checks that a no-bearer request still `401`s — and never prints a secret. See
 [Running Bryce → Cloudflare Access](../guides/running-bryce.md#cloudflare-access-in-front-of-the-tunnel)
 for the full flag set and the Cloudflare Access topology.
