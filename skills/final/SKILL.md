@@ -54,8 +54,10 @@ skipped: stop and recheck.
      in the SOW's *Reviewer Backstop* line and continue.
    - **Different** (Step 1 folded something after `verify`) → **re-summon the Reviewer on the delta**
      (`--mode work --base <reviewed_sha>`, per [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* →
-     *Reviewer*) so only the folded diff is re-reviewed, and fold any new must-fix finding before
-     proceeding.
+     *Reviewer*) so only the folded diff is re-reviewed. If that re-review makes you fold a new must-fix
+     fix, that fold moves `HEAD` again — so **repeat this step** (re-anchor: reviewed SHA ← the newly
+     reviewed commit, compare to `HEAD`) until `HEAD` equals the last reviewed SHA. No commit reaches
+     the SOW that some Reviewer pass did not see.
    - **The chain is exhausted** (no Reviewer answers, through the whole fallback order) → the
      [`PROJECT.md`](../../PROJECT.md) *Reviewer degradation floor* applies: it is `stop-and-ask` and is
      **not configurable**, so an unreviewed PR does **not** reach a SOW. Stop and ask the HC instead of
