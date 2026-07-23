@@ -31,7 +31,7 @@ and responses are JSON.
 
 ## Routes
 
-All ten routes live under `/api`. Request/response bodies are JSON; inputs are validated by the same
+All eleven routes live under `/api`. Request/response bodies are JSON; inputs are validated by the same
 shared Zod schemas the MCP tools use (`src/api/schemas.ts`, `src/queries/statLines.ts`), so a
 malformed input is rejected identically on both surfaces.
 
@@ -50,6 +50,27 @@ updated.
 
 Add an NCAA Player by `stats_player_seq`. Body `{ "ncaaPlayerSeq": N }`; name and school are resolved
 from his game-log page. Returns **201** on add, **200** on update — same convention as the MLB add.
+
+### `POST /api/players/batch`
+
+Batch-add up to **25** Players in one call ([#68](https://github.com/wrburgess/bryce/issues/68),
+[ADR 0045](../adr/0045-batch-add-stages-by-identity-best-effort-defers-backfill.md)). Body
+`{ "entries": [ ... ], "list"?: NAME }`, where each entry is a **typed identity** — **exactly one** of
+`{ "personId": N }`, `{ "ncaaPlayerSeq": N }`, or `{ "name": "..." }` (an MLB-only people-search
+convenience that must resolve to exactly one Player). `list` is accepted but ignored today (the
+[#70](https://github.com/wrburgess/bryce/issues/70) named-list seam).
+
+- **Always returns 200** for a well-formed batch: `{ "summary": { added, updated, unresolved, failed,
+  total }, "entries": [ ... ] }`. Each entry is a discriminated outcome on `status` — `added`/`updated`
+  carry the `player`; `unresolved` carries a `reason` (and `candidates` for `name_ambiguous`); `failed`
+  carries a `reason` and a display `message`. A **soft** per-entry failure stays inside this 200 body;
+  it never takes the 404/502 seam.
+- **400** when the batch **shape** is bad — empty, over the 25 cap, an untyped/multi-key entry, an
+  unknown key, or an in-batch duplicate (a `personId` N and an `ncaaPlayerSeq` N are *different*
+  Players) — rejected before any network or write. **413** when the request body exceeds **64 KB**.
+- **Deferred backfill (unlike `POST /api/players`):** each Player is staged by **identity** now, but
+  **no first Refresh runs inline** — his Stat Lines appear at the next Refresh (or an explicit
+  `POST /api/refresh`), which sweeps the active Watch List. Batch-add records no freshness run.
 
 ### `POST /api/players/ncaa/:seq/deactivate`
 

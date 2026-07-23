@@ -26,6 +26,7 @@ import {
   UnknownPersonError,
   addNcaaPlayer,
   addPlayer,
+  batchAddPlayers,
   deactivatePlayer,
   listPlayers,
   searchPlayers,
@@ -33,6 +34,7 @@ import {
 import {
   AddNcaaPlayerInputSchema,
   AddPlayerInputSchema,
+  BatchAddInputBase,
   DeactivateInputSchema,
   DeactivateInputShape,
   DigestInputSchema,
@@ -50,7 +52,7 @@ import {
 } from "../api/schemas.js";
 
 /**
- * The MCP server — Bryce's primary interface (ADR 0027). Eleven tools over the
+ * The MCP server — Bryce's primary interface (ADR 0027). Twelve tools over the
  * same service layer and Zod schemas the REST routes use; every result is
  * JSON, returned both as structuredContent and as a text part for clients
  * that read only text. Mounted at /mcp behind the bearer middleware.
@@ -148,6 +150,25 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
         const input = AddNcaaPlayerInputSchema.parse(args);
         const result = await addNcaaPlayer(deps, input.ncaaPlayerSeq);
         return jsonResult({ action: result.action, player: result.player, refresh: result.refresh });
+      }),
+  );
+
+  server.registerTool(
+    "watchlist_batch_add",
+    {
+      description:
+        "Batch-add up to 25 players to the watch list in one call (issue #68). entries is an array of typed identity entries, each EXACTLY one of: personId (MLB/MiLB), ncaaPlayerSeq (NCAA), or name (an MLB-only people-search convenience that must resolve to exactly one player — there is no NCAA name search). Unlike watchlist_add, NO season backfill runs inline: each player's identity is resolved and staged now, and his stats appear at the next run_refresh (call run_refresh afterward to backfill early). The whole call is rejected as a usage error if the SHAPE is bad — empty, over 25, an untyped/multi-key entry, an unknown top-level key, or an in-batch duplicate (a personId N and an ncaaPlayerSeq N are different players, never a duplicate) — before any network or write. Otherwise every entry is resolved best-effort and the result reports a per-entry outcome (added/updated/unresolved/failed) plus a summary; one entry failing never aborts the others.",
+      // The strict BatchAddInputBase object (NOT its raw .shape): the MCP SDK
+      // (@modelcontextprotocol/sdk 1.29.0) accepts a full schema for inputSchema
+      // and preserves its .strict(), so an unknown top-level key is rejected here
+      // exactly as REST rejects it (ADR 0045) — a raw .shape would be wrapped in a
+      // non-strict object that silently strips the stray key.
+      inputSchema: BatchAddInputBase,
+    },
+    (args) =>
+      guarded(async () => {
+        const result = await batchAddPlayers(deps, args);
+        return jsonResult({ ...result });
       }),
   );
 

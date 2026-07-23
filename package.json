@@ -22,6 +22,7 @@
     "db:restore": "tsx src/cli/restore.ts",
     "players:backup": "tsx src/cli/players-backup.ts",
     "players:restore": "tsx src/cli/players-restore.ts",
+    "players:batch-add": "tsx src/cli/batch-add.ts",
     "server": "tsx src/server.ts"
   },
   "dependencies": {

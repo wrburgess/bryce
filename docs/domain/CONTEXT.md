@@ -192,3 +192,11 @@ _Avoid_: overloading the delivery-ledger sense ("guarantee restored across the d
 - **"player list"** (issue #67's phrasing) — resolved: a **Player List Backup** captures *every*
   **Player** row, active and inactive, which is broader than the **Watch List** (the active subset
   only); inactive Players carry history and past choices worth restoring.
+- **"batch-add player names"** (issue #68) — the title reads as "add by name," but the domain
+  identifies a **Player** by **External ID** (NCAA: `stats_player_seq`), never by a bare name.
+  Resolved: a batch add keys on *identity*; a **name** is only a search convenience — the MLB Stats
+  API people-search, MLB/MiLB only, since there is no NCAA name search
+  ([ADR 0032](../adr/0032-ncaa-identity-stats-player-seq-scrape-adapter.md)) — that resolves to an
+  **External ID**. A batch takes identifiers directly and names that resolve to *exactly one* hit; a
+  name with zero or several hits is *reported back*, never guessed, and an NCAA **Player** enters a
+  batch only by `stats_player_seq`.
