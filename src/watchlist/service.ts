@@ -12,7 +12,12 @@ import type { Person } from "../mlb/schemas.js";
 import type { NcaaClient } from "../ncaa/client.js";
 import { NcaaApiError, UnsupportedNcaaSeasonError } from "../ncaa/client.js";
 import { parseGameLogPage } from "../ncaa/parse.js";
-import { parseTagSelector, playerIdsMatchingTags, syncDerivedTags } from "../tags/service.js";
+import {
+  isManualTag,
+  parseTagSelector,
+  playerIdsMatchingTags,
+  syncDerivedTags,
+} from "../tags/service.js";
 
 /**
  * Watch-list service: the one home for add/deactivate/list/search semantics,
@@ -452,8 +457,11 @@ export function restorePlayerListBackup(
       // Re-apply the entry's MANUAL tags by the restored id. A direct insert
       // preserves exact fidelity (the backup is authoritative for manual tags);
       // onConflictDoNothing keeps a re-import idempotent. A v1 backup with no
-      // `tags` field leaves this a no-op (back-compat).
+      // `tags` field leaves this a no-op (back-compat). SKIP any tag that is not
+      // a valid manual tag — a hand-edited backup carrying a derived-namespace or
+      // unknown tag must never write a bogus manual row derivation can't undo.
       for (const tag of row.tags ?? []) {
+        if (!isManualTag(tag.namespace, tag.value)) continue;
         tx
           .insert(playerTags)
           .values({

@@ -335,5 +335,12 @@ describe("seed CLI", () => {
       expect(await runSeed(["tag", "add", "--person-id", "691185", "--tag", "notacolon"], deps())).toBe(1);
       expect(output.some((l) => l.startsWith("error:"))).toBe(true);
     });
+
+    it("list --tags with a malformed selector exits 1", async () => {
+      await runSeed(["add", "--person-id", "691185"], deps());
+      output = [];
+      expect(await runSeed(["list", "--tags", ":foo"], deps())).toBe(1);
+      expect(output.some((l) => l.startsWith("error:"))).toBe(true);
+    });
   });
 });

@@ -219,6 +219,16 @@ describe("tag service", () => {
       expect(() => parseTagSelector("foo:")).toThrow(ZodError);
     });
 
+    it("splits a token on the FIRST colon only; extra colons ride in the value (matching nothing)", async () => {
+      // Pinned behavior for `foo:bar:baz`: namespace='foo', value='bar:baz'.
+      const tokens = parseTagSelector("foo:bar:baz");
+      expect(tokens).toEqual([{ namespace: "foo", value: "bar:baz" }]);
+      // A real tag exists, but no tag has value 'bar:baz', so the selector matches nobody.
+      const player = await insertPlayer(opened.db, { level: "milb", milbLevel: "Triple-A", position: "SS" });
+      syncDerivedTags(opened.db, player.id, NOW);
+      expect(playerIdsMatchingTags(opened.db, tokens)).toEqual([]);
+    });
+
     it("throws a ZodError when the distinct token count exceeds the bound", () => {
       const expr = Array.from({ length: 17 }, (_, i) => `ns${i}`).join(",");
       expect(() => parseTagSelector(expr)).toThrow(ZodError);
