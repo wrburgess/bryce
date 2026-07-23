@@ -28,6 +28,18 @@ self-test — a fixture bundle driven through `--root` (one happy path plus one 
 asserting **both** the non-zero exit **and** the specific error string) — so the check can never become a
 silent false green.
 
+### Carve-out: the declared policy boundaries are value-checked, not just present
+
+Heading presence stays the rule, so a host freely extends a file's body — but it does not extend to the
+handful of **declared policy boundaries a host must not be free to change**. `checkHumanGates` parses
+[`PROJECT.md`](../../PROJECT.md) → *Human Gates* and hard-fails a merge gate or a *Reviewer degradation
+floor* declared as anything but `required` / `stop-and-ask`, because a check that only asserted those
+headings were present would happily pass a bundle declaring self-merge. Parse such a value through a
+shared, unit-tested module ([`scripts/human-gates.ts`](../../scripts/human-gates.ts), shaped like
+`protected-branches.ts`) and keep the **parse status separate from the effective value**: a setting
+written without backticks must report `unparseable`, not fall back to the fail-closed default and quietly
+pass. Keep the carve-out narrow — value-check a declared boundary, never a host's ordinary prose.
+
 ### Content checks: match forbidden tokens on word boundaries, not raw substrings
 
 A check that scans a file's *content* for forbidden tokens — as the skills content-neutrality check

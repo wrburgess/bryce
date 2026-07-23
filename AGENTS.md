@@ -61,8 +61,9 @@ the first sub-PR merges, orphaning the remaining phases — close the specific p
 The lifecycle is issue/PR-shaped: **Assess → Plan → Implement → Verify → Deliver**, plus a
 review-response step. `assess`/`devise` post to an issue; `invoke` opens a PR; `verify`/`listen`/`final`
 operate on that PR. The **merge** gate is mandatory and never bypassed; the **plan-approval** gate is
-**auto-approved** in this host per its gate policy ([`PROJECT.md`](PROJECT.md) → *Lifecycle Host* →
-*Human gates*) — the plan is still posted to the issue, but work proceeds without waiting.
+set per [`PROJECT.md`](PROJECT.md) → *Human Gates* (`auto` in this host, so the plan is posted and work
+proceeds without waiting; `required` would pause for the HC) — skill bodies name the gate and state
+both branches, so flipping that value changes behavior without editing a skill.
 GitHub is the default lifecycle host, set in `PROJECT.md` and remappable
 ([ADR 0006](docs/adr/0006-baseline-skill-set-and-github-default-lifecycle-host.md)). The full stage
 spec — stages, roles, gates, and terminal artifacts — is

@@ -1,6 +1,6 @@
 ---
 name: ship
-description: The hands-off orchestrator. Sequences the six lifecycle skills (assess → devise → invoke → verify → listen → final) end to end while keeping a lean orchestrator context — delegating output-heavy work to discardable sub-agents and honoring the host's human-gate policy (in this host, plan approval is auto-approved and only the merge gate stops). Use to run the whole development lifecycle for one issue in a single driven flow.
+description: The hands-off orchestrator. Sequences the six lifecycle skills (assess → devise → invoke → verify → listen → final) end to end while keeping a lean orchestrator context — delegating output-heavy work to discardable sub-agents and honoring the host's human-gate policy (PROJECT.md → Human Gates; in this host plan approval is auto and only the merge gate stops, but ship branches on the configured value). Use to run the whole development lifecycle for one issue in a single driven flow.
 ---
 
 <what-to-do>
@@ -83,9 +83,10 @@ Run the phases in order, following each phase's canonical body for its steps and
    and folding the returned `exploration-summary` into the assessment you synthesize. Post the
    assessment to the issue.
 2. **Plan** — follow [`devise`](../../skills/devise/SKILL.md) **in the orchestrator** (no offload). Post
-   the plan to the issue. **→ Gate 1 (plan approval) is auto-approved in this host** per
-   [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Human gates*: the posted plan is deemed
-   approved on posting — proceed immediately to Implement, no pause.
+   the plan to the issue. **→ Gate 1 (plan approval) follows [`PROJECT.md`](../../PROJECT.md) →
+   *Human Gates*.** Under `auto` — this host's setting — the posted plan is deemed approved on posting,
+   so proceed immediately to Implement, no pause; under `required` `ship` stops and waits for the HC's
+   approval before Implement.
 3. **Implement** — follow [`invoke`](../../skills/invoke/SKILL.md): the orchestrator owns branch setup and
    all lifecycle-host I/O; the code + check + fix loop is delegated, returning a `check-result`.
    Reconcile git state, gate on `verdict`, then commit → push → open the PR.
@@ -101,19 +102,20 @@ Run the phases in order, following each phase's canonical body for its steps and
 ## The human gates (host policy: one stop, at merge)
 
 `ship` replaces every per-stage "wait for the HC" pause with the host's gate policy from
-[`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Human gates*. In this host:
+[`PROJECT.md`](../../PROJECT.md) → *Human Gates*, branching on the configured *Plan approval* value:
 
-1. **Plan approval — auto-approved.** The plan is still authored with full `devise` rigor and posted
-   to the issue (the terminal artifact and audit trail are unchanged), but it is deemed approved on
-   posting: `ship` proceeds straight to Implement without waiting. A mid-`invoke` re-plan follows the
-   same policy — post the revised plan, proceed.
-2. **Merge — mandatory, never bypassed.** After `final` posts the SOW with a green gate and no open
-   must-fix findings, `ship` stops. **`ship` never merges** — merge is the HC's.
+1. **Plan approval — `auto` in this host.** The plan is authored with full `devise` rigor and posted
+   to the issue (the terminal artifact and audit trail are unchanged). Under `auto` it is deemed
+   approved on posting: `ship` proceeds straight to Implement without waiting. Under `required` `ship`
+   stops after posting and waits for the HC's approval. A mid-`invoke` re-plan follows the same policy
+   — post the revised plan, then proceed or wait per the setting.
+2. **Merge — mandatory, never bypassed, never configurable.** After `final` posts the SOW with a green
+   gate and no open must-fix findings, `ship` stops. **`ship` never merges** — merge is the HC's.
 
 ## Emergency stops (unconditional)
 
 Beyond the gates, `ship` **stops and asks the HC** the moment any of these appears — it never
-works around them (the auto-approved plan gate does not waive these):
+works around them (an `auto` plan gate does not waive these):
 
 - A quality check fails and the fix is not obvious / cannot be auto-resolved.
 - A discovery that the change touches core logic the plan did not anticipate.
@@ -126,8 +128,8 @@ works around them (the auto-approved plan gate does not waive these):
 To keep the orchestrator lean through the delegated heavy ops, treat the gates as **session
 boundaries** and **externalize state** to the issue / PR / git rather than carrying it in context:
 
-- Run **assess + plan in one clean session**; the posted plan is a natural boundary (even
-  auto-approved, it is the durable artifact the build phase re-reads).
+- Run **assess + plan in one clean session**; the posted plan is a natural boundary (even under
+  `auto`, it is the durable artifact the build phase re-reads).
 - Run **build (`invoke` → `final`) in a fresh session** so the orchestrator starts lean before the
   delegated code/verify/review churn.
 - A **pre-`final` context check** offers another reset before the merge-readiness judgment.
@@ -139,10 +141,12 @@ boundaries** and **externalize state** to the issue / PR / git rather than carry
 
 The PR gets an **independent second-model review** (the Reviewer named in
 [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* / the lifecycle's Reviewer role) so a delegated
-summary the orchestrator never saw cannot silently steer the outcome — with the plan gate
-auto-approved in this host, the PR review is where that backstop concentrates. If **no second model
-is reachable**, flag it plainly in the SOW so the HC reviews the merge with that in mind — the
-backstop is never silently dropped.
+summary the orchestrator never saw cannot silently steer the outcome — with the plan gate `auto` in
+this host, the PR review is where that backstop concentrates. If the **whole Reviewer chain is
+exhausted** and no second model is reachable, the [`PROJECT.md`](../../PROJECT.md) *Reviewer
+degradation floor* applies — it is `stop-and-ask` and is **not configurable**: `ship` stops and asks
+the HC rather than delivering an unreviewed PR. The backstop is never silently dropped, and a run that
+cannot obtain an independent review does not certify itself.
 
 </procedure>
 

@@ -1,13 +1,14 @@
 ---
 name: devise
-description: Stage 2 of the development lifecycle. Turn the HC's chosen option into a right-sized plan — a concrete, ordered implementation plan with its testing strategy decided up front for well-understood work, or an HC-elected exploratory spike/re-plan plan (a plan to learn) whose production test strategy is decided in the post-spike re-plan. Use after the HC picks an option and before writing any code.
+description: Stage 2 of the development lifecycle. Turn the chosen assessment option into a right-sized plan — a concrete, ordered implementation plan with its testing strategy decided up front for well-understood work, or an HC-elected exploratory spike/re-plan plan (a plan to learn) whose production test strategy is decided in the post-spike re-plan. Use after the option is chosen (the HC's under required, the AC's own recommendation under auto per PROJECT.md → Human Gates) and before writing any code.
 ---
 
 <what-to-do>
 
-Create an implementation plan for the tracked issue named in the invocation, based on the option the
-HC chose from the [assessment](../../skills/assess/SKILL.md). This is **Stage 2 (Plan)** of the
-[development lifecycle](../../docs/standards/development-lifecycle.md).
+Create an implementation plan for the tracked issue named in the invocation, based on the chosen
+[assessment](../../skills/assess/SKILL.md) option — the HC's under the `required` *Plan approval* gate,
+or the AC's own recommended option under `auto` ([`PROJECT.md`](../../PROJECT.md) → *Human Gates*). This
+is **Stage 2 (Plan)** of the [development lifecycle](../../docs/standards/development-lifecycle.md).
 
 Read host-specific values — the lifecycle host and artifact map, the branch/PR policy, the
 quality-check commands, the attribution/model — from [`PROJECT.md`](../../PROJECT.md). Never hardcode
@@ -17,8 +18,10 @@ them here.
 
 <procedure>
 
-1. **Read the issue and its comments** — the assessment and the HC's chosen option (and any answers to
-   the assessment's open questions).
+1. **Read the issue and its comments** — the assessment and the chosen option (the HC's under the
+   `required` *Plan approval* gate; the AC's own recommended option under `auto`, per
+   [`PROJECT.md`](../../PROJECT.md) → *Human Gates*), and any answers to the assessment's open
+   questions.
 2. **Right-size the plan to the task.** Match the plan's altitude to how much is actually known. For a
    well-understood change, write the full ordered plan below. For an **exploratory/discovery issue** —
    where the outcome is genuinely uncertain and a full ordered plan would be written against unknowns —
@@ -99,10 +102,11 @@ post-spike re-plan; here, state only what the spike must *learn*.)
 - [Migration, authorization, search/index, or breaking-change concerns]
 
 ### Next Step
-Per this host's gate policy ([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Human gates*),
-this plan is deemed approved on posting. Summoning the Reviewer for an independent plan critique;
-must-fix findings are folded into a revised plan before the implement skill (`invoke`) starts. HC:
-comment on the issue to revise direction at any time.
+Per this host's *Plan approval* gate ([`PROJECT.md`](../../PROJECT.md) → *Human Gates*): under `auto`
+— this host's setting — this plan is deemed approved on posting and work proceeds; under `required` it
+would wait for the HC's approval first. Either way, summoning the Reviewer for an independent plan
+critique; must-fix findings are folded into a revised plan before the implement skill (`invoke`)
+starts. HC: comment on the issue to revise direction at any time.
 ```
 
 Sign with the attribution footer from [`PROJECT.md`](../../PROJECT.md) → *Attribution & Model
@@ -126,16 +130,19 @@ while it is outstanding:
 4. **Only then hand off** to the implement skill, against the *final* posted plan.
 
 If the summon fails, follow the *Reviewer* failure ladder in the Project Config: fall back to the
-declared fallback Reviewer, and if no Reviewer returns a critique at all, **flag the missing plan
-review** on the issue so the deliver skill (`final`) can record it in the SOW. The gate is never
-silently skipped — a critique that never arrived must never look like a critique that found nothing.
+declared fallback Reviewer. If the **whole chain is exhausted** and no Reviewer returns a critique, the
+[`PROJECT.md`](../../PROJECT.md) *Reviewer degradation floor* applies — it is `stop-and-ask` and is
+**not configurable**: **stop and ask the HC** rather than proceeding to `invoke` on an uncritiqued
+plan. The gate is never silently skipped — a critique that never arrived must never look like a
+critique that found nothing.
 
 **Terminal artifact:** the plan posted on the issue — with its Reviewer critique answered, and any
-must-fix finding folded into a posted revision. **In this host the plan-approval gate is
-auto-approved** ([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Human gates*): the posted plan
-is deemed approved on posting, and work proceeds without a human pause. That waives the *human* wait,
-not the *Reviewer* one — the AC still does not write code without a posted plan, and not while a plan
-critique is outstanding.
+must-fix finding folded into a posted revision. The **plan-approval gate** follows
+[`PROJECT.md`](../../PROJECT.md) → *Human Gates*: under `auto` (this host's setting) the posted plan is
+deemed approved on posting and work proceeds without a human pause; under `required` the AC waits for
+the HC's approval before writing code. Either setting waives only the *human* wait, never the
+*Reviewer* one — the AC still does not write code without a posted plan, and not while a plan critique
+is outstanding.
 
 An approved plan is **revisable direction, not a frozen contract.** Discovering mid-`invoke` that the
 plan was wrong — an assumption broke, the spike taught something the plan didn't foresee — is an

@@ -78,8 +78,9 @@ documentation-only change may skip Assess and Plan (see the
 <output>
 
 Post the assessment to the issue via the lifecycle host's issue-comment mechanism
-([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host*), and also display it in the conversation so the
-HC can discuss before choosing. Use this template:
+([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host*), and also display it in the conversation. Under
+`required` this is where the HC discusses before choosing; under `auto` the AC proceeds on its own
+recommended option (the HC can still redirect by commenting on the issue). Use this template:
 
 ```markdown
 ## Issue Assessment
@@ -121,8 +122,13 @@ HC can discuss before choosing. Use this template:
 Option [X] because [rationale].
 
 ### Next Step
-HC: send this assessment to the Reviewer, then reply with your chosen option and run the plan skill
-(`devise`) for the same issue.
+The two independent Reviewer gates are the plan (Stage 2) and the PR (Stage 4); this assessment is
+posted for the audit trail and open to HC comment, **not** a separate review gate (there is no
+assess-mode summon — [`PROJECT.md`](../../PROJECT.md) → *Human Gates*). The **option pick** follows the
+*Plan approval* gate: under `required` the HC replies with a chosen option and runs the plan skill
+(`devise`); under `auto` — this host's setting — the AC proceeds on its own recommended option and runs
+`devise` directly, naming the self-selection in the posted plan. The HC can comment on the issue to
+redirect at any time.
 ```
 
 Sign the comment with the attribution footer from [`PROJECT.md`](../../PROJECT.md) → *Attribution &

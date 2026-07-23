@@ -24,9 +24,11 @@ over time is which gates require external review vs. self-review; what changes a
   this lifecycle only requires that it is *a different model from the AC*. **The AC summons the
   Reviewer at every gate where the host declares a mechanism** — that is what makes a hands-off run
   possible; the HC is not the courier for those. Where a host declares no mechanism for a gate, that
-  gate stays the HC's to route: a stage never claims a summon that cannot be executed. If no second
-  model is reachable, the gate **degrades to a flagged, visible gap** (the declared fallback, else a
-  missing-review flag carried into the SOW) — it is never silently dropped.
+  gate stays the HC's to route: a stage never claims a summon that cannot be executed. If the whole
+  Reviewer chain is exhausted, the **degradation floor** applies — it is `stop-and-ask` and is **not
+  configurable** ([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Reviewer degradation floor*):
+  a run that cannot obtain an independent review must not certify itself, so it stops and asks the HC
+  rather than delivering unreviewed. The gate is never silently dropped.
 
 ## The lifecycle host
 
@@ -60,18 +62,22 @@ HC where requirements are ambiguous (ask, don't guess). For any non-trivial issu
 codebase trace is offloaded to a read-only sub-agent that returns a compact **exploration-summary**
 (ADR 0005) — degrading to inline reads on tools without sub-agents.
 
-**Quality gate:** the assessment goes to the Reviewer (missing options, incorrect codebase
-assumptions, requirements gaps, architectural concerns). The host's summon covers the *plan* and
-*work* gates only ([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Reviewer*), so unless a host
-declares an assessment mechanism this stage is the HC's to route — the AC asks for it in its terminal
-artifact rather than claiming a summon it cannot perform.
+**Quality gate:** the AC self-reviews the assessment for the defects a Reviewer would flag (missing
+options, incorrect codebase assumptions, requirements gaps, architectural concerns). The two
+*independent* Reviewer gates are the plan (Stage 2) and the work/PR (Stage 4) — the only summons the
+host can run ([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Reviewer*; there is no assess
+mode). The assessment is therefore **not** an independent-review gate: it is posted for the audit
+trail and open to HC comment, and no stage here claims a Reviewer summon it cannot perform — the
+first independent review is the plan critique at Stage 2.
 
-**Terminal artifact:** the assessment posted on the issue. **Exit:** HC picks an option; the AC does
-not proceed without a chosen option.
+**Terminal artifact:** the assessment posted on the issue. **Exit:** the option pick follows the
+*Plan approval* gate — under `auto` (this host's setting) the AC proceeds on its own recommended
+option; under `required` the HC picks. The AC does not write a plan against no option.
 
 ### Stage 2: Plan (`devise`)
 
-**Trigger:** HC picks an option.
+**Trigger:** an option is chosen — under `auto` the AC's own recommendation, under `required` the HC's
+pick ([`PROJECT.md`](../../PROJECT.md) → *Human Gates*).
 
 **AC produces:** a plan **right-sized to the task** — a step-by-step plan with specific file paths when
 the change is well understood, or, for an HC-elected **exploratory/discovery issue**, a thin hypothesis
@@ -88,9 +94,11 @@ missing edge cases, patterns that don't match the codebase, unaddressed requirem
 [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Reviewer*. The critique **blocks the handoff to
 Implement**: must-fix findings are folded into a revised plan, posted, before any code is written.
 
-**Terminal artifact:** the plan posted on the issue. **This is gate 1 (plan approval) — auto-approved
-in this host** ([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Human gates*).
-**Exit:** the plan is posted and deemed approved; the HC can comment at any time to revise direction.
+**Terminal artifact:** the plan posted on the issue. **This is gate 1 (plan approval)**, set per
+[`PROJECT.md`](../../PROJECT.md) → *Human Gates* — `auto` in this host (the posted plan is deemed
+approved on posting), or `required` where a host sets it so (the AC waits for the HC).
+**Exit:** the plan is posted and — under `auto` — deemed approved; the HC can comment at any time to
+revise direction.
 The AC does not write code without a posted plan. An approved plan is **revisable direction, not a
 frozen contract** — a mid-`invoke` discovery that it was wrong loops back through this gate to re-plan
 (post the revised plan, proceed), an expected outcome rather than a failure
@@ -98,7 +106,8 @@ frozen contract** — a mid-`invoke` discovery that it was wrong loops back thro
 
 ### Stage 3: Implement (`invoke`)
 
-**Trigger:** the plan is posted (auto-approved per host gate policy).
+**Trigger:** the plan is posted and approved per host gate policy (`auto` in this host, so posting
+approves it; `required` waits for the HC).
 
 **AC does:** creates the feature branch (the branch-protection guardrails block writes on a protected
 branch — see [`PROJECT.md`](../../PROJECT.md) → *Branch & PR Policy*); implements the plan step by
@@ -139,7 +148,8 @@ corrects) per [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Reviewe
 ### Stage 5: Deliver (`final`) + review-response (`listen`)
 
 **Trigger:** the Reviewer summoned at the end of Verify has returned its findings (or its failure
-ladder has run out and the missing review is flagged for the SOW).
+ladder has run out — in which case the `stop-and-ask` floor applies and the run pauses for the HC
+before Deliver, rather than proceeding unreviewed).
 
 **AC responds to Reviewer feedback (`listen`):** fetches all review threads via the lifecycle host,
 classifies each by the *Review Severity Framework*, summarizes for the HC, and — **after the HC
@@ -147,10 +157,14 @@ chooses** which findings to address — fixes them, re-runs the *Quality Checks*
 thread. The fetch-and-fix churn may be offloaded; the severity and stop-and-ask judgment stays with
 the orchestrator (ADR 0005).
 
-**AC delivers (`final`):** re-verifies the PR is green with no open must-fix findings, then posts a
-**Statement of Work** on the PR (issue link; option chosen; technical decisions; what changed; testing
-coverage; Reviewer findings + resolutions; known limitations; follow-ups) and a reference link on the
-issue.
+**AC delivers (`final`):** first disposes of any Rules-Layer/config improvements per
+[`PROJECT.md`](../../PROJECT.md) → *Human Gates* → *Rule-suggestion disposition* (under `autonomous-fold`,
+folds the well-scoped/low-risk ones into this PR and defers the rest) **before** verifying, so the
+folded diff is what gets checked and recorded; re-verifies the PR is green with no open must-fix
+findings; confirms the Reviewer backstop covers the delivered diff (re-summoning on any late fold);
+then posts a **Statement of Work** on the PR (issue link; option chosen; technical decisions; what
+changed; folded/deferred rule-config changes; testing coverage; Reviewer backstop; Reviewer findings +
+resolutions; known limitations; follow-ups) and a reference link on the issue.
 
 **Both operate on the existing PR — they never open one. `final` does not self-merge.** **Terminal
 artifact:** the SOW on the PR + the reference link on the issue. **This is the second mandatory human
@@ -159,12 +173,13 @@ gate.** **Exit:** no open must-fix findings, SOW posted; **HC merges.**
 ## The human gates (host policy)
 
 The Generic Baseline defines two mandatory human gates; this host tunes them in
-[`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Human gates*:
+[`PROJECT.md`](../../PROJECT.md) → *Human Gates*:
 
-1. **Plan approval — auto-approved.** After `devise`, the posted plan is deemed approved on posting;
-   work proceeds without a human pause. The plan artifact and its rigor are unchanged.
-2. **Merge — mandatory, never bypassed**, on any tool or track. After `final` posts the SOW with a
-   green gate and no open must-fix findings, the HC merges. The AC never merges.
+1. **Plan approval — `auto` in this host** (allowed `required · auto`). Under `auto` the posted plan
+   is deemed approved on posting and work proceeds without a human pause; under `required` the AC waits
+   for the HC's approval. The plan artifact and its rigor are unchanged either way.
+2. **Merge — mandatory, never bypassed, never configurable**, on any tool or track. After `final`
+   posts the SOW with a green gate and no open must-fix findings, the HC merges. The AC never merges.
 
 An **approved plan is revisable direction, not a frozen contract.** When an Implement-stage discovery
 shows the plan was wrong — including a `ship` emergency stop for core logic the plan didn't anticipate
@@ -212,7 +227,7 @@ On tools without sub-agent fan-out the same phases run inline with a "compact be
 | Stage | Skill | Terminal artifact |
 |-------|-------|-------------------|
 | Assess | `assess` | Assessment on the issue |
-| Plan | `devise` | Plan on the issue (gate 1: plan approval — auto-approved in this host) |
+| Plan | `devise` | Plan on the issue (gate 1: plan approval — `auto` in this host) |
 | Implement | `invoke` | Open PR |
 | Verify | `verify` | Self-review comment on the PR |
 | Review response | `listen` | Replies on the PR review threads |

@@ -22,6 +22,12 @@ import { join, dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { argv } from "node:process";
 import { fromFile as protectedBranchesFromFile } from "./protected-branches.js";
+import {
+  fromFile as humanGatesFromFile,
+  invalid as invalidHumanGates,
+  asciiSafe as asciiSafeGateValue,
+  DEFAULTS as DEFAULT_HUMAN_GATES,
+} from "./human-gates.js";
 
 const CANONICAL = "AGENTS.md";
 
@@ -75,6 +81,7 @@ const REQUIRED_PROJECT_SECTIONS = [
   "## Branch & PR Policy",
   "## Review Severity Framework",
   "## Lifecycle Host",
+  "## Human Gates",
 ];
 
 const SIDECAR = ".githooks/protected-branches";
@@ -129,6 +136,7 @@ class ParityCheck {
     this.checkCopilotAdapter();
     this.checkRenderedRegions();
     this.checkProjectSections();
+    this.checkHumanGates();
     this.checkRules();
     this.checkSkills();
     this.checkGuardrails();
@@ -246,6 +254,48 @@ class ParityCheck {
     for (const section of REQUIRED_PROJECT_SECTIONS) {
       if (!headings.includes(section)) {
         this.err(`Project Config ${PROJECT_CONFIG} missing required section: \`${section}\``);
+      }
+    }
+  }
+
+  // The one place parity asserts VALUES rather than heading presence: the Human Gates declarations
+  // are policy boundaries a Host App must not be free to change (docs/guides/authoring-the-bundle.md).
+  // Parse status is checked separately from the value, so a setting written without backticks reports
+  // `unparseable` instead of silently falling back to the fail-closed default and passing.
+  private checkHumanGates(): void {
+    // Existence guard: checkProjectSections() only RECORDS the missing-file error and returns, so
+    // without this a readFileSync here would throw ENOENT and abort the whole aggregate report.
+    if (!this.exists(PROJECT_CONFIG)) return;
+
+    for (const bad of invalidHumanGates(humanGatesFromFile(this.path(PROJECT_CONFIG)))) {
+      const allowed = bad.allowed.map((v) => `\`${v}\``).join(" | ");
+
+      if (bad.field.status !== "parsed") {
+        this.err(
+          `Human Gates declaration \`${bad.label}\` in ${PROJECT_CONFIG}: ${bad.field.status} ` +
+          `(expected exactly one declaration carrying a backticked value, one of ${allowed}) - the ` +
+          `fail-closed default \`${DEFAULT_HUMAN_GATES[bad.key]}\` applies until it is fixed`,
+        );
+        continue;
+      }
+
+      if (bad.key === "merge") {
+        this.err(
+          `Human Gates: \`Merge\` is declared \`${asciiSafeGateValue(bad.field.value)}\` in ` +
+          `${PROJECT_CONFIG} but \`required\` is its only allowed value - no Host App may express ` +
+          `self-merge; a human always merges the delivered PR`,
+        );
+      } else if (bad.key === "reviewerFloor") {
+        this.err(
+          `Human Gates: \`Reviewer degradation floor\` is declared ` +
+          `\`${asciiSafeGateValue(bad.field.value)}\` in ${PROJECT_CONFIG} but \`stop-and-ask\` is ` +
+          `its only allowed value - a run that cannot obtain an independent review may not certify itself`,
+        );
+      } else {
+        this.err(
+          `Human Gates declaration \`${bad.label}\` in ${PROJECT_CONFIG} has value ` +
+          `\`${asciiSafeGateValue(bad.field.value)}\`, which is not allowed - allowed values: ${allowed}`,
+        );
       }
     }
   }

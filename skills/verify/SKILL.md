@@ -122,8 +122,27 @@ from the drift-report:
 - [x] All quality checks pass (from PROJECT.md → Quality Checks)
 - [x] Self-review complete — summoning the Reviewer for an independent second-model review
 
+### Reviewer Backstop Evidence
+- Reviewed commit: `[git rev-parse HEAD at summon time]`
+- Reviewer: _summon pending_
+- Disposition: _summon pending_
+
 Reviewer summoned; their findings will be answered on this PR.
 ```
+
+Record the **reviewed commit SHA** (`git rev-parse HEAD` at the moment you summon) in that block —
+this is known *before* the summon and is the load-bearing field: it is durable, machine-locatable
+evidence that survives context loss, and the deliver skill (`final`) compares it against `HEAD` to
+prove the PR-gate review covered the *delivered* diff. If a later `autonomous-fold` in `final` changes
+the diff, that mismatch is what triggers `final`'s delta re-summons
+([`PROJECT.md`](../../PROJECT.md) → *Human Gates* → *Rule-suggestion disposition*).
+
+The **Reviewer** and **Disposition** fields are *not* yet known when this comment is posted (it is
+posted **before** the summon, so the Reviewer reads a PR the AC has already attacked). Leave them
+`_summon pending_`, then **once the failure ladder completes, edit this comment** to record which
+harness actually answered (primary or a fallback) and the disposition (`ok` / fell back to `<harness>`
+/ floor hit) — never guess the reviewer before the summon returns, since a fallback would make a
+pre-filled value wrong and `final` relies on it.
 
 Sign with the attribution footer from [`PROJECT.md`](../../PROJECT.md) → *Attribution & Model
 Declaration*.
@@ -137,8 +156,11 @@ hardcode a command here. The order matters: the self-review comment is posted **
 Reviewer reads a PR the AC has already attacked and confirms rather than corrects.
 
 If the summon fails, follow the *Reviewer* failure ladder in the Project Config: fall back to the
-declared fallback Reviewer, and if no Reviewer returns a review at all, **flag the missing review**
-so the deliver skill (`final`) records it in the SOW. The gate is never silently skipped.
+declared fallback Reviewer. If the **whole chain is exhausted** and no Reviewer returns a review, the
+[`PROJECT.md`](../../PROJECT.md) *Reviewer degradation floor* applies — it is `stop-and-ask` and is
+**not configurable**: **stop and ask the HC.** A run that cannot obtain an independent review must not
+certify itself, so the lifecycle does not proceed to `final` with an unreviewed PR. The gate is never
+silently skipped — a review that never arrived must never look like a review that found nothing.
 
 Once the Reviewer's findings land, run the review-response skill (`listen`), then the deliver skill
 (`final`). The HC's remaining gate is the merge.
