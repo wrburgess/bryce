@@ -568,19 +568,22 @@ fi
 # ---------------------------------------------------------------------------
 echo "Standard/skill agreement (no gate claims a mechanism that does not exist):"
 
-# The summon has plan and work modes only — there is no assessment mode. A
-# standard that tells the AC to summon the Reviewer at Stage 1 therefore
-# describes a gate no one can run, and contradicts assess/SKILL.md, which asks
-# the HC to route the assessment. Documentation drift is a real defect here:
-# these files ARE the instructions the agents execute.
+# The summon has plan and work modes only — there is no assessment mode. So the
+# two INDEPENDENT Reviewer gates are the plan (Stage 2) and the work/PR (Stage 4);
+# the Stage-1 assessment is posted for the audit trail and open to HC comment but
+# is NOT an independent-review gate, so no stage claims a Reviewer summons that
+# cannot be run (#82). Documentation drift is a real defect here: these files ARE
+# the instructions the agents execute.
 if [ -f "$LIFECYCLE_MD" ] && [ -f "$ASSESS_MD" ]; then
   STAGE1="$(awk '/^### Stage 1: Assess/{f=1} /^### Stage 2:/{f=0} f' "$LIFECYCLE_MD")"
   ! printf '%s\n' "$STAGE1" | grep -qiE 'the AC summons the Reviewer'
   report "Stage 1 does not claim an AC summon the script cannot perform" $?
-  printf '%s\n' "$STAGE1" | grep -qiF "Reviewer"
-  report "Stage 1 still requires a Reviewer pass on the assessment" $?
-  grep -qiF "send this assessment to the Reviewer" "$ASSESS_MD"
-  report "assess/SKILL.md still routes the assessment through the HC" $?
+  printf '%s\n' "$STAGE1" | grep -qiF "first independent review is the plan"
+  report "Stage 1 names the plan (Stage 2) as the first independent review gate" $?
+  ! grep -qiF "send this assessment to the Reviewer" "$ASSESS_MD"
+  report "assess/SKILL.md does not route a nonexistent assessment-review gate" $?
+  grep -qiF "two independent Reviewer gates" "$ASSESS_MD"
+  report "assess/SKILL.md names the two independent Reviewer gates (plan, PR)" $?
 
   STAGE2="$(awk '/^### Stage 2: Plan/{f=1} /^### Stage 3:/{f=0} f' "$LIFECYCLE_MD")"
   printf '%s\n' "$STAGE2" | grep -qiF "the AC summons the Reviewer"

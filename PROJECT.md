@@ -175,7 +175,7 @@ stays `required` and is never configurable** — it is the sole human gate
 
 | Gate | Setting | Allowed values |
 |------|---------|----------------|
-| **Plan approval** — the Stage-2 plan approval | `auto` | `required` · `auto` |
+| **Plan approval** — the Stage-2 plan approval and the Stage-1 option pick | `auto` | `required` · `auto` |
 | **Merge** — the HC merges the delivered PR | `required` | `required` (not configurable) |
 
 - **`auto`** (this host's setting) — the AC proceeds on **its own stated recommendation** rather than
@@ -193,6 +193,14 @@ stays `required` and is never configurable** — it is the sole human gate
 rows, the *Reviewer degradation floor* bullet under *Lifecycle Host*, and the disposition below, and
 rejects a declaration that is missing, unparseable (e.g. a value written without backticks),
 duplicated, or out of range — so an unsafe setting can never hide behind a fail-closed default.
+
+**The two independent Reviewer gates are the plan and the PR.** The AC-runnable summon
+([`scripts/summon-reviewer.ts`](scripts/summon-reviewer.ts)) has a `--mode plan` (Stage 2) and a
+`--mode work` (Stage 4) and no assess mode. So the **Stage-1 assessment** is posted for the audit
+trail and open to HC comment, but it is **not** a separate independent-review gate — a hands-off
+`auto` run reaches the plan gate as its first independent review, and no lifecycle stage claims a
+Reviewer summons that cannot be run. The Stage-1 **option pick** rides the *Plan approval* gate above:
+under `auto` the AC proceeds on its own recommended option, under `required` the HC picks.
 
 **Unconditional, whatever this section says:**
 

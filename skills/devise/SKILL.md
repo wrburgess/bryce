@@ -1,13 +1,14 @@
 ---
 name: devise
-description: Stage 2 of the development lifecycle. Turn the HC's chosen option into a right-sized plan — a concrete, ordered implementation plan with its testing strategy decided up front for well-understood work, or an HC-elected exploratory spike/re-plan plan (a plan to learn) whose production test strategy is decided in the post-spike re-plan. Use after the HC picks an option and before writing any code.
+description: Stage 2 of the development lifecycle. Turn the chosen assessment option into a right-sized plan — a concrete, ordered implementation plan with its testing strategy decided up front for well-understood work, or an HC-elected exploratory spike/re-plan plan (a plan to learn) whose production test strategy is decided in the post-spike re-plan. Use after the option is chosen (the HC's under required, the AC's own recommendation under auto per PROJECT.md → Human Gates) and before writing any code.
 ---
 
 <what-to-do>
 
-Create an implementation plan for the tracked issue named in the invocation, based on the option the
-HC chose from the [assessment](../../skills/assess/SKILL.md). This is **Stage 2 (Plan)** of the
-[development lifecycle](../../docs/standards/development-lifecycle.md).
+Create an implementation plan for the tracked issue named in the invocation, based on the chosen
+[assessment](../../skills/assess/SKILL.md) option — the HC's under the `required` *Plan approval* gate,
+or the AC's own recommended option under `auto` ([`PROJECT.md`](../../PROJECT.md) → *Human Gates*). This
+is **Stage 2 (Plan)** of the [development lifecycle](../../docs/standards/development-lifecycle.md).
 
 Read host-specific values — the lifecycle host and artifact map, the branch/PR policy, the
 quality-check commands, the attribution/model — from [`PROJECT.md`](../../PROJECT.md). Never hardcode
@@ -17,8 +18,10 @@ them here.
 
 <procedure>
 
-1. **Read the issue and its comments** — the assessment and the HC's chosen option (and any answers to
-   the assessment's open questions).
+1. **Read the issue and its comments** — the assessment and the chosen option (the HC's under the
+   `required` *Plan approval* gate; the AC's own recommended option under `auto`, per
+   [`PROJECT.md`](../../PROJECT.md) → *Human Gates*), and any answers to the assessment's open
+   questions.
 2. **Right-size the plan to the task.** Match the plan's altitude to how much is actually known. For a
    well-understood change, write the full ordered plan below. For an **exploratory/discovery issue** —
    where the outcome is genuinely uncertain and a full ordered plan would be written against unknowns —

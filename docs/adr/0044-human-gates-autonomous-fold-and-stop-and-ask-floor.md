@@ -74,6 +74,17 @@ removed Ruby here), so any port is reimplemented in TypeScript, and it must stay
   is a deterministic value parse — structural, within ADR 0008 — and `docs/guides/authoring-the-bundle.md`
   gains a narrow carve-out for it.
 
+- **The two independent Reviewer gates are the plan (Stage 2) and the work/PR (Stage 4); the Stage-1
+  assessment is not an independent-review gate.** Surfaced during this issue's own PR review (HC
+  decision on the #83 delta): `summon-reviewer.ts` has a `--mode plan` and a `--mode work` and no assess
+  mode, so a vestigial "the assessment goes to the Reviewer, HC-routed" gate had no runnable mechanism
+  and contradicted the hands-off `auto` run. Resolved by making the design explicit — the assessment is
+  posted for the audit trail and open to HC comment, the first *independent* review is the plan
+  critique — and reconciled across `assess`, `devise`, `development-lifecycle.md`, `PROJECT.md`, and the
+  summon self-test (whose Stage-1 invariant flips from "requires an HC-routed assessment review" to "no
+  stage claims a summons that cannot be run"). The Stage-1 option pick rides the *Plan approval* gate
+  (`auto` → the AC selects; `required` → the HC selects), so every entry point agrees.
+
 ## Considered options
 
 - **A — documentary reconciliation (prose only), no parity or test changes.** Rejected: nothing would

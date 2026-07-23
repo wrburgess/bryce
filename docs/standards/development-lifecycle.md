@@ -62,14 +62,17 @@ HC where requirements are ambiguous (ask, don't guess). For any non-trivial issu
 codebase trace is offloaded to a read-only sub-agent that returns a compact **exploration-summary**
 (ADR 0005) — degrading to inline reads on tools without sub-agents.
 
-**Quality gate:** the assessment goes to the Reviewer (missing options, incorrect codebase
-assumptions, requirements gaps, architectural concerns). The host's summon covers the *plan* and
-*work* gates only ([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Reviewer*), so unless a host
-declares an assessment mechanism this stage is the HC's to route — the AC asks for it in its terminal
-artifact rather than claiming a summon it cannot perform.
+**Quality gate:** the AC self-reviews the assessment for the defects a Reviewer would flag (missing
+options, incorrect codebase assumptions, requirements gaps, architectural concerns). The two
+*independent* Reviewer gates are the plan (Stage 2) and the work/PR (Stage 4) — the only summons the
+host can run ([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Reviewer*; there is no assess
+mode). The assessment is therefore **not** an independent-review gate: it is posted for the audit
+trail and open to HC comment, and no stage here claims a Reviewer summon it cannot perform — the
+first independent review is the plan critique at Stage 2.
 
-**Terminal artifact:** the assessment posted on the issue. **Exit:** HC picks an option; the AC does
-not proceed without a chosen option.
+**Terminal artifact:** the assessment posted on the issue. **Exit:** the option pick follows the
+*Plan approval* gate — under `auto` (this host's setting) the AC proceeds on its own recommended
+option; under `required` the HC picks. The AC does not write a plan against no option.
 
 ### Stage 2: Plan (`devise`)
 
