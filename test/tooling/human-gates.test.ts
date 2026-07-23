@@ -29,7 +29,7 @@ const GATE_HEADER = "| Gate | Setting | Allowed values |";
 const GATE_SEPARATOR = "|------|---------|----------------|";
 
 function planRow(setting: string): string {
-  return `| **Plan approval** — the Stage-2 plan approval (and the Stage-1 option pick) | ${setting} | \`required\` · \`auto\` |`;
+  return `| **Plan approval** — the Stage-2 plan approval | ${setting} | \`required\` · \`auto\` |`;
 }
 
 function mergeRow(setting: string): string {

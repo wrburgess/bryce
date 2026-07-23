@@ -17,10 +17,8 @@ them here.
 
 <procedure>
 
-1. **Read the issue and its comments** — the assessment and the chosen option (the HC's under the
-   `required` *Plan approval* gate; the AC's own recommended option under `auto`, per
-   [`PROJECT.md`](../../PROJECT.md) → *Human Gates*), and any answers to the assessment's open
-   questions.
+1. **Read the issue and its comments** — the assessment and the HC's chosen option (and any answers to
+   the assessment's open questions).
 2. **Right-size the plan to the task.** Match the plan's altitude to how much is actually known. For a
    well-understood change, write the full ordered plan below. For an **exploratory/discovery issue** —
    where the outcome is genuinely uncertain and a full ordered plan would be written against unknowns —

@@ -175,7 +175,7 @@ stays `required` and is never configurable** — it is the sole human gate
 
 | Gate | Setting | Allowed values |
 |------|---------|----------------|
-| **Plan approval** — the Stage-2 plan approval (and the Stage-1 option pick) | `auto` | `required` · `auto` |
+| **Plan approval** — the Stage-2 plan approval | `auto` | `required` · `auto` |
 | **Merge** — the HC merges the delivered PR | `required` | `required` (not configurable) |
 
 - **`auto`** (this host's setting) — the AC proceeds on **its own stated recommendation** rather than
