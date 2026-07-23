@@ -278,6 +278,18 @@ describe("MCP server over Streamable HTTP", () => {
     expect(await opened.db.select().from(players)).toHaveLength(0);
   });
 
+  it("watchlist_batch_add rejects an unknown top-level key (strict), writing nothing", async () => {
+    // The tool registers the strict BatchAddInputBase object, so a stray sibling
+    // of entries/list is rejected before any write — consistent with REST's 400
+    // (ADR 0045). Registering the raw .shape would have silently stripped it.
+    const result = await call("watchlist_batch_add", {
+      entries: [{ personId: 691185 }],
+      bogusKey: 1,
+    });
+    expect(result.isError).toBe(true);
+    expect(await opened.db.select().from(players)).toHaveLength(0);
+  });
+
   it("watchlist_batch_add keeps a soft per-entry failure inside the structured result", async () => {
     api.options.searchResults = [];
     const result = await call("watchlist_batch_add", {

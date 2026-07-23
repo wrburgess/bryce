@@ -86,10 +86,10 @@ Batch-add up to **25** Players in one call ([#68](https://github.com/wrburgess/b
   N are *different* Players, never a duplicate) — is rejected as an input error **before any network or
   write**, and is the *only* thing that fails the whole call. Every other problem is a per-entry
   outcome; one entry failing never aborts the others (batch-add is deliberately non-transactional).
-  One MCP-only nuance: an unknown *top-level* key (a stray sibling of `entries`/`list`) is silently
-  **ignored** here per the MCP SDK's default object handling, whereas REST rejects it (400). The entry
-  shape, the 25 cap, the exactly-one-key rule, and in-batch dedupe are still strictly enforced on
-  every surface, so no malformed entry is ever staged.
+  An unknown *top-level* key (a stray sibling of `entries`/`list`) is **rejected** here (strict),
+  consistent with REST's 400, because the tool registers the strict batch schema and the MCP SDK
+  preserves its `.strict()`. The entry shape, the 25 cap, the exactly-one-key rule, and in-batch dedupe
+  are strictly enforced on every surface, so no malformed entry is ever staged.
 
 ### `watchlist_deactivate`
 

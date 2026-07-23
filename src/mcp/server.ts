@@ -157,8 +157,13 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "watchlist_batch_add",
     {
       description:
-        "Batch-add up to 25 players to the watch list in one call (issue #68). entries is an array of typed identity entries, each EXACTLY one of: personId (MLB/MiLB), ncaaPlayerSeq (NCAA), or name (an MLB-only people-search convenience that must resolve to exactly one player — there is no NCAA name search). Unlike watchlist_add, NO season backfill runs inline: each player's identity is resolved and staged now, and his stats appear at the next run_refresh (call run_refresh afterward to backfill early). The whole call is rejected as a usage error if the SHAPE is bad — empty, over 25, an untyped/multi-key entry, or an in-batch duplicate (a personId N and an ncaaPlayerSeq N are different players, never a duplicate) — before any network or write. Otherwise every entry is resolved best-effort and the result reports a per-entry outcome (added/updated/unresolved/failed) plus a summary; one entry failing never aborts the others.",
-      inputSchema: BatchAddInputBase.shape,
+        "Batch-add up to 25 players to the watch list in one call (issue #68). entries is an array of typed identity entries, each EXACTLY one of: personId (MLB/MiLB), ncaaPlayerSeq (NCAA), or name (an MLB-only people-search convenience that must resolve to exactly one player — there is no NCAA name search). Unlike watchlist_add, NO season backfill runs inline: each player's identity is resolved and staged now, and his stats appear at the next run_refresh (call run_refresh afterward to backfill early). The whole call is rejected as a usage error if the SHAPE is bad — empty, over 25, an untyped/multi-key entry, an unknown top-level key, or an in-batch duplicate (a personId N and an ncaaPlayerSeq N are different players, never a duplicate) — before any network or write. Otherwise every entry is resolved best-effort and the result reports a per-entry outcome (added/updated/unresolved/failed) plus a summary; one entry failing never aborts the others.",
+      // The strict BatchAddInputBase object (NOT its raw .shape): the MCP SDK
+      // (@modelcontextprotocol/sdk 1.29.0) accepts a full schema for inputSchema
+      // and preserves its .strict(), so an unknown top-level key is rejected here
+      // exactly as REST rejects it (ADR 0045) — a raw .shape would be wrapped in a
+      // non-strict object that silently strips the stray key.
+      inputSchema: BatchAddInputBase,
     },
     (args) =>
       guarded(async () => {

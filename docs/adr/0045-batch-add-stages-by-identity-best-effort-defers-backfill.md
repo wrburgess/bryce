@@ -50,15 +50,13 @@ ADR 0032) that must resolve to *exactly one* hit, and an NCAA **Player** enters 
 - **List-agnostic until #70.** Batch-add targets the single **Watch List** (there is no list object
   today); the service signature and API/MCP schemas leave an optional `list` seam so named lists
   (#70) can slot in without breaking callers. #70 owns the list model.
-- **Unknown *top-level* keys are silently ignored on MCP, rejected on REST.** MCP registers
-  `BatchAddInputBase.shape`, and the MCP SDK wraps that raw shape in a *non-strict* `z.object` that
-  **strips** an unknown top-level sibling of `entries`/`list` rather than rejecting it (REST parses the
-  `.strict()` schema directly, so it 400s the same input). This is a cosmetic surface difference only:
-  the SDK still enforces each entry's `.strict()` shape, the `.min(1)`/`.max(25)` cap, and the
-  exactly-one-key rule, and the service's own `BatchAddInputSchema.parse` re-runs the in-batch dedupe —
-  so **entries, the cap, exactly-one-key, and in-batch dedupe are strictly enforced on every surface,
-  and no malformed entry is ever staged**. `registerTool` takes a raw shape and cannot be told to be
-  strict, so this is documented, not code-fixed.
+- **Unknown *top-level* keys are rejected on MCP, consistent with REST.** MCP registers the **strict
+  `BatchAddInputBase` object** (not its raw `.shape`); `@modelcontextprotocol/sdk` 1.29.0 accepts a
+  full schema for a tool's `inputSchema` and preserves its `.strict()`, so an unknown top-level sibling
+  of `entries`/`list` is **rejected on MCP just as REST 400s it** (registering the raw `.shape` would
+  instead wrap it in a *non-strict* object that silently strips the stray key). Each entry's `.strict()`
+  shape, the `.min(1)`/`.max(25)` cap, the exactly-one-key rule, and the service's own in-batch dedupe
+  are enforced on **every** surface, so no malformed entry is ever staged.
 - **Two input encodings, one entry model.** REST/MCP take a JSON `{ entries: [...] }` array; the CLI
   adds a paste-friendly `--file` of tagged lines (bare digits → `personId`, `ncaa:<n>` →
   `ncaaPlayerSeq`, anything else → a name, `name:` as an explicit escape; `#` comments and blank lines
