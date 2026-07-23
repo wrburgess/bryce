@@ -78,8 +78,9 @@ documentation-only change may skip Assess and Plan (see the
 <output>
 
 Post the assessment to the issue via the lifecycle host's issue-comment mechanism
-([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host*), and also display it in the conversation so the
-HC can discuss before choosing. Use this template:
+([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host*), and also display it in the conversation. Under
+`required` this is where the HC discusses before choosing; under `auto` the AC proceeds on its own
+recommended option (the HC can still redirect by commenting on the issue). Use this template:
 
 ```markdown
 ## Issue Assessment

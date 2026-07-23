@@ -76,7 +76,8 @@ option; under `required` the HC picks. The AC does not write a plan against no o
 
 ### Stage 2: Plan (`devise`)
 
-**Trigger:** HC picks an option.
+**Trigger:** an option is chosen — under `auto` the AC's own recommendation, under `required` the HC's
+pick ([`PROJECT.md`](../../PROJECT.md) → *Human Gates*).
 
 **AC produces:** a plan **right-sized to the task** — a step-by-step plan with specific file paths when
 the change is well understood, or, for an HC-elected **exploratory/discovery issue**, a thin hypothesis
