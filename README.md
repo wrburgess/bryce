@@ -27,8 +27,8 @@ This repo vendors the [ai-config](https://github.com/wrburgess/ai-config) Generi
 (canonical instructions in [`AGENTS.md`](AGENTS.md), host values in [`PROJECT.md`](PROJECT.md)),
 trimmed to the nine dev-lifecycle skills as a host Customization. Notable host policies:
 
-- **Human gates:** plan approval is auto-approved; the **merge gate is the one human stop**
-  (`PROJECT.md` → *Lifecycle Host* → *Human gates*).
+- **Human gates:** plan approval is `auto` in this host (allowed `required · auto`); the **merge gate
+  is the one human stop** and is never configurable (`PROJECT.md` → *Human Gates*).
 - **Quality gate:** `npx tsx scripts/parity-check.ts` from day one; the npm checks in
   `PROJECT.md` → *Quality Checks* apply (the app is scaffolded).
 

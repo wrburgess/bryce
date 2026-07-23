@@ -99,10 +99,11 @@ post-spike re-plan; here, state only what the spike must *learn*.)
 - [Migration, authorization, search/index, or breaking-change concerns]
 
 ### Next Step
-Per this host's gate policy ([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Human gates*),
-this plan is deemed approved on posting. Summoning the Reviewer for an independent plan critique;
-must-fix findings are folded into a revised plan before the implement skill (`invoke`) starts. HC:
-comment on the issue to revise direction at any time.
+Per this host's *Plan approval* gate ([`PROJECT.md`](../../PROJECT.md) → *Human Gates*): under `auto`
+— this host's setting — this plan is deemed approved on posting and work proceeds; under `required` it
+would wait for the HC's approval first. Either way, summoning the Reviewer for an independent plan
+critique; must-fix findings are folded into a revised plan before the implement skill (`invoke`)
+starts. HC: comment on the issue to revise direction at any time.
 ```
 
 Sign with the attribution footer from [`PROJECT.md`](../../PROJECT.md) → *Attribution & Model
@@ -126,16 +127,19 @@ while it is outstanding:
 4. **Only then hand off** to the implement skill, against the *final* posted plan.
 
 If the summon fails, follow the *Reviewer* failure ladder in the Project Config: fall back to the
-declared fallback Reviewer, and if no Reviewer returns a critique at all, **flag the missing plan
-review** on the issue so the deliver skill (`final`) can record it in the SOW. The gate is never
-silently skipped — a critique that never arrived must never look like a critique that found nothing.
+declared fallback Reviewer. If the **whole chain is exhausted** and no Reviewer returns a critique, the
+[`PROJECT.md`](../../PROJECT.md) *Reviewer degradation floor* applies — it is `stop-and-ask` and is
+**not configurable**: **stop and ask the HC** rather than proceeding to `invoke` on an uncritiqued
+plan. The gate is never silently skipped — a critique that never arrived must never look like a
+critique that found nothing.
 
 **Terminal artifact:** the plan posted on the issue — with its Reviewer critique answered, and any
-must-fix finding folded into a posted revision. **In this host the plan-approval gate is
-auto-approved** ([`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* → *Human gates*): the posted plan
-is deemed approved on posting, and work proceeds without a human pause. That waives the *human* wait,
-not the *Reviewer* one — the AC still does not write code without a posted plan, and not while a plan
-critique is outstanding.
+must-fix finding folded into a posted revision. The **plan-approval gate** follows
+[`PROJECT.md`](../../PROJECT.md) → *Human Gates*: under `auto` (this host's setting) the posted plan is
+deemed approved on posting and work proceeds without a human pause; under `required` the AC waits for
+the HC's approval before writing code. Either setting waives only the *human* wait, never the
+*Reviewer* one — the AC still does not write code without a posted plan, and not while a plan critique
+is outstanding.
 
 An approved plan is **revisable direction, not a frozen contract.** Discovering mid-`invoke` that the
 plan was wrong — an assumption broke, the spike taught something the plan didn't foresee — is an

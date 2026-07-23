@@ -106,7 +106,7 @@ shim, and the native-discovery tools reach the same body by the documented "read
 - Issue-scoped stages (`assess`, `devise`, `invoke`) take the **issue** id; PR-scoped stages (`verify`,
   `listen`, `final`) take the **PR** id that `invoke` opens.
 - The **merge** gate (after `final`) is mandatory and never bypassed; the **plan-approval** gate
-  (after `devise`) is auto-approved in this host per `PROJECT.md` → *Lifecycle Host* → *Human gates*.
+  (after `devise`) is `auto` in this host per `PROJECT.md` → *Human Gates* (allowed `required · auto`).
 - Full stage spec, terminal artifacts, and when to compress stages →
   [`development-lifecycle.md`](../standards/development-lifecycle.md).
 - To run the whole lifecycle hands-off, the [`ship`](../../skills/ship/SKILL.md) orchestrator sequences

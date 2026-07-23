@@ -131,6 +131,17 @@ sharpens the upstream ask rather than withdrawing it: the generalizable lesson i
 invocation path must not depend on a precondition the AC cannot satisfy itself, and that "summoned
 but silent" needs a *named* classification — otherwise it is indistinguishable from "pending".
 
+**Host resolution (2026-07-22, issue #82):** two follow-through changes. (1) The script is now
+`scripts/summon-reviewer.ts` (TypeScript, post-[ADR 0039](../adr/0039-repo-tooling-unifies-on-typescript-remove-ruby.md)),
+not the `.rb` named above. (2) The **degradation floor changed**: F9's "degrade last to a
+missing-review flag in the SOW" is superseded by a non-configurable **`stop-and-ask`** floor
+([ADR 0044](../adr/0044-human-gates-autonomous-fold-and-stop-and-ask-floor.md)) — a run that cannot
+obtain an independent review now stops and asks the HC rather than delivering unreviewed, resolving a
+contradiction with [ADR 0005](../adr/0005-ship-hybrid-delegation-offload-retrieval-protect-judgment.md).
+The `summon-reviewer.ts` design itself (the 8-way ladder, the exit-status trigger, the Copilot
+fallback) is fed upstream in [`2026-07-22-post-130-reconciliation.md`](2026-07-22-post-130-reconciliation.md)
+to replace ai-config's unreachable `@codex review` GitHub-App invocation path.
+
 ## F10 — Repo-centric self-references survive vendoring and mislead in a host clone
 
 **Disposition: `upstream` · Status: filed ([ai-config#100](https://github.com/wrburgess/ai-config/issues/100); fix PR [ai-config#101](https://github.com/wrburgess/ai-config/pull/101), which also addresses #95/#97/#98)** — surfaced by Copilot's second-model review of bryce PR #1
