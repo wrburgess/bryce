@@ -324,6 +324,22 @@ describe("batchAddPlayers", () => {
     });
 
     it("rejects a blank name", () => expectRejectsNoWrite({ entries: [{ name: "   " }] }));
+
+    // A batch JSON identity is a REAL JSON number, not a coerced string: the batch
+    // schema is z.number() (NOT z.coerce.number()), so a boolean, array, or numeric
+    // STRING must be rejected outright — coercion would turn `true`->1 or `[123]`->123
+    // and stage the wrong player, defeating the strict-shape guarantee (PR #84 review).
+    it("rejects a boolean personId (no coercion of true->1)", () =>
+      expectRejectsNoWrite({ entries: [{ personId: true }] }));
+
+    it("rejects an array personId (no coercion of [123]->123)", () =>
+      expectRejectsNoWrite({ entries: [{ personId: [123] }] }));
+
+    it("rejects a numeric-string personId (a JSON number is required)", () =>
+      expectRejectsNoWrite({ entries: [{ personId: "123" }] }));
+
+    it("rejects a boolean ncaaPlayerSeq (no coercion of true->1)", () =>
+      expectRejectsNoWrite({ entries: [{ ncaaPlayerSeq: true }] }));
   });
 
   describe("strict-shape acceptance", () => {

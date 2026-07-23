@@ -144,25 +144,39 @@ function parseBatchFile(raw: string): { entries: BatchEntryInput[]; error: strin
   return { entries, error: null };
 }
 
+/**
+ * Make a runtime-derived value safe for one greppable ASCII line (rules/scripting.md): strip
+ * diacritics, collapse any whitespace/control run (incl. newlines that would forge extra lines) to a
+ * single space, and replace any residual non-ASCII byte with '?'. (PR #84 review.)
+ */
+function asciiField(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // strip combining accent marks (U+0300..U+036F)
+    .replace(/\s+/g, " ") // collapse whitespace/newlines -> single space
+    .replace(/[^\x20-\x7e]/g, "?") // any residual non-ASCII byte -> '?'
+    .trim();
+}
+
 /** Describe the identity an entry addressed, for a per-entry outcome line. */
 function describeEntry(result: BatchAddEntryResult): string {
   const entry = result.entry;
   if (entry.personId !== undefined) return `personId=${entry.personId}`;
   if (entry.ncaaPlayerSeq !== undefined) return `ncaaSeq=${entry.ncaaPlayerSeq}`;
-  return `name=${entry.name ?? ""}`;
+  return `name=${asciiField(entry.name ?? "")}`;
 }
 
 /** One greppable key=value outcome line per entry. */
 function formatOutcome(result: BatchAddEntryResult): string {
   const ref = describeEntry(result);
   if (result.status === "added" || result.status === "updated") {
-    return `outcome status=${result.status} ${ref} id=${result.player.id} name=${result.player.fullName}`;
+    return `outcome status=${result.status} ${ref} id=${result.player.id} name=${asciiField(result.player.fullName)}`;
   }
   if (result.status === "unresolved") {
     const candidates = result.candidates !== undefined ? ` candidates=${result.candidates.length}` : "";
     return `outcome status=unresolved reason=${result.reason} ${ref}${candidates}`;
   }
-  const message = result.message !== undefined ? ` message=${result.message.replace(/\s+/g, " ")}` : "";
+  const message = result.message !== undefined ? ` message=${asciiField(result.message)}` : "";
   return `outcome status=failed reason=${result.reason} ${ref}${message}`;
 }
 

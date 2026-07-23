@@ -38,18 +38,31 @@ export const AddNcaaPlayerInputSchema = z.object({
 /**
  * Per-call entry cap. This is a LATENCY bound, not a byte-DoS bound like
  * MAX_BACKUP_BYTES: resolving one NCAA stats_player_seq fetches a game-log page
- * at the NCAA client's ~3 s politeness interval, so an all-NCAA batch of N costs
- * ~3 N seconds. 25 entries is a worst case ~75 s, comfortably under the ~100 s
- * Cloudflare-edge timeout (ADR 0045). MLB entries are far cheaper (teams cached).
+ * at the NCAA client's DEFAULT ~3 s politeness interval, so an all-NCAA batch of
+ * N costs ~3 N seconds. 25 entries is a worst case ~75 s, comfortably under the
+ * ~100 s Cloudflare-edge timeout (ADR 0045). MLB entries are far cheaper (teams
+ * cached). The cap PRESUMES that default ~3 s delay: raising NCAA_SCRAPE_DELAY_MS
+ * proportionally lengthens an all-NCAA batch and narrows the safe size, so an
+ * operator who raises it should add players in smaller batches. A client-side
+ * timeout is non-destructive — batch-add is best-effort and non-transactional, so
+ * already-staged rows persist and are valid (re-run to view outcomes, or
+ * run_refresh to backfill). A config-derived dynamic cap is out of scope for this
+ * single-user host (PR #84 review).
  */
 export const MAX_BATCH_ENTRIES = 25;
 const BATCH_STRING_MAX = 120;
 
+// Batch JSON identities are real JSON numbers (REST body / MCP typed input; the CLI parses tokens to
+// numbers before building entries), so they must NOT coerce — z.coerce.number() would turn `true`→1
+// or `[123]`→123 and stage the wrong player, defeating the strict-shape guarantee (PR #84 review).
+const BatchPersonIdSchema = z.number().int().positive();
+const BatchNcaaPlayerSeqSchema = z.number().int().positive();
+
 /** One typed identity entry: exactly one of personId, ncaaPlayerSeq, or name. */
 export const BatchAddEntrySchema = z
   .object({
-    personId: PersonIdSchema.optional().describe("MLB Stats API personId (MLB/MiLB)."),
-    ncaaPlayerSeq: NcaaPlayerSeqSchema.optional().describe(
+    personId: BatchPersonIdSchema.optional().describe("MLB Stats API personId (MLB/MiLB)."),
+    ncaaPlayerSeq: BatchNcaaPlayerSeqSchema.optional().describe(
       "stats.ncaa.org stats_player_seq (NCAA).",
     ),
     name: z

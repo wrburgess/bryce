@@ -159,4 +159,33 @@ describe("players:batch-add CLI (in-process)", () => {
       expect(out[0]).toMatch(/^error: cannot read nope.txt/);
     });
   });
+
+  describe("ASCII-safe, forgery-proof output (rules/scripting.md)", () => {
+    it("transliterates a resolved player's accented fullName to a pure-ASCII outcome line", async () => {
+      // A resolved MLB player whose real name carries diacritics — the outcome
+      // line must stay ASCII-only (no raw accented bytes on a bundled script's stdout).
+      api.options.person = makePerson({ fullName: "Ronald Acuña Jr." });
+      const code = await runBatchAdd(["--person-ids", "691185"], deps());
+      expect(code).toBe(0);
+      const line = out.find((l) => l.startsWith("outcome "));
+      expect(line).toBeDefined();
+      expect(/[^\x20-\x7e]/.test(line as string)).toBe(false); // no non-ASCII byte survives
+      expect(line).toContain("Acuna"); // diacritic stripped, not dropped
+    });
+
+    it("collapses a newline in a --names value so it cannot forge a second output line", async () => {
+      // A user-supplied name carrying an embedded newline would otherwise break the
+      // single greppable outcome line into two forged lines.
+      api.options.searchResults = []; // resolves to zero hits -> one unresolved outcome
+      const code = await runBatchAdd(["--names", "Bad\nName"], deps());
+      expect(code).toBe(0);
+      // The whole captured output is exactly two physical lines (outcome + summary):
+      // no embedded newline survived to forge a third.
+      const physicalLines = out.join("\n").split("\n");
+      expect(physicalLines).toHaveLength(2);
+      const referencing = physicalLines.filter((l) => l.includes("Bad Name"));
+      expect(referencing).toHaveLength(1); // exactly one line, newline collapsed to a space
+      expect(referencing[0]).not.toContain("\n");
+    });
+  });
 });

@@ -326,6 +326,17 @@ describe("REST API", () => {
       expect(await opened.db.select().from(players)).toHaveLength(0);
     });
 
+    it("400s a non-coercing identity (personId: true, never coerced to 1) and writes nothing", async () => {
+      const res = await app().request("/api/players/batch", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ entries: [{ personId: true }] }),
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe("invalid-input");
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+
     it("413s a body over the 64 KB ceiling before parsing", async () => {
       const huge = JSON.stringify({ entries: [{ name: "x".repeat(70_000) }] });
       const res = await app().request("/api/players/batch", {

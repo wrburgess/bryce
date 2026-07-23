@@ -20,7 +20,12 @@ ADR 0032) that must resolve to *exactly one* hit, and an NCAA **Player** enters 
   set concretely to **25 entries** (worst case ≈ 75 s, comfortably under the ~100 s Cloudflare-edge
   timeout), not the ~100 a byte-style DoS bound would suggest; MLB entries (~0.5 s/call, teams cached)
   are far cheaper. A larger synchronous cap would require a background-job design, deliberately out of
-  scope for a single-user host.
+  scope for a single-user host. The cap **presumes the default ~3 s NCAA delay**: raising
+  `NCAA_SCRAPE_DELAY_MS` proportionally lengthens an all-NCAA batch and narrows the safe size, so an
+  operator who raises it should add players in smaller batches. A client-side timeout is
+  non-destructive — batch-add is best-effort and non-transactional (see Consequences), so any
+  already-staged rows persist and are valid (re-run to view outcomes, or `run_refresh` to backfill). A
+  config-derived dynamic cap is deliberately left out of scope for this single-user host.
 - **By name with auto-pick.** Rejected: a bare name is not a domain identity; auto-picking the top
   search hit silently watches the wrong human, and names are MLB-only anyway.
 - **Inline first-Refresh per entry (like single-add, ADR 0030).** Rejected for batches: N sequential
@@ -45,6 +50,15 @@ ADR 0032) that must resolve to *exactly one* hit, and an NCAA **Player** enters 
 - **List-agnostic until #70.** Batch-add targets the single **Watch List** (there is no list object
   today); the service signature and API/MCP schemas leave an optional `list` seam so named lists
   (#70) can slot in without breaking callers. #70 owns the list model.
+- **Unknown *top-level* keys are silently ignored on MCP, rejected on REST.** MCP registers
+  `BatchAddInputBase.shape`, and the MCP SDK wraps that raw shape in a *non-strict* `z.object` that
+  **strips** an unknown top-level sibling of `entries`/`list` rather than rejecting it (REST parses the
+  `.strict()` schema directly, so it 400s the same input). This is a cosmetic surface difference only:
+  the SDK still enforces each entry's `.strict()` shape, the `.min(1)`/`.max(25)` cap, and the
+  exactly-one-key rule, and the service's own `BatchAddInputSchema.parse` re-runs the in-batch dedupe —
+  so **entries, the cap, exactly-one-key, and in-batch dedupe are strictly enforced on every surface,
+  and no malformed entry is ever staged**. `registerTool` takes a raw shape and cannot be told to be
+  strict, so this is documented, not code-fixed.
 - **Two input encodings, one entry model.** REST/MCP take a JSON `{ entries: [...] }` array; the CLI
   adds a paste-friendly `--file` of tagged lines (bare digits → `personId`, `ncaa:<n>` →
   `ncaaPlayerSeq`, anything else → a name, `name:` as an explicit escape; `#` comments and blank lines
