@@ -95,7 +95,9 @@ level. Query: `q=NAME` (required, non-blank). Returns `{ "results": [...] }`.
 Manual-tag management, addressed by **personId** (`:id`) for MLB/MiLB or **`stats_player_seq`**
 (`:seq`) for NCAA — the same external addressing as the sibling player routes. Tag semantics live in
 the service: a manual write to a derived namespace (`level`/`pos`/`prospect`), or an unknown
-namespace/value, is a **400**; an unknown Player is a **404**.
+namespace/value, is a **400**; an unknown Player is a **404**. See the
+[Player tag model reference](../domain/tags.md) for the namespace vocabulary, the derived values, and
+the `?tags=` selector grammar.
 
 | Route | Meaning |
 |---|---|

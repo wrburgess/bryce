@@ -191,6 +191,9 @@ exactly one.
 - **Success:** `{ tags: [...] }`, ordered by namespace, value, source.
 - **Side effects:** none (read-only).
 
+See the [Player tag model reference](../domain/tags.md) for the full namespace vocabulary, the derived
+values, and the selector grammar (the `tags` filter on `watchlist_list` uses the same selector).
+
 ### `sql_query`
 
 Run a single read-only SQL query for ad-hoc analysis.

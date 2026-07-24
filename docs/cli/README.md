@@ -86,6 +86,9 @@ One required subcommand (`add` | `deactivate` | `list` | `tag`), then flags:
 | `tag list` | `--person-id N` \| `--ncaa-seq N` | Print every tag (derived + manual) for the Player plus a `total=` line. |
 | `tag rebuild` | — | Re-derive the `level`/`pos`/`prospect` tags for **every** Player (the one-shot backfill). |
 
+See the [Player tag model reference](../domain/tags.md) for the full namespace vocabulary, the derived
+values, and the selector grammar shared by `list --tags` and the REST/MCP surfaces.
+
 Adding a **new** Player runs his **first Refresh** immediately — his whole current season is
 backfilled — unless the pipeline is in Offseason Sleep, in which case the add succeeds and the
 Refresh is skipped. Re-adding a Player already on the Watch List is a no-op update with no Refresh;
