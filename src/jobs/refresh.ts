@@ -3,7 +3,7 @@ import type { Db } from "../db/client.js";
 import type { NewStatLineRow, PlayerRow } from "../db/schema.js";
 import { players, seasonCalendar, statLines } from "../db/schema.js";
 import type { CalendarEntry } from "../domain/season.js";
-import { hostDate, sleepWindow, sportIdForPlayer } from "../domain/season.js";
+import { calendarHasUsableDates, hostDate, sleepWindow, sportIdForPlayer } from "../domain/season.js";
 import type { MlbClient, StatGroup } from "../mlb/client.js";
 import { isIngestedGameType } from "../mlb/gameTypes.js";
 import { levelForSportId, NCAA_SPORT_ID, SPORT_IDS } from "../mlb/levels.js";
@@ -31,15 +31,6 @@ const NCAA_CATEGORIES: readonly NcaaStatCategory[] = ["batting", "pitching", "fi
 export interface CalendarFailure {
   sportId: number;
   reason: string;
-  /**
-   * Whether a cached `season_calendar` row for this (sportId, season) ALREADY
-   * existed when the fetch threw (P1). When true the digest still has a calendar
-   * to judge season membership against — a stale row is a tolerable fallback. When
-   * FALSE, no calendar exists for a watched sport, so `isInSeason` returns false
-   * and the digest would SILENTLY omit that level's idle players — the run must
-   * then settle at least `partial` so the digest carries a freshness warning.
-   */
-  hadCachedRow: boolean;
 }
 
 /** A watched player whose refresh threw (#23): collected, not fatal to the sweep. */
@@ -198,13 +189,13 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   // computation below, never to the outer catch.
   let calendarFailures: CalendarFailure[] = [];
   const playerFailures: PlayerFailure[] = [];
+  // Hoisted above the try so the settle-time freshness check (P1) can re-check
+  // season membership for the SAME season the calendars were fetched for.
+  const season = currentSeason(deps);
   try {
-    const season = currentSeason(deps);
     // getSeason failures are caught inside refreshCalendars and returned; a
     // calendar DB-WRITE failure is NOT — it escapes to the outer catch (MF1).
-    // Pass the start-of-run calendar snapshot so each failure records whether a
-    // cached fallback row exists (P1).
-    calendarFailures = await refreshCalendars(deps, season, calendars);
+    calendarFailures = await refreshCalendars(deps, season);
     await refreshNcaaCalendar(deps, season, activePlayers);
 
     for (const player of activePlayers) {
@@ -280,17 +271,32 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   }
 
   // A calendar failure BLOCKS `fresh` (P1) only when it would leave the digest
-  // silently incomplete: the fetch failed for a WATCHED sport AND no cached
-  // season_calendar row exists to fall back on. `isInSeason` returns false with
-  // no calendar row, so those idle players would be dropped from the digest with
-  // no warning — such a run must settle at least `partial`. NCAA (sportId 22) is
-  // seeded from bundled dates, never fetched here, so it never appears in
-  // calendarFailures and is unaffected.
+  // silently incomplete: a getSeason FETCH threw for a sport that — judged
+  // against the POST-refresh state — a watched player is at, and no calendar row
+  // with USABLE dates exists to fall back on. The digest reads a player's CURRENT
+  // level and calls isInSeason, which returns false when the calendar row is
+  // missing OR lacks a start/end; so those idle players would be dropped with no
+  // warning, and such a run must settle at least `partial`.
+  //
+  // Both inputs are re-read at SETTLE time (post-refresh): loadActivePlayers so a
+  // call-up/demotion during the sweep is reflected in the watched sportIds, and
+  // loadCalendars so a sportId that DID refresh is not counted stale. Only a
+  // sport in calendarFailures (an actual fetch throw) can block — a getSeason
+  // that returned null (unpublished season) is not a failure and never blocks.
+  // NCAA (sportId 22) is seeded from bundled dates, never fetched here, so it
+  // never appears in calendarFailures and is unaffected.
+  const finalPlayers = await loadActivePlayers(db);
+  const finalCalendars = await loadCalendars(db);
   const watchedSportIds = new Set(
-    activePlayers.map((p) => sportIdForPlayer(p)).filter((id): id is number => id !== null),
+    finalPlayers.map((p) => sportIdForPlayer(p)).filter((id): id is number => id !== null),
   );
-  const calendarBlocksFresh = calendarFailures.some(
-    (f) => !f.hadCachedRow && watchedSportIds.has(f.sportId),
+  const failedSportIds = new Set(calendarFailures.map((f) => f.sportId));
+  const calendarBlocksFresh = [...watchedSportIds].some(
+    (sportId) =>
+      failedSportIds.has(sportId) &&
+      !finalCalendars.some(
+        (c) => c.sportId === sportId && c.season === season && calendarHasUsableDates(c),
+      ),
   );
 
   // Status from the collected counts (#23): `ok` only when nothing failed, nothing
@@ -386,16 +392,10 @@ export function currentSeason(deps: Pick<RefreshDeps, "now" | "tz">): string {
  * the cached calendar, so a stale row is a tolerable degradation, not a blocker.
  * A calendar DB-WRITE failure is deliberately NOT caught: it escapes to the
  * runRefresh outer boundary (MF1) rather than being silently swallowed.
- *
- * `cachedCalendars` is the start-of-run snapshot of `season_calendar`; each
- * collected failure records whether a cached row for that (sportId, season)
- * already existed (P1). A failed sportId is never upserted, so the snapshot is
- * an accurate answer to "does the digest still have a calendar to fall back on?".
  */
 export async function refreshCalendars(
   deps: RefreshDeps,
   season: string,
-  cachedCalendars: CalendarEntry[] = [],
 ): Promise<CalendarFailure[]> {
   const { db, client, now } = deps;
   const fetchedAt = now().toISOString();
@@ -405,11 +405,7 @@ export async function refreshCalendars(
     try {
       s = await client.getSeason(sportId, season);
     } catch (err) {
-      failures.push({
-        sportId,
-        reason: err instanceof Error ? err.message : String(err),
-        hadCachedRow: cachedCalendars.some((c) => c.sportId === sportId && c.season === season),
-      });
+      failures.push({ sportId, reason: err instanceof Error ? err.message : String(err) });
       continue;
     }
     if (s === null) continue;
@@ -877,7 +873,7 @@ export async function runRefreshForPlayer(
     const ncaaResult = await refreshNcaaPlayer(deps, player, season);
     return { skipped: false, ...ncaaResult, calendarFailures: [] };
   }
-  const calendarFailures = await refreshCalendars(deps, season, calendars);
+  const calendarFailures = await refreshCalendars(deps, season);
   if (calendarFailures.length > 0) {
     // MF3: do NOT silently swallow a calendar failure on the single-player path.
     // The player still proceeds (he never depended on the DB calendar), but the

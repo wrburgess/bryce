@@ -47,6 +47,18 @@ export function sportIdForPlayer(player: WatchedLevel): number | null {
 }
 
 /**
+ * Whether a calendar row carries the dates `isInSeason` needs to judge season
+ * membership: a regular-season START and a season END (postseason end, falling
+ * back to regular-season end). A row missing either is UNUSABLE — `isInSeason`
+ * treats it as "no calendar" and returns false. Shared so Refresh's freshness
+ * gate (#23 P1) reuses `isInSeason`'s OWN criterion rather than a drifting proxy.
+ */
+export function calendarHasUsableDates(cal: CalendarEntry): boolean {
+  const end = cal.postSeasonEnd ?? cal.regularSeasonEnd;
+  return cal.regularSeasonStart !== null && end !== null;
+}
+
+/**
  * A Player is In Season while his sport still has games left: today is on or
  * after his sport's regular-season start and on or before its last possible
  * game (postseason end, falling back to regular-season end).
@@ -69,9 +81,9 @@ export function isInSeason(
   const today = asOfDate ?? hostDate(now, tz);
   return calendars.some((cal) => {
     if (cal.sportId !== sportId) return false;
-    const start = cal.regularSeasonStart;
+    if (!calendarHasUsableDates(cal)) return false;
     const end = cal.postSeasonEnd ?? cal.regularSeasonEnd;
-    return start !== null && end !== null && today >= start && today <= end;
+    return today >= cal.regularSeasonStart! && today <= end!;
   });
 }
 

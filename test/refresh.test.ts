@@ -943,7 +943,7 @@ describe("runRefresh — continue after failures (#23)", () => {
     expect(summary.status).toBe("ok");
     expect(summary.playersRefreshed).toBe(1);
     expect(summary.calendarFailures).toEqual([
-      { sportId: 1, reason: expect.stringContaining("season 1 down"), hadCachedRow: true },
+      { sportId: 1, reason: expect.stringContaining("season 1 down") },
     ]);
 
     // sportId 1's cached row is byte-for-byte untouched by the failed re-fetch.
@@ -1006,7 +1006,7 @@ describe("runRefresh — continue after failures (#23)", () => {
     expect(summary.playersFailed).toBe(0);
     expect(summary.status).toBe("partial"); // NOT ok — the digest would be silently incomplete
     expect(summary.calendarFailures).toEqual([
-      { sportId: 11, reason: expect.stringContaining("season 11 down"), hadCachedRow: false },
+      { sportId: 11, reason: expect.stringContaining("season 11 down") },
     ]);
     const runs = await opened.db.select().from(refreshRuns);
     expect(runs[0]?.status).toBe("partial");
@@ -1031,7 +1031,7 @@ describe("runRefresh — continue after failures (#23)", () => {
     expect(summary.playersRefreshed).toBe(1);
     expect(summary.status).toBe("ok"); // cached fallback keeps the digest correct
     expect(summary.calendarFailures).toEqual([
-      { sportId: 11, reason: expect.stringContaining("season 11 down"), hadCachedRow: true },
+      { sportId: 11, reason: expect.stringContaining("season 11 down") },
     ]);
     // The cached sportId 11 row is byte-for-byte untouched by the failed re-fetch.
     const cal11 = (await opened.db.select().from(seasonCalendar).where(eq(seasonCalendar.sportId, 11)))[0];
@@ -1051,8 +1051,75 @@ describe("runRefresh — continue after failures (#23)", () => {
     expect(summary.playersRefreshed).toBe(1);
     expect(summary.status).toBe("ok");
     expect(summary.calendarFailures).toEqual([
-      { sportId: 1, reason: expect.stringContaining("season 1 down"), hadCachedRow: false },
+      { sportId: 1, reason: expect.stringContaining("season 1 down") },
     ]);
+  });
+
+  it("downgrades to `partial` when the cached row EXISTS but lacks USABLE dates (P1a)", async () => {
+    // The existence-only check would wrongly pass: a cached sportId 11 row is
+    // present but its regular-season START is null, so isInSeason (and the
+    // digest) cannot use it — the run must settle `partial`, not `ok`.
+    await insertPlayer(opened.db, { externalId: 691185 }); // Triple-A → sportId 11
+    // A valid MLB (sportId 1) calendar keeps the pipeline awake at the sleep check.
+    await insertCalendar(opened.db);
+    await insertCalendar(opened.db, {
+      sportId: 11,
+      season: "2026",
+      regularSeasonStart: null, // UNUSABLE: no start date
+      regularSeasonEnd: "2026-09-20",
+      postSeasonStart: null,
+      postSeasonEnd: null,
+      springStart: null,
+      springEnd: null,
+      fetchedAt: "2020-01-01T00:00:00.000Z",
+    });
+
+    const summary = await runRefresh({ ...deps(), client: failGetSeason(11, "season 11 down") });
+    expect(summary.playersRefreshed).toBe(1);
+    // Existence-only would say ok; the usable-dates check says partial.
+    expect(summary.status).toBe("partial");
+    const runs = await opened.db.select().from(refreshRuns);
+    expect(runs[0]?.status).toBe("partial");
+  });
+
+  it("keys the freshness block on the POST-refresh level (a call-up into a calendar-failed sport → `partial`) (P1b)", async () => {
+    // Player starts Triple-A (sportId 11) but is CALLED UP to MLB (sportId 1)
+    // DURING the run — refreshPlayer resolves his current team to the MLB club.
+    // getSeason for sportId 1 throws with no usable calendar. PRE-refresh
+    // watchedSportIds would be {11} and miss it; POST-refresh it is {1}, so the
+    // settle-time check correctly blocks and the run settles `partial`.
+    const player = await insertPlayer(opened.db, {
+      externalId: 691185,
+      level: "milb",
+      milbLevel: "Triple-A",
+    });
+    // A valid Triple-A calendar: awake at the sleep check AND usable for sportId 11
+    // (so ONLY the post-refresh sportId 1 can be the blocker).
+    await insertCalendar(opened.db, {
+      sportId: 11,
+      season: "2026",
+      regularSeasonStart: "2026-03-27",
+      regularSeasonEnd: "2026-09-20",
+      postSeasonStart: null,
+      postSeasonEnd: null,
+      springStart: null,
+      springEnd: null,
+    });
+    // The refresh resolves him to the MLB club (team 146 → sportId 1).
+    api.options.person = makePerson({
+      currentTeam: { id: 146, name: "Miami Marlins", link: "/api/v1/teams/146" },
+    });
+
+    const summary = await runRefresh({ ...deps(), client: failGetSeason(1, "season 1 down") });
+
+    // He was called up (post-refresh level mlb → sportId 1)...
+    const row = (await opened.db.select().from(players).where(eq(players.id, player.id)))[0];
+    expect(row?.level).toBe("mlb");
+    expect(row?.milbLevel).toBeNull();
+    // ...and the sportId 1 calendar failure (no usable row) blocks fresh → partial.
+    expect(summary.playersRefreshed).toBe(1);
+    expect(summary.status).toBe("partial");
+    expect(summary.calendarFailures.map((f) => f.sportId)).toContain(1);
   });
 
   it("heals a failed player on the next run: partial → retry → ok, no dup rows, created_at preserved (SC3)", async () => {
@@ -1181,7 +1248,7 @@ describe("runRefresh — continue after failures (#23)", () => {
     expect(result.inserted).toBeGreaterThan(0);
     // ...but the calendar failure is SURFACED, not dropped.
     expect(result.calendarFailures).toEqual([
-      { sportId: 1, reason: expect.stringContaining("season 1 down"), hadCachedRow: false },
+      { sportId: 1, reason: expect.stringContaining("season 1 down") },
     ]);
   });
 });
