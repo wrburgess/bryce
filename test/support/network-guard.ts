@@ -251,15 +251,25 @@ function connectTarget(args: unknown[]): { host: string | undefined; port: numbe
  * DNS (a custom `lookup` on a literal is dead code), so it stays allowed. A connect with no
  * custom lookup keeps the original loopback-allow / non-loopback-block behavior exactly.
  */
-function guardSocketArgs(args: unknown[]): void {
+function guardSocketArgs(args: unknown[], fromTls = false): void {
   const { host, port, path } = connectTarget(args);
-  if (path !== undefined) return; // unix socket / pipe — no host, allowed
-  // An EXISTING socket is being reused (`tls.connect({ socket })`, or a Unix-socket TLS wrap): Node
-  // opens NO new connection and IGNORES any `lookup`, so there is no egress or DNS to verify — the
-  // underlying socket was already subject to the guard when it first connected. Allow it BEFORE the
-  // name/custom-lookup block, or a valid TLS-over-existing-socket call with a stray `lookup` would be
-  // wrongly blocked and recorded as a phantom `localhost:?` attempt (R5-P2).
-  if (hasExistingSocket(args)) return;
+  // A unix-socket / pipe PATH means Node connects to the pipe and performs NO TCP egress — allowed.
+  // But Node takes the pipe branch only for a TRUTHY path (`if (options.path && ...)`); a present-but
+  // -EMPTY `path: ""` is FALSY, so Node falls THROUGH and DIALS host/port. Treat an empty path as
+  // ABSENT (the same falsy-value class as the socket exemption, R6-P1b) so it can never wave a real
+  // host dial through. A NON-EMPTY path — numeric string or not — is a genuine pipe to Node (verified),
+  // so it stays allowed and never reaches the host checks below.
+  if (path !== undefined && path !== "") return;
+  // An EXISTING socket is being reused (`tls.connect({ socket })`): Node opens NO new connection and
+  // IGNORES host/port/lookup, so there is no egress or DNS to verify — the underlying socket was
+  // already subject to the guard when it first connected. This exemption is TLS-ONLY (R6-P1a): only
+  // `tls.connect` honors `options.socket`. `net.connect`/`net.createConnection`/`Socket.prototype.connect`
+  // IGNORE a `socket` property and STILL dial host/port, so a stray `socket` must NEVER exempt them —
+  // consulting it there would let `net.connect({ host, port, socket: {} })` bypass every host check and
+  // perform unrecorded non-loopback egress. The `fromTls` flag is set only by the tls.connect wrapper,
+  // so the exemption cannot leak into the net.* paths. Allowed BEFORE the name/custom-lookup block, or a
+  // valid TLS-over-existing-socket call with a stray `lookup` would be wrongly blocked (R5-P2).
+  if (fromTls && hasExistingSocket(args)) return;
   // A TCP connect that OMITS the host (undefined/empty but carries a port) defaults to
   // `localhost` in Node. Resolve the omission to the loopback NAME `localhost` up front so the
   // custom-lookup refusal below covers the implicit-localhost case too (Delta-1); otherwise a
@@ -308,15 +318,19 @@ function hasCustomLookup(args: unknown[]): boolean {
 }
 
 /**
- * True when `args[0]` is an options object supplying an EXISTING `socket` to wrap — the
- * `tls.connect({ socket })` reuse form, where Node opens no new connection and ignores `lookup`.
- * A plain, prototype-honoring read (matching how Node reads options), never a write.
+ * True when `args[0]` is an options object supplying a TRUTHY existing `socket` to wrap — the
+ * `tls.connect({ socket })` reuse form, where Node opens no new connection and ignores host/lookup.
+ * A present-but-FALSY `socket` (`false`, `null`, `undefined`, `0`, `""`) counts as ABSENT (R6-P1b):
+ * Node's `tls.connect` decides with `if (!options.socket)`, so a falsy socket makes it CREATE and
+ * connect a NEW socket — unrecorded egress if we exempted it. Only a truthy socket suppresses the
+ * dial. A plain, prototype-honoring read (matching how Node reads options), never a write, so a
+ * frozen or prototype-backed options object is safe to inspect.
  */
 function hasExistingSocket(args: unknown[]): boolean {
   const first = args[0];
   if (typeof first !== "object" || first === null) return false;
   const opts = first as { socket?: unknown };
-  return opts.socket !== undefined && opts.socket !== null;
+  return Boolean(opts.socket);
 }
 
 /**
@@ -335,10 +349,15 @@ function isLoopbackIpLiteral(host: string | undefined): boolean {
   return netModule.isIP(host) !== 0 && isLoopback(host);
 }
 
-function makeGuardedConnect<F>(original: F): F {
+/**
+ * `fromTls` is set ONLY by the tls.connect wrapper. It gates the socket-reuse exemption so it can
+ * never leak into `net.connect`/`net.createConnection`/`Socket.prototype.connect`, which ignore
+ * `options.socket` and still dial host/port (R6-P1a).
+ */
+function makeGuardedConnect<F>(original: F, fromTls = false): F {
   const originalFn = original as unknown as (...a: unknown[]) => unknown;
   const wrapper = function (this: unknown, ...args: unknown[]): unknown {
-    guardSocketArgs(args);
+    guardSocketArgs(args, fromTls);
     return originalFn.apply(this, args);
   };
   return wrapper as unknown as F;
@@ -370,5 +389,6 @@ export function installNetworkGuard(): void {
   patch(netModule, "connect", makeGuardedConnect(originalNetConnect));
   patch(netModule, "createConnection", makeGuardedConnect(originalNetCreateConnection));
   patch(netModule.Socket.prototype, "connect", makeGuardedConnect(originalSocketConnect));
-  patch(tlsModule, "connect", makeGuardedConnect(originalTlsConnect));
+  // Only the tls.connect wrapper carries `fromTls`, so the socket-reuse exemption is TLS-only (R6-P1a).
+  patch(tlsModule, "connect", makeGuardedConnect(originalTlsConnect, true));
 }

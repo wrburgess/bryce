@@ -421,7 +421,7 @@ describe("a custom DNS lookup on an allowed name is REFUSED — fail closed by c
     // IGNORES `lookup`. The guard must not treat the missing host as a name and block — there is no
     // egress or DNS to verify (the underlying socket was already guarded when it first connected).
     // Formerly this threw + recorded a phantom `localhost:?`, rejecting valid TLS-over-socket tests.
-    const tcpServer = net.createServer((sock) => sock.on("error", () => undefined));
+    const tcpServer = net.createServer();
     await new Promise<void>((resolve, reject) => {
       tcpServer.once("error", reject);
       tcpServer.listen(0, "127.0.0.1", resolve);
@@ -429,10 +429,18 @@ describe("a custom DNS lookup on an allowed name is REFUSED — fail closed by c
     const { port } = tcpServer.address() as AddressInfo;
     const socket = net.connect({ host: "127.0.0.1", port });
     socket.on("error", () => undefined); // once tls wraps it, errors surface on the TLSSocket
-    await new Promise<void>((resolve, reject) => {
-      socket.once("connect", resolve);
-      socket.once("error", reject);
-    });
+    // Await BOTH ends of the connection deterministically so teardown can destroy the server-side
+    // accept too: `server.close()` only fires its callback once every live connection has ended, so a
+    // lingering server-side socket would otherwise hang the drain under a saturated (full-suite,
+    // parallel) event loop and time the test out — a genuine existing loopback socket, closed cleanly.
+    const [, serverSock] = await Promise.all([
+      new Promise<void>((resolve, reject) => {
+        socket.once("connect", resolve);
+        socket.once("error", reject);
+      }),
+      new Promise<net.Socket>((resolve) => tcpServer.once("connection", resolve)),
+    ]);
+    serverSock.on("error", () => undefined);
     // The loopback connect above is allowed and records nothing; drain any before the real assertion.
     expect(takeAttempts()).toEqual([]);
 
@@ -446,12 +454,86 @@ describe("a custom DNS lookup on an allowed name is REFUSED — fail closed by c
     } catch (err) {
       threw = err;
     } finally {
+      // Destroy BOTH ends before draining so `server.close()` returns immediately (no live connection).
       tlsSocket?.destroy();
       socket.destroy();
+      serverSock.destroy();
       await new Promise<void>((resolve) => tcpServer.close(() => resolve()));
     }
-    expect(threw).not.toBeInstanceOf(NetworkBlockedError); // the guard did not block the reuse
+    // Tightened (R6-P2): prove the guard did NOT interfere at all. A `not NetworkBlockedError` check
+    // alone was a false green — an unrelated synchronous TypeError would still pass it, and the optional
+    // `tlsSocket?` cleanup let `tlsSocket` stay undefined even if valid existing-socket wrapping broke.
+    expect(threw).toBeUndefined(); // no error of ANY kind was thrown by the socket-reuse path
+    expect(tlsSocket).toBeInstanceOf(tls.TLSSocket); // a REAL TLSSocket was returned from tls.connect({ socket })
     expect(takeAttempts()).toEqual([]); // no new connection, nothing recorded
+  });
+});
+
+describe("the socket-reuse exemption is TLS-only and truthy-only (R6-P1)", () => {
+  // R6-P1a — only `tls.connect` honors `options.socket`. `net.connect`/`net.createConnection`/
+  // `Socket.prototype.connect` IGNORE it and STILL dial host/port, so a stray `socket` prop must NEVER
+  // exempt them; otherwise a non-loopback dial slips past every host check and egresses unrecorded.
+  it("R6-P1a: BLOCKS + records net.connect carrying a stray `socket` on a non-loopback NAME", () => {
+    const opts = { host: "api.example.com", port: 443, socket: {} } as unknown as net.NetConnectOpts;
+    expect(() => net.connect(opts)).toThrow(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "api.example.com", port: 443 }]);
+  });
+
+  it("R6-P1a: BLOCKS + records net.connect carrying a stray `socket` on a non-loopback IP literal", () => {
+    const opts = { host: "8.8.8.8", port: 443, socket: {} } as unknown as net.NetConnectOpts;
+    expect(() => net.connect(opts)).toThrow(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "8.8.8.8", port: 443 }]);
+  });
+
+  it("R6-P1a: BLOCKS + records net.createConnection carrying a stray `socket` on a non-loopback NAME", () => {
+    const opts = { host: "api.example.com", port: 443, socket: {} } as unknown as net.NetConnectOpts;
+    expect(() => net.createConnection(opts)).toThrow(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "api.example.com", port: 443 }]);
+  });
+
+  // R6-P1b — Node's `tls.connect` uses `if (!options.socket)`, so a present-but-FALSY socket makes it
+  // CREATE and connect a NEW socket. The exemption must treat a falsy `socket` as ABSENT and fall
+  // through to the normal host / custom-lookup checks.
+  it("R6-P1b: BLOCKS + records tls.connect with a FALSY `socket` on a non-loopback NAME (Node dials)", () => {
+    const opts = {
+      host: "api.example.com",
+      port: 443,
+      socket: false,
+      lookup: () => {},
+    } as unknown as tls.ConnectionOptions;
+    expect(() => tls.connect(opts)).toThrow(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "api.example.com", port: 443 }]);
+  });
+
+  it("R6-P1b: BLOCKS + records tls.connect with a FALSY `socket` + custom lookup on `localhost` (Node dials, custom lookup)", () => {
+    // A falsy socket means Node opens a REAL connection; a custom lookup on that connection is refused
+    // by name exactly like the no-socket case — the allowed name `localhost` is no longer waved through.
+    const opts = {
+      host: "localhost",
+      port: 443,
+      socket: null,
+      lookup: () => {},
+    } as unknown as tls.ConnectionOptions;
+    expect(() => tls.connect(opts)).toThrow(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "localhost", port: 443 }]);
+  });
+
+  // Same falsy-value class as R6-P1b, found during the bounded sanity check — on `path` this time:
+  // Node takes the pipe branch only for a TRUTHY `path` (`if (options.path && ...)`), so an EMPTY
+  // `path: ""` is falsy and Node falls through to DIAL host/port. The guard must NOT treat an empty
+  // path as a pipe — else `net.connect({ path: "", host, port })` egresses to a non-loopback host,
+  // unrecorded. A non-empty path stays a genuine pipe (verified: numeric strings pipe too), allowed.
+  it("R6-path: BLOCKS + records a connect whose EMPTY `path: \"\"` falls through to a host dial", () => {
+    const opts = { path: "", host: "api.example.com", port: 443 } as unknown as net.NetConnectOpts;
+    expect(() => net.connect(opts)).toThrow(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "api.example.com", port: 443 }]);
+  });
+
+  it("R6-path: still ALLOWS a genuine NON-EMPTY pipe path (Node connects to the pipe, no host dial)", () => {
+    const socket = net.connect("/tmp/bryce-network-guard-nonempty-path-control.sock");
+    socket.on("error", () => undefined);
+    socket.destroy();
+    expect(takeAttempts()).toEqual([]);
   });
 });
 
