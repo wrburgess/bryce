@@ -15,6 +15,19 @@ import { toCsv } from "../export/csv.js";
 import { statLinesToCsv } from "../export/tabular.js";
 import { runDigest } from "../jobs/digest.js";
 import { runRefresh, runRefreshForPlayer } from "../jobs/refresh.js";
+import {
+  BlankListNameError,
+  DuplicateListNameError,
+  UnknownListError,
+  addToList,
+  createList,
+  deleteList,
+  listLists,
+  listMembersOf,
+  removeFromList,
+  renameList,
+  resolveListByName,
+} from "../lists/service.js";
 import { MlbApiError } from "../mlb/client.js";
 import { NcaaApiError, UnsupportedNcaaSeasonError } from "../ncaa/client.js";
 import { queryStatLines } from "../queries/statLines.js";
@@ -30,11 +43,15 @@ import {
   listPlayers,
   searchPlayers,
 } from "../watchlist/service.js";
+import type { PlayerRef } from "../watchlist/service.js";
 import {
   AddNcaaPlayerInputSchema,
   AddPlayerInputSchema,
   DigestInputSchema,
   DigestPreviewQueryInputSchema,
+  ListCreateBodySchema,
+  ListMembersBodySchema,
+  ListRenameBodySchema,
   NcaaPlayerSeqSchema,
   PersonIdSchema,
   PlayerSearchInputSchema,
@@ -42,6 +59,11 @@ import {
   RefreshInputSchema,
   StatLinesFormatSchema,
 } from "./schemas.js";
+
+/** Project a validated member reference into the service's PlayerRef union. */
+function toPlayerRef(ref: { personId?: number; ncaaPlayerSeq?: number }): PlayerRef {
+  return ref.personId !== undefined ? ref.personId : { ncaaPlayerSeq: ref.ncaaPlayerSeq! };
+}
 
 /**
  * Thin token-authed REST API (ADR 0027): request/response orchestration only —
@@ -74,9 +96,16 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     if (
       err instanceof UnknownPersonError ||
       err instanceof UnknownNcaaPlayerError ||
-      err instanceof PlayerNotFoundError
+      err instanceof PlayerNotFoundError ||
+      err instanceof UnknownListError
     ) {
       return c.json({ error: err.message }, 404);
+    }
+    if (err instanceof DuplicateListNameError) {
+      return c.json({ error: err.message }, 409);
+    }
+    if (err instanceof BlankListNameError) {
+      return c.json({ error: err.message }, 400);
     }
     if (err instanceof MlbApiError || err instanceof NcaaApiError) {
       // Upstream (MLB Stats API / stats.ncaa.org) failure: a bad gateway.
@@ -164,7 +193,11 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     // way. `table` is accepted for every format but used only by csv — a
     // Presentation (html/md) always renders both tables.
     const query = DigestPreviewQueryInputSchema.parse(c.req.query());
-    const assembly = await assembleDigest(deps.db, { ...deps, spec: query.window });
+    // A `?list=` scopes the preview to that list's active members; an unknown
+    // list fails closed (UnknownListError -> 404 via onError).
+    const listId =
+      query.list !== undefined ? (await resolveListByName(deps.db, query.list)).id : undefined;
+    const assembly = await assembleDigest(deps.db, { ...deps, spec: query.window, listId });
     const spec = assembly.window.spec;
     if (query.format === "html") {
       return fileResponse(
@@ -208,6 +241,9 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     // Malformed JSON is a client error (SyntaxError -> 400 via onError).
     const raw = await c.req.text();
     const body = DigestInputSchema.parse(raw.trim().length === 0 ? {} : JSON.parse(raw));
+    // A `list` scopes an ON-DEMAND send to that list's members; unknown -> 404.
+    const listId =
+      body.list !== undefined ? (await resolveListByName(deps.db, body.list)).id : undefined;
     const result = await runDigest({
       db: deps.db,
       mailer: deps.mailer,
@@ -217,6 +253,7 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
       from: deps.digestFrom,
       spec: body.window,
       force: body.force,
+      listId,
     });
     return c.json(result, result.action === "failed" ? 502 : 200);
   });
@@ -240,6 +277,57 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
       );
     }
     return c.json(await runRefreshForPlayer(deps, player.id));
+  });
+
+  // --- Named player lists (issue #70 / ADR 0046) ---------------------------
+
+  api.get("/lists", async (c) => {
+    return c.json({ lists: await listLists(deps.db) });
+  });
+
+  api.post("/lists", async (c) => {
+    const body = ListCreateBodySchema.parse(await c.req.json());
+    const list = await createList(deps.db, body.name, deps.now());
+    return c.json({ list }, 201);
+  });
+
+  api.get("/lists/:name", async (c) => {
+    const name = c.req.param("name");
+    const list = await resolveListByName(deps.db, name);
+    return c.json({ list, members: await listMembersOf(deps.db, name) });
+  });
+
+  api.patch("/lists/:name", async (c) => {
+    const body = ListRenameBodySchema.parse(await c.req.json());
+    const list = await renameList(deps.db, c.req.param("name"), body.name, deps.now());
+    return c.json({ list });
+  });
+
+  api.delete("/lists/:name", async (c) => {
+    const list = await deleteList(deps.db, c.req.param("name"), deps.now());
+    return c.json({ list });
+  });
+
+  api.post("/lists/:name/members", async (c) => {
+    const body = ListMembersBodySchema.parse(await c.req.json());
+    const result = await addToList(
+      deps.db,
+      c.req.param("name"),
+      body.players.map(toPlayerRef),
+      deps.now(),
+    );
+    return c.json({ list: result.list, added: result.changed, players: result.players });
+  });
+
+  api.delete("/lists/:name/members", async (c) => {
+    const body = ListMembersBodySchema.parse(await c.req.json());
+    const result = await removeFromList(
+      deps.db,
+      c.req.param("name"),
+      body.players.map(toPlayerRef),
+      deps.now(),
+    );
+    return c.json({ list: result.list, removed: result.changed, players: result.players });
   });
 
   return api;

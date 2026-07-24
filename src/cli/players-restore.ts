@@ -8,6 +8,7 @@ import { PlayerBackupParseError, parsePlayerListBackup } from "../backup/player-
 import {
   AmbiguousImportTargetError,
   SplitIdentityConflictError,
+  UnresolvedBackupMemberError,
   restorePlayerListBackup,
 } from "../watchlist/service.js";
 import { isMain } from "./main.js";
@@ -89,13 +90,22 @@ export async function runPlayersRestore(
   }
 
   try {
-    const summary = restorePlayerListBackup(deps.db, backup.players, deps.now());
+    const summary = restorePlayerListBackup(deps.db, backup.players, deps.now(), {
+      lists: backup.lists,
+      members: backup.members,
+    });
+    const listCount = backup.lists?.length ?? 0;
+    const memberCount = backup.members?.length ?? 0;
     deps.write(
-      `player-list restored inserted=${summary.inserted} updated=${summary.updated} total=${summary.total}`,
+      `player-list restored inserted=${summary.inserted} updated=${summary.updated} total=${summary.total} lists=${listCount} members=${memberCount}`,
     );
     return 0;
   } catch (err) {
-    if (err instanceof SplitIdentityConflictError || err instanceof AmbiguousImportTargetError) {
+    if (
+      err instanceof SplitIdentityConflictError ||
+      err instanceof AmbiguousImportTargetError ||
+      err instanceof UnresolvedBackupMemberError
+    ) {
       deps.write(`error: ${err.message}`);
       return 1;
     }

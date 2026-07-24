@@ -1,8 +1,9 @@
-import { and, desc, eq, gte, lte } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
 import type { PlayerRow } from "../db/schema.js";
 import { players, statLines } from "../db/schema.js";
+import { listMemberIds, resolveListByName } from "../lists/service.js";
 
 /**
  * Read-side Stat Line queries for the API/MCP surfaces. Zod-validated bounds
@@ -56,6 +57,14 @@ export const StatLineFilterShape = {
     .describe(
       `Maximum rows to return, newest first; 1 to ${STAT_LINES_MAX_LIMIT}, default ${STAT_LINES_DEFAULT_LIMIT}.`,
     ),
+  list: z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .describe(
+      "Named player list to scope results to its active members (issue #70); an unknown list is rejected. Omit for all players.",
+    ),
 };
 
 /** `from` must not be after `to`; shared by every schema built on the shape. */
@@ -102,6 +111,13 @@ export async function queryStatLines(db: Db, input: unknown): Promise<StatLineVi
   if (q.level !== undefined) conditions.push(eq(players.level, q.level));
   if (q.from !== undefined) conditions.push(gte(statLines.gameDate, q.from));
   if (q.to !== undefined) conditions.push(lte(statLines.gameDate, q.to));
+  if (q.list !== undefined) {
+    // Fail closed on an unknown list (UnknownListError), then scope to its active
+    // members; an empty list selects nothing rather than falling through (#70).
+    const list = await resolveListByName(db, q.list);
+    const memberIds = await listMemberIds(db, list.id);
+    conditions.push(memberIds.length > 0 ? inArray(statLines.playerId, memberIds) : sql`1 = 0`);
+  }
 
   const rows = await db
     .select({ line: statLines, playerName: players.fullName, level: players.level, milbLevel: players.milbLevel })

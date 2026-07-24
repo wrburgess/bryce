@@ -976,4 +976,129 @@ describe("REST API", () => {
     const kept = await opened.db.select().from(statLines).where(eq(statLines.playerId, gone.id));
     expect(kept).toHaveLength(1); // his history is kept, just never selected
   });
+
+  describe("named lists (#70 / ADR 0046)", () => {
+    async function createList(name: string): Promise<Response> {
+      return app().request("/api/lists", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ name }),
+      });
+    }
+
+    it("POST /api/lists creates a list (201), GET /api/lists lists it", async () => {
+      const created = await createList("Prospects");
+      expect(created.status).toBe(201);
+      expect(await created.json()).toMatchObject({ list: { name: "Prospects" } });
+
+      const listed = await app().request("/api/lists", { headers: AUTH });
+      expect(listed.status).toBe(200);
+      const body = (await listed.json()) as { lists: Array<{ name: string; memberCount: number }> };
+      expect(body.lists).toEqual([{ ...body.lists[0], name: "Prospects", memberCount: 0 }]);
+    });
+
+    it("adds and shows members; membership is scoped to active players", async () => {
+      await createList("L");
+      const p = await insertPlayer(opened.db, { externalId: 501, fullName: "Listed Guy" });
+
+      const added = await app().request("/api/lists/L/members", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ players: [{ personId: 501 }] }),
+      });
+      expect(added.status).toBe(200);
+      expect(await added.json()).toMatchObject({ added: 1 });
+
+      const shown = await app().request("/api/lists/L", { headers: AUTH });
+      const body = (await shown.json()) as { members: Array<{ id: number }> };
+      expect(body.members.map((m) => m.id)).toEqual([p.id]);
+    });
+
+    it("PATCH renames and DELETE soft-deletes (name frees for reuse)", async () => {
+      await createList("Old");
+      const renamed = await app().request("/api/lists/Old", {
+        method: "PATCH",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ name: "New" }),
+      });
+      expect(await renamed.json()).toMatchObject({ list: { name: "New" } });
+
+      const deleted = await app().request("/api/lists/New", { method: "DELETE", headers: AUTH });
+      expect(deleted.status).toBe(200);
+      // The name is free again.
+      expect((await createList("New")).status).toBe(201);
+    });
+
+    it("DELETE /api/lists/:name/members removes a member", async () => {
+      await createList("L");
+      await insertPlayer(opened.db, { externalId: 502 });
+      await app().request("/api/lists/L/members", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ players: [{ personId: 502 }] }),
+      });
+      const removed = await app().request("/api/lists/L/members", {
+        method: "DELETE",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ players: [{ personId: 502 }] }),
+      });
+      expect(await removed.json()).toMatchObject({ removed: 1 });
+    });
+
+    it("sad paths: unknown list 404, duplicate name 409, blank name 400", async () => {
+      const unknown = await app().request("/api/lists/ghost", { headers: AUTH });
+      expect(unknown.status).toBe(404);
+
+      await createList("Dupes");
+      const dup = await createList("Dupes");
+      expect(dup.status).toBe(409);
+
+      const blank = await app().request("/api/lists", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ name: "   " }),
+      });
+      expect(blank.status).toBe(400);
+    });
+
+    it("GET /digest/preview?list= scopes the preview, and an unknown list 404s", async () => {
+      await createList("L");
+      const member = await insertPlayer(opened.db, { externalId: 601, fullName: "Preview Member" });
+      await insertStatLine(opened.db, { playerId: member.id, gameDate: "2026-07-18" });
+      const nonMember = await insertPlayer(opened.db, { externalId: 602, fullName: "Preview Other" });
+      await insertStatLine(opened.db, { playerId: nonMember.id, gameDate: "2026-07-18" });
+      await app().request("/api/lists/L/members", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ players: [{ personId: 601 }] }),
+      });
+
+      const scoped = await app().request("/api/digest/preview?list=L", { headers: AUTH });
+      const body = (await scoped.json()) as { playerCount: number };
+      expect(body.playerCount).toBe(1);
+
+      const bad = await app().request("/api/digest/preview?list=ghost", { headers: AUTH });
+      expect(bad.status).toBe(404);
+    });
+
+    it("GET /stat-lines?list= scopes to the list's members", async () => {
+      await createList("L");
+      const member = await insertPlayer(opened.db, { externalId: 701 });
+      await insertStatLine(opened.db, { playerId: member.id, gameId: 810001 });
+      const nonMember = await insertPlayer(opened.db, { externalId: 702 });
+      await insertStatLine(opened.db, { playerId: nonMember.id, gameId: 810002 });
+      await app().request("/api/lists/L/members", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ players: [{ personId: 701 }] }),
+      });
+
+      const res = await app().request("/api/stat-lines?list=L", { headers: AUTH });
+      const body = (await res.json()) as { statLines: Array<{ playerId: number }> };
+      expect(body.statLines.map((s) => s.playerId)).toEqual([member.id]);
+
+      const bad = await app().request("/api/stat-lines?list=ghost", { headers: AUTH });
+      expect(bad.status).toBe(404);
+    });
+  });
 });

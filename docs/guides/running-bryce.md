@@ -377,7 +377,7 @@ API_TOKEN=... MCP_URL=https://your-host.example.com/mcp npm run connector:smoke
 ```
 
 It drives the real MCP SDK client over Streamable HTTP: `initialize` → `tools/list` (asserts the
-exact twelve tools) → `status` → `digest_preview` (read-only — sends nothing, writes nothing), then
+exact nineteen tools) → `status` → `digest_preview` (read-only — sends nothing, writes nothing), then
 confirms a **no-bearer** request still returns `401 {"error":"unauthorized"}`. It reads config from
 the environment only, refuses a non-`https` URL for any non-loopback host, never follows a redirect
 on an authenticated request, and **never prints a secret** (the token and any `CF_ACCESS_*` values
@@ -546,7 +546,7 @@ tunnel is the second, independent layer per
 The full, canonical per-audience references live under `docs/` — this runbook does not restate them,
 so they never drift:
 
-- **[MCP Reference](../mcp/README.md)** — all twelve tools, their inputs and result shapes, and how
+- **[MCP Reference](../mcp/README.md)** — all nineteen tools, their inputs and result shapes, and how
   to connect a Claude client. **Claude Code** connects today with a static bearer header; the hosted
   **claude.ai / Claude mobile** custom-connector flow is **pending verification**
   ([#37](https://github.com/wrburgess/bryce/issues/37)) — a static `Authorization: Bearer` header is

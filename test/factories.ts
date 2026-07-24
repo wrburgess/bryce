@@ -4,8 +4,23 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Db, OpenedDb } from "../src/db/client.js";
 import { openDb } from "../src/db/client.js";
-import type { DigestDeliveryRow, PlayerRow, RefreshRunRow, StatLineRow } from "../src/db/schema.js";
-import { digestDeliveries, players, refreshRuns, seasonCalendar, statLines } from "../src/db/schema.js";
+import type {
+  DigestDeliveryRow,
+  ListMemberRow,
+  PlayerListRow,
+  PlayerRow,
+  RefreshRunRow,
+  StatLineRow,
+} from "../src/db/schema.js";
+import {
+  digestDeliveries,
+  listMembers,
+  playerLists,
+  players,
+  refreshRuns,
+  seasonCalendar,
+  statLines,
+} from "../src/db/schema.js";
 import type { FetchLike } from "../src/mlb/client.js";
 import { MlbClient } from "../src/mlb/client.js";
 import type {
@@ -229,6 +244,43 @@ export async function insertRefreshRun(
     .returning();
   const row = rows[0];
   if (row === undefined) throw new Error("insertRefreshRun failed");
+  return row;
+}
+
+/** A named player list (issue #70). Defaults describe a live list. */
+export async function insertList(
+  db: Db,
+  overrides: Partial<typeof playerLists.$inferInsert> = {},
+): Promise<PlayerListRow> {
+  const rows = await db
+    .insert(playerLists)
+    .values({
+      name: `list-${nextInt()}`,
+      createdAt: ISO_NOW,
+      updatedAt: ISO_NOW,
+      ...overrides,
+    })
+    .returning();
+  const row = rows[0];
+  if (row === undefined) throw new Error("insertList failed");
+  return row;
+}
+
+/** A membership join row between a list and a player (issue #70). */
+export async function insertListMember(
+  db: Db,
+  args: { listId: number; playerId: number; createdAt?: string },
+): Promise<ListMemberRow> {
+  const rows = await db
+    .insert(listMembers)
+    .values({
+      listId: args.listId,
+      playerId: args.playerId,
+      createdAt: args.createdAt ?? ISO_NOW,
+    })
+    .returning();
+  const row = rows[0];
+  if (row === undefined) throw new Error("insertListMember failed");
   return row;
 }
 

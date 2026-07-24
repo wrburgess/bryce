@@ -112,7 +112,7 @@ export const BatchAddInputBase = z
       .max(BATCH_STRING_MAX)
       .optional()
       .describe(
-        "Reserved named-list target (issue #70). Accepted and shape-validated but IGNORED today — there is one Watch List; a value never changes behavior.",
+        "Named player list (issue #70) to add every staged player to. Must name an EXISTING list — batch-add does not create lists — or the whole call is rejected (unknown list). Omit to stage onto the Watch List without list membership.",
       ),
   })
   .strict();
@@ -163,6 +163,80 @@ export const BatchAddInputSchema = BatchAddInputBase.superRefine((val, ctx) => {
     }
   });
 });
+
+/**
+ * Named-list schemas (issue #70 / ADR 0046), shared by REST and MCP. A list name
+ * is a trimmed, non-blank string; a member reference is exactly one of personId
+ * or ncaaPlayerSeq (like Deactivate). REST bodies and MCP typed input funnel
+ * through the same shapes (ADR 0027).
+ */
+export const ListNameSchema = z.string().trim().min(1).max(BATCH_STRING_MAX);
+
+/** Per-call cap on member refs — a cheap bound, not a latency one (all DB-local). */
+export const MAX_LIST_MEMBER_REFS = 100;
+
+// Member refs are real JSON numbers (REST body / MCP typed input), so they must
+// NOT coerce — same reasoning as the batch identity schemas above (PR #84).
+export const ListMemberRefSchema = z
+  .object({
+    personId: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("MLB Stats API personId (MLB/MiLB). Provide exactly one of personId or ncaaPlayerSeq."),
+    ncaaPlayerSeq: z
+      .number()
+      .int()
+      .positive()
+      .optional()
+      .describe("stats.ncaa.org stats_player_seq (NCAA). Provide exactly one of personId or ncaaPlayerSeq."),
+  })
+  .strict()
+  .superRefine((val, ctx) => {
+    const present = (val.personId !== undefined ? 1 : 0) + (val.ncaaPlayerSeq !== undefined ? 1 : 0);
+    if (present !== 1) {
+      ctx.addIssue({
+        code: "custom",
+        message: "each player reference must carry exactly one of personId or ncaaPlayerSeq",
+      });
+    }
+  });
+
+const LIST_MEMBERS_DESCRIPTION = `The players to add or remove, 1 to ${MAX_LIST_MEMBER_REFS} references, each exactly one of personId (MLB/MiLB) or ncaaPlayerSeq (NCAA).`;
+
+/** MCP tool shape: `{ name }` — create/delete/show a list by name. */
+export const ListNameInputShape = {
+  name: ListNameSchema.describe("The list name (trimmed, non-blank, case-sensitive)."),
+};
+export const ListNameInputSchema = z.object(ListNameInputShape);
+
+/** MCP tool shape: `{ name, newName }` — rename a live list. */
+export const ListRenameInputShape = {
+  name: ListNameSchema.describe("The current name of the list to rename."),
+  newName: ListNameSchema.describe("The new name; must not collide with another live list."),
+};
+export const ListRenameInputSchema = z.object(ListRenameInputShape);
+
+/** MCP tool shape: `{ name, players }` — add/remove members of a named list. */
+export const ListMembersMutateShape = {
+  name: ListNameSchema.describe("The name of the list to modify."),
+  players: z
+    .array(ListMemberRefSchema)
+    .min(1)
+    .max(MAX_LIST_MEMBER_REFS)
+    .describe(LIST_MEMBERS_DESCRIPTION),
+};
+export const ListMembersMutateSchema = z.object(ListMembersMutateShape).strict();
+
+/** REST bodies (the list name arrives in the path, so it is not in the body). */
+export const ListCreateBodySchema = z.object({ name: ListNameSchema }).strict();
+export const ListRenameBodySchema = z.object({ name: ListNameSchema }).strict();
+export const ListMembersBodySchema = z
+  .object({
+    players: z.array(ListMemberRefSchema).min(1).max(MAX_LIST_MEMBER_REFS),
+  })
+  .strict();
 
 /** Deactivate addressing: exactly one of personId or ncaaPlayerSeq (ADR 0032). */
 export const DeactivateInputShape = {
@@ -240,6 +314,16 @@ const WindowSchema = z
  * RefreshInputShape). Typed JSON in, so `force` is a real boolean: an MCP
  * client sending `force: "yes"` should be told it is wrong, not silently obeyed.
  */
+/**
+ * Named-list scope for a digest (issue #70 / ADR 0046). Omit ⇒ all active
+ * players (today's path). When set, the digest covers only that list's active
+ * members; an unknown list is rejected. A named-list SEND is on-demand only —
+ * it never takes the scheduled daily slot — so the scheduler leaves this unset.
+ */
+const DigestListSchema = ListNameSchema.optional().describe(
+  "Named player list (issue #70) to scope the digest to its active members; an unknown list is rejected. Omit for all active players. A named-list send is on-demand only (it takes no daily slot).",
+);
+
 export const DigestInputShape = {
   force: z
     .boolean()
@@ -248,6 +332,7 @@ export const DigestInputShape = {
       "send_digest only: forces the daily 1d slot past its already-sent-today (or Offseason heartbeat) guard. Overriding one of those makes the send a write-free replay; forcing with no slot yet today, or over a failed slot, sends and records a delivery row normally. Accepted but ignored by digest_preview.",
     ),
   window: WindowSchema,
+  list: DigestListSchema,
 };
 
 export const DigestInputSchema = z.object(DigestInputShape);
@@ -264,6 +349,7 @@ export const DigestQueryInputSchema = z.object({
     .default("false")
     .describe("Accepted for symmetry with POST /digest/send but a no-op here: a preview never claims or sends."),
   window: WindowSchema,
+  list: DigestListSchema,
 });
 
 export const SqlQueryInputSchema = z.object({

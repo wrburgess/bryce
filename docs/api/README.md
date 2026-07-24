@@ -31,7 +31,7 @@ and responses are JSON.
 
 ## Routes
 
-All eleven routes live under `/api`. Request/response bodies are JSON; inputs are validated by the same
+All routes live under `/api`. Request/response bodies are JSON; inputs are validated by the same
 shared Zod schemas the MCP tools use (`src/api/schemas.ts`, `src/queries/statLines.ts`), so a
 malformed input is rejected identically on both surfaces.
 
@@ -57,8 +57,9 @@ Batch-add up to **25** Players in one call ([#68](https://github.com/wrburgess/b
 [ADR 0045](../adr/0045-batch-add-stages-by-identity-best-effort-defers-backfill.md)). Body
 `{ "entries": [ ... ], "list"?: NAME }`, where each entry is a **typed identity** — **exactly one** of
 `{ "personId": N }`, `{ "ncaaPlayerSeq": N }`, or `{ "name": "..." }` (an MLB-only people-search
-convenience that must resolve to exactly one Player). `list` is accepted but ignored today (the
-[#70](https://github.com/wrburgess/bryce/issues/70) named-list seam).
+convenience that must resolve to exactly one Player). `list` (optional) adds every staged Player to an
+**existing** named list ([#70](https://github.com/wrburgess/bryce/issues/70)); batch-add never
+*creates* a list, so an unknown `list` **fails the whole call closed (404)** before any write.
 
 - **Always returns 200** for a well-formed batch: `{ "summary": { added, updated, unresolved, failed,
   total }, "entries": [ ... ] }`. Each entry is a discriminated outcome on `status` — `added`/`updated`
@@ -97,6 +98,7 @@ Query stored per-game Stat Lines, newest first. Query params (all optional excep
 | `level` | `mlb`, `milb`, or `ncaa`. |
 | `from` / `to` | Inclusive `YYYY-MM-DD` bounds; `from > to` is rejected. |
 | `limit` | Max rows, `1`–`200`, default `50`. |
+| `list` | Named list ([#70](https://github.com/wrburgess/bryce/issues/70)) to scope to its **active** members; an unknown list is rejected (**404**). Omit for all players. |
 | `format` | `json` (default) or `csv`. `csv` downloads the rows as a CSV **Export** ([ADR 0037](../adr/0037-presentation-export-formats-digest-and-tabular.md)) — `Content-Type: text/csv`, `Content-Disposition: attachment; filename="bryce-stat-lines.csv"`, one column per field with `stats` as a JSON column. |
 
 Returns `{ "statLines": [...] }` for `json`; a CSV file body for `csv`.
@@ -106,7 +108,9 @@ Returns `{ "statLines": [...] }` for `json`; a CSV file body for `csv`.
 Preview what a Digest would report for a Window, without sending or claiming anything (read-only).
 Query: `window=` (one of `1d`/`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`, default `1d`) and `force=true|false` (default
 `false`). **`force` is accepted but a no-op here** — a preview never claims or sends, and window
-selection makes its content identical either way. For `format=json` (the default) returns
+selection makes its content identical either way. `list=NAME`
+([#70](https://github.com/wrburgess/bryce/issues/70)) scopes the preview to a named list's active
+members; an unknown list is rejected (**404**). For `format=json` (the default) returns
 `{ window, statLineCount, playerCount, batters, pitchers, unknownFields, mail }`.
 
 `format` ([ADR 0037](../adr/0037-presentation-export-formats-digest-and-tabular.md)) is one of
@@ -119,10 +123,36 @@ download — `Content-Type: text/html|text/markdown|text/csv` with `Content-Disp
 ### `POST /api/digest/send`
 
 Run the Digest job now. Body is optional: an empty or absent body means "no force, default window"
-(so every pre-`force` caller keeps working); otherwise `{ "force"?: boolean, "window"?: spec }`.
-Malformed JSON is a client error (**400**). On success returns **200** with the run result. **When
-the run's `action` is `"failed"` the status is 502** and the body is the normal result object (not
-an error envelope) — a failed send is reported as data, so the caller sees the run detail.
+(so every pre-`force` caller keeps working); otherwise `{ "force"?: boolean, "window"?: spec,
+"list"?: NAME }`. A `list` ([#70](https://github.com/wrburgess/bryce/issues/70)) scopes the send to a
+named list's active members; a named-list send is **on-demand only** — it takes no daily slot,
+whatever its window — and an unknown list is rejected (**404**). Malformed JSON is a client error
+(**400**). On success returns **200** with the run result. **When the run's `action` is `"failed"`
+the status is 502** and the body is the normal result object (not an error envelope) — a failed send
+is reported as data, so the caller sees the run detail.
+
+### Named player lists (`#70`)
+
+Named lists ([ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)) are curated membership over
+the Watch List — distinct from tags (#30) and rosters (#69). A named-list scope selects a list's
+**active** members; `players.active` stays the master gate. Names are trimmed, non-blank, and
+case-sensitively unique among **live** lists.
+
+- **`GET /api/lists`** — every live list with its active-member count: `{ "lists": [{ id, name,
+  memberCount, createdAt, updatedAt }] }`.
+- **`POST /api/lists`** — create a list. Body `{ "name": NAME }`. **201** with `{ "list": {...} }`;
+  a duplicate live name is **409**; a blank name is **400**.
+- **`GET /api/lists/:name`** — the list plus its active members: `{ "list": {...}, "members": [...] }`.
+  Unknown list **404**.
+- **`PATCH /api/lists/:name`** — rename. Body `{ "name": NEW }`. Unknown list **404**; a collision with
+  another live list **409**.
+- **`DELETE /api/lists/:name`** — **soft-delete** the list (its name frees for reuse; membership rows
+  are left in place). Unknown list **404**.
+- **`POST /api/lists/:name/members`** — add members. Body `{ "players": [ { "personId": N } | {
+  "ncaaPlayerSeq": N } ] }`. Idempotent (re-adding a member is a no-op). Returns `{ "list", "added",
+  "players" }`. Unknown list **404**; a reference to a Player not on the Watch List **404**.
+- **`DELETE /api/lists/:name/members`** — remove members (hard-deletes the join rows; removing a
+  non-member is a no-op). Same body; returns `{ "list", "removed", "players" }`.
 
 ### `POST /api/refresh`
 
@@ -139,7 +169,8 @@ Errors are shaped by a single `onError` handler; the status is chosen by error t
 | Missing / wrong bearer token | **401** | `{ "error": "unauthorized" }` |
 | Zod validation failure (bad input) | **400** | `{ "error": "invalid-input", "issues": [...] }` |
 | Malformed JSON body (`SyntaxError`) | **400** | `{ "error": "invalid-input", "issues": [{ "message": ... }] }` |
-| Unknown person / unknown NCAA player / player not found | **404** | `{ "error": "<message>" }` |
+| Unknown person / unknown NCAA player / player not found / **unknown list** (#70) | **404** | `{ "error": "<message>" }` |
+| **Duplicate live list name** (#70) | **409** | `{ "error": "<message>" }` |
 | MLB Stats API or stats.ncaa.org upstream failure | **502** | `{ "error": "<message>" }` |
 | No bundled NCAA season lookup for the requested year | **503** | `{ "error": "<message>" }` |
 | `POST /api/digest/send` where the run's `action` is `"failed"` | **502** | the normal result object (see above) |

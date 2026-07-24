@@ -43,7 +43,17 @@ const ALL_TOOLS = [
   "run_refresh",
   "sql_query",
   "status",
+  "lists_list",
+  "list_create",
+  "list_rename",
+  "list_delete",
+  "list_members",
+  "list_add_players",
+  "list_remove_players",
 ];
+
+/** Tools with NO input fields — exempt from the field-description check. */
+const FIELDLESS_TOOLS = ["status", "lists_list"];
 
 describe("MCP server over Streamable HTTP", () => {
   let opened: OpenedDb;
@@ -121,7 +131,7 @@ describe("MCP server over Streamable HTTP", () => {
     };
   }
 
-  it("exposes exactly the twelve tools", async () => {
+  it("exposes exactly the advertised tools", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...ALL_TOOLS].sort());
     for (const tool of tools) {
@@ -160,7 +170,7 @@ describe("MCP server over Streamable HTTP", () => {
       (t) => Object.keys(t.inputSchema.properties ?? {}).length > 0,
     );
     expect(toolsWithInputs.map((t) => t.name).sort()).toEqual(
-      ALL_TOOLS.filter((n) => n !== "status").sort(),
+      ALL_TOOLS.filter((n) => !FIELDLESS_TOOLS.includes(n)).sort(),
     );
 
     // Every exposed field carries a genuinely informative description (`.describe()`
@@ -804,5 +814,76 @@ describe("MCP server over Streamable HTTP", () => {
       const refresh = result.structuredContent?.refresh as Record<string, unknown> | null;
       expect(refresh?.state, JSON.stringify(row)).toBe(state);
     }
+  });
+
+  describe("named lists (#70 / ADR 0046)", () => {
+    it("list_create / lists_list / list_add_players / list_members round-trip", async () => {
+      const created = await call("list_create", { name: "Prospects" });
+      expect(created.isError).toBeUndefined();
+      expect(created.structuredContent).toMatchObject({ list: { name: "Prospects" } });
+
+      await insertPlayer(opened.db, { externalId: 501, fullName: "Listed Guy" });
+      const added = await call("list_add_players", {
+        name: "Prospects",
+        players: [{ personId: 501 }],
+      });
+      expect(added.structuredContent).toMatchObject({ added: 1 });
+
+      const listed = await call("lists_list");
+      const lists = listed.structuredContent?.lists as Array<{ name: string; memberCount: number }>;
+      expect(lists).toEqual([{ ...lists[0], name: "Prospects", memberCount: 1 }]);
+
+      const members = await call("list_members", { name: "Prospects" });
+      const m = members.structuredContent?.members as Array<{ fullName: string }>;
+      expect(m.map((x) => x.fullName)).toEqual(["Listed Guy"]);
+    });
+
+    it("list_rename and list_delete (name frees for reuse)", async () => {
+      await call("list_create", { name: "Old" });
+      const renamed = await call("list_rename", { name: "Old", newName: "New" });
+      expect(renamed.structuredContent).toMatchObject({ list: { name: "New" } });
+      const deleted = await call("list_delete", { name: "New" });
+      expect(deleted.isError).toBeUndefined();
+      // The freed name can be recreated.
+      expect((await call("list_create", { name: "New" })).isError).toBeUndefined();
+    });
+
+    it("list_remove_players removes a member", async () => {
+      await call("list_create", { name: "L" });
+      await insertPlayer(opened.db, { externalId: 502 });
+      await call("list_add_players", { name: "L", players: [{ personId: 502 }] });
+      const removed = await call("list_remove_players", { name: "L", players: [{ personId: 502 }] });
+      expect(removed.structuredContent).toMatchObject({ removed: 1 });
+    });
+
+    it("sad paths surface as isError: unknown list and duplicate name", async () => {
+      const unknown = await call("list_members", { name: "ghost" });
+      expect(unknown.isError).toBe(true);
+      expect(unknown.content[0]?.text).toContain('no list named "ghost"');
+
+      await call("list_create", { name: "Dupes" });
+      const dup = await call("list_create", { name: "Dupes" });
+      expect(dup.isError).toBe(true);
+      expect(dup.content[0]?.text).toContain("already exists");
+    });
+
+    it("digest_preview and stat_lines accept a list scope; unknown list isError", async () => {
+      await call("list_create", { name: "L" });
+      const member = await insertPlayer(opened.db, { externalId: 601 });
+      await insertStatLine(opened.db, { playerId: member.id, gameId: 820001, gameDate: "2026-07-18" });
+      const nonMember = await insertPlayer(opened.db, { externalId: 602 });
+      await insertStatLine(opened.db, { playerId: nonMember.id, gameId: 820002, gameDate: "2026-07-18" });
+      await call("list_add_players", { name: "L", players: [{ personId: 601 }] });
+
+      const preview = await call("digest_preview", { window: "1d", list: "L" });
+      expect(preview.structuredContent).toMatchObject({ playerCount: 1 });
+
+      const stat = await call("stat_lines", { list: "L" });
+      const lines = stat.structuredContent?.statLines as Array<{ playerId: number }>;
+      expect(lines.map((l) => l.playerId)).toEqual([member.id]);
+
+      const bad = await call("digest_preview", { window: "1d", list: "ghost" });
+      expect(bad.isError).toBe(true);
+    });
   });
 });

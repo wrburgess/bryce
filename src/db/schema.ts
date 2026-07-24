@@ -162,6 +162,61 @@ export const refreshRuns = sqliteTable(
   ],
 );
 
+/**
+ * A named player list for scoped digests/queries (issue #70 / ADR 0046). A list
+ * is CURATED membership over the Watch List — distinct from a tag (a queryable
+ * attribute, #30) and a fantasy roster (a future specialization, #69).
+ *
+ * Soft-deleted (`deleted_at`) so the HC's curation intent is recoverable like a
+ * deactivated player; the PARTIAL unique index frees the name for reuse once a
+ * list is deleted. Named-list scope selects active players who are members —
+ * `players.active` stays the master gate (ADR 0046 decision 2).
+ */
+export const playerLists = sqliteTable(
+  "player_lists",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    name: text("name").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    /** Null while live; set on soft-delete. The partial unique index keys on this. */
+    deletedAt: text("deleted_at"),
+  },
+  (t) => [
+    // A name is unique among LIVE lists only: a soft-deleted list keeps its row
+    // but frees its name, so a fresh list may reuse it (ADR 0046 decision 3).
+    // The invariant lives in the DB, DECLARED in the schema (rules/backend.md).
+    uniqueIndex("player_lists_name_live_uq")
+      .on(t.name)
+      .where(sql`${t.deletedAt} is null`),
+    check("player_lists_name_nonblank_ck", sql`length(trim(${t.name})) > 0`),
+  ],
+);
+
+/**
+ * Membership join between a list and a player (issue #70 / ADR 0046). Hard-delete
+ * on remove — a single join row carries no irreplaceable state (the player and
+ * his stats are untouched), so scoped reads need no `deleted_at` filter.
+ */
+export const listMembers = sqliteTable(
+  "list_members",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    listId: integer("list_id")
+      .notNull()
+      .references(() => playerLists.id),
+    playerId: integer("player_id")
+      .notNull()
+      .references(() => players.id),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    // One membership per (list, player): re-adding a member is idempotent under
+    // this unique index rather than duplicating the join row (ADR 0046).
+    uniqueIndex("list_members_list_player_uq").on(t.listId, t.playerId),
+  ],
+);
+
 export const seasonCalendar = sqliteTable(
   "season_calendar",
   {
@@ -202,3 +257,7 @@ export type RefreshRunRow = typeof refreshRuns.$inferSelect;
 export type RefreshRunStatus = RefreshRunRow["status"];
 export type SeasonCalendarRow = typeof seasonCalendar.$inferSelect;
 export type NewSeasonCalendarRow = typeof seasonCalendar.$inferInsert;
+export type PlayerListRow = typeof playerLists.$inferSelect;
+export type NewPlayerListRow = typeof playerLists.$inferInsert;
+export type ListMemberRow = typeof listMembers.$inferSelect;
+export type NewListMemberRow = typeof listMembers.$inferInsert;
