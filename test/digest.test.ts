@@ -86,7 +86,7 @@ describe("runDigest", () => {
     expect(mailer.sent).toHaveLength(1);
     const mail = mailer.sent[0];
     expect(mail?.to).toBe("hc@example.com");
-    expect(mail?.subject).toBe("MLB Daily Tracker - Last 7 Days (Jul 12-18)");
+    expect(mail?.subject).toBe("ScoreKeeps Baseball (Default) - Prev 7 Days");
     // Never assert only success: BOTH parts carry the actual stat content, and
     // the numbers are the WINDOW's — 3-for-9 with 6 total bases across two
     // games, derived from summed counters rather than averaged per game.
@@ -167,8 +167,8 @@ describe("runDigest", () => {
     expect(result.action).toBe("sent");
     expect(mailer.sent).toHaveLength(2);
     const subjects = mailer.sent.map((m) => m.subject);
-    expect(subjects).toContain("MLB Daily Tracker - Sat, July 18, 2026"); // recovered
-    expect(subjects).toContain("MLB Daily Tracker - Sun, July 19, 2026"); // today
+    expect(subjects).toContain("ScoreKeeps Baseball (Default) - Sat, July 18, 2026"); // recovered
+    expect(subjects).toContain("ScoreKeeps Baseball (Default) - Sun, July 19, 2026"); // today
 
     // The recovered slot is now settled sent, not left failed.
     const rows = await opened.db
@@ -214,7 +214,7 @@ describe("runDigest", () => {
     // Today is Jul 20, so its 1d window covers Jul 19 — proof the reconciled
     // slot did not also re-send its own Jul 18 content.
     expect(lookup.sent).toHaveLength(1);
-    expect(lookup.sent[0]?.subject).toBe("MLB Daily Tracker - Sun, July 19, 2026");
+    expect(lookup.sent[0]?.subject).toBe("ScoreKeeps Baseball (Default) - Sun, July 19, 2026");
     expect(lookup.lookups.map((l) => l.deliveryKey)).toContain("bryce:digest:2026-07-19");
   });
 
@@ -403,7 +403,7 @@ describe("runDigest", () => {
     // ...and the content it sent must describe the SAME day. A 1d window on
     // Jul 19 covers Jul 18, so the subject names Jul 18 — not Jul 19, which is
     // what an unfrozen clock produced.
-    expect(mailer.sent.at(-1)?.subject).toBe("MLB Daily Tracker - Sat, July 18, 2026");
+    expect(mailer.sent.at(-1)?.subject).toBe("ScoreKeeps Baseball (Default) - Sat, July 18, 2026");
 
     // The direct pin: the run reads the clock ONCE, so this clock never gets a
     // second chance to advance. Before the anchor existed there were nine reads
@@ -470,7 +470,7 @@ describe("runDigest", () => {
     expect(result.action).toBe("sent");
     expect(result.statLineCount).toBe(0);
     const mail = mailer.sent[1];
-    expect(mail?.subject).toBe("MLB Daily Tracker - Sun, July 19, 2026");
+    expect(mail?.subject).toBe("ScoreKeeps Baseball (Default) - Sun, July 19, 2026");
     // A GP 0 row says it better than the old "no new stats" tail.
     expect(cells(mail?.text ?? "", "M Acosta")).toEqual(
       ["M", "Acosta", "AAA", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0"],

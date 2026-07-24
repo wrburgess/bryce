@@ -63,8 +63,24 @@ export function formatSubjectDate(isoDate: string): string {
  * Note the date is `window.to` — the last COMPLETED day, so a run on July 19
  * is titled July 18. The title names the content, not the run.
  */
-function windowTitle(window: ResolvedWindow): string {
-  return window.spec === "1d" ? formatSubjectDate(window.to) : window.label;
+export function digestWindowTitle(window: ResolvedWindow): string {
+  if (window.spec === "1d") return formatSubjectDate(window.to);
+  if (window.spec === "ytd") return "YTD";
+  return `Prev ${window.spec.slice(0, -1)} Days`;
+}
+
+interface DigestPresentation {
+  subject: string;
+  heading: string;
+}
+
+function digestPresentation(assembly: DigestAssembly): DigestPresentation {
+  const listName = assembly.listName ?? "Default";
+  const windowTitle = digestWindowTitle(assembly.window);
+  return {
+    subject: `ScoreKeeps Baseball (${listName}) - ${windowTitle}`,
+    heading: `ScoreKeeps Baseball - ${listName} List - ${windowTitle}`,
+  };
 }
 
 /**
@@ -307,8 +323,7 @@ function freshnessBanner(
 
 export function renderDigest(assembly: DigestAssembly, freshness?: DigestFreshness): RenderedMail {
   const { window } = assembly;
-  const title = windowTitle(window);
-  const heading = title;
+  const { subject, heading } = digestPresentation(assembly);
 
   // An empty table is omitted rather than rendered as a bare heading: a watch
   // list with no pitchers should not carry an empty Pitchers section daily.
@@ -342,7 +357,7 @@ export function renderDigest(assembly: DigestAssembly, freshness?: DigestFreshne
   }
 
   return {
-    subject: `MLB Daily Tracker - ${title}`,
+    subject,
     text: `${textParts.join("\n").trimEnd()}\n`,
     html: htmlParts.join("\n"),
   };
@@ -399,8 +414,8 @@ const DIGEST_HTML_STYLE =
  */
 export function renderDigestMarkdown(assembly: DigestAssembly): string {
   const { window } = assembly;
-  // The bare title, mirroring the email's own h1 (no "Bryce - " prefix, #54).
-  const parts: string[] = [`# ${windowTitle(window)}`];
+  const { heading } = digestPresentation(assembly);
+  const parts: string[] = [`# ${heading}`];
 
   const tables: Table[] = [
     { title: "Batters", columns: battingColumns(window), rows: assembly.batters },
@@ -425,7 +440,7 @@ export function renderDigestMarkdown(assembly: DigestAssembly): string {
 export function renderDigestHtmlDocument(assembly: DigestAssembly): string {
   // Document metadata (the browser tab / saved-file name) mirrors the email
   // subject; the body h1 is the bare title, from the reused renderDigest fragment.
-  const title = escapeHtml(`MLB Daily Tracker - ${windowTitle(assembly.window)}`);
+  const title = escapeHtml(digestPresentation(assembly).subject);
   return (
     "<!doctype html>\n" +
     "<html>\n" +

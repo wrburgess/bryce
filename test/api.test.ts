@@ -486,7 +486,7 @@ describe("REST API", () => {
       expect(body.playerCount).toBe(1);
       expect(body.batters[0]).toMatchObject({ lvl: "AAA" });
       expect(body.batters[0]?.player.fullName).toBe("Maximo Acosta");
-      expect(body.mail.subject).toBe("MLB Daily Tracker - Sat, July 18, 2026");
+      expect(body.mail.subject).toBe("ScoreKeeps Baseball (Default) - Sat, July 18, 2026");
       expect(body.mail.text).toContain("M Acosta");
 
       // Read-only: no send, no delivery row, no stamping.
@@ -575,9 +575,9 @@ describe("REST API", () => {
         pitchers: [],
         unknownFields: [],
         mail: {
-          subject: "MLB Daily Tracker - Sat, July 18, 2026",
-          html: "<h1>Sat, July 18, 2026</h1>\n<p>No games in this window.</p>",
-          text: "Sat, July 18, 2026\n\nNo games in this window.\n",
+          subject: "ScoreKeeps Baseball (Default) - Sat, July 18, 2026",
+          html: "<h1>ScoreKeeps Baseball - Default List - Sat, July 18, 2026</h1>\n<p>No games in this window.</p>",
+          text: "ScoreKeeps Baseball - Default List - Sat, July 18, 2026\n\nNo games in this window.\n",
         },
       };
       const omitted = await app().request("/api/digest/preview", { headers: AUTH });
@@ -752,7 +752,7 @@ describe("REST API", () => {
         statLineCount: 2,
         window: "Last 7 Days (Jul 12-18)",
       });
-      expect(mailer.sent[0]?.subject).toBe("MLB Daily Tracker - Last 7 Days (Jul 12-18)");
+      expect(mailer.sent[0]?.subject).toBe("ScoreKeeps Baseball (Default) - Prev 7 Days");
 
       const bogus = await app().request("/api/digest/send", {
         method: "POST",
@@ -776,7 +776,7 @@ describe("REST API", () => {
       });
       expect(sent.status).toBe(200);
       expect(await sent.json()).toMatchObject({ action: "sent", statLineCount: 2 });
-      expect(mailer.sent[0]?.subject).toContain("Last 28 Days");
+      expect(mailer.sent[0]?.subject).toContain("Prev 28 Days");
       // On-demand: the slot is keyed (kind, date) with no room for a window, so
       // any non-1d send takes no slot and writes no delivery row.
       expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
@@ -1124,8 +1124,10 @@ describe("REST API", () => {
       });
 
       const scoped = await app().request("/api/digest/preview?list=L", { headers: AUTH });
-      const body = (await scoped.json()) as { playerCount: number };
+      const body = (await scoped.json()) as { playerCount: number; mail: { subject: string; text: string } };
       expect(body.playerCount).toBe(1);
+      expect(body.mail.subject).toBe("ScoreKeeps Baseball (L) - Sat, July 18, 2026");
+      expect(body.mail.text).toContain("ScoreKeeps Baseball - L List - Sat, July 18, 2026");
 
       const bad = await app().request("/api/digest/preview?list=ghost", { headers: AUTH });
       expect(bad.status).toBe(404);

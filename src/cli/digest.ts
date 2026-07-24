@@ -92,9 +92,12 @@ export async function runDigestCli(argv: string[], deps: DigestCliDeps): Promise
   // Resolve a named list to its id and fail closed on an unknown list — a typo'd
   // list must not silently widen the scope to every active player.
   let listId: number | undefined;
+  let resolvedListName: string | undefined;
   if (listName !== undefined) {
     try {
-      listId = (await resolveListByName(deps.db, listName)).id;
+      const list = await resolveListByName(deps.db, listName);
+      listId = list.id;
+      resolvedListName = list.name;
     } catch (err) {
       if (err instanceof UnknownListError) {
         writeError(`error: ${err.message}`);
@@ -113,6 +116,7 @@ export async function runDigestCli(argv: string[], deps: DigestCliDeps): Promise
     spec,
     force: parseForce(argv),
     listId,
+    listName: resolvedListName,
   });
   deps.write(
     `digest kind=${result.kind} action=${result.action} statLines=${result.statLineCount} players=${result.playerCount}${

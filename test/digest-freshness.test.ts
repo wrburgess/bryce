@@ -73,7 +73,7 @@ describe("digest freshness gate (ADR 0043)", () => {
     expect(mail?.text).toContain("as of last successful refresh: never");
     expect(mail?.html).toContain("<p>⚠️");
     // The subject is untouched — it names the content day, not the warning.
-    expect(mail?.subject).toBe("MLB Daily Tracker - Sat, July 18, 2026");
+    expect(mail?.subject).toBe("ScoreKeeps Baseball (Default) - Sat, July 18, 2026");
   });
 
   it("stale banner dates itself by the last successful refresh when one exists", async () => {
@@ -148,7 +148,7 @@ describe("digest freshness gate (ADR 0043)", () => {
     const mail = mailer.sent[0];
     expect(mail?.text).not.toContain("⚠️");
     // The body opens straight on the content heading — no banner line prepended.
-    expect(mail?.text.startsWith("Sat, July 18, 2026")).toBe(true);
+    expect(mail?.text.startsWith("ScoreKeeps Baseball - Default List - Sat, July 18, 2026")).toBe(true);
   });
 
   it("pins the NORMAL scheduled case: refresh at 02:00, digest at 05:00 same host day → fresh", async () => {

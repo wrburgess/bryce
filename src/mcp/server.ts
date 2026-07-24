@@ -287,9 +287,13 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     (args) =>
       guarded(async () => {
         const input = DigestPreviewInputSchema.parse(args);
-        const listId =
-          input.list !== undefined ? (await resolveListByName(deps.db, input.list)).id : undefined;
-        const assembly = await assembleDigest(deps.db, { ...deps, spec: input.window, listId });
+        const list = input.list !== undefined ? await resolveListByName(deps.db, input.list) : undefined;
+        const assembly = await assembleDigest(deps.db, {
+          ...deps,
+          spec: input.window,
+          listId: list?.id,
+          listName: list?.name,
+        });
         if (input.format === "html") return textResult(renderDigestHtmlDocument(assembly));
         if (input.format === "md") return textResult(renderDigestMarkdown(assembly));
         if (input.format === "csv") {
@@ -318,8 +322,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     (args) =>
       guarded(async () => {
         const input = DigestInputSchema.parse(args);
-        const listId =
-          input.list !== undefined ? (await resolveListByName(deps.db, input.list)).id : undefined;
+        const list = input.list !== undefined ? await resolveListByName(deps.db, input.list) : undefined;
         const result = await runDigest({
           db: deps.db,
           mailer: deps.mailer,
@@ -329,7 +332,8 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
           from: deps.digestFrom,
           spec: input.window,
           force: input.force,
-          listId,
+          listId: list?.id,
+          listName: list?.name,
         });
         return jsonResult({ ...result });
       }),

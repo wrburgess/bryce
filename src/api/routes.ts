@@ -271,9 +271,13 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     const query = DigestPreviewQueryInputSchema.parse(c.req.query());
     // A `?list=` scopes the preview to that list's active members; an unknown
     // list fails closed (UnknownListError -> 404 via onError).
-    const listId =
-      query.list !== undefined ? (await resolveListByName(deps.db, query.list)).id : undefined;
-    const assembly = await assembleDigest(deps.db, { ...deps, spec: query.window, listId });
+    const list = query.list !== undefined ? await resolveListByName(deps.db, query.list) : undefined;
+    const assembly = await assembleDigest(deps.db, {
+      ...deps,
+      spec: query.window,
+      listId: list?.id,
+      listName: list?.name,
+    });
     const spec = assembly.window.spec;
     if (query.format === "html") {
       return fileResponse(
@@ -318,8 +322,7 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     const raw = await c.req.text();
     const body = DigestInputSchema.parse(raw.trim().length === 0 ? {} : JSON.parse(raw));
     // A `list` scopes an ON-DEMAND send to that list's members; unknown -> 404.
-    const listId =
-      body.list !== undefined ? (await resolveListByName(deps.db, body.list)).id : undefined;
+    const list = body.list !== undefined ? await resolveListByName(deps.db, body.list) : undefined;
     const result = await runDigest({
       db: deps.db,
       mailer: deps.mailer,
@@ -329,7 +332,8 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
       from: deps.digestFrom,
       spec: body.window,
       force: body.force,
-      listId,
+      listId: list?.id,
+      listName: list?.name,
     });
     return c.json(result, result.action === "failed" ? 502 : 200);
   });

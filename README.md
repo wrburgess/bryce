@@ -1,6 +1,6 @@
-# Bryce — Daily Baseball Digest
+# ScoreKeeps Baseball Tracker — Daily Baseball Digest
 
-A single-user, **AI-and-API-first** application that emails a daily digest of the previous day's
+A single-user, **AI-and-API-first** application, developed under the internal name **Bryce**, that emails a daily digest of the previous day's
 stats for a personal watch list of baseball players across three levels: **MLB**, **MiLB** (all
 levels), and **NCAA**. No web UI: the primary interface is an **MCP server**, so Claude (web,
 mobile, or CLI) is the front end.

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { DigestAssembly, DigestRow } from "../src/digest/assemble.js";
 import {
   digestTableRows,
+  digestWindowTitle,
   renderDigest,
   renderDigestHtmlDocument,
   renderDigestMarkdown,
@@ -86,6 +87,35 @@ const reliever7d = row(
 );
 
 const idleRow = row("Idle Player", "batting", []);
+
+describe("Digest public presentation", () => {
+  it("uses stable public labels for every supported window while leaving structured labels to resolveWindow", () => {
+    const expected = {
+      "1d": "Sun, July 19, 2026",
+      "7d": "Prev 7 Days",
+      "14d": "Prev 14 Days",
+      "21d": "Prev 21 Days",
+      "28d": "Prev 28 Days",
+      "35d": "Prev 35 Days",
+      "60d": "Prev 60 Days",
+      ytd: "YTD",
+    } as const;
+
+    for (const [spec, title] of Object.entries(expected) as Array<[WindowSpec, string]>) {
+      const assembly = assemblyWith({ spec });
+      expect(digestWindowTitle(assembly.window)).toBe(title);
+      expect(assembly.window.label).not.toBe("");
+    }
+  });
+
+  it("uses the named list in email, Markdown, and standalone HTML titles", () => {
+    const assembly = { ...assemblyWith({ spec: "ytd" }), listName: "Prospects" };
+    expect(renderDigest(assembly).subject).toBe("ScoreKeeps Baseball (Prospects) - YTD");
+    expect(renderDigest(assembly).text).toContain("ScoreKeeps Baseball - Prospects List - YTD");
+    expect(renderDigestMarkdown(assembly).startsWith("# ScoreKeeps Baseball - Prospects List - YTD")).toBe(true);
+    expect(renderDigestHtmlDocument(assembly)).toContain("<title>ScoreKeeps Baseball (Prospects) - YTD</title>");
+  });
+});
 
 describe("renderDigest — tables", () => {
   it("renders a Batters table with a Lvl column and no level sections", () => {
@@ -190,9 +220,9 @@ describe("renderDigest — tables", () => {
   it("puts the window label in the dash subject, and a bare heading, for a range window", () => {
     const mail = renderDigest(assemblyWith({ spec: "7d" }));
     // Subject now uses " - ", not ": ".
-    expect(mail.subject).toBe("MLB Daily Tracker - Last 7 Days (Jul 13-19)");
+    expect(mail.subject).toBe("ScoreKeeps Baseball (Default) - Prev 7 Days");
     // The body heading is the bare title — no "Bryce - " prefix.
-    expect(mail.text.split("\n")[0]).toBe("Last 7 Days (Jul 13-19)");
+    expect(mail.text.split("\n")[0]).toBe("ScoreKeeps Baseball - Default List - Prev 7 Days");
     expect(mail.text).not.toContain("Bryce - ");
   });
 
@@ -200,8 +230,8 @@ describe("renderDigest — tables", () => {
     // The DATE is the last completed day (07-19 for a run on 07-20), because the
     // title names the content, not the run.
     const mail = renderDigest(assemblyWith({ spec: "1d" }));
-    expect(mail.subject).toBe("MLB Daily Tracker - Sun, July 19, 2026");
-    expect(mail.text.split("\n")[0]).toBe("Sun, July 19, 2026");
+    expect(mail.subject).toBe("ScoreKeeps Baseball (Default) - Sun, July 19, 2026");
+    expect(mail.text.split("\n")[0]).toBe("ScoreKeeps Baseball - Default List - Sun, July 19, 2026");
     expect(mail.text).not.toContain("Bryce - ");
   });
 
@@ -352,7 +382,7 @@ describe("renderDigestMarkdown", () => {
     const md = renderDigestMarkdown(
       assemblyWith({ spec: "7d", batters: [harper7d], pitchers: [wheeler7d] }),
     );
-    expect(md.startsWith("# Last 7 Days (Jul 13-19)")).toBe(true);
+    expect(md.startsWith("# ScoreKeeps Baseball - Default List - Prev 7 Days")).toBe(true);
     expect(md).toContain("## Batters");
     expect(md).toContain("## Pitchers");
     // A left-aligned column separator and a right-aligned one both appear.
@@ -423,7 +453,7 @@ describe("renderDigestHtmlDocument", () => {
     );
     expect(html.startsWith("<!doctype html>")).toBe(true);
     expect(html).toContain('<meta charset="utf-8">');
-    expect(html).toContain("<title>MLB Daily Tracker - Last 7 Days (Jul 13-19)</title>");
+    expect(html).toContain("<title>ScoreKeeps Baseball (Default) - Prev 7 Days</title>");
     expect(html).toContain("<h2>Batters</h2>");
     expect(html).toContain("<h2>Pitchers</h2>");
     // Wraps the SAME email fragment, so it carries a real <table>.
