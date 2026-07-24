@@ -1,7 +1,7 @@
 # MCP Reference
 
 The MCP server is Bryce's **primary interface** ([ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)):
-fifteen tools over the same service layer and Zod schemas the [REST API](../api/README.md) and
+twenty-two tools over the same service layer and Zod schemas the [REST API](../api/README.md) and
 [CLI](../cli/README.md) use, so a Claude client (web, mobile, or CLI) is the front end and there is
 no web UI. It is mounted at `/mcp` over Streamable HTTP, behind the bearer token. Domain terms —
 **Player**, **Refresh**, **Digest**, **Window**, **Offseason Sleep** — are defined in
@@ -71,8 +71,9 @@ Batch-add up to **25** Players in one call ([#68](https://github.com/wrburgess/b
 
 - **Inputs:** `entries` — an array of 1 to 25 **typed identity entries**, each **exactly one** of
   `personId` (MLB/MiLB), `ncaaPlayerSeq` (NCAA), or `name` (an MLB-only people-search convenience that
-  must resolve to *exactly one* Player — there is no NCAA name search). An optional `list` is accepted
-  but ignored today (the [#70](https://github.com/wrburgess/bryce/issues/70) named-list seam).
+  must resolve to *exactly one* Player — there is no NCAA name search). An optional `list` adds every
+  staged Player to an **existing** named list ([#70](https://github.com/wrburgess/bryce/issues/70));
+  batch-add never *creates* a list, so an unknown `list` fails the whole call closed before any write.
 - **Success:** `{ "summary": { added, updated, unresolved, failed, total }, "entries": [ ... ] }`. Each
   entry is a discriminated outcome on `status`: `added` / `updated` carry the `player`; `unresolved`
   carries a `reason` (`person_not_found` · `name_no_match` · `name_ambiguous` · `ncaa_not_found`) and,
@@ -116,7 +117,8 @@ Query stored per-game Stat Lines, newest first.
 
 - **Inputs:** `playerId` (internal Bryce `players.id`, not the personId), `level` (`mlb`/`milb`/`ncaa`),
   `from`/`to` (inclusive `YYYY-MM-DD`; `from > to` is rejected), `limit` (`1`–`200`, default `50`),
-  `format` (`json` default, or `csv`) — all optional.
+  `list` (named list to scope to its active members, [#70](https://github.com/wrburgess/bryce/issues/70);
+  an unknown list is rejected), `format` (`json` default, or `csv`) — all optional.
 - **Success:** `{ "statLines": [...] }` for `json`; for `csv`, a CSV **Export** returned inline as a
   text part (no `structuredContent`) — one column per field, `stats` as a JSON column
   ([ADR 0037](../adr/0037-presentation-export-formats-digest-and-tabular.md)).
@@ -127,9 +129,10 @@ Query stored per-game Stat Lines, newest first.
 Preview the Digest for a Window as the Batters and Pitchers tables the email would carry.
 
 - **Inputs:** `window` (`1d`/`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`, default `1d`; an unsupported value is rejected),
-  `force` — **accepted but ignored here**, because a preview never claims or sends — and `format`
-  (`json` default, or `html`/`md`/`csv`) with `table` (`batters` default, or `pitchers`; used only by
-  `csv`).
+  `force` — **accepted but ignored here**, because a preview never claims or sends — `list` (a named
+  list to scope to its active members, [#70](https://github.com/wrburgess/bryce/issues/70); an unknown
+  list is rejected) and `format` (`json` default, or `html`/`md`/`csv`) with `table` (`batters`
+  default, or `pitchers`; used only by `csv`).
 - **Success:** for `json`, `{ window, statLineCount, playerCount, batters, pitchers, unknownFields, mail }`.
   For `html`/`md` a whole-Digest **Presentation** (both tables) and for `csv` a one-table **Export**
   (`table` selects it), each returned inline as a text part with no `structuredContent`
@@ -141,8 +144,11 @@ Preview the Digest for a Window as the Batters and Pitchers tables the email wou
 
 Run the Digest job now for a Window.
 
-- **Inputs:** `window` (as above; an unsupported value is rejected and nothing is sent) and `force`
-  (default `false`). `force` applies only to the daily `1d` slot: it overrides the already-sent-today
+- **Inputs:** `window` (as above; an unsupported value is rejected and nothing is sent), `force`
+  (default `false`), and `list` — a named list ([#70](https://github.com/wrburgess/bryce/issues/70))
+  that scopes the send to its active members. A named-list send is **on-demand only** (it takes no
+  daily slot, whatever its window); an unknown list is rejected. `force` applies only to the daily
+  `1d` slot: it overrides the already-sent-today
   guard (and, in Offseason Sleep, the weekly-heartbeat rule). Overriding one of those makes the send a
   **write-free replay**; but forcing when today's slot does not exist yet, or over a failed/expired
   slot, sends and **records a delivery row normally**. It never overrides an in-flight claim held by
@@ -218,6 +224,26 @@ Health snapshot, the same shape as `GET /health`.
   count, and the last digest/heartbeat delivery (including an in-flight `sending` status).
 - **Side effects:** none.
 
+### Named player lists (`#70`)
+
+Seven tools over the named-list service ([ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)).
+A list is curated membership over the Watch List — distinct from tags (#30) and rosters (#69). A
+named-list scope selects a list's **active** members; `players.active` stays the master gate. Names are
+trimmed, non-blank, and case-sensitively unique among live lists. An unknown list surfaces as `isError`
+(`no list named "…"`); a duplicate live name as `isError` (`… already exists`).
+
+- **`lists_list`** — every live list with its active-member count. Read-only. No inputs.
+- **`list_create`** — create a list. Input `name`. `{ "list": {...} }`.
+- **`list_rename`** — rename a live list. Inputs `name`, `newName`.
+- **`list_delete`** — **soft-delete** a list (its name frees for reuse; membership rows are kept).
+  Input `name`.
+- **`list_members`** — a list's active members, ordered by id. Input `name`. `{ "list", "members" }`.
+- **`list_add_players`** — add members, idempotently. Inputs `name` and `players` (an array of
+  references, each exactly one of `personId` or `ncaaPlayerSeq`). `{ "list", "added", "players" }`. A
+  reference to a Player not on the Watch List is rejected.
+- **`list_remove_players`** — remove members (hard-deletes the join rows; removing a non-member is a
+  no-op). Same inputs; `{ "list", "removed", "players" }`.
+
 ## Connecting a Claude client
 
 Point a client at the `/mcp` endpoint (locally `http://localhost:3000/mcp`, or your tunnel host such
@@ -230,7 +256,7 @@ client end to end:
 API_TOKEN=... MCP_URL=https://your-host.example.com/mcp npm run connector:smoke
 ```
 
-It runs `initialize` → `tools/list` (asserts all fifteen tools) → `status` → a read-only
+It runs `initialize` → `tools/list` (asserts all twenty-two tools) → `status` → a read-only
 `digest_preview`, then checks that a no-bearer request still `401`s — and never prints a secret. See
 [Running Bryce → Cloudflare Access](../guides/running-bryce.md#cloudflare-access-in-front-of-the-tunnel)
 for the full flag set and the Cloudflare Access topology.

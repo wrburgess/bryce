@@ -7,9 +7,17 @@ import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { BUSY_TIMEOUT_MS } from "../src/db/client.js";
-import { digestDeliveries, players, statLines } from "../src/db/schema.js";
+import { digestDeliveries, listMembers, playerLists, players, statLines } from "../src/db/schema.js";
 import { upsertStatLines } from "../src/jobs/refresh.js";
-import { insertPlayer, insertPlayerTag, insertStatLine, testDb, testFileDb } from "./factories.js";
+import {
+  insertList,
+  insertListMember,
+  insertPlayer,
+  insertPlayerTag,
+  insertStatLine,
+  testDb,
+  testFileDb,
+} from "./factories.js";
 
 describe("stat_lines schema invariants (ADR 0029)", () => {
   let opened: OpenedDb;
@@ -617,5 +625,69 @@ describe("digest_deliveries claim columns and lock behaviour (ADR 0034)", () => 
       sqlite.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * Named-list schema invariants (issue #70 / ADR 0046). The constraints are the
+ * real guarantee under concurrency, so they are asserted against a REAL opened
+ * database (testDb applies migration 0006), not against the schema definition.
+ */
+describe("player_lists / list_members schema invariants (ADR 0046)", () => {
+  let opened: OpenedDb;
+
+  beforeEach(() => {
+    opened = testDb();
+  });
+  afterEach(() => {
+    opened.close();
+  });
+
+  it("rejects a duplicate (list_id, player_id) membership at the DATABASE level", async () => {
+    const list = await insertList(opened.db, { name: "L" });
+    const player = await insertPlayer(opened.db);
+    await insertListMember(opened.db, { listId: list.id, playerId: player.id });
+    await expect(
+      insertListMember(opened.db, { listId: list.id, playerId: player.id }),
+    ).rejects.toThrow(/UNIQUE constraint failed/);
+  });
+
+  it("rejects two LIVE lists with the same name, but allows a deleted + a live one", async () => {
+    await insertList(opened.db, { name: "Prospects" });
+    // A second LIVE list with the same name violates the partial unique index...
+    await expect(insertList(opened.db, { name: "Prospects" })).rejects.toThrow(
+      /UNIQUE constraint failed/,
+    );
+    // ...but soft-deleting the first frees the name for a new live list.
+    await opened.db
+      .update(playerLists)
+      .set({ deletedAt: "2026-07-19T17:00:00.000Z" })
+      .where(eq(playerLists.name, "Prospects"));
+    await expect(insertList(opened.db, { name: "Prospects" })).resolves.toBeDefined();
+    // Two rows named "Prospects" now coexist: one deleted, one live.
+    const rows = await opened.db.select().from(playerLists).where(eq(playerLists.name, "Prospects"));
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((r) => r.deletedAt === null)).toHaveLength(1);
+  });
+
+  it("rejects a blank list name via the CHECK constraint", async () => {
+    await expect(insertList(opened.db, { name: "   " })).rejects.toThrow(/CHECK constraint failed/);
+  });
+
+  it("rejects a membership whose list_id or player_id has no parent (foreign keys)", async () => {
+    const list = await insertList(opened.db, { name: "L" });
+    const player = await insertPlayer(opened.db);
+    // Missing list.
+    await expect(
+      opened.db
+        .insert(listMembers)
+        .values({ listId: 99999, playerId: player.id, createdAt: "2026-07-19T17:00:00.000Z" }),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/);
+    // Missing player.
+    await expect(
+      opened.db
+        .insert(listMembers)
+        .values({ listId: list.id, playerId: 99999, createdAt: "2026-07-19T17:00:00.000Z" }),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/);
   });
 });

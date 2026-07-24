@@ -1,8 +1,14 @@
-import { and, desc, eq, gte, lte } from "drizzle-orm";
+import { and, desc, eq, exists, gte, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
 import type { PlayerRow, StatLineRow } from "../db/schema.js";
-import { players, statLines } from "../db/schema.js";
+import { listMembers, players, statLines } from "../db/schema.js";
+// `resolveListByName` is imported lazily inside queryStatLines (below) rather than
+// at module top. A static import would make this module depend on `lists/service`
+// at init time, closing an import cycle (statLines -> lists/service -> watchlist ->
+// api/schemas -> statLines) that leaves `StatLineFilterShape` in the temporal dead
+// zone when `api/schemas` composes it. The lazy import keeps this module a leaf so
+// its exported shapes initialize before any consumer reads them.
 
 /**
  * Read-side Stat Line queries for the API/MCP surfaces. Zod-validated bounds
@@ -56,6 +62,14 @@ export const StatLineFilterShape = {
     .describe(
       `Maximum rows to return, newest first; 1 to ${STAT_LINES_MAX_LIMIT}, default ${STAT_LINES_DEFAULT_LIMIT}.`,
     ),
+  list: z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .describe(
+      "Named player list to scope results to its active members (issue #70); an unknown list is rejected. Omit for all players.",
+    ),
 };
 
 /** `from` must not be after `to`; shared by every schema built on the shape. */
@@ -102,6 +116,31 @@ export async function queryStatLines(db: Db, input: unknown): Promise<StatLineVi
   if (q.level !== undefined) conditions.push(eq(players.level, q.level));
   if (q.from !== undefined) conditions.push(gte(statLines.gameDate, q.from));
   if (q.to !== undefined) conditions.push(lte(statLines.gameDate, q.to));
+  if (q.list !== undefined) {
+    // Fail closed on an unknown list (UnknownListError), then scope to its
+    // members with a correlated EXISTS against list_members keyed by list_id.
+    // Constant-size (no per-member bind param, so no SQLite ~999-param ceiling),
+    // and an empty list selects nothing naturally — EXISTS is false with no
+    // member rows, so no `1 = 0` special-case is needed.
+    const { resolveListByName } = await import("../lists/service.js");
+    const list = await resolveListByName(db, q.list);
+    // A named-list scope selects the list's ACTIVE members — `players.active`
+    // stays the master gate under membership (ADR 0046 decision 2), so a member
+    // who was later deactivated must not leak. The main query already joins
+    // `players` (for the level filter), so require active here alongside the
+    // membership EXISTS.
+    conditions.push(eq(players.active, true));
+    conditions.push(
+      exists(
+        db
+          .select({ x: sql`1` })
+          .from(listMembers)
+          .where(
+            and(eq(listMembers.listId, list.id), eq(listMembers.playerId, statLines.playerId)),
+          ),
+      ),
+    );
+  }
 
   const rows = await db
     .select({ line: statLines, playerName: players.fullName, level: players.level, milbLevel: players.milbLevel })

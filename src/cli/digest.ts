@@ -6,6 +6,7 @@ import type { WindowSpec } from "../domain/window.js";
 import { WINDOW_SPECS, parseWindowSpec } from "../domain/window.js";
 import type { Mailer } from "../mailer/types.js";
 import { runDigest } from "../jobs/digest.js";
+import { UnknownListError, resolveListByName } from "../lists/service.js";
 import { createMailer } from "../mailer/index.js";
 import { isMain } from "./main.js";
 
@@ -54,13 +55,53 @@ export function parseWindow(argv: string[]): WindowSpec | null {
   return value === undefined ? null : parseWindowSpec(value);
 }
 
+/**
+ * `--list <name>` / `--list=<name>`, scoping an on-demand send to a named list's
+ * active members (issue #70). Returns undefined when absent (unscoped, all
+ * active players) and null when the flag is present but its value is missing —
+ * so the caller can fail closed on a malformed flag, just like `--window`.
+ */
+export function parseList(argv: string[]): string | null | undefined {
+  const inline = argv.find((a) => a.startsWith("--list="));
+  if (inline !== undefined) {
+    const value = inline.slice("--list=".length).trim();
+    return value.length === 0 ? null : value;
+  }
+  const at = argv.indexOf("--list");
+  if (at === -1) return undefined;
+  const value = argv[at + 1];
+  // A following flag (or nothing) means the value is missing — fail closed.
+  return value === undefined || value.startsWith("--") || value.trim().length === 0
+    ? null
+    : value.trim();
+}
+
 export async function runDigestCli(argv: string[], deps: DigestCliDeps): Promise<number> {
   const spec = parseWindow(argv);
+  const writeError = deps.writeError ?? deps.write;
   if (spec === null) {
     // Fail closed, BEFORE the mailer is touched: nothing is sent.
-    const writeError = deps.writeError ?? deps.write;
     writeError(`error: unsupported --window value; supported: ${WINDOW_SPECS.join(", ")}`);
     return 1;
+  }
+  const listName = parseList(argv);
+  if (listName === null) {
+    writeError("error: --list requires a non-blank list name");
+    return 1;
+  }
+  // Resolve a named list to its id and fail closed on an unknown list — a typo'd
+  // list must not silently widen the scope to every active player.
+  let listId: number | undefined;
+  if (listName !== undefined) {
+    try {
+      listId = (await resolveListByName(deps.db, listName)).id;
+    } catch (err) {
+      if (err instanceof UnknownListError) {
+        writeError(`error: ${err.message}`);
+        return 1;
+      }
+      throw err;
+    }
   }
   const result = await runDigest({
     db: deps.db,
@@ -71,6 +112,7 @@ export async function runDigestCli(argv: string[], deps: DigestCliDeps): Promise
     from: deps.from,
     spec,
     force: parseForce(argv),
+    listId,
   });
   deps.write(
     `digest kind=${result.kind} action=${result.action} statLines=${result.statLineCount} players=${result.playerCount}${

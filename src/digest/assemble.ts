@@ -1,11 +1,12 @@
-import { and, eq, gte, inArray, lte } from "drizzle-orm";
+import { and, eq, exists, gte, inArray, lte, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { PlayerRow, StatLineRow } from "../db/schema.js";
-import { players, statLines } from "../db/schema.js";
+import { listMembers, players, statLines } from "../db/schema.js";
 import type { CalendarEntry } from "../domain/season.js";
 import { hostDate, isInSeason, sportIdForPlayer } from "../domain/season.js";
 import type { ResolvedWindow, WindowSpec } from "../domain/window.js";
 import { resolveWindow } from "../domain/window.js";
+import { listMemberIds } from "../lists/service.js";
 import { levelAbbrev, levelRank } from "../mlb/levels.js";
 import type { Aggregate } from "../stats/aggregate.js";
 import { aggregate } from "../stats/aggregate.js";
@@ -69,6 +70,14 @@ export interface AssembleDeps {
   spec: WindowSpec;
   /** Recover a past slot: anchor the window on this host date, not now. */
   asOf?: string;
+  /**
+   * Scope the digest to a named list's ACTIVE members (issue #70 / ADR 0046).
+   * Undefined ⇒ the untouched current path (all active players, no membership
+   * join). When set, BOTH selection sites are scoped — the main stat-line join
+   * AND the active-player set that feeds the idle/zero-row tail and
+   * `seasonStartFor` — so an off-list player can never leak as a zero row.
+   */
+  listId?: number;
 }
 
 interface Split {
@@ -79,7 +88,17 @@ interface Split {
 
 export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<DigestAssembly> {
   const { now, tz } = deps;
-  const activePlayers = await loadActivePlayers(db);
+  const allActive = await loadActivePlayers(db);
+
+  // A list scope selects the ACTIVE members of the list; `players.active` stays
+  // the master gate (ADR 0046 decision 2). Both selection sites read from this
+  // ONE resolved set so an off-list player cannot leak as a zero row: the join
+  // is filtered by memberIds, and the idle/season set is `activePlayers` below.
+  const memberIds = deps.listId !== undefined ? await listMemberIds(db, deps.listId) : null;
+  const memberSet = memberIds === null ? null : new Set(memberIds);
+  const activePlayers =
+    memberSet === null ? allActive : allActive.filter((p) => memberSet.has(p.id));
+
   const calendars = await loadCalendars(db);
   const window = resolveWindow(
     deps.spec,
@@ -89,6 +108,23 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
     deps.asOf ?? null,
   );
 
+  // Scope the main join to the list's members with a correlated EXISTS against
+  // list_members, keyed by list_id. It is constant-size regardless of list size
+  // (no per-member bind param, so no SQLite ~999-param ceiling), and an EMPTY
+  // named list selects nothing naturally — EXISTS is false with no member rows,
+  // no `1 = 0` special-case needed. No list ⇒ nothing added (path unchanged).
+  const scopeCondition =
+    deps.listId === undefined
+      ? undefined
+      : exists(
+          db
+            .select({ x: sql`1` })
+            .from(listMembers)
+            .where(
+              and(eq(listMembers.listId, deps.listId), eq(listMembers.playerId, players.id)),
+            ),
+        );
+
   // One join, not one query per player (rules/backend.md).
   const rows = await db
     .select({ line: statLines, player: players })
@@ -97,6 +133,7 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
     .where(
       and(
         eq(players.active, true),
+        ...(scopeCondition !== undefined ? [scopeCondition] : []),
         // Regular season only: ingestion also allows postseason types, and a
         // YTD line blending playoff and regular-season stats is not a season line.
         eq(statLines.gameType, "R"),

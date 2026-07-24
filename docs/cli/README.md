@@ -38,6 +38,7 @@ state, so re-running a Window always sends the same content.
 | Flag | Default | Accepted values |
 |---|---|---|
 | `--window <spec>` / `--window=<spec>` | `1d` | `1d`, `7d`, `14d`, `21d`, `28d`, `35d`, `60d`, `ytd` |
+| `--list <name>` / `--list=<name>` | off (all active) | any existing list name (#70) |
 | `--force` | off (boolean) | present or absent |
 
 - Both `--window 7d` and `--window=7d` are accepted. An unsupported window (e.g. `30d`) **fails
@@ -54,6 +55,30 @@ state, so re-running a Window always sends the same content.
 - The `1d` window is the scheduled daily artifact; any wider window (`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`) is an
   on-demand report that takes no slot and answers even during Offseason Sleep
   ([ADR 0035](../adr/0035-window-selected-digest.md)).
+- `--list NAME` scopes the send to a named list's active members
+  ([#70](https://github.com/wrburgess/bryce/issues/70) / [ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)).
+  A named-list send is **on-demand only** (it takes no daily slot); an unknown list **fails closed**
+  (exit `1`, `error: no list named "…"`, nothing sent).
+
+## `players:lists` — manage named player lists (`#70`)
+
+```sh
+npm run players:lists -- create --name Prospects
+npm run players:lists -- rename --name Prospects --to "Top 30"
+npm run players:lists -- add    --name "Top 30" --person-ids 691185,700001 --ncaa-seqs 2649785
+npm run players:lists -- remove --name "Top 30" --person-ids 700001
+npm run players:lists -- show                       # every live list + member counts
+npm run players:lists -- show   --name "Top 30"     # a list's active members
+npm run players:lists -- delete --name "Top 30"     # soft-delete; the name frees for reuse
+```
+
+A thin presenter over the named-list service ([ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)):
+a list is curated membership over the Watch List, distinct from tags (#30) and rosters (#69). A
+scope selects a list's **active** members (`players.active` stays the master gate). Output is greppable
+`key=value` lines; a failure writes an `error=…` line to stderr and exits `1`. Members are addressed
+by `--person-ids` (MLB/MiLB, comma-separated) and/or `--ncaa-seqs` (NCAA); `add` is idempotent and
+`remove` no-ops on a non-member. An unknown list, or a reference to a Player not on the Watch List,
+fails closed. (Distinct from `seed list`, which prints players.)
 
 ## `seed` — manage the Watch List
 
