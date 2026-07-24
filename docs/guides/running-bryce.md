@@ -564,9 +564,9 @@ NCAA baseball has no MLB Stats API `personId`, so an NCAA Player is identified b
 `stats_player_seq` and its data is scraped from stats.ncaa.org through an isolated adapter
 ([ADR 0032](../adr/0032-ncaa-identity-stats-player-seq-scrape-adapter.md)).
 
-**Finding a player's `stats_player_seq`:** open his player page on stats.ncaa.org — the URL is
-`https://stats.ncaa.org/players/{stats_player_seq}` (the trailing number is the seq). It also appears
-as `stats_player_seq=...` in a game-log link's query string.
+**Finding a player's `stats_player_seq`:** open his player page on stats.ncaa.org — for example,
+`https://stats.ncaa.org/players/9702101?year_stat_category_id=15867`. The number immediately after
+`/players/` is the seq; `year_stat_category_id` only selects the stats view and is not passed to Bryce.
 
 **Adding him** (his first Refresh runs immediately, unless the pipeline is in Offseason Sleep):
 

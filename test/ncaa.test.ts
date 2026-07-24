@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  NcaaAccessDeniedError,
   NcaaApiError,
   NcaaClient,
   UnsupportedNcaaSeasonError,
@@ -308,24 +309,29 @@ describe("NCAA normalizer", () => {
 });
 
 describe("NCAA client", () => {
-  it("builds the legacy game_by_game URL with the season/category ids", () => {
+  it("builds the current player URL with the bundled category id", () => {
     const season = ncaaSeasonFor("2025");
     expect(season).not.toBeNull();
     const url = buildGameLogUrl({ seq: 2649785, season: season!, category: "batting" });
-    expect(url).toContain("https://stats.ncaa.org/player/game_by_game?");
-    expect(url).toContain("game_sport_year_ctl_id=16840");
-    expect(url).toContain("stats_player_seq=2649785");
-    expect(url).toContain("year_stat_category_id=15687");
-    // org_id omitted when the school is unknown.
-    expect(url).not.toContain("org_id");
+    expect(url).toBe("https://stats.ncaa.org/players/2649785?year_stat_category_id=15687");
+    expect(url).not.toContain("game_sport_year_ctl_id");
+    expect(url).not.toContain("stats_player_seq=");
+  });
+
+  it("builds Gavin Kelly's exact current 2026 player URL", () => {
+    const season = ncaaSeasonFor("2026");
+    expect(season).not.toBeNull();
+    const url = buildGameLogUrl({ seq: 9702101, season: season!, category: "batting" });
+    expect(url).toBe("https://stats.ncaa.org/players/9702101?year_stat_category_id=15867");
+    expect(url).not.toContain("game_sport_year_ctl_id");
+    expect(url).not.toContain("stats_player_seq=");
   });
 
   it("builds the fielding game-log URL with the bundled fielding category id", () => {
     const season = ncaaSeasonFor("2025");
     expect(season).not.toBeNull();
     const url = buildGameLogUrl({ seq: 2649785, season: season!, category: "fielding" });
-    expect(url).toContain("year_stat_category_id=15689");
-    expect(url).toContain("game_sport_year_ctl_id=16840");
+    expect(url).toBe("https://stats.ncaa.org/players/2649785?year_stat_category_id=15689");
   });
 
   it("sends the full browser header set on the request", async () => {
@@ -374,6 +380,22 @@ describe("NCAA client", () => {
     const promise = fakeNcaaClient(api).getGameLogPage(2649785, "2025", "batting");
     await expect(promise).rejects.toBeInstanceOf(NcaaApiError);
     await promise.catch((err: unknown) => expect((err as NcaaApiError).status).toBe(403));
+  });
+
+  it("throws NcaaAccessDeniedError when Akamai returns a denial page with HTTP 200", async () => {
+    const api = new FakeNcaaApi({ body: "<html><title>Access Denied</title><body>Access Denied</body></html>" });
+    const promise = fakeNcaaClient(api).getGameLogPage(9702101, "2026", "batting");
+    await expect(promise).rejects.toBeInstanceOf(NcaaAccessDeniedError);
+    await expect(promise).rejects.not.toBeInstanceOf(NcaaApiError);
+  });
+
+  it("throws NcaaAccessDeniedError for Akamai's HTTP-200 JavaScript interstitial", async () => {
+    const api = new FakeNcaaApi({
+      body: '<meta http-equiv="refresh" content="URL=\'/players/9702101?bm-verify=token\'"><iframe src="akamai_validation.html">',
+    });
+    await expect(fakeNcaaClient(api).getGameLogPage(9702101, "2026", "batting")).rejects.toBeInstanceOf(
+      NcaaAccessDeniedError,
+    );
   });
 
   it("throws UnsupportedNcaaSeasonError for a year with no bundled lookup", async () => {

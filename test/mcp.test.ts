@@ -264,6 +264,15 @@ describe("MCP server over Streamable HTTP", () => {
     expect(await opened.db.select().from(players)).toHaveLength(0);
   });
 
+  it("watchlist_add_ncaa reports an NCAA access-denied page as a structured tool error", async () => {
+    ncaaApi.options.body = "<html><title>Access Denied</title></html>";
+    const result = await call("watchlist_add_ncaa", { ncaaPlayerSeq: 9702101 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("denied access");
+    expect(result.content[0]?.text).not.toContain("no NCAA player");
+    expect(await opened.db.select().from(players)).toHaveLength(0);
+  });
+
   it("watchlist_batch_add stages a batch and returns a structured summary (no inline backfill)", async () => {
     const result = await call("watchlist_batch_add", {
       entries: [{ personId: 691185 }, { ncaaPlayerSeq: 2649785 }],

@@ -19,7 +19,11 @@ import { MlbApiError } from "../mlb/client.js";
 import { levelForSportId } from "../mlb/levels.js";
 import type { Person } from "../mlb/schemas.js";
 import type { NcaaClient } from "../ncaa/client.js";
-import { NcaaApiError, UnsupportedNcaaSeasonError } from "../ncaa/client.js";
+import {
+  NcaaAccessDeniedError,
+  NcaaApiError,
+  UnsupportedNcaaSeasonError,
+} from "../ncaa/client.js";
 import { parseGameLogPage } from "../ncaa/parse.js";
 import {
   isManualTag,
@@ -281,6 +285,7 @@ export async function upsertNcaaPlayer(
   } catch (err) {
     // Upstream trouble is NOT a missing player: a non-404 HTTP failure and an
     // unbundled season propagate untouched for the callers' error seams.
+    if (err instanceof NcaaAccessDeniedError) throw err;
     if (err instanceof NcaaApiError && err.status !== 404) throw err;
     if (err instanceof UnsupportedNcaaSeasonError) throw err;
     // A genuine not-found — HTTP 404 or a page with no resolvable player —
@@ -405,7 +410,7 @@ function classifyBatchFailure(entry: BatchAddEntry, err: unknown): BatchAddEntry
   if (err instanceof UnsupportedNcaaSeasonError) {
     return { status: "failed", entry, reason: "unsupported_season", message: err.message };
   }
-  if (err instanceof MlbApiError || err instanceof NcaaApiError) {
+  if (err instanceof MlbApiError || err instanceof NcaaApiError || err instanceof NcaaAccessDeniedError) {
     return { status: "failed", entry, reason: "upstream_error", message: err.message };
   }
   return {
