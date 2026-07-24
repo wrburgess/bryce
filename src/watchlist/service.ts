@@ -718,6 +718,10 @@ export function restorePlayerListBackup(
         if (p.ncaaPlayerSeq != null) byNcaa.set(p.ncaaPlayerSeq, p.id);
       }
 
+      // Resolve every membership FIRST (a bad list name or player id aborts the
+      // whole restore), then write in one bulk insert — never a write per member
+      // (rules/backend.md: no N+1). Duplicates are skipped idempotently.
+      const memberValues: { listId: number; playerId: number; createdAt: string }[] = [];
       for (const member of extras.members ?? []) {
         const listName = member.list.trim();
         let listId = listIdByName.get(listName);
@@ -745,8 +749,11 @@ export function restorePlayerListBackup(
               : `ncaaPlayerSeq=${member.ncaaPlayerSeq}`;
           throw new UnresolvedBackupMemberError(`no player with ${ref} for list "${listName}"`);
         }
+        memberValues.push({ listId, playerId, createdAt: nowIso });
+      }
+      if (memberValues.length > 0) {
         tx.insert(listMembers)
-          .values({ listId, playerId, createdAt: nowIso })
+          .values(memberValues)
           .onConflictDoNothing({ target: [listMembers.listId, listMembers.playerId] })
           .run();
       }

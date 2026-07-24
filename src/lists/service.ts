@@ -327,17 +327,17 @@ export async function addPlayerIdsToList(
   playerIds: number[],
   now: Date,
 ): Promise<number> {
+  if (playerIds.length === 0) return 0;
   const nowIso = now.toISOString();
-  let changed = 0;
-  for (const playerId of playerIds) {
-    const inserted = await db
-      .insert(listMembers)
-      .values({ listId, playerId, createdAt: nowIso })
-      .onConflictDoNothing({ target: [listMembers.listId, listMembers.playerId] })
-      .returning();
-    changed += inserted.length;
-  }
-  return changed;
+  // One bulk insert, never a write per id (rules/backend.md: no N+1). Existing
+  // members conflict on the unique key and are skipped, so `changed` counts only
+  // rows actually newly inserted (a re-add is idempotent).
+  const inserted = await db
+    .insert(listMembers)
+    .values(playerIds.map((playerId) => ({ listId, playerId, createdAt: nowIso })))
+    .onConflictDoNothing({ target: [listMembers.listId, listMembers.playerId] })
+    .returning();
+  return inserted.length;
 }
 
 /** A better-sqlite3 UNIQUE-constraint failure, however drizzle surfaces it. */
