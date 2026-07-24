@@ -172,6 +172,41 @@ Builds the default one-day digest for the last completed host date and "sends" i
 `MAILER_PROVIDER=console` it prints the email (subject, HTML, and plain text) straight to your
 terminal. You can request a different Digest window (for example, `npm run digest -- --window 7d`);
 the complete supported-window list and syntax live in the [CLI Digest reference](../cli/README.md#digest--build-and-send-a-windowed-digest).
+
+### Choose a Digest variation
+
+A **Window** is the period of completed games to include. Every window ends on yesterday in your
+configured timezone, so the result does not depend on the time of day you run it. The default `1d`
+window is the scheduled daily Digest; the wider windows are on-demand reports you can ask for at any
+time.
+
+| What you want | Command | What happens |
+|---|---|---|
+| Yesterday's whole watch list | `npm run digest` | The default `1d` daily Digest. It sends at most once per host date. |
+| The last week | `npm run digest -- --window 7d` | An on-demand report for the previous seven completed days. Safe to repeat. |
+| A longer recent period | `npm run digest -- --window 14d` | Use `14d`, `21d`, `28d`, `35d`, or `60d` for that many completed days. |
+| This season so far | `npm run digest -- --window ytd` | An on-demand year-to-date report from the relevant season start through yesterday. |
+
+You can also focus a Digest on a named **list**: a curated subset of your active watch list. Create
+the list, add players to it, then pass its name with `--list`:
+
+```bash
+npm run players:lists -- create --name Prospects
+npm run players:lists -- add --name Prospects --person-ids 691185,700001
+npm run digest -- --window 7d --list Prospects
+```
+
+A named-list Digest is always on-demand, even with `--window 1d`, so it does not consume or replace
+the whole-watch-list daily slot. A list contains only active players; deactivating a player removes
+them from every scoped Digest without deleting their history. List names must already exist — a typo
+fails without sending a wider, unintended report.
+
+Use `npm run players:lists -- show` to see your lists and their member counts. The [CLI reference]
+(../cli/README.md#playerslists--manage-named-player-lists-70) documents renaming, removing members,
+and deleting lists. The [Digest reference](../cli/README.md#digest--build-and-send-a-windowed-digest)
+has the full flag contract, including `--force` for a deliberate test replay of the scheduled daily
+slot.
+
 You should see your players' lines grouped by level, in the fixed format — e.g.
 `PA 4, H 2, BB 1, K 1, 2B 0, 3B 0, HR 1, RBI 3, R 2, SB 0, CS 0, E 0` for hitters or
 `IP 6.1, ER 2, K 8, K/9 11.4, BB 1, HA 4, HRA 1, ERA 2.84, WHIP 0.79, QS 1, S 0, BS 0, HLD 0, RW 0, RL 0`
