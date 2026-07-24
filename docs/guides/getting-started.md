@@ -265,7 +265,7 @@ npm run digest  # database migrations apply automatically on the next run of any
 |---|---|
 | `npm install` fails on `better-sqlite3` | Node too old — re-check `node --version` ≥ 22 |
 | Server exits immediately on start | `API_TOKEN` missing or blank in `.env` — it fails closed by design |
-| `npm run digest` says nothing new | Everything was already reported today (report-once), or all players are out of season |
+| `npm run digest` shows no games | No watched player appeared in the selected window; the scheduled daily Digest still sends an empty report, while Offseason Sleep replaces it with a weekly heartbeat |
 | Weekly "heartbeat" email instead of a daily digest | Offseason Sleep (World Series → earliest watched opening day) — expected |
 | Real email not arriving | `DIGEST_FROM` not a verified Postmark Sender Signature, or wrong server token |
 | NCAA add/probe fails with a 403 or parse error | stats.ncaa.org edge/selector drift — run the probe and see [Running Bryce → NCAA players](running-bryce.md#ncaa-players) |
