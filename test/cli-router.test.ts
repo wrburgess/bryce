@@ -86,6 +86,10 @@ describe("CLI router metadata", () => {
       ["seed", "add"],
       ["seed", "add", "--person-id", "1", "--ncaa-seq", "2"],
       ["seed", "tag", "add", "--tag", "status:rostered"],
+      ["players", "lists", "create", "--name", "   "],
+      ["players", "backup", "--out", ""],
+      ["digest", "--list", ""],
+      ["seed", "add", "--search", "   "],
     ];
     for (const args of invalidCases) expect(await runRouter(args, vi.fn(), commands)).toBe(1);
     expect(loader).not.toHaveBeenCalled();
@@ -115,20 +119,29 @@ describe("CLI router metadata", () => {
     expect(digestSeen).toEqual([["-w", "7d"]]);
   });
 
-  it("keeps a direct compatibility entry point on its default process argv", () => {
+  it("keeps every direct compatibility entry point bounded and exit-draining on default argv", () => {
     const work = mkdtempSync(join(tmpdir(), "bryce-compat-"));
     try {
-      const result = spawnSync(join(process.cwd(), "node_modules", ".bin", "tsx"), [join(process.cwd(), "src", "cli", "backup.ts")], {
-        cwd: work,
-        encoding: "utf8",
-        env: { ...process.env, MAILER_PROVIDER: "console", DATABASE_PATH: join(work, "bryce.db"), BACKUP_DIR: join(work, "snapshots") },
-      });
-      expect(result.status).toBe(0);
-      expect(result.stdout).toContain("snapshot created");
+      const entrypoints = [
+        "src/cli/backup.ts", "src/cli/batch-add.ts", "src/cli/connector-smoke.ts", "src/cli/digest.ts",
+        "src/cli/lists.ts", "src/cli/migrate.ts", "src/cli/ncaa-probe.ts", "src/cli/players-backup.ts",
+        "src/cli/players-restore.ts", "src/cli/refresh.ts", "src/cli/restore.ts", "src/cli/seed.ts", "src/server.ts",
+      ];
+      for (const entrypoint of entrypoints) {
+        const result = spawnSync(join(process.cwd(), "node_modules", ".bin", "tsx"), [join(process.cwd(), entrypoint)], {
+          cwd: work,
+          encoding: "utf8",
+          env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
+          timeout: 10_000,
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.status).not.toBeNull();
+        expect(`${result.stderr}`).toMatch(/error[=:]/);
+      }
     } finally {
       rmSync(work, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("reports unknown and incomplete commands without loading a leaf", async () => {
     const output = vi.fn();

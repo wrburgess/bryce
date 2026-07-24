@@ -24,10 +24,13 @@ const leaf = (
   load: Command["load"], options: readonly Option[] = [], requirements: Pick<Command, "required" | "oneOf" | "exactlyOneOf"> = {},
 ): Command => ({ path, purpose, usage, example, load, options, ...requirements });
 
+const nonBlank = (value: string): string | null => value.trim().length > 0 ? null : "a non-blank value";
+const withNonBlank = (validate?: Option["validate"]): Option["validate"] => (candidate) =>
+  nonBlank(candidate) ?? validate?.(candidate) ?? null;
 const value = (name: string, description: string, values?: readonly string[], aliases?: string[], validate?: Option["validate"]): Option =>
-  ({ name, description, values, aliases, validate });
+  ({ name, description, values, aliases, validate: withNonBlank(validate) });
 const inlineValue = (name: string, description: string, values?: readonly string[], aliases?: string[], validate?: Option["validate"]): Option =>
-  ({ name, description, values, aliases, validate, inline: true });
+  ({ name, description, values, aliases, validate: withNonBlank(validate), inline: true });
 const flag = (name: string, description: string): Option => ({ name, description, value: false });
 const positiveInteger = (value: string): string | null => /^\d+$/.test(value) && Number(value) > 0 ? null : "a positive integer";
 const year = (value: string): string | null => /^\d{4}$/.test(value) ? null : "a four-digit year";
