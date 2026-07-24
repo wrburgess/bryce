@@ -264,7 +264,7 @@ const guardedLookups = new WeakSet<object>();
 /**
  * Close the "resolve-an-allowed-name-to-a-public-IP" bypass (issue #25). When a connect
  * is allowed only because the host is an allowed NAME (not an IP literal) and the caller
- * supplied a custom DNS `lookup`, hand the original connect a shallow COPY of the options
+ * supplied a custom DNS `lookup`, hand the original connect a DERIVED copy of the options
  * whose `lookup` is a wrapper that re-validates EVERY resolved address through `isLoopback`
  * (never mutating the caller's own object — it may be frozen). A non-loopback result is
  * recorded as a redacted `socket` attempt (the resolved IP — never the name, MF7) and the
@@ -307,27 +307,27 @@ function hardenCustomLookup(args: unknown[], host: string | undefined, port: num
     });
   };
   guardedLookups.add(guardedLookup);
-  // Hand the original connect a DERIVED options object that overrides only `lookup`,
-  // without mutating the caller's own object (which native `net.connect` may pass FROZEN —
-  // an in-place `opts.lookup = …` would throw a synchronous TypeError and break a valid
-  // loopback connect before its resolver ran, Delta-2). A shallow spread `{ ...opts }`
-  // would drop inherited and non-enumerable fields — when `opts` is prototype-backed
-  // (`Object.create({ host, port, lookup })`) the spread copies only own-enumerable keys,
-  // so `net.connect` reads host/port as missing and fails with `ERR_MISSING_ARGS` (D3).
-  // `Object.create(opts)` instead inherits EVERY readable property (own enumerable, own
-  // non-enumerable, and inherited) through the prototype chain, leaving the caller's object
-  // untouched. Define `lookup` with `Object.defineProperty` rather than `wrapped.lookup = …`:
-  // a plain assignment walks the prototype chain and, when `opts` is frozen, finds the
-  // inherited `lookup` as a NON-WRITABLE data property, so `[[Set]]` throws in strict mode.
-  // `defineProperty` creates an OWN property directly, shadowing the inherited one (the
-  // derived child is extensible even when `opts` is frozen).
-  const wrapped = Object.create(opts) as typeof opts;
-  Object.defineProperty(wrapped, "lookup", {
-    value: guardedLookup,
-    writable: true,
-    enumerable: true,
-    configurable: true,
-  });
+  // Hand the original connect a DERIVED options object that overrides only `lookup`, without
+  // mutating the caller's own object. The three downstream Node APIs read options TWO different
+  // ways, so the copy must satisfy BOTH:
+  //   • `net.connect` reads the target via PROPERTY ACCESS (`options.host`) — the prototype chain
+  //     is honored, so a prototype-backed `opts` (`Object.create({ host, port, lookup })`) must
+  //     keep resolving through inheritance (D3).
+  //   • `tls.connect` and the `net.Socket` constructor copy options with an OWN-ENUMERABLE spread
+  //     (`{ ...opts }`) — anything behind a prototype is LOST: host/port/certs make tls throw
+  //     `ERR_MISSING_ARGS`, and `signal`/`keepAlive` are silently dropped (D4).
+  // `getOwnPropertyDescriptors(opts)` copies every OWN property (enumerable AND non-enumerable)
+  // WITH its descriptor, and `getPrototypeOf(opts)` preserves the chain, so `wrapped` exposes the
+  // caller's own props as its OWN props (surviving the spread) AND still inherits the rest
+  // (surviving property access). A shallow spread `{ ...opts }` dropped inherited/non-enumerable
+  // fields (D3); `Object.create(opts)` parked the caller's own props behind the prototype where the
+  // spread could not see them (D4) — this descriptor+prototype copy ends both failure modes.
+  // Overriding `descriptors.lookup` BEFORE `Object.create` replaces that entry in the descriptor
+  // map, so even a FROZEN `opts` (whose own `lookup` descriptor is non-writable/non-configurable)
+  // is handled without ever writing to the caller's object (Delta-2).
+  const descriptors = Object.getOwnPropertyDescriptors(opts);
+  descriptors.lookup = { value: guardedLookup, writable: true, enumerable: true, configurable: true };
+  const wrapped = Object.create(Object.getPrototypeOf(opts), descriptors) as typeof opts;
   args[0] = wrapped;
 }
 

@@ -288,6 +288,32 @@ describe("a custom DNS lookup cannot smuggle egress past an allowed name (P2)", 
     });
   }
 
+  /**
+   * Like `settle`, for the TLS surface: resolves the error (or a SYNCHRONOUS throw) on
+   * failure, or null on `secureConnect`. The sync-throw catch matters for the D4 regression:
+   * when the hardening parks host/port behind a prototype, `tls.connect` throws
+   * `ERR_MISSING_ARGS` synchronously before any resolver runs.
+   */
+  function settleTls(options: tls.ConnectionOptions): Promise<Error | null> {
+    return new Promise<Error | null>((resolve) => {
+      let socket: tls.TLSSocket;
+      try {
+        socket = tls.connect(options);
+      } catch (err) {
+        resolve(err as Error);
+        return;
+      }
+      socket.on("error", (err) => {
+        socket.destroy();
+        resolve(err);
+      });
+      socket.on("secureConnect", () => {
+        socket.destroy();
+        resolve(null);
+      });
+    });
+  }
+
   it("blocks + records the resolved IP when a custom lookup returns a non-loopback address", async () => {
     // "localhost" is an allowed NAME, but the resolver hands back a public IP; the guard
     // must re-validate the resolved address and fail closed, recording the resolved IP.
@@ -402,6 +428,48 @@ describe("a custom DNS lookup cannot smuggle egress past an allowed name (P2)", 
     const settled = await settle(protoBacked);
     expect(settled).toBeInstanceOf(NetworkBlockedError);
     expect(takeAttempts()).toEqual([{ surface: "socket", host: "8.8.8.8", port: 443 }]);
+  });
+
+  // --- D4: `tls.connect` and the `net.Socket` constructor copy only OWN-ENUMERABLE options
+  // (a `{ ...opts }` spread), so the hardening must expose the caller's own props as OWN props,
+  // not park them behind a prototype. `Object.create(opts)` (the pre-fix form) moved host/port/
+  // signal onto the prototype, where the spread could not see them: tls threw ERR_MISSING_ARGS
+  // and net silently dropped construction options. The descriptor+prototype copy fixes both
+  // while keeping the D3 property-access reads (net.connect) inherited.
+
+  it("D4: tls.connect keeps own host/port past its spread — a custom lookup to a public IP is blocked + recorded", async () => {
+    // If the hardening parked host/port behind a prototype, tls.connect's own-enumerable spread
+    // would drop them and throw ERR_MISSING_ARGS BEFORE the resolver ran (no record). Getting a
+    // NetworkBlockedError plus the recorded resolved IP proves host/port survived to tls AND the
+    // guarded lookup re-validated the smuggled address.
+    const publicIpLookup: net.LookupFunction = (_hostname, _options, cb) => cb(null, "8.8.8.8", 4);
+    const settled = await settleTls({ host: "localhost", port: 443, lookup: publicIpLookup });
+    expect(settled).toBeInstanceOf(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "8.8.8.8", port: 443 }]);
+  });
+
+  it("D4: net.Socket construction keeps own options — a pre-aborted signal survives the guard's rewrap", async () => {
+    // A custom lookup forces the guard to REBUILD the options object; that rebuild must carry the
+    // caller's OWN `signal` across as an own prop, or the net.Socket constructor's own-enumerable
+    // spread drops it. Proof: a pre-aborted signal must still abort the loopback connect. If the
+    // signal were dropped, the connect would proceed to the in-process server and succeed instead.
+    const server = await startLoopbackServer((_req, res) => res.end("ok"));
+    const port = Number(new URL(server.url).port);
+    const controller = new AbortController();
+    controller.abort();
+    try {
+      const settled = await settle({
+        host: "localhost",
+        port,
+        lookup: fixedLookup("127.0.0.1"),
+        signal: controller.signal,
+      });
+      expect(settled).toBeInstanceOf(Error);
+      expect((settled as Error).name).toBe("AbortError"); // signal preserved → connect aborted
+      expect(takeAttempts()).toEqual([]); // aborted before the resolver ran — nothing recorded
+    } finally {
+      await server.close();
+    }
   });
 });
 
