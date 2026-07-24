@@ -33,6 +33,7 @@ UTF-8 — not raw upstream bytes.
 | Command | Emits player/email identity? | Class | Encoding |
 |---|---|---|---|
 | `seed` (`add`/`deactivate`/`list`/`tag`) | yes (`name=…`) | human-facing app CLI | **UTF-8** |
+| `players:lists` (`show`/`create`/`rename`/`add`/`remove`/`delete`) | yes (member `name=` + user-supplied list names) | human-facing app CLI | **UTF-8** |
 | `digest` (`MAILER_PROVIDER=console`) | yes (rendered email) | human-facing app CLI | **UTF-8** (already) |
 | `players:batch-add` | yes, but **folded + forgery-proofed** | greppable bulk-outcome reporter | ASCII |
 | `ncaa:probe` | parsed name/school (folded) | machine diagnostic | ASCII |
@@ -42,15 +43,18 @@ UTF-8 — not raw upstream bytes.
 `players:batch-add` is the deliberate exception on the app-CLI side: its `asciiField()` fold is
 **dual-purpose** — besides locale-safety it collapses whitespace / strips control bytes so a crafted
 upstream name cannot forge a fake `key=value` token on a greppable bulk line (PR #84). Option 1's
-"the HC should see `Acuña`" does not override that forgery-proofing, so `batch-add` keeps folding.
+"the HC should see `Acuña`" does not override that forgery-proofing, so `batch-add` keeps folding on
+its `outcome` line (its malformed-invocation error path shares the sad-path gap noted below).
 
 ## Scope boundaries
 
-- **`ncaa:probe` is ASCII only for its folded identity fields** (`name`/`school` via `ascii()`).
-  Generic fetch/parse/top-level errors still emit a raw `err.message`, which can carry non-ASCII bytes.
-  Closing that sad-path gap (sanitizing flag echoes and exception messages, with tests over every
-  promised path) is **out of scope** here and deferred to a tracked follow-up — the issue #74 body
-  already noted a blanket "diagnostic output is ASCII-safe" claim would need that broader work.
+- **The ASCII side folds identity *fields*, not every byte.** `ncaa:probe`'s `ascii()` covers only the
+  parsed `name`/`school`; `players:batch-add`'s `asciiField()` covers only the per-entry `outcome`
+  line's `name`/`message`. Both still emit a raw echoed flag token, file path, or `err.message` on a
+  malformed invocation or a fetch/parse/read error, which can carry non-ASCII bytes. Closing that
+  shared sad-path gap (sanitizing flag echoes and exception messages, with tests over every promised
+  path) is **out of scope** here and deferred to a tracked follow-up — the issue #74 body already noted
+  a blanket "diagnostic output is ASCII-safe" claim would need that broader work.
 - **`seed` is not given forgery-proofing.** Option 1 chose a plain UTF-8 identity echo; names are
   NFC-normalized at ingestion. Adding `batch-add`-style field-hardening to `seed` is a separate concern.
 - **Enforcement is unchanged.** [ADR 0011](0011-ascii-safe-stdout-stays-doc-only.md)'s decision — the
