@@ -679,7 +679,10 @@ export function restorePlayerListBackup(
     // are then merged idempotently (a duplicate list_id/player_id is a no-op).
     // A member whose player natural id (or list name) does not resolve throws and
     // aborts — consistent with the restore's existing strictness.
-    const listIdByName = new Map<string, number>();
+    // Shared list-name resolution memo across BOTH loops below. A `number` is a
+    // resolved live list id; `null` is the memoized "no live list of this name"
+    // sentinel — so a repeated member list name is looked up at most once.
+    const listIdByName = new Map<string, number | null>();
     for (const list of extras.lists ?? []) {
       const name = list.name.trim();
       const live = tx
@@ -692,17 +695,17 @@ export function restorePlayerListBackup(
         listIdByName.set(name, live.id);
         continue;
       }
-      tx.insert(playerLists)
+      // Insert and read the new row's id straight back via .returning() — no
+      // separate re-SELECT (this is the sync better-sqlite3 tx, so .all() is
+      // synchronous, mirroring the selects above).
+      const created = tx
+        .insert(playerLists)
         .values({
           name,
           createdAt: list.createdAt ?? nowIso,
           updatedAt: list.updatedAt ?? nowIso,
         })
-        .run();
-      const created = tx
-        .select()
-        .from(playerLists)
-        .where(and(eq(playerLists.name, name), isNull(playerLists.deletedAt)))
+        .returning()
         .all()[0];
       if (created === undefined) throw new Error(`list insert failed for ${name}`);
       listIdByName.set(name, created.id);
@@ -720,20 +723,24 @@ export function restorePlayerListBackup(
 
       // Resolve every membership FIRST (a bad list name or player id aborts the
       // whole restore), then write in one bulk insert — never a write per member
-      // (rules/backend.md: no N+1). Duplicates are skipped idempotently.
+      // (rules/backend.md: no N+1). List names resolve through the shared
+      // listIdByName memo, so each distinct name is queried at most once across
+      // both the lists loop above and this loop; duplicates are skipped idempotently.
       const memberValues: { listId: number; playerId: number; createdAt: string }[] = [];
       for (const member of extras.members ?? []) {
         const listName = member.list.trim();
-        let listId = listIdByName.get(listName);
-        if (listId === undefined) {
+        if (!listIdByName.has(listName)) {
+          // First sighting of this name in the member loop: resolve once and
+          // memoize (null = no live list) so a repeated name never re-queries.
           const live = tx
             .select()
             .from(playerLists)
             .where(and(eq(playerLists.name, listName), isNull(playerLists.deletedAt)))
             .all()[0];
-          listId = live?.id;
+          listIdByName.set(listName, live?.id ?? null);
         }
-        if (listId === undefined) {
+        const listId = listIdByName.get(listName);
+        if (listId == null) {
           throw new UnresolvedBackupMemberError(`no list named "${listName}"`);
         }
         const playerId =

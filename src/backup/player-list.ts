@@ -171,6 +171,16 @@ export const playerListBackupSchema = z
   })
   .strict()
   .superRefine((env, ctx) => {
+    // Fail-closed on the version field: v1 predates named lists (ADR 0046), so a
+    // v1 payload MUST NOT carry list/member data. Rejecting it here keeps the
+    // version field trustworthy — list/member data requires version 2.
+    if (env.version === 1 && ((env.lists?.length ?? 0) > 0 || (env.members?.length ?? 0) > 0)) {
+      ctx.addIssue({
+        code: "custom",
+        message: "version 1 backups must not carry lists or members (use version 2)",
+      });
+    }
+
     // Natural-id uniqueness WITHIN the payload — two rows sharing an identity
     // would fight over the same DB row on import.
     const seenExternal = new Set<number>();

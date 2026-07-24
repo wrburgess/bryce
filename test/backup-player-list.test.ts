@@ -396,6 +396,38 @@ describe("parsePlayerListBackup: strict validation", () => {
     ).toThrow(PlayerBackupParseError);
   });
 
+  it("rejects a version 1 payload that carries lists or members (fail-closed on version)", () => {
+    // A v1 payload claiming named-list data is a version-field lie — list/member
+    // data requires version 2. Both a non-empty `lists` and a non-empty `members`
+    // must be rejected.
+    expect(() =>
+      parsePlayerListBackup(
+        JSON.stringify({
+          ...makeBackupEnvelope([makeBackupEntry()], { version: 1 }),
+          lists: [{ name: "Prospects" }],
+        }),
+      ),
+    ).toThrow(PlayerBackupParseError);
+    expect(() =>
+      parsePlayerListBackup(
+        JSON.stringify({
+          ...makeBackupEnvelope([makeBackupEntry()], { version: 1 }),
+          members: [{ list: "Prospects", externalId: 691185, ncaaPlayerSeq: null }],
+        }),
+      ),
+    ).toThrow(PlayerBackupParseError);
+    // A v1 payload with an EMPTY lists/members array is still fine (players-only).
+    expect(() =>
+      parsePlayerListBackup(
+        JSON.stringify({
+          ...makeBackupEnvelope([makeBackupEntry()], { version: 1 }),
+          lists: [],
+          members: [],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
   it("rejects duplicate natural ids within the payload", () => {
     expect(() =>
       parse([makeBackupEntry({ externalId: 42 }), makeBackupEntry({ externalId: 42 })]),
