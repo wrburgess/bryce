@@ -12,7 +12,7 @@ import {
   createList,
   deleteList,
   listLists,
-  listMembersOf,
+  listMembersById,
   removeFromList,
   renameList,
   resolveListByName,
@@ -179,7 +179,7 @@ async function runShow(flags: Map<string, string>, deps: ListsDeps): Promise<num
   const name = flags.get("name");
   if (name !== undefined && name.trim().length > 0) {
     const list = await resolveListByName(deps.db, name.trim());
-    const members = await listMembersOf(deps.db, name.trim());
+    const members = await listMembersById(deps.db, list.id);
     for (const p of members) {
       const idRef =
         p.level === "ncaa" ? `ncaaSeq=${p.ncaaPlayerSeq ?? "-"}` : `personId=${p.externalId ?? "-"}`;

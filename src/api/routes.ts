@@ -23,7 +23,7 @@ import {
   createList,
   deleteList,
   listLists,
-  listMembersOf,
+  listMembersById,
   removeFromList,
   renameList,
   resolveListByName,
@@ -294,7 +294,7 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
   api.get("/lists/:name", async (c) => {
     const name = c.req.param("name");
     const list = await resolveListByName(deps.db, name);
-    return c.json({ list, members: await listMembersOf(deps.db, name) });
+    return c.json({ list, members: await listMembersById(deps.db, list.id) });
   });
 
   api.patch("/lists/:name", async (c) => {

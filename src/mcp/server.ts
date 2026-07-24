@@ -40,7 +40,7 @@ import {
   createList,
   deleteList,
   listLists,
-  listMembersOf,
+  listMembersById,
   removeFromList,
   renameList,
   resolveListByName,
@@ -439,7 +439,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
       guarded(async () => {
         const input = ListNameInputSchema.parse(args);
         const list = await resolveListByName(deps.db, input.name);
-        return jsonResult({ list, members: await listMembersOf(deps.db, input.name) });
+        return jsonResult({ list, members: await listMembersById(deps.db, list.id) });
       }),
   );
 

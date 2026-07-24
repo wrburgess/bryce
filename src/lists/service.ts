@@ -200,16 +200,21 @@ export async function listMemberIds(db: Db, listId: number): Promise<number[]> {
   return rows.map((r) => r.id);
 }
 
-/** Active member rows of a named list, ordered by players.id. Unknown → UnknownListError. */
-export async function listMembersOf(db: Db, name: string): Promise<PlayerRow[]> {
-  const list = await resolveListByName(db, name);
+/** Active member rows for a resolved list id, ordered by players.id (no re-resolution). */
+export async function listMembersById(db: Db, listId: number): Promise<PlayerRow[]> {
   return db
     .select({ player: players })
     .from(listMembers)
     .innerJoin(players, eq(listMembers.playerId, players.id))
-    .where(and(eq(listMembers.listId, list.id), eq(players.active, true)))
+    .where(and(eq(listMembers.listId, listId), eq(players.active, true)))
     .orderBy(players.id)
     .then((rows) => rows.map((r) => r.player));
+}
+
+/** Active member rows of a named list, ordered by players.id. Unknown → UnknownListError. */
+export async function listMembersOf(db: Db, name: string): Promise<PlayerRow[]> {
+  const list = await resolveListByName(db, name);
+  return listMembersById(db, list.id);
 }
 
 /** How many membership rows a mutation added or removed, plus the resolved list. */
