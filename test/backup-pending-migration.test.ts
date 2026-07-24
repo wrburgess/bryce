@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../src/db/client.js";
@@ -22,6 +22,7 @@ import {
   makeMigrationsDir,
   makeTempDir,
 } from "./backup-helpers.js";
+import { syncDerivedTags } from "../src/tags/service.js";
 import { fakeClock, insertPlayer, insertPlayerTag, insertStatLine } from "./factories.js";
 
 const CLOCK = fakeClock("2026-07-22T12:00:00Z").now;
@@ -395,6 +396,86 @@ describe("startupDb derived-tag backfill (Phase A of #29)", () => {
     } finally {
       started.close();
     }
+  });
+
+  it("self-heals only the players missing a derived tag (resumes a partial prior run), and is a no-op once all tagged", async () => {
+    const first = await startupDb(dbPath, { migrationsFolder: migrations.dir, now: CLOCK });
+    // Player A already has derived tags (a completed prior sync); player B has
+    // none (a prior backfill crashed, or his first-add Refresh threw, before
+    // deriving). The whole-table-empty guard would have permanently skipped both.
+    const a = await insertPlayer(first.db, {
+      externalId: 691185,
+      level: "milb",
+      milbLevel: "Triple-A",
+      position: "SS",
+    });
+    syncDerivedTags(first.db, a.id, CLOCK());
+    const b = await insertPlayer(first.db, {
+      externalId: 700000,
+      level: "milb",
+      milbLevel: "Double-A",
+      position: "1B",
+    });
+    // Snapshot A's derived row ids: the sweep must not rewrite an already-tagged
+    // player (it skips him entirely), and B has no derived tags yet.
+    const aRowIdsBefore = first.db
+      .select()
+      .from(playerTags)
+      .where(and(eq(playerTags.playerId, a.id), eq(playerTags.source, "derived")))
+      .all()
+      .map((t) => t.id)
+      .sort((x, y) => x - y);
+    expect(aRowIdsBefore.length).toBeGreaterThan(0);
+    expect(
+      first.db
+        .select()
+        .from(playerTags)
+        .where(eq(playerTags.playerId, b.id))
+        .all(),
+    ).toHaveLength(0);
+    first.close();
+
+    const started = await startupDb(dbPath, { migrationsFolder: migrations.dir, now: CLOCK });
+    try {
+      // B is healed.
+      const bDerived = started.db
+        .select()
+        .from(playerTags)
+        .where(and(eq(playerTags.playerId, b.id), eq(playerTags.source, "derived")))
+        .all();
+      expect(bDerived.length).toBeGreaterThan(0);
+      // A's derived rows are UNTOUCHED (same row ids — no delete+reinsert).
+      const aRowIdsAfter = started.db
+        .select()
+        .from(playerTags)
+        .where(and(eq(playerTags.playerId, a.id), eq(playerTags.source, "derived")))
+        .all()
+        .map((t) => t.id)
+        .sort((x, y) => x - y);
+      expect(aRowIdsAfter).toEqual(aRowIdsBefore);
+    } finally {
+      started.close();
+    }
+
+    // A further startup, now that everyone is tagged, writes NOTHING: the whole
+    // player_tags table is byte-identical (same row ids) across the no-op sweep.
+    const snapshotIds = (): number[] => {
+      const s = openDb(dbPath, { migrate: false, migrationsFolder: migrations.dir });
+      try {
+        return s.db
+          .select()
+          .from(playerTags)
+          .all()
+          .map((t) => t.id)
+          .sort((x, y) => x - y);
+      } finally {
+        s.close();
+      }
+    };
+    const before = snapshotIds();
+    const third = await startupDb(dbPath, { migrationsFolder: migrations.dir, now: CLOCK });
+    third.close();
+    expect(snapshotIds()).toEqual(before);
   });
 
   it("is a NO-OP on a fresh/empty DB and does not re-fire once tags exist", async () => {

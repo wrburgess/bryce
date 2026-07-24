@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { digestDeliveries, players, refreshRuns, statLines } from "../src/db/schema.js";
+import { digestDeliveries, playerTags, players, refreshRuns, statLines } from "../src/db/schema.js";
 import { MlbClient } from "../src/mlb/client.js";
 import type { AppDeps } from "../src/server.js";
 import { createApp } from "../src/server.js";
@@ -855,6 +855,31 @@ describe("MCP server over Streamable HTTP", () => {
 
   it("returns isError (PlayerNotFoundError) for a tag op on an unknown player", async () => {
     const res = await call("player_tags_list", { personId: 424242 });
+    expect(res.isError).toBe(true);
+  });
+
+  it("tag tools reject a coercion-prone personId ([123]/true/'123') instead of tagging player 123", async () => {
+    // A real player 123 exists — a well-formed personId: 123 WOULD tag him. The
+    // strict (non-coercing) MCP shape must reject a malformed personId over this
+    // typed-JSON boundary rather than coerce [123]/true/"123" onto player 123.
+    await insertPlayer(opened.db, { externalId: 123, milbLevel: "Triple-A", position: "SS" });
+    for (const personId of [[123], true, "123"] as unknown[]) {
+      const label = JSON.stringify(personId);
+      const add = await call("player_tag_add", { personId, namespace: "status", value: "rostered" });
+      expect(add.isError, `add ${label}`).toBe(true);
+      const remove = await call("player_tag_remove", { personId, namespace: "status", value: "rostered" });
+      expect(remove.isError, `remove ${label}`).toBe(true);
+      const list = await call("player_tags_list", { personId });
+      expect(list.isError, `list ${label}`).toBe(true);
+    }
+    // None of the malformed calls mutated player 123 (or anyone): no tag rows.
+    expect(await opened.db.select().from(playerTags)).toHaveLength(0);
+  });
+
+  it("watchlist_list returns isError for a separators-only tags selector", async () => {
+    await call("watchlist_add", { personId: 691185 });
+    // `,,,` normalizes to zero tokens — a malformed selector, not an absent one.
+    const res = await call("watchlist_list", { tags: ",,," });
     expect(res.isError).toBe(true);
   });
 });

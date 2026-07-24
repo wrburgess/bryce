@@ -219,6 +219,15 @@ describe("tag service", () => {
       expect(() => parseTagSelector("foo:")).toThrow(ZodError);
     });
 
+    it("throws a ZodError when a PROVIDED selector normalizes to zero tokens", () => {
+      // A present-but-empty expression (only separators or whitespace) must error,
+      // NOT filter down to an empty token list that reads as "no filter" and
+      // returns the whole roster.
+      expect(() => parseTagSelector(",,,")).toThrow(ZodError);
+      expect(() => parseTagSelector("   ")).toThrow(ZodError);
+      expect(() => parseTagSelector(" , , ")).toThrow(ZodError);
+    });
+
     it("splits a token on the FIRST colon only; extra colons ride in the value (matching nothing)", async () => {
       // Pinned behavior for `foo:bar:baz`: namespace='foo', value='bar:baz'.
       const tokens = parseTagSelector("foo:bar:baz");

@@ -159,5 +159,30 @@ describe("deriveTags", () => {
       expect(tags.has("level:dsl")).toBe(false);
       expect([...tags].filter((t) => t.startsWith("level:"))).toHaveLength(1);
     });
+
+    it("does NOT override a promoted MLB player's level with a stale DSL stat line", async () => {
+      // Column level is mlb (a call-up), but his latest STORED line is still a DSL
+      // game he has not yet superseded. The current column level is authoritative:
+      // derive level:mlb, never level:dsl.
+      const tags = await derive(
+        opened,
+        { level: "mlb", milbLevel: null, position: null },
+        { sportId: 16, leagueName: "Dominican Summer League" },
+      );
+      expect(tags.has("level:mlb")).toBe(true);
+      expect(tags.has("level:dsl")).toBe(false);
+      expect([...tags].filter((t) => t.startsWith("level:"))).toHaveLength(1);
+    });
+
+    it("does NOT override a promoted Triple-A player's level with a stale DSL stat line", async () => {
+      const tags = await derive(
+        opened,
+        { level: "milb", milbLevel: "Triple-A", position: null },
+        { sportId: 16, leagueName: "Dominican Summer League" },
+      );
+      expect(tags.has("level:aaa")).toBe(true);
+      expect(tags.has("level:dsl")).toBe(false);
+      expect([...tags].filter((t) => t.startsWith("level:"))).toHaveLength(1);
+    });
   });
 });

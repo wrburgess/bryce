@@ -164,6 +164,58 @@ describe("watch-list service", () => {
       expect(await opened.db.select().from(statLines)).toHaveLength(linesBefore.length);
     });
 
+    it("re-adding an existing UNTAGGED player derives his tags on the updated path", async () => {
+      // A row that exists but was never tagged (e.g. a first-add whose Refresh
+      // failed before deriving). Re-adding must heal it, not skip derivation.
+      const existing = await insertPlayer(opened.db, {
+        externalId: 691185,
+        milbLevel: "Triple-A",
+        position: "SS",
+      });
+      expect(
+        await opened.db.select().from(playerTags).where(eq(playerTags.playerId, existing.id)),
+      ).toHaveLength(0);
+
+      const result = await addPlayer(deps(), 691185);
+      expect(result.action).toBe("updated");
+      const keys = new Set(
+        (await opened.db.select().from(playerTags).where(eq(playerTags.playerId, existing.id))).map(
+          (t) => `${t.namespace}:${t.value}`,
+        ),
+      );
+      expect(keys.has("level:aaa")).toBe(true);
+      expect(keys.has("pos:ss")).toBe(true);
+      expect(keys.has("prospect:prospect")).toBe(true);
+    });
+
+    it("a first add whose first Refresh throws still derives tags from the committed columns", async () => {
+      // The identity fetch (findPerson/getPerson/getTeam) succeeds so the row is
+      // inserted, but the game-log fetch fails — refreshPlayer throws before its own
+      // syncDerivedTags. The best-effort catch derives from the committed columns.
+      const failing = new MlbClient({
+        fetchImpl: (url: string) =>
+          /\/people\/\d+\/stats(\?|$)/.test(url)
+            ? Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({}) })
+            : api.fetch(url),
+        delayMs: 0,
+      });
+      await expect(addPlayer({ ...deps(), client: failing }, 691185)).rejects.toBeInstanceOf(
+        MlbApiError,
+      );
+
+      const player = (
+        await opened.db.select().from(players).where(eq(players.externalId, 691185))
+      )[0];
+      expect(player).toBeDefined();
+      const keys = new Set(
+        (await opened.db.select().from(playerTags).where(eq(playerTags.playerId, player!.id))).map(
+          (t) => `${t.namespace}:${t.value}`,
+        ),
+      );
+      expect(keys.has("level:aaa")).toBe(true);
+      expect(keys.has("pos:ss")).toBe(true);
+    });
+
     it("throws UnknownPersonError when the API has no person for the id", async () => {
       api.options.person = undefined;
       await expect(addPlayer(deps(), 424242)).rejects.toBeInstanceOf(UnknownPersonError);

@@ -122,7 +122,20 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
   api.get("/players", async (c) => {
     const query = PlayersListInputSchema.parse(c.req.query());
     const filter = query.active === "all" ? "all" : query.active === "true" ? "active" : "inactive";
-    return c.json({ players: await listPlayers(deps.db, filter, query.tags) });
+    // listPlayers throws a ZodError for a malformed tag selector (e.g. a token
+    // like `:foo`, or a present-but-empty `,,,` that normalizes to zero tokens).
+    // Catch it HERE and shape the 400 directly: an async rejection from this
+    // static, middleware-less route does not reliably reach api.onError under the
+    // current Hono dispatch (a sync parse error above does, and so do the param /
+    // middleware'd routes), so relying on onError would let the ZodError escape as
+    // an unhandled 500-class throw. Every other error propagates to onError.
+    try {
+      const list = await listPlayers(deps.db, filter, query.tags);
+      return c.json({ players: list });
+    } catch (err) {
+      if (err instanceof ZodError) return c.json({ error: "invalid-input", issues: err.issues }, 400);
+      throw err;
+    }
   });
 
   // NCAA tag routes are registered BEFORE the personId (`:id`) variants so the

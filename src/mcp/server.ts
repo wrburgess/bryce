@@ -57,6 +57,8 @@ import {
   SqlQueryFormatShape,
   StatLinesFormatSchema,
   StatLinesFormatShape,
+  StrictPlayerRefSchema,
+  StrictPlayerRefShape,
   TagWriteInputSchema,
   TagWriteInputShape,
 } from "../api/schemas.js";
@@ -367,11 +369,13 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     {
       description:
         "List every tag (derived AND manual) for a watch-list player, addressed by personId (MLB/MiLB) or ncaaPlayerSeq (NCAA) — exactly one. Ordered by namespace, value, source.",
-      inputSchema: DeactivateInputShape,
+      // Strict, non-coercing IDs: a typed-JSON boundary, so `personId: [123]`/`true`/`"123"`
+      // is rejected (isError), never coerced onto the wrong player.
+      inputSchema: StrictPlayerRefShape,
     },
     (args) =>
       guarded(async () => {
-        const input = DeactivateInputSchema.parse(args);
+        const input = StrictPlayerRefSchema.parse(args);
         const player = await resolvePlayerRow(refOf(input));
         return jsonResult({ tags: listTags(deps.db, player.id) });
       }),

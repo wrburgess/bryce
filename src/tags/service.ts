@@ -141,6 +141,37 @@ export function syncAllDerivedTags(db: TagDb, now: Date): number {
 }
 
 /**
+ * The self-healing startup sweep: derive tags for every player that currently
+ * has NO `source='derived'` tag row, and only those. Unlike the whole-table
+ * one-shot ({@link syncAllDerivedTags}), this RESUMES a backfill that crashed
+ * after committing some players and repairs any player a failed Refresh (or a
+ * first-add whose Refresh threw) left untagged. Every valid player derives at
+ * least one derived tag (level and/or prospect), so "no derived row" reliably
+ * means "not yet derived", and the sweep is a genuine NO-OP once all players are
+ * tagged. Returns the number of players swept.
+ */
+export function syncUntaggedDerivedTags(db: TagDb, now: Date): number {
+  const tagged = new Set(
+    db
+      .select({ playerId: playerTags.playerId })
+      .from(playerTags)
+      .where(eq(playerTags.source, "derived"))
+      .all()
+      .map((r) => r.playerId),
+  );
+  const ids = db
+    .select({ id: players.id })
+    .from(players)
+    .all()
+    .map((r) => r.id)
+    .filter((id) => !tagged.has(id));
+  for (const id of ids) {
+    syncDerivedTags(db, id, now);
+  }
+  return ids.length;
+}
+
+/**
  * Add a manual tag (semantics enforced HERE — boundary schemas check syntax
  * only). Rejects a derived namespace, an unknown namespace, or a `status` value
  * outside the allowed set. Idempotent: a repeat add makes no duplicate row.
@@ -245,6 +276,15 @@ export function parseTagSelector(expr: string): TagToken[] {
     if (seen.has(key)) continue;
     seen.add(key);
     tokens.push({ namespace, value });
+  }
+  // A PROVIDED expression that normalizes to zero tokens (only separators or
+  // whitespace, e.g. `,,,` or `  `) is malformed — NOT an absent filter. Left to
+  // fall through, an empty token list would read as "no filter" in
+  // `playerIdsMatchingTags` and return the whole roster, silently bypassing the
+  // validation error. An ABSENT `tags` param never reaches here (callers guard on
+  // undefined), so this only rejects a present-but-empty selector.
+  if (tokens.length === 0) {
+    throw selectorError(`tag selector '${expr}' has no tokens`, expr);
   }
   if (tokens.length > MAX_SELECTOR_TOKENS) {
     throw selectorError(`too many tag tokens (max ${MAX_SELECTOR_TOKENS})`, expr);

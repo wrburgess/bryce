@@ -6,7 +6,7 @@ import type { DbLock } from "./lock.js";
 import { acquireOpenLock } from "./lock.js";
 import { hasExistingSchema, hasPendingMigrations } from "./pending.js";
 import { createSnapshot, pruneSnapshots } from "../backup/snapshot.js";
-import { syncAllDerivedTags } from "../tags/service.js";
+import { syncUntaggedDerivedTags } from "../tags/service.js";
 
 /**
  * The async startup seam (ADR 0042). `openDb` stays synchronous; entrypoints
@@ -91,25 +91,18 @@ export async function startupDb(
 
     migrate(opened.db, { migrationsFolder });
 
-    // One-time self-healing backfill of derived tags (Phase A of #29). Applying
-    // the 0006 migration only CREATES an empty player_tags table; a later Refresh
-    // repairs only ACTIVE, in-season players, so existing inactive players — and
-    // everyone during Offseason Sleep — would stay untagged indefinitely, leaving
-    // the tag list/selector surfaces incomplete. If the roster has rows but no
-    // tags at all, derive them all once. Guarded to a NO-OP on a normal startup
-    // (tags already present) and on a fresh/empty DB (no players); every player
-    // derives at least one tag, so it never re-fires on subsequent startups.
-    const playerCount = (
-      opened.sqlite.prepare("SELECT count(*) AS n FROM players").get() as { n: number }
-    ).n;
-    if (playerCount > 0) {
-      const tagCount = (
-        opened.sqlite.prepare("SELECT count(*) AS n FROM player_tags").get() as { n: number }
-      ).n;
-      if (tagCount === 0) {
-        syncAllDerivedTags(opened.db, now());
-      }
-    }
+    // Self-healing backfill of derived tags (Phase A of #29). Applying the 0006
+    // migration only CREATES an empty player_tags table; a later Refresh repairs
+    // only ACTIVE, in-season players, so existing inactive players — and everyone
+    // during Offseason Sleep — would stay untagged indefinitely, leaving the tag
+    // list/selector surfaces incomplete. Rather than gate on the WHOLE table being
+    // empty (which permanently skips the rest if a prior backfill crashed after
+    // some players committed, or a first-add's Refresh threw before deriving),
+    // derive tags for every player that currently lacks a source='derived' row.
+    // This resumes a partial run and repairs any straggler; every valid player
+    // derives at least one derived tag, so it is a genuine NO-OP once all are
+    // tagged (and on a fresh/empty DB).
+    syncUntaggedDerivedTags(opened.db, now());
 
     return {
       db: opened.db,

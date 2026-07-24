@@ -1037,6 +1037,14 @@ describe("REST API", () => {
       expect(none.players).toHaveLength(0);
     });
 
+    it("400s a separators-only tags selector rather than listing the whole roster", async () => {
+      await seedPlayer();
+      // `,,,` normalizes to zero tokens: a malformed selector, NOT an absent one —
+      // it must 400, not silently return the full roster.
+      const res = await app().request("/api/players?tags=,,,", { headers: AUTH });
+      expect(res.status).toBe(400);
+    });
+
     it("400s a manual write to a derived namespace and an unknown status value", async () => {
       await seedPlayer();
       const derived = await app().request("/api/players/691185/tags", {

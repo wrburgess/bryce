@@ -97,9 +97,17 @@ const prospectRule: Rule = ({ player }) =>
  * The one stat-derived tag: `level:dsl` when the most-recent Stat Line is in the
  * Dominican Summer League. Reuses `levelAbbrev`, which owns the load-bearing
  * "Dominican Summer League" literal, rather than re-encoding the match here.
+ *
+ * The DSL override applies ONLY to a player whose CURRENT column-derived level is
+ * `rookie` (`players.level='milb'` AND `players.milbLevel='Rookie'`). A promoted
+ * player's latest stored line may still be a DSL game he has not superseded, but
+ * his column level (AA/AAA/MLB) is now authoritative — emitting `level:dsl` there
+ * would let this stat rule discard the correct column level. So it never fires
+ * once the player has moved off Rookie.
  */
-const dslRule: Rule = ({ latestStatLine }) => {
+const dslRule: Rule = ({ player, latestStatLine }) => {
   if (latestStatLine === null) return [];
+  if (!(player.level === "milb" && player.milbLevel === "Rookie")) return [];
   return levelAbbrev(latestStatLine.sportId, latestStatLine.leagueName) === "DSL"
     ? [{ namespace: "level", value: "dsl" }]
     : [];

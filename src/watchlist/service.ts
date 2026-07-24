@@ -175,18 +175,33 @@ export async function addPlayer(deps: WatchlistDeps, personId: number): Promise<
   const { action, player } = await upsertMlbPlayer(deps, personId, nowIso, new Map());
 
   if (action === "updated") {
+    // Heal on re-add: a player left untagged by an earlier failed first-add (its
+    // Refresh threw before deriving) gets his derived tags now, from the
+    // committed identity columns. Idempotent for an already-tagged player; the
+    // update path never touched a tag-relevant column, so this only ADDS.
+    syncDerivedTags(db, player.id, now());
     return { action, player, refresh: null };
   }
 
   // Adding a Player IS his first Refresh (ADR 0030) — unless the pipeline sleeps.
-  const refresh = await runRefreshForPlayer(
-    { db, client, ncaaClient: deps.ncaaClient, now, tz: deps.tz },
-    player.id,
-  );
+  let refresh: FirstRefreshSummary;
+  try {
+    refresh = await runRefreshForPlayer(
+      { db, client, ncaaClient: deps.ncaaClient, now, tz: deps.tz },
+      player.id,
+    );
+  } catch (err) {
+    // The player row is already committed, but a mid-Refresh throw means
+    // refreshPlayer's own syncDerivedTags never ran — derive from the committed
+    // identity columns (best-effort) so a failed first-add is never left
+    // untagged, then rethrow so the caller still sees the failure.
+    syncDerivedTags(db, player.id, now());
+    throw err;
+  }
   // SC1: a completed Refresh already synced tags via refreshPlayer; only derive
   // here when the first Refresh was SKIPPED (Offseason Sleep), so tags still
   // land from the inserted identity columns and we avoid double-derivation.
-  if (refresh === null || refresh.skipped) {
+  if (refresh.skipped) {
     syncDerivedTags(db, player.id, now());
   }
   return { action: "added", player, refresh };
@@ -210,13 +225,24 @@ export async function addNcaaPlayer(
   const { action, player } = await upsertNcaaPlayer(deps, playerSeq, nowIso);
 
   if (action === "updated") {
+    // Heal on re-add (mirrors addPlayer): a previously-untagged NCAA player gets
+    // his derived tags now from the committed identity columns. Idempotent.
+    syncDerivedTags(db, player.id, now());
     return { action, player, refresh: null };
   }
 
-  const refresh = await runRefreshForPlayer({ db, client, ncaaClient, now, tz }, player.id);
+  let refresh: FirstRefreshSummary;
+  try {
+    refresh = await runRefreshForPlayer({ db, client, ncaaClient, now, tz }, player.id);
+  } catch (err) {
+    // Best-effort derive from the committed columns before rethrowing, so a
+    // first-add whose Refresh threw is never left untagged (mirrors addPlayer).
+    syncDerivedTags(db, player.id, now());
+    throw err;
+  }
   // SC1: mirror addPlayer — only derive here when the first Refresh was SKIPPED
   // (Offseason Sleep); a completed Refresh already synced via refreshNcaaPlayer.
-  if (refresh === null || refresh.skipped) {
+  if (refresh.skipped) {
     syncDerivedTags(db, player.id, now());
   }
   return { action: "added", player, refresh };
@@ -449,14 +475,14 @@ export async function batchAddPlayers(
   // Batch-add STAGES identity with NO inline Refresh, so — unlike addPlayer,
   // whose completed first Refresh derives tags — a newly staged player has no
   // derived tags yet. Derive them now from the identity columns just written
-  // (reusing the single captured clock; idempotent, manual tags untouched), so
-  // a batch-added player is not left untagged until the next Refresh. Mirrors
-  // addPlayer's skipped-Refresh branch: only a NEW add needs it — an updated /
-  // re-activated row keeps its tags, and upsert's update path never touches a
-  // tag-relevant column.
+  // (reusing the single captured clock; idempotent, manual tags untouched), so a
+  // batch-added player is not left untagged until the next Refresh. Both `added`
+  // AND `updated` are synced: an `added` needs its first derivation, and an
+  // `updated` re-add heals a player an earlier failed add left untagged
+  // (idempotent when he is already tagged).
   const derivedAt = new Date(nowIso);
   for (const result of entries) {
-    if (result.status === "added") {
+    if (result.status === "added" || result.status === "updated") {
       syncDerivedTags(deps.db, result.player.id, derivedAt);
     }
   }
