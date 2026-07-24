@@ -1101,6 +1101,28 @@ describe("REST API", () => {
       expect(bad.status).toBe(404);
     });
 
+    it("GET /stat-lines?list= excludes a deactivated member's lines (active is the master gate)", async () => {
+      await createList("L");
+      // Two members of L, each with a stat line...
+      const activeMember = await insertPlayer(opened.db, { externalId: 711 });
+      await insertStatLine(opened.db, { playerId: activeMember.id, gameId: 811001 });
+      const goneMember = await insertPlayer(opened.db, { externalId: 712 });
+      await insertStatLine(opened.db, { playerId: goneMember.id, gameId: 811002 });
+      await app().request("/api/lists/L/members", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ players: [{ personId: 711 }, { personId: 712 }] }),
+      });
+      // ...then DEACTIVATE one. His membership row stays, but a named-list scope
+      // selects only ACTIVE members (ADR 0046 decision 2), so his lines must NOT
+      // appear. Without the active filter in the q.list branch this returns both.
+      await opened.db.update(players).set({ active: false }).where(eq(players.id, goneMember.id));
+
+      const res = await app().request("/api/stat-lines?list=L", { headers: AUTH });
+      const body = (await res.json()) as { statLines: Array<{ playerId: number }> };
+      expect(body.statLines.map((s) => s.playerId)).toEqual([activeMember.id]);
+    });
+
     it("GET /stat-lines?list= for an EMPTY list selects zero rows, not all players", async () => {
       await createList("Empty");
       // Stat lines DO exist — but only for players who are NOT in the empty list.

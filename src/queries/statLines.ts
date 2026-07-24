@@ -118,6 +118,12 @@ export async function queryStatLines(db: Db, input: unknown): Promise<StatLineVi
     // and an empty list selects nothing naturally — EXISTS is false with no
     // member rows, so no `1 = 0` special-case is needed.
     const list = await resolveListByName(db, q.list);
+    // A named-list scope selects the list's ACTIVE members — `players.active`
+    // stays the master gate under membership (ADR 0046 decision 2), so a member
+    // who was later deactivated must not leak. The main query already joins
+    // `players` (for the level filter), so require active here alongside the
+    // membership EXISTS.
+    conditions.push(eq(players.active, true));
     conditions.push(
       exists(
         db

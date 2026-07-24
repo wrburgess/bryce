@@ -155,37 +155,34 @@ export async function deleteList(db: Db, name: string, now: Date): Promise<Playe
 
 /** Every live list with its active-member count, ordered by name. */
 export async function listLists(db: Db): Promise<ListSummary[]> {
-  const lists = await db
-    .select()
+  // One constant-size query, never a per-list count (rules/backend.md: no N+1)
+  // and never a materialized `IN (<all list ids>)` (unbounded param cap). LEFT
+  // JOIN so a list with zero members still appears with count 0, and carry the
+  // `players.active = true` gate in the players JOIN's ON clause (not a WHERE)
+  // so a deactivated member is uncounted without dropping its list — active
+  // membership is the master gate (ADR 0046 decision 2). `count(players.id)`
+  // ignores the NULL-padded rows a member-less or deactivated-only list yields.
+  const rows = await db
+    .select({
+      id: playerLists.id,
+      name: playerLists.name,
+      createdAt: playerLists.createdAt,
+      updatedAt: playerLists.updatedAt,
+      memberCount: sql<number>`count(${players.id})`,
+    })
     .from(playerLists)
+    .leftJoin(listMembers, eq(listMembers.listId, playerLists.id))
+    .leftJoin(players, and(eq(players.id, listMembers.playerId), eq(players.active, true)))
     .where(isNull(playerLists.deletedAt))
+    .groupBy(playerLists.id)
     .orderBy(playerLists.name);
-  if (lists.length === 0) return [];
 
-  // One grouped count over the active members of every live list — never a
-  // query per list (rules/backend.md: no N+1).
-  const counts = await db
-    .select({ listId: listMembers.listId, count: sql<number>`count(*)` })
-    .from(listMembers)
-    .innerJoin(players, eq(listMembers.playerId, players.id))
-    .where(
-      and(
-        eq(players.active, true),
-        inArray(
-          listMembers.listId,
-          lists.map((l) => l.id),
-        ),
-      ),
-    )
-    .groupBy(listMembers.listId);
-  const byList = new Map(counts.map((c) => [c.listId, Number(c.count)]));
-
-  return lists.map((l) => ({
-    id: l.id,
-    name: l.name,
-    memberCount: byList.get(l.id) ?? 0,
-    createdAt: l.createdAt,
-    updatedAt: l.updatedAt,
+  return rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    memberCount: Number(r.memberCount),
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
   }));
 }
 
@@ -226,15 +223,36 @@ export interface ListMembershipResult {
   changed: number;
 }
 
-/** Resolve a PlayerRef to its Watch List row, or throw PlayerNotFoundError (as deactivatePlayer does). */
-async function resolvePlayer(db: Db, ref: PlayerRef): Promise<PlayerRow> {
-  const where =
-    typeof ref === "number"
-      ? eq(players.externalId, ref)
-      : eq(players.ncaaPlayerSeq, ref.ncaaPlayerSeq);
-  const row = (await db.select().from(players).where(where))[0];
-  if (row === undefined) throw new PlayerNotFoundError(ref);
-  return row;
+/**
+ * Resolve every PlayerRef to its Watch List row IN INPUT ORDER, in bulk — one
+ * query for the MLB `personId` (externalId) refs and one for the NCAA
+ * `{ncaaPlayerSeq}` refs, never a query per ref (rules/backend.md: no N+1). The
+ * ref set is capped at the boundary, so the two `inArray` lists are bounded.
+ * The first ref that resolves to no player throws PlayerNotFoundError for that
+ * ref (as the prior per-ref loop did), so a bad ref aborts the whole mutation.
+ */
+async function resolvePlayers(db: Db, refs: PlayerRef[]): Promise<PlayerRow[]> {
+  const externalIds = refs.filter((r): r is number => typeof r === "number");
+  const ncaaSeqs = refs
+    .filter((r): r is { ncaaPlayerSeq: number } => typeof r !== "number")
+    .map((r) => r.ncaaPlayerSeq);
+
+  const byExternal = new Map<number, PlayerRow>();
+  if (externalIds.length > 0) {
+    const rows = await db.select().from(players).where(inArray(players.externalId, externalIds));
+    for (const row of rows) if (row.externalId !== null) byExternal.set(row.externalId, row);
+  }
+  const byNcaa = new Map<number, PlayerRow>();
+  if (ncaaSeqs.length > 0) {
+    const rows = await db.select().from(players).where(inArray(players.ncaaPlayerSeq, ncaaSeqs));
+    for (const row of rows) if (row.ncaaPlayerSeq !== null) byNcaa.set(row.ncaaPlayerSeq, row);
+  }
+
+  return refs.map((ref) => {
+    const row = typeof ref === "number" ? byExternal.get(ref) : byNcaa.get(ref.ncaaPlayerSeq);
+    if (row === undefined) throw new PlayerNotFoundError(ref);
+    return row;
+  });
 }
 
 /**
@@ -250,20 +268,19 @@ export async function addToList(
 ): Promise<ListMembershipResult> {
   const list = await resolveListByName(db, name);
   // Resolve EVERY ref before writing anything, so a bad ref aborts the whole add.
-  const rows: PlayerRow[] = [];
-  for (const ref of refs) rows.push(await resolvePlayer(db, ref));
+  const rows = await resolvePlayers(db, refs);
+  if (rows.length === 0) return { list, players: rows, changed: 0 };
 
+  // One bulk insert, never a write per member (rules/backend.md: no N+1). A
+  // re-add of an existing member conflicts on the unique key and is skipped, so
+  // `changed` counts only rows actually newly inserted (idempotent re-add = 0).
   const nowIso = now.toISOString();
-  let changed = 0;
-  for (const player of rows) {
-    const inserted = await db
-      .insert(listMembers)
-      .values({ listId: list.id, playerId: player.id, createdAt: nowIso })
-      .onConflictDoNothing({ target: [listMembers.listId, listMembers.playerId] })
-      .returning();
-    changed += inserted.length;
-  }
-  return { list, players: rows, changed };
+  const inserted = await db
+    .insert(listMembers)
+    .values(rows.map((player) => ({ listId: list.id, playerId: player.id, createdAt: nowIso })))
+    .onConflictDoNothing({ target: [listMembers.listId, listMembers.playerId] })
+    .returning();
+  return { list, players: rows, changed: inserted.length };
 }
 
 /**
@@ -278,18 +295,25 @@ export async function removeFromList(
   _now: Date,
 ): Promise<ListMembershipResult> {
   const list = await resolveListByName(db, name);
-  const rows: PlayerRow[] = [];
-  for (const ref of refs) rows.push(await resolvePlayer(db, ref));
+  const rows = await resolvePlayers(db, refs);
+  if (rows.length === 0) return { list, players: rows, changed: 0 };
 
-  let changed = 0;
-  for (const player of rows) {
-    const deleted = await db
-      .delete(listMembers)
-      .where(and(eq(listMembers.listId, list.id), eq(listMembers.playerId, player.id)))
-      .returning();
-    changed += deleted.length;
-  }
-  return { list, players: rows, changed };
+  // One bulk delete, never a write per member (rules/backend.md: no N+1).
+  // Removing a non-member deletes nothing, so `changed` counts only rows
+  // actually deleted.
+  const deleted = await db
+    .delete(listMembers)
+    .where(
+      and(
+        eq(listMembers.listId, list.id),
+        inArray(
+          listMembers.playerId,
+          rows.map((p) => p.id),
+        ),
+      ),
+    )
+    .returning();
+  return { list, players: rows, changed: deleted.length };
 }
 
 /**
