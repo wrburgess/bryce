@@ -1,11 +1,16 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { BatchAddEntry } from "../api/schemas.js";
 import { BatchAddInputSchema } from "../api/schemas.js";
 import type { Db } from "../db/client.js";
 import type { PlayerRow } from "../db/schema.js";
-import { playerTags, players } from "../db/schema.js";
-import type { PlayerBackupEntry } from "../backup/player-list.js";
+import { listMembers, playerLists, playerTags, players } from "../db/schema.js";
+import type {
+  PlayerBackupEntry,
+  PlayerBackupList,
+  PlayerBackupMember,
+} from "../backup/player-list.js";
 import { canonicalizeName } from "../domain/names.js";
+import { addPlayerIdsToList, resolveListByName } from "../lists/service.js";
 import { hostDate } from "../domain/season.js";
 import { runRefreshForPlayer } from "../jobs/refresh.js";
 import type { MlbClient } from "../mlb/client.js";
@@ -432,6 +437,13 @@ export async function batchAddPlayers(
   // A bad shape aborts the whole call before any network or write (ADR 0045).
   const parsed = BatchAddInputSchema.parse(input);
 
+  // The `list` seam (issue #70 / ADR 0046): a value must name an EXISTING list —
+  // batch-add never creates one — so resolve it up front and fail closed on an
+  // unknown list (UnknownListError) BEFORE any network or write, exactly like the
+  // shape check. Staged players are added to it after resolution below.
+  const list =
+    parsed.list !== undefined ? await resolveListByName(deps.db, parsed.list) : null;
+
   const nowIso = deps.now().toISOString();
   const teamCache: TeamCache = new Map();
   const entries: BatchAddEntryResult[] = [];
@@ -485,6 +497,18 @@ export async function batchAddPlayers(
     if (result.status === "added" || result.status === "updated") {
       syncDerivedTags(deps.db, result.player.id, derivedAt);
     }
+  }
+
+  // Add every successfully staged player to the target list, idempotently. A
+  // membership write is DB-local (no network) and never fails an already-staged
+  // entry, so it happens after the best-effort loop.
+  if (list !== null) {
+    const stagedIds = entries
+      .filter((e): e is Extract<BatchAddEntryResult, { status: "added" | "updated" }> =>
+        e.status === "added" || e.status === "updated",
+      )
+      .map((e) => e.player.id);
+    await addPlayerIdsToList(deps.db, list.id, stagedIds, new Date(nowIso));
   }
 
   const summary: BatchAddSummary = {
@@ -585,6 +609,24 @@ export interface RestorePlayerListSummary {
   total: number;
 }
 
+/**
+ * A v2 backup membership whose player natural id (or list name) does not resolve
+ * against the just-restored state. Aborts the whole import, consistent with the
+ * restore's all-or-nothing strictness (ADR 0046).
+ */
+export class UnresolvedBackupMemberError extends Error {
+  constructor(detail: string) {
+    super(`unresolvable backup membership: ${detail}`);
+    this.name = "UnresolvedBackupMemberError";
+  }
+}
+
+/** The named-list half of a v2 Player List Backup, recreated inside the restore transaction. */
+export interface RestoreListExtras {
+  lists?: PlayerBackupList[];
+  members?: PlayerBackupMember[];
+}
+
 /** The drizzle better-sqlite3 transaction handle (a synchronous transaction). */
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
@@ -607,6 +649,7 @@ export function restorePlayerListBackup(
   db: Db,
   rows: PlayerBackupEntry[],
   now: Date,
+  extras: RestoreListExtras = {},
 ): RestorePlayerListSummary {
   const nowIso = now.toISOString();
 
@@ -741,6 +784,101 @@ export function restorePlayerListBackup(
             .onConflictDoNothing()
             .run();
         }
+      }
+    }
+
+    // Phase 3 — recreate named lists and memberships (v2 backup, ADR 0046),
+    // INSIDE this same all-or-nothing transaction. List recreation is
+    // find-or-create by name (idempotent, mirroring the player upsert): a name
+    // that already names a LIVE list REUSES that list rather than colliding on
+    // the partial unique index and rolling the whole restore back; memberships
+    // are then merged idempotently (a duplicate list_id/player_id is a no-op).
+    // A member whose player natural id (or list name) does not resolve throws and
+    // aborts — consistent with the restore's existing strictness.
+    // Shared list-name resolution memo across BOTH loops below. A `number` is a
+    // resolved live list id; `null` is the memoized "no live list of this name"
+    // sentinel — so a repeated member list name is looked up at most once.
+    const listIdByName = new Map<string, number | null>();
+    for (const list of extras.lists ?? []) {
+      const name = list.name.trim();
+      const live = tx
+        .select()
+        .from(playerLists)
+        .where(and(eq(playerLists.name, name), isNull(playerLists.deletedAt)))
+        .all()[0];
+      if (live !== undefined) {
+        // Reuse an existing live list of the same name (do not insert, do not error).
+        listIdByName.set(name, live.id);
+        continue;
+      }
+      // Insert and read the new row's id straight back via .returning() — no
+      // separate re-SELECT (this is the sync better-sqlite3 tx, so .all() is
+      // synchronous, mirroring the selects above).
+      const created = tx
+        .insert(playerLists)
+        .values({
+          name,
+          createdAt: list.createdAt ?? nowIso,
+          updatedAt: list.updatedAt ?? nowIso,
+        })
+        .returning()
+        .all()[0];
+      if (created === undefined) throw new Error(`list insert failed for ${name}`);
+      listIdByName.set(name, created.id);
+    }
+
+    if ((extras.members ?? []).length > 0) {
+      // Build player natural-id -> id maps from the just-restored state.
+      const allPlayers = tx.select().from(players).all();
+      const byExternal = new Map<number, number>();
+      const byNcaa = new Map<number, number>();
+      for (const p of allPlayers) {
+        if (p.externalId != null) byExternal.set(p.externalId, p.id);
+        if (p.ncaaPlayerSeq != null) byNcaa.set(p.ncaaPlayerSeq, p.id);
+      }
+
+      // Resolve every membership FIRST (a bad list name or player id aborts the
+      // whole restore), then write in one bulk insert — never a write per member
+      // (rules/backend.md: no N+1). List names resolve through the shared
+      // listIdByName memo, so each distinct name is queried at most once across
+      // both the lists loop above and this loop; duplicates are skipped idempotently.
+      const memberValues: { listId: number; playerId: number; createdAt: string }[] = [];
+      for (const member of extras.members ?? []) {
+        const listName = member.list.trim();
+        if (!listIdByName.has(listName)) {
+          // First sighting of this name in the member loop: resolve once and
+          // memoize (null = no live list) so a repeated name never re-queries.
+          const live = tx
+            .select()
+            .from(playerLists)
+            .where(and(eq(playerLists.name, listName), isNull(playerLists.deletedAt)))
+            .all()[0];
+          listIdByName.set(listName, live?.id ?? null);
+        }
+        const listId = listIdByName.get(listName);
+        if (listId == null) {
+          throw new UnresolvedBackupMemberError(`no list named "${listName}"`);
+        }
+        const playerId =
+          member.externalId != null
+            ? byExternal.get(member.externalId)
+            : member.ncaaPlayerSeq != null
+              ? byNcaa.get(member.ncaaPlayerSeq)
+              : undefined;
+        if (playerId === undefined) {
+          const ref =
+            member.externalId != null
+              ? `externalId=${member.externalId}`
+              : `ncaaPlayerSeq=${member.ncaaPlayerSeq}`;
+          throw new UnresolvedBackupMemberError(`no player with ${ref} for list "${listName}"`);
+        }
+        memberValues.push({ listId, playerId, createdAt: nowIso });
+      }
+      if (memberValues.length > 0) {
+        tx.insert(listMembers)
+          .values(memberValues)
+          .onConflictDoNothing({ target: [listMembers.listId, listMembers.playerId] })
+          .run();
       }
     }
 

@@ -14,8 +14,16 @@ import {
 import {
   AmbiguousImportTargetError,
   SplitIdentityConflictError,
+  UnresolvedBackupMemberError,
   restorePlayerListBackup,
 } from "../src/watchlist/service.js";
+import {
+  addToList,
+  createList,
+  deleteList,
+  listLists,
+  listMembersOf,
+} from "../src/lists/service.js";
 import { makeBackupEntry, makeBackupEnvelope, makeTempDir } from "./backup-helpers.js";
 import {
   InjectedFault,
@@ -59,7 +67,7 @@ describe("createPlayerListBackup", () => {
     });
 
     const backup = await createPlayerListBackup(opened.db, fakeClock("2026-07-22T12:00:00Z").now);
-    expect(backup.version).toBe(1);
+    expect(backup.version).toBe(2);
     expect(backup.exportedAt).toBe("2026-07-22T12:00:00.000Z");
     expect(backup.players).toHaveLength(2);
     expect(backup.players[1]).toMatchObject({
@@ -314,13 +322,21 @@ describe("writePlayerListBackupFile", () => {
 });
 
 describe("parsePlayerListBackup: strict validation", () => {
-  it("rejects an absent or wrong version", () => {
+  it("rejects an absent or wrong version (1 and 2 are accepted, #70)", () => {
     expect(() =>
       parsePlayerListBackup(JSON.stringify({ players: [makeBackupEntry()] })),
     ).toThrow(PlayerBackupParseError);
+    // v3 is not a known version.
+    expect(() =>
+      parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 3 }))),
+    ).toThrow(PlayerBackupParseError);
+    // Both v1 and v2 parse.
+    expect(() =>
+      parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 1 }))),
+    ).not.toThrow();
     expect(() =>
       parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 2 }))),
-    ).toThrow(PlayerBackupParseError);
+    ).not.toThrow();
   });
 
   it("rejects unknown keys (strict envelope and rows)", () => {
@@ -364,6 +380,62 @@ describe("parsePlayerListBackup: strict validation", () => {
     ).toThrow(PlayerBackupParseError);
   });
 
+  it("rejects a v2 list name containing a control character (mirrors the live surfaces)", () => {
+    // A crafted backup could otherwise restore a list name with a newline/tab,
+    // reintroducing the forge-extra-lines issue the live path forbids.
+    expect(() =>
+      parsePlayerListBackup(
+        JSON.stringify({
+          ...makeBackupEnvelope([makeBackupEntry()], { version: 2 }),
+          lists: [{ name: "a\nb" }],
+        }),
+      ),
+    ).toThrow(PlayerBackupParseError);
+  });
+
+  it("rejects a v2 member list field containing a control character", () => {
+    expect(() =>
+      parsePlayerListBackup(
+        JSON.stringify({
+          ...makeBackupEnvelope([makeBackupEntry()], { version: 2 }),
+          members: [{ list: "a\tb", externalId: 691185, ncaaPlayerSeq: null }],
+        }),
+      ),
+    ).toThrow(PlayerBackupParseError);
+  });
+
+  it("rejects a version 1 payload that carries lists or members (fail-closed on version)", () => {
+    // A v1 payload claiming named-list data is a version-field lie — list/member
+    // data requires version 2. Both a non-empty `lists` and a non-empty `members`
+    // must be rejected.
+    expect(() =>
+      parsePlayerListBackup(
+        JSON.stringify({
+          ...makeBackupEnvelope([makeBackupEntry()], { version: 1 }),
+          lists: [{ name: "Prospects" }],
+        }),
+      ),
+    ).toThrow(PlayerBackupParseError);
+    expect(() =>
+      parsePlayerListBackup(
+        JSON.stringify({
+          ...makeBackupEnvelope([makeBackupEntry()], { version: 1 }),
+          members: [{ list: "Prospects", externalId: 691185, ncaaPlayerSeq: null }],
+        }),
+      ),
+    ).toThrow(PlayerBackupParseError);
+    // A v1 payload with an EMPTY lists/members array is still fine (players-only).
+    expect(() =>
+      parsePlayerListBackup(
+        JSON.stringify({
+          ...makeBackupEnvelope([makeBackupEntry()], { version: 1 }),
+          lists: [],
+          members: [],
+        }),
+      ),
+    ).not.toThrow();
+  });
+
   it("rejects duplicate natural ids within the payload", () => {
     expect(() =>
       parse([makeBackupEntry({ externalId: 42 }), makeBackupEntry({ externalId: 42 })]),
@@ -378,6 +450,121 @@ describe("parsePlayerListBackup: strict validation", () => {
   it("rejects a payload over the size ceiling before parsing", () => {
     const huge = "a".repeat(MAX_BACKUP_BYTES + 1);
     expect(() => parsePlayerListBackup(huge)).toThrow(/size ceiling/);
+  });
+});
+
+describe("named lists in the backup (v2, #70 / ADR 0046)", () => {
+  let opened: OpenedDb;
+
+  beforeEach(() => {
+    opened = testDb();
+  });
+
+  afterEach(() => {
+    opened.close();
+  });
+
+  it("emits version 2 with live lists and memberships, and round-trips into an empty db", async () => {
+    const mlb = await insertPlayer(opened.db, { externalId: 691185, fullName: "Mlb Guy" });
+    const ncaa = await insertPlayer(opened.db, {
+      externalId: null,
+      ncaaPlayerSeq: 555,
+      level: "ncaa",
+      milbLevel: null,
+      teamName: null,
+      fullName: "Ncaa Guy",
+      schoolName: "LSU",
+    });
+    await createList(opened.db, "Prospects", NOW);
+    await addToList(opened.db, "Prospects", [mlb.externalId!, { ncaaPlayerSeq: 555 }], NOW);
+
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+    expect(backup.version).toBe(2);
+    expect(backup.lists).toEqual([{ name: "Prospects", createdAt: expect.any(String), updatedAt: expect.any(String) }]);
+    expect(backup.members).toHaveLength(2);
+    // The envelope round-trips through the strict parser.
+    expect(() => parsePlayerListBackup(JSON.stringify(backup))).not.toThrow();
+
+    // Restore into a FRESH db recreates players, the list, and both memberships.
+    const dest = testDb();
+    try {
+      const parsed = parsePlayerListBackup(JSON.stringify(backup));
+      restorePlayerListBackup(dest.db, parsed.players, NOW, {
+        lists: parsed.lists,
+        members: parsed.members,
+      });
+      const lists = await listLists(dest.db);
+      expect(lists.map((l) => l.name)).toEqual(["Prospects"]);
+      const members = await listMembersOf(dest.db, "Prospects");
+      expect(members.map((m) => m.fullName).sort()).toEqual(["Mlb Guy", "Ncaa Guy"]);
+      expect(ncaa.ncaaPlayerSeq).toBe(555);
+    } finally {
+      dest.close();
+    }
+  });
+
+  it("excludes a soft-deleted list from the backup", async () => {
+    const p = await insertPlayer(opened.db, { externalId: 700 });
+    await createList(opened.db, "Live", NOW);
+    await createList(opened.db, "Gone", NOW);
+    await addToList(opened.db, "Gone", [p.externalId!], NOW);
+    await deleteList(opened.db, "Gone", NOW);
+
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+    expect(backup.lists?.map((l) => l.name)).toEqual(["Live"]);
+    // The deleted list's membership is not carried either.
+    expect(backup.members).toEqual([]);
+  });
+
+  it("still restores a v1 payload (no lists/members) with no lists created", async () => {
+    const parsed = parsePlayerListBackup(
+      JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 1 })),
+    );
+    const summary = restorePlayerListBackup(opened.db, parsed.players, NOW, {
+      lists: parsed.lists,
+      members: parsed.members,
+    });
+    expect(summary.inserted).toBe(1);
+    expect(await listLists(opened.db)).toEqual([]);
+  });
+
+  it("aborts the whole import when a membership's player natural id does not resolve", async () => {
+    const rows = parse([makeBackupEntry({ externalId: 691185 })]);
+    expect(() =>
+      restorePlayerListBackup(opened.db, rows, NOW, {
+        lists: [{ name: "Prospects" }],
+        // References a player NOT in the payload.
+        members: [{ list: "Prospects", externalId: 999999, ncaaPlayerSeq: null }],
+      }),
+    ).toThrow(UnresolvedBackupMemberError);
+
+    // The transaction rolled back entirely: no players, no lists persisted.
+    expect(await opened.db.select().from(players)).toHaveLength(0);
+    expect(await listLists(opened.db)).toEqual([]);
+  });
+
+  it("restore reuses a pre-existing live list of the same name and merges memberships (idempotent, no rollback)", async () => {
+    // A live list "L" already holds its own member (a DIFFERENT player).
+    const existing = await insertPlayer(opened.db, { externalId: 100, fullName: "Existing Member" });
+    await createList(opened.db, "L", NOW);
+    await addToList(opened.db, "L", [existing.externalId!], NOW);
+
+    // The v2 backup carries a list ALSO named "L" and a backed-up member (player 200).
+    const rows = parse([makeBackupEntry({ externalId: 200, fullName: "Backup Member" })]);
+    const summary = restorePlayerListBackup(opened.db, rows, NOW, {
+      lists: [{ name: "L" }],
+      members: [{ list: "L", externalId: 200, ncaaPlayerSeq: null }],
+    });
+
+    // If list recreation still INSERTed, the name would collide on the partial
+    // unique index and roll the WHOLE restore back — the player would be lost.
+    // Instead the player restore commits and the list is reused.
+    expect(summary).toEqual({ inserted: 1, updated: 0, total: 1 });
+    const lists = await listLists(opened.db);
+    expect(lists.map((l) => l.name)).toEqual(["L"]); // reused, not duplicated
+    // Both the original and the backed-up member are present (memberships merged).
+    const members = await listMembersOf(opened.db, "L");
+    expect(members.map((m) => m.externalId).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([100, 200]);
   });
 });
 

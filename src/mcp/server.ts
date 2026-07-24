@@ -40,6 +40,19 @@ import {
   searchPlayers,
 } from "../watchlist/service.js";
 import {
+  BlankListNameError,
+  DuplicateListNameError,
+  UnknownListError,
+  addToList,
+  createList,
+  deleteList,
+  listLists,
+  listMembersById,
+  removeFromList,
+  renameList,
+  resolveListByName,
+} from "../lists/service.js";
+import {
   AddNcaaPlayerInputSchema,
   AddPlayerInputSchema,
   BatchAddInputBase,
@@ -49,6 +62,12 @@ import {
   DigestInputShape,
   DigestPreviewInputSchema,
   DigestPreviewInputShape,
+  ListMembersMutateSchema,
+  ListMembersMutateShape,
+  ListNameInputSchema,
+  ListNameInputShape,
+  ListRenameInputSchema,
+  ListRenameInputShape,
   PlayerSearchInputSchema,
   PlayersListInputSchema,
   RefreshInputSchema,
@@ -63,8 +82,13 @@ import {
   TagWriteInputShape,
 } from "../api/schemas.js";
 
+/** Project a validated member reference into the service's PlayerRef union. */
+function toPlayerRef(ref: { personId?: number; ncaaPlayerSeq?: number }): PlayerRef {
+  return ref.personId !== undefined ? ref.personId : { ncaaPlayerSeq: ref.ncaaPlayerSeq! };
+}
+
 /**
- * The MCP server — Bryce's primary interface (ADR 0027). Fifteen tools over the
+ * The MCP server — Bryce's primary interface (ADR 0027). Twenty-two tools over the
  * same service layer and Zod schemas the REST routes use; every result is
  * JSON, returned both as structuredContent and as a text part for clients
  * that read only text. Mounted at /mcp behind the bearer middleware.
@@ -98,6 +122,9 @@ function errorResult(err: unknown): CallToolResult {
       : err instanceof UnknownPersonError ||
           err instanceof UnknownNcaaPlayerError ||
           err instanceof PlayerNotFoundError ||
+          err instanceof UnknownListError ||
+          err instanceof DuplicateListNameError ||
+          err instanceof BlankListNameError ||
           err instanceof ManualWriteToDerivedNamespaceError ||
           err instanceof UnknownTagError ||
           err instanceof ReadonlyQueryError ||
@@ -260,7 +287,9 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     (args) =>
       guarded(async () => {
         const input = DigestPreviewInputSchema.parse(args);
-        const assembly = await assembleDigest(deps.db, { ...deps, spec: input.window });
+        const listId =
+          input.list !== undefined ? (await resolveListByName(deps.db, input.list)).id : undefined;
+        const assembly = await assembleDigest(deps.db, { ...deps, spec: input.window, listId });
         if (input.format === "html") return textResult(renderDigestHtmlDocument(assembly));
         if (input.format === "md") return textResult(renderDigestMarkdown(assembly));
         if (input.format === "csv") {
@@ -289,6 +318,8 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     (args) =>
       guarded(async () => {
         const input = DigestInputSchema.parse(args);
+        const listId =
+          input.list !== undefined ? (await resolveListByName(deps.db, input.list)).id : undefined;
         const result = await runDigest({
           db: deps.db,
           mailer: deps.mailer,
@@ -298,6 +329,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
           from: deps.digestFrom,
           spec: input.window,
           force: input.force,
+          listId,
         });
         return jsonResult({ ...result });
       }),
@@ -415,6 +447,117 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     },
     () =>
       guarded(async () => jsonResult({ ...(await healthSnapshot(deps.db, deps.now(), deps.tz)) })),
+  );
+
+  // --- Named player lists (issue #70 / ADR 0046) ---------------------------
+
+  server.registerTool(
+    "lists_list",
+    {
+      description:
+        "List every named player list with its active-member count. A named list scopes a digest or stat-line query to its active members; membership sits UNDER players.active (a deactivated player never appears). Read-only.",
+      inputSchema: {},
+    },
+    () => guarded(async () => jsonResult({ lists: await listLists(deps.db) })),
+  );
+
+  server.registerTool(
+    "list_create",
+    {
+      description:
+        "Create a new named player list. The name is trimmed, non-blank, and case-sensitively unique among live lists; a duplicate name is rejected. Creating a list adds no members — use list_add_players.",
+      inputSchema: ListNameInputShape,
+    },
+    (args) =>
+      guarded(async () => {
+        const input = ListNameInputSchema.parse(args);
+        return jsonResult({ list: await createList(deps.db, input.name, deps.now()) });
+      }),
+  );
+
+  server.registerTool(
+    "list_rename",
+    {
+      description:
+        "Rename a live named list. An unknown list is rejected, as is a new name that collides with another live list.",
+      inputSchema: ListRenameInputShape,
+    },
+    (args) =>
+      guarded(async () => {
+        const input = ListRenameInputSchema.parse(args);
+        return jsonResult({
+          list: await renameList(deps.db, input.name, input.newName, deps.now()),
+        });
+      }),
+  );
+
+  server.registerTool(
+    "list_delete",
+    {
+      description:
+        "Soft-delete a named list: it disappears from lists_list and can no longer scope a digest/query, but its curation intent is recoverable and its NAME frees for reuse. Membership rows are left in place. An unknown list is rejected.",
+      inputSchema: ListNameInputShape,
+    },
+    (args) =>
+      guarded(async () => {
+        const input = ListNameInputSchema.parse(args);
+        return jsonResult({ list: await deleteList(deps.db, input.name, deps.now()) });
+      }),
+  );
+
+  server.registerTool(
+    "list_members",
+    {
+      description:
+        "Show a named list's ACTIVE members, ordered by player id. A deactivated member is excluded (players.active stays the master gate). An unknown list is rejected.",
+      inputSchema: ListNameInputShape,
+    },
+    (args) =>
+      guarded(async () => {
+        const input = ListNameInputSchema.parse(args);
+        const list = await resolveListByName(deps.db, input.name);
+        return jsonResult({ list, members: await listMembersById(deps.db, list.id) });
+      }),
+  );
+
+  server.registerTool(
+    "list_add_players",
+    {
+      description:
+        "Add players to a named list, idempotently (re-adding an existing member is a no-op). Each player reference is exactly one of personId (MLB/MiLB) or ncaaPlayerSeq (NCAA). An unknown list, or a reference to a player not on the Watch List, is rejected and nothing is added.",
+      inputSchema: ListMembersMutateShape,
+    },
+    (args) =>
+      guarded(async () => {
+        const input = ListMembersMutateSchema.parse(args);
+        const result = await addToList(
+          deps.db,
+          input.name,
+          input.players.map(toPlayerRef),
+          deps.now(),
+        );
+        return jsonResult({ list: result.list, added: result.changed, players: result.players });
+      }),
+  );
+
+  server.registerTool(
+    "list_remove_players",
+    {
+      description:
+        "Remove players from a named list (hard-deletes the membership rows; the players and their stats are untouched). Removing a non-member is a no-op. Each reference is exactly one of personId or ncaaPlayerSeq. An unknown list, or a reference to a player not on the Watch List, is rejected.",
+      inputSchema: ListMembersMutateShape,
+    },
+    (args) =>
+      guarded(async () => {
+        const input = ListMembersMutateSchema.parse(args);
+        const result = await removeFromList(
+          deps.db,
+          input.name,
+          input.players.map(toPlayerRef),
+          deps.now(),
+        );
+        return jsonResult({ list: result.list, removed: result.changed, players: result.players });
+      }),
   );
 
   return server;
