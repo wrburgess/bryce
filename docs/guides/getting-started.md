@@ -55,6 +55,12 @@ cd bryce
 npm install
 ```
 
+Activate the project-local command for interactive use:
+
+```bash
+npm link
+```
+
 This reads `package.json` and downloads every dependency into `node_modules/` (a minute or two on
 first run; it prints a summary like `added 300 packages` at the end). Then activate the repo's
 git hooks once:
@@ -122,7 +128,7 @@ Bryce ships with an **empty watch list**; it only tracks players you add.
 **MLB / minor-league players** — search by name:
 
 ```bash
-npm run seed -- add --search "Jackson Holliday"
+bryce seed add --search "Jackson Holliday"
 ```
 
 If several players match, it prints a numbered list; re-run with `--pick` to choose one:
@@ -157,7 +163,7 @@ npm run seed -- deactivate --ncaa-seq 2649785
 ## 7. Run a Refresh and send your first Digest
 
 ```bash
-npm run refresh
+bryce refresh
 ```
 
 Re-pulls every active player's full season game log and stores it. It's idempotent — running it

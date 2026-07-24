@@ -1,7 +1,8 @@
 # CLI Reference
 
-The command-line entry points to Bryce's pipeline, run as npm scripts on the host (a Mac with Node
-22). Each is a thin presenter over the same service layer the [REST API](../api/README.md) and
+The command-line entry points to Bryce's pipeline. Activate the project-local executable once with
+`npm link`, then run `bryce …` from any directory. The executable resolves its own project-local
+TypeScript runtime; it does not require a global `tsx`. Each is a thin presenter over the same service layer the [REST API](../api/README.md) and
 [MCP tools](../mcp/README.md) use. Each job's **summary** is a deterministic `key=value` line and
 every command exits non-zero on failure — but the output is not purely ASCII `key=value`: `digest`
 with `MAILER_PROVIDER=console` prints the full rendered email above its summary, and `seed`/`list`
@@ -11,13 +12,14 @@ UTF-8 — a deliberate policy scoping the ASCII-safe-stdout rule to machine outp
 **Player**, **Refresh**, **Digest**, **Window**, **Offseason Sleep** — are defined in
 [`docs/domain/CONTEXT.md`](../domain/CONTEXT.md).
 
-There is no `--help` handler: this page is the reference. Arguments after `npm run <script>` must
-follow a `--` separator so npm forwards them to the script rather than consuming them itself.
+Built-in help is the canonical source for command syntax and supported options: use `bryce help`,
+`bryce help players lists`, or `bryce digest --help`. This page is the deeper operational reference.
+Existing `npm run …` scripts remain migration-compatible; arguments after one must follow `--`.
 
 ## `refresh` — re-ingest the current season
 
 ```sh
-npm run refresh
+bryce refresh
 ```
 
 Re-ingests the **full current season** game log for every active Player and upserts it idempotently
@@ -28,10 +30,10 @@ time. Takes **no arguments**. During **Offseason Sleep** it exits without any AP
 ## `digest` — build and send a windowed Digest
 
 ```sh
-npm run digest                       # default 1d window
-npm run digest -- --window 7d        # space form
-npm run digest -- --window=14d       # equals form
-npm run digest -- --force            # daily-slot test replay
+bryce digest                         # default 1d window
+bryce digest -w 7d                   # short alias
+bryce digest --window=14d            # equals form
+bryce digest --force                 # daily-slot test replay
 ```
 
 Builds the Digest for a **Window** and sends it through the configured mailer. Writes no stat-line

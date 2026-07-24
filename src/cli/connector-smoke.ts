@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { loadDotEnv } from "../env.js";
-import { isMain } from "./main.js";
+import { exitAfterDrain, isMain } from "./main.js";
 
 /**
  * Connector smoke diagnostic (issue #37): drives the REAL MCP SDK client over
@@ -542,7 +542,7 @@ export function createRealConnector(fetchImpl: SmokeFetch): McpConnector {
   };
 }
 
-export async function main(): Promise<number> {
+export async function main(argv = process.argv.slice(2)): Promise<number> {
   loadDotEnv();
   const io: SmokeIo = {
     write: (line) => process.stdout.write(`${line}\n`),
@@ -551,7 +551,7 @@ export async function main(): Promise<number> {
   const safeFetch = makeSafeFetch((url, init) => fetch(url, init));
   return runSmoke({
     env: process.env,
-    argv: process.argv.slice(2),
+    argv,
     io,
     fetchImpl: safeFetch,
     connectMcp: createRealConnector(safeFetch),
@@ -560,7 +560,7 @@ export async function main(): Promise<number> {
 
 if (isMain(import.meta.url)) {
   main()
-    .then((code) => process.exit(code))
+    .then(exitAfterDrain)
     .catch((err: unknown) => {
       // Route even the top-level failure through the same secret redactor as
       // runSmoke, so no configured secret value can ever reach stderr.
@@ -572,6 +572,6 @@ if (isMain(import.meta.url)) {
       const message = err instanceof Error ? err.message : String(err);
       // Same order as runSmoke: redact secrets, then ASCII-normalize.
       process.stderr.write(`${toAscii(sanitize(`error: ${message}`))}\n`);
-      process.exit(1);
+      return exitAfterDrain(1);
     });
 }

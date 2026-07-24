@@ -1,5 +1,10 @@
 # Running Bryce (MLB/MiLB/NCAA pipeline + MCP/REST server)
 
+For interactive administration, activate the local command once with `npm link` and use `bryce …`.
+Keep the existing `npm run …` form in launchd plists: launchd has a deliberately minimal PATH.
+Where a direct executable is needed, use its absolute project path (for example
+`/Users/YOU/code/bryce/bin/bryce`).
+
 How to run the daily pipeline on its intended host: a Mac (laptop or mini) with Node 22, launchd
 for scheduling, and optional Litestream replication + Cloudflare Tunnel exposure
 ([ADR 0028](../adr/0028-local-macbook-hosting-cloudflare-tunnel.md)). The domain language used

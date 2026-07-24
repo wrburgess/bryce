@@ -1,0 +1,13 @@
+#!/usr/bin/env node
+// The bin target stays JavaScript so `npm link` works from any directory; tsx is
+// resolved from this package, never assumed to be globally installed.
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const require = createRequire(import.meta.url);
+const here = dirname(fileURLToPath(import.meta.url));
+const child = spawn(process.execPath, ["--import", require.resolve("tsx/esm"), resolve(here, "../src/cli/router.ts"), ...process.argv.slice(2)], { stdio: "inherit" });
+child.on("error", (error) => { process.stderr.write(`error: ${error.message}\n`); process.exitCode = 1; });
+child.on("exit", (code, signal) => { process.exitCode = code ?? (signal === null ? 0 : 1); });

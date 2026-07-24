@@ -17,7 +17,7 @@ import {
   renameList,
   resolveListByName,
 } from "../lists/service.js";
-import { isMain } from "./main.js";
+import { exitAfterDrain, isMain } from "./main.js";
 
 /**
  * Named-list CLI (issue #70 / ADR 0046): a thin presenter over the list service
@@ -198,7 +198,7 @@ async function runShow(flags: Map<string, string>, deps: ListsDeps): Promise<num
   return 0;
 }
 
-export async function main(): Promise<number> {
+export async function main(argv = process.argv.slice(2)): Promise<number> {
   loadDotEnv();
   const config = loadConfig();
   const { db, close } = await startupDb(config.databasePath, {
@@ -206,7 +206,7 @@ export async function main(): Promise<number> {
     keepLast: config.backupKeepLast,
   });
   try {
-    return await runLists(process.argv.slice(2), {
+    return await runLists(argv, {
       db,
       now: () => new Date(),
       write: (line) => process.stdout.write(`${line}\n`),
@@ -219,9 +219,9 @@ export async function main(): Promise<number> {
 
 if (isMain(import.meta.url)) {
   main()
-    .then((code) => process.exit(code))
+    .then(exitAfterDrain)
     .catch((err: unknown) => {
       process.stderr.write(`error=${err instanceof Error ? err.message : String(err)}\n`);
-      process.exit(1);
+      return exitAfterDrain(1);
     });
 }

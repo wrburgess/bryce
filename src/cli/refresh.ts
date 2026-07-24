@@ -5,7 +5,7 @@ import { startupDb } from "../db/startup.js";
 import { runRefresh } from "../jobs/refresh.js";
 import { MlbClient } from "../mlb/client.js";
 import { NcaaClient } from "../ncaa/client.js";
-import { isMain } from "./main.js";
+import { exitAfterDrain, isMain } from "./main.js";
 
 /**
  * The refresh CLI: `npm run refresh`. A thin presenter over `runRefresh`,
@@ -69,7 +69,11 @@ export async function runRefreshCli(deps: RefreshCliDeps): Promise<number> {
   return summary.status === "failed" ? 1 : 0;
 }
 
-export async function main(): Promise<number> {
+export async function main(argv = process.argv.slice(2)): Promise<number> {
+  if (argv.length > 0) {
+    process.stderr.write(`error: refresh takes no arguments; got ${argv.join(" ")}\n`);
+    return 1;
+  }
   loadDotEnv();
   const config = loadConfig();
   const { db, close } = await startupDb(config.databasePath, {
@@ -99,11 +103,9 @@ if (isMain(import.meta.url)) {
   // closed the db, so nothing keeps the event loop alive — Node drains stdio and
   // then exits with process.exitCode on its own (P2).
   main()
-    .then((code) => {
-      process.exitCode = code;
-    })
+    .then(exitAfterDrain)
     .catch((err: unknown) => {
-      process.exitCode = 1;
       process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
+      return exitAfterDrain(1);
     });
 }
