@@ -23,6 +23,15 @@
 // at `connect` before Node dials, and no provider issues a data-carrying request
 // without a connect.
 //
+// CUSTOM DNS LOOKUP (fail closed by construction): a caller-supplied `options.lookup`
+// could resolve an allowed NAME (`localhost`, an omitted host, …) to a public IP that Node
+// then dials directly. The guard cannot verify an arbitrary resolver without cloning the
+// caller's options to interpose a re-validating wrapper — a clone that proved impossible to
+// get right across every option shape (frozen, prototype-backed, own-enumerable spreads,
+// Proxy get-traps). So the guard REFUSES the resolver: a connect to a NAME carrying a custom
+// `lookup` is BLOCKED and recorded by name, never cloned or mutated. Only a loopback IP
+// LITERAL — which Node never routes through DNS — keeps its custom lookup, as dead code.
+//
 // IMPLEMENTATION NOTE: Node core `net`/`tls` exports are mutable at runtime (unlike
 // read-only ESM namespace bindings), so the interceptors are patched in place on the
 // real module objects (obtained via `createRequire`). Install is idempotent via a
@@ -229,106 +238,76 @@ function connectTarget(args: unknown[]): { host: string | undefined; port: numbe
   return { host: undefined, port: null, path: undefined };
 }
 
-/** Throws synchronously for a non-loopback socket target; returns for allowed ones. */
+/**
+ * Throws synchronously for a blocked socket target; returns for allowed ones.
+ *
+ * Fail closed by construction on custom DNS resolvers. The guard cannot verify what an
+ * arbitrary `options.lookup` will hand back without cloning the caller's options to slip in
+ * a re-validating wrapper — and that clone proved impossible to get right across every option
+ * shape (frozen objects, prototype-backed options, own-enumerable `{ ...opts }` spreads, Proxy
+ * get-traps). So the guard REFUSES the resolver instead: any connect to an allowed NAME that
+ * also carries a custom `lookup` is BLOCKED and recorded by NAME — never cloned, wrapped, or
+ * mutated. The sole exception is a genuine loopback IP LITERAL, which Node never routes through
+ * DNS (a custom `lookup` on a literal is dead code), so it stays allowed. A connect with no
+ * custom lookup keeps the original loopback-allow / non-loopback-block behavior exactly.
+ */
 function guardSocketArgs(args: unknown[]): void {
   const { host, port, path } = connectTarget(args);
   if (path !== undefined) return; // unix socket / pipe — no host, allowed
   // A TCP connect that OMITS the host (undefined/empty but carries a port) defaults to
-  // `localhost` in Node — and Node still runs any custom `lookup` against that implicit
-  // name. Resolve the omission to the loopback NAME `localhost` *before* the lookup check
-  // so the hardening below applies; otherwise a custom lookup on an omitted-host connect
-  // could resolve the implicit localhost to a public IP that Node dials unrecorded (Delta-1).
+  // `localhost` in Node. Resolve the omission to the loopback NAME `localhost` up front so the
+  // custom-lookup refusal below covers the implicit-localhost case too (Delta-1); otherwise a
+  // custom lookup on an omitted-host connect could resolve the implicit localhost to a public
+  // IP that Node dials unrecorded.
   let effectiveHost = host;
   if ((host === undefined || host === "") && port !== null) {
     effectiveHost = "localhost";
   }
+  // A custom `lookup` on anything but a loopback IP LITERAL is REFUSED: the guard can neither
+  // verify nor safely intercept what an arbitrary resolver returns (that is the cloning trap we
+  // deleted), so it fails closed and records the attempt by the NAME the caller supplied — we
+  // block BEFORE any resolution, so there is no resolved address to record. An IP literal is
+  // exempt because Node short-circuits DNS for it, so the lookup never runs and cannot smuggle
+  // anything. This blocks an allowed name (e.g. `localhost`) it previously waved through, which
+  // is the intended fail-closed inversion.
+  if (hasCustomLookup(args) && !isLoopbackIpLiteral(effectiveHost)) {
+    const normHost = normalizeHost((effectiveHost ?? "localhost") as string);
+    record({ surface: "socket", host: normHost, port });
+    throw new NetworkBlockedError(
+      `Blocked socket egress: refusing an unverifiable custom lookup on ${normHost}:${port ?? "?"}`,
+    );
+  }
   if (isLoopback(effectiveHost)) {
-    // Allowed because the host is loopback/absent. But an allowed *name* (not an IP
-    // literal) still goes through DNS: a caller-supplied `options.lookup` could resolve
-    // it to a non-loopback address that Node then dials directly, never re-entering this
-    // wrapper. Harden any such lookup so every resolved address is re-validated.
-    hardenCustomLookup(args, effectiveHost, port);
-    return;
+    return; // loopback name or IP literal, no custom lookup — allowed, unrecorded
   }
   const normHost = normalizeHost(effectiveHost as string);
   record({ surface: "socket", host: normHost, port });
   throw new NetworkBlockedError(`Blocked socket egress to ${normHost}:${port ?? "?"}`);
 }
 
-type LookupCallback = (err: Error | null, address?: unknown, family?: number) => void;
-type LookupFn = (hostname: string, options: unknown, callback: LookupCallback) => void;
-
-/** Custom `lookup` fns we've already wrapped, so a re-entrant connect never stacks wrappers. */
-const guardedLookups = new WeakSet<object>();
+/**
+ * True when `args[0]` is an options object carrying a custom `lookup` function. A plain
+ * property read that honors the prototype chain (matching how Node itself reads options) —
+ * never a write, so a frozen or prototype-backed options object is safe to inspect.
+ */
+function hasCustomLookup(args: unknown[]): boolean {
+  const first = args[0];
+  if (typeof first !== "object" || first === null) return false;
+  const opts = first as { lookup?: unknown };
+  return typeof opts.lookup === "function";
+}
 
 /**
- * Close the "resolve-an-allowed-name-to-a-public-IP" bypass (issue #25). When a connect
- * is allowed only because the host is an allowed NAME (not an IP literal) and the caller
- * supplied a custom DNS `lookup`, hand the original connect a DERIVED copy of the options
- * whose `lookup` is a wrapper that re-validates EVERY resolved address through `isLoopback`
- * (never mutating the caller's own object — it may be frozen). A non-loopback result is
- * recorded as a redacted `socket` attempt (the resolved IP — never the name, MF7) and the
- * connection is failed closed, instead of Node silently dialing the smuggled address.
- * IP literals never trigger DNS, and a connect without a custom lookup is left untouched.
+ * True only for a genuine loopback IP LITERAL (`127/8`, `::1`, `::ffff:127.x`, bracketed or
+ * not). Node short-circuits DNS for an IP literal, so a custom `lookup` on one is dead code and
+ * stays allowed; every NAME (including `localhost` and the omitted→localhost case) is treated as
+ * re-resolvable and refused when it carries a custom lookup.
  */
-function hardenCustomLookup(args: unknown[], host: string | undefined, port: number | null): void {
-  if (host === undefined || netModule.isIP(host) !== 0) return; // IP literal → no DNS lookup
-  const first = args[0];
-  if (typeof first !== "object" || first === null) return;
-  const opts = first as { lookup?: unknown };
-  if (typeof opts.lookup !== "function") return;
-  const originalLookup = opts.lookup as LookupFn;
-  if (guardedLookups.has(originalLookup)) return; // already hardened — don't re-wrap
-  const guardedLookup: LookupFn = function (hostname, lookupOptions, callback): void {
-    originalLookup(hostname, lookupOptions, (err, address, family) => {
-      if (err) {
-        callback(err, address, family);
-        return;
-      }
-      // Node uses two callback shapes: (err, address, family) and — when the resolver
-      // is asked with `{ all: true }` (Node's default connect path) — (err, [{ address,
-      // family }, ...]). Validate whichever came back; a single leak fails the connect.
-      const resolved: unknown[] = Array.isArray(address) ? address : [address];
-      for (const entry of resolved) {
-        let addr: string | undefined;
-        if (typeof entry === "string") addr = entry;
-        else if (typeof entry === "object" && entry !== null) {
-          const value = (entry as { address?: unknown }).address;
-          addr = typeof value === "string" ? value : undefined;
-        }
-        if (addr !== undefined && !isLoopback(addr)) {
-          const normAddr = normalizeHost(addr);
-          record({ surface: "socket", host: normAddr, port });
-          callback(new NetworkBlockedError(`Blocked socket egress to ${normAddr}:${port ?? "?"}`));
-          return;
-        }
-      }
-      callback(err, address, family);
-    });
-  };
-  guardedLookups.add(guardedLookup);
-  // Hand the original connect a DERIVED options object that overrides only `lookup`, without
-  // mutating the caller's own object. The three downstream Node APIs read options TWO different
-  // ways, so the copy must satisfy BOTH:
-  //   • `net.connect` reads the target via PROPERTY ACCESS (`options.host`) — the prototype chain
-  //     is honored, so a prototype-backed `opts` (`Object.create({ host, port, lookup })`) must
-  //     keep resolving through inheritance (D3).
-  //   • `tls.connect` and the `net.Socket` constructor copy options with an OWN-ENUMERABLE spread
-  //     (`{ ...opts }`) — anything behind a prototype is LOST: host/port/certs make tls throw
-  //     `ERR_MISSING_ARGS`, and `signal`/`keepAlive` are silently dropped (D4).
-  // `getOwnPropertyDescriptors(opts)` copies every OWN property (enumerable AND non-enumerable)
-  // WITH its descriptor, and `getPrototypeOf(opts)` preserves the chain, so `wrapped` exposes the
-  // caller's own props as its OWN props (surviving the spread) AND still inherits the rest
-  // (surviving property access). A shallow spread `{ ...opts }` dropped inherited/non-enumerable
-  // fields (D3); `Object.create(opts)` parked the caller's own props behind the prototype where the
-  // spread could not see them (D4) — this descriptor+prototype copy ends both failure modes.
-  // Overriding `descriptors.lookup` BEFORE `Object.create` replaces that entry in the descriptor
-  // map, so even a FROZEN `opts` (whose own `lookup` descriptor is non-writable/non-configurable)
-  // is handled without ever writing to the caller's object (Delta-2).
-  const descriptors = Object.getOwnPropertyDescriptors(opts);
-  descriptors.lookup = { value: guardedLookup, writable: true, enumerable: true, configurable: true };
-  const wrapped = Object.create(Object.getPrototypeOf(opts), descriptors) as typeof opts;
-  args[0] = wrapped;
+function isLoopbackIpLiteral(host: string | undefined): boolean {
+  if (host === undefined) return false;
+  let h = host.toLowerCase();
+  if (h.startsWith("[") && h.endsWith("]")) h = h.slice(1, -1);
+  return netModule.isIP(h) !== 0 && isLoopback(h);
 }
 
 function makeGuardedConnect<F>(original: F): F {

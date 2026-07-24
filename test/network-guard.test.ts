@@ -259,11 +259,13 @@ describe("loopback allow-list is IP-literal-exact, not a textual 127. prefix (P1
   });
 });
 
-describe("a custom DNS lookup cannot smuggle egress past an allowed name (P2)", () => {
+describe("a custom DNS lookup on an allowed name is REFUSED — fail closed by construction", () => {
   /**
-   * A fake resolver that maps any name to `addr`, honoring Node's `all` option. Node's
-   * default connect path calls `lookup` with `{ all: true }` and expects an array shape,
-   * so a real custom resolver must handle both — this mirrors that contract.
+   * A fake resolver that maps any name to `addr`. Under the fail-closed rule the guard blocks
+   * a NAME carrying a custom lookup BEFORE any resolution runs, so what this returns is
+   * irrelevant for a name — the point is that a custom `lookup` is present at all. It still
+   * honors Node's `all`-option contract for the one case Node actually runs it: a loopback IP
+   * LITERAL, which Node never re-resolves anyway.
    */
   function fixedLookup(addr: string): net.LookupFunction {
     const family = net.isIP(addr) || 4;
@@ -288,185 +290,114 @@ describe("a custom DNS lookup cannot smuggle egress past an allowed name (P2)", 
     });
   }
 
-  /**
-   * Like `settle`, for the TLS surface: resolves the error (or a SYNCHRONOUS throw) on
-   * failure, or null on `secureConnect`. The sync-throw catch matters for the D4 regression:
-   * when the hardening parks host/port behind a prototype, `tls.connect` throws
-   * `ERR_MISSING_ARGS` synchronously before any resolver runs.
-   */
-  function settleTls(options: tls.ConnectionOptions): Promise<Error | null> {
-    return new Promise<Error | null>((resolve) => {
-      let socket: tls.TLSSocket;
-      try {
-        socket = tls.connect(options);
-      } catch (err) {
-        resolve(err as Error);
-        return;
-      }
-      socket.on("error", (err) => {
-        socket.destroy();
-        resolve(err);
-      });
-      socket.on("secureConnect", () => {
-        socket.destroy();
-        resolve(null);
-      });
-    });
-  }
+  // --- The fail-closed inversion: a custom lookup on an allowed NAME is now BLOCKED, recorded
+  // by the NAME the caller supplied (we block before resolution — there is no resolved address),
+  // regardless of what the resolver would have returned. The block is a SYNCHRONOUS throw from
+  // `connect`, so these assert `toThrow` directly. ---
 
-  it("blocks + records the resolved IP when a custom lookup returns a non-loopback address", async () => {
-    // "localhost" is an allowed NAME, but the resolver hands back a public IP; the guard
-    // must re-validate the resolved address and fail closed, recording the resolved IP.
-    const settled = await settle({ host: "localhost", port: 443, lookup: fixedLookup("8.8.8.8") });
-    expect(settled).toBeInstanceOf(NetworkBlockedError);
-    expect(takeAttempts()).toEqual([{ surface: "socket", host: "8.8.8.8", port: 443 }]);
+  it("blocks + records a custom lookup on the allowed name `localhost` — recorded by name, exactly once", () => {
+    // Formerly ALLOWED (the resolver returned 127.0.0.1); now refused by construction. The
+    // single-element record also proves the `net.connect` → `Socket.prototype.connect` double
+    // dispatch does not double-count: the outer wrapper throws before the inner one runs.
+    expect(() =>
+      net.connect({ host: "localhost", port: 443, lookup: fixedLookup("127.0.0.1") }),
+    ).toThrow(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "localhost", port: 443 }]);
   });
 
-  it("still allows a custom lookup that resolves an allowed name to loopback (unrecorded)", async () => {
-    // Positive control: legitimate loopback resolution through a custom lookup must
-    // connect to the in-process server and leave the attempts buffer empty.
-    const server = await startLoopbackServer((_req, res) => res.end("ok"));
-    const port = Number(new URL(server.url).port);
-    try {
-      const settled = await settle({ host: "localhost", port, lookup: fixedLookup("127.0.0.1") });
-      expect(settled).toBeNull();
-      expect(takeAttempts()).toEqual([]);
-    } finally {
-      await server.close();
-    }
+  it("records the NAME, not the resolved IP, when a custom lookup on `localhost` points at a public IP", () => {
+    // Formerly recorded the RESOLVED 8.8.8.8; now blocked before resolution, so the record is
+    // the NAME the caller supplied. Still blocked either way.
+    expect(() =>
+      net.connect({ host: "localhost", port: 443, lookup: fixedLookup("8.8.8.8") }),
+    ).toThrow(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "localhost", port: 443 }]);
   });
 
-  // --- Delta-1: an OMITTED host still defaults to `localhost` and must be hardened -------
-  // `net.connect({ port, lookup })` omits the host; Node dials `localhost` and runs the
-  // custom lookup against it. The hardening must apply to that implicit name, or a custom
-  // lookup could resolve it to a public IP that Node dials without a throw or a record.
-
-  it("Delta-1: blocks an OMITTED-host connect whose custom lookup returns a public IP (scalar shape)", async () => {
+  it("Delta-1: blocks + records a custom lookup on an OMITTED host (defaults to the name localhost)", () => {
+    // `net.connect({ port, lookup })` omits the host; Node would dial `localhost` and run the
+    // custom lookup against it. Refused, recorded as the implicit name `localhost`. The resolver
+    // shape (scalar vs `{all:true}` array) no longer matters — we never call it.
     const scalarLookup: net.LookupFunction = (_hostname, _options, cb) => cb(null, "8.8.8.8", 4);
-    const settled = await settle({ port: 443, lookup: scalarLookup });
-    expect(settled).toBeInstanceOf(NetworkBlockedError);
-    expect(takeAttempts()).toEqual([{ surface: "socket", host: "8.8.8.8", port: 443 }]);
+    expect(() => net.connect({ port: 443, lookup: scalarLookup })).toThrow(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "localhost", port: 443 }]);
   });
 
-  it("Delta-1: blocks an OMITTED-host connect whose custom lookup returns a public IP ({all:true} array shape)", async () => {
-    const arrayLookup: net.LookupFunction = (_hostname, _options, cb) =>
-      cb(null, [{ address: "8.8.8.8", family: 4 }]);
-    const settled = await settle({ port: 443, lookup: arrayLookup });
-    expect(settled).toBeInstanceOf(NetworkBlockedError);
-    expect(takeAttempts()).toEqual([{ surface: "socket", host: "8.8.8.8", port: 443 }]);
-  });
-
-  it("Delta-1: still allows an OMITTED-host connect whose custom lookup resolves to loopback (unrecorded)", async () => {
-    // Positive control: host omitted, lookup resolves the implicit localhost to 127.0.0.1 —
-    // must connect to the in-process server and record nothing.
-    const server = await startLoopbackServer((_req, res) => res.end("ok"));
-    const port = Number(new URL(server.url).port);
-    try {
-      const settled = await settle({ port, lookup: fixedLookup("127.0.0.1") });
-      expect(settled).toBeNull();
-      expect(takeAttempts()).toEqual([]);
-    } finally {
-      await server.close();
-    }
-  });
-
-  // --- Delta-2: the hardening must never mutate the caller's (possibly frozen) options ---
-
-  it("Delta-2: accepts a FROZEN options object and leaves the caller's lookup untouched", async () => {
-    // Native `net.connect` accepts a frozen options object; the hardening must copy it,
-    // never assign `options.lookup = wrapped` in place (which would throw a TypeError and
-    // break this valid loopback connect before its resolver ran).
-    const server = await startLoopbackServer((_req, res) => res.end("ok"));
-    const port = Number(new URL(server.url).port);
+  it("Delta-2: cleanly BLOCKS a FROZEN options object with a custom lookup — NO TypeError, caller untouched", () => {
+    // The fail-closed path only READS `lookup` to detect it, then throws; it never writes to the
+    // caller's object. So a frozen options object is blocked cleanly (a NetworkBlockedError, not
+    // a TypeError from an in-place assignment) and its own lookup is left exactly as supplied.
     const callerLookup = fixedLookup("127.0.0.1");
-    const frozenOptions = Object.freeze({ host: "localhost", port, lookup: callerLookup });
+    const frozenOptions = Object.freeze({ host: "localhost", port: 443, lookup: callerLookup });
+    let threw: unknown;
     try {
-      const settled = await settle(frozenOptions);
-      expect(settled).toBeNull(); // connected — no TypeError from a frozen-options assignment
-      expect(takeAttempts()).toEqual([]); // loopback resolution, nothing recorded
-      // The caller's object is untouched: its lookup is still the caller's own function,
-      // not the guard's wrapper.
-      expect(frozenOptions.lookup).toBe(callerLookup);
-    } finally {
-      await server.close();
+      net.connect(frozenOptions);
+    } catch (err) {
+      threw = err;
     }
+    expect(threw).toBeInstanceOf(NetworkBlockedError); // fail-closed, NOT a TypeError
+    expect(frozenOptions.lookup).toBe(callerLookup); // caller's object never mutated
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "localhost", port: 443 }]);
   });
 
-  // --- D3: a PROTOTYPE-BACKED options object must keep its inherited/non-enumerable fields ---
-  // A shallow spread `{ ...opts }` copies only OWN ENUMERABLE keys, so when host/port/lookup
-  // live on the prototype (or are non-enumerable) they vanish and native `net.connect` reads
-  // host/port as missing → `ERR_MISSING_ARGS`. `Object.create(opts)` preserves the full
-  // property-read semantics while overriding only `lookup`.
-
-  it("D3: accepts a PROTOTYPE-BACKED options object (inherited host/port/lookup) and connects", async () => {
-    const server = await startLoopbackServer((_req, res) => res.end("ok"));
-    const port = Number(new URL(server.url).port);
-    try {
-      // host/port/lookup live on the PROTOTYPE, not as own-enumerable keys — a shallow
-      // spread would drop them and connect would fail with ERR_MISSING_ARGS.
-      const protoBacked = Object.create({
-        host: "localhost",
-        port,
-        lookup: fixedLookup("127.0.0.1"),
-      }) as net.NetConnectOpts;
-      const settled = await settle(protoBacked);
-      expect(settled).toBeNull(); // connected — no ERR_MISSING_ARGS / TypeError
-      expect(takeAttempts()).toEqual([]); // loopback resolution, nothing recorded
-    } finally {
-      await server.close();
-    }
-  });
-
-  it("D3: still BLOCKS a prototype-backed options object whose custom lookup resolves to a public IP", async () => {
-    // The guard must re-validate the resolved address even when host/port/lookup are
-    // inherited: the allowed NAME (localhost) resolving to 8.8.8.8 is recorded + failed closed.
+  it("D3: blocks + records a PROTOTYPE-BACKED options object carrying a custom lookup (read through the chain)", () => {
+    // host/port/lookup live on the PROTOTYPE, not as own-enumerable keys; the guard reads them
+    // through the chain (as Node does), detects the custom lookup, and refuses — recorded by the
+    // inherited name. No cloning, so no ERR_MISSING_ARGS / spread-fidelity concerns remain.
     const protoBacked = Object.create({
       host: "localhost",
       port: 443,
       lookup: fixedLookup("8.8.8.8"),
     }) as net.NetConnectOpts;
-    const settled = await settle(protoBacked);
-    expect(settled).toBeInstanceOf(NetworkBlockedError);
-    expect(takeAttempts()).toEqual([{ surface: "socket", host: "8.8.8.8", port: 443 }]);
+    expect(() => net.connect(protoBacked)).toThrow(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "localhost", port: 443 }]);
   });
 
-  // --- D4: `tls.connect` and the `net.Socket` constructor copy only OWN-ENUMERABLE options
-  // (a `{ ...opts }` spread), so the hardening must expose the caller's own props as OWN props,
-  // not park them behind a prototype. `Object.create(opts)` (the pre-fix form) moved host/port/
-  // signal onto the prototype, where the spread could not see them: tls threw ERR_MISSING_ARGS
-  // and net silently dropped construction options. The descriptor+prototype copy fixes both
-  // while keeping the D3 property-access reads (net.connect) inherited.
-
-  it("D4: tls.connect keeps own host/port past its spread — a custom lookup to a public IP is blocked + recorded", async () => {
-    // If the hardening parked host/port behind a prototype, tls.connect's own-enumerable spread
-    // would drop them and throw ERR_MISSING_ARGS BEFORE the resolver ran (no record). Getting a
-    // NetworkBlockedError plus the recorded resolved IP proves host/port survived to tls AND the
-    // guarded lookup re-validated the smuggled address.
+  it("blocks + records a custom lookup on an allowed name over tls.connect (recorded by name)", () => {
+    // The TLS surface fails closed identically: a custom lookup on `localhost` is refused before
+    // the handshake, recorded by the NAME. (The resolver would have pointed at a public IP.)
     const publicIpLookup: net.LookupFunction = (_hostname, _options, cb) => cb(null, "8.8.8.8", 4);
-    const settled = await settleTls({ host: "localhost", port: 443, lookup: publicIpLookup });
-    expect(settled).toBeInstanceOf(NetworkBlockedError);
-    expect(takeAttempts()).toEqual([{ surface: "socket", host: "8.8.8.8", port: 443 }]);
+    expect(() => tls.connect({ host: "localhost", port: 443, lookup: publicIpLookup })).toThrow(
+      NetworkBlockedError,
+    );
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "localhost", port: 443 }]);
   });
 
-  it("D4: net.Socket construction keeps own options — a pre-aborted signal survives the guard's rewrap", async () => {
-    // A custom lookup forces the guard to REBUILD the options object; that rebuild must carry the
-    // caller's OWN `signal` across as an own prop, or the net.Socket constructor's own-enumerable
-    // spread drops it. Proof: a pre-aborted signal must still abort the loopback connect. If the
-    // signal were dropped, the connect would proceed to the in-process server and succeed instead.
+  it("blocks + records a custom lookup on a non-loopback NAME (recorded by name, before resolution)", () => {
+    // A non-loopback name was already blocked; with a custom lookup it is still blocked, and the
+    // record is the name — the refusal fires before any resolution regardless of loopback status.
+    expect(() =>
+      net.connect({ host: "api.example.com", port: 443, lookup: fixedLookup("127.0.0.1") }),
+    ).toThrow(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "api.example.com", port: 443 }]);
+  });
+
+  // --- Positive controls: the IP-LITERAL exemption and plain (no-custom-lookup) loopback connects
+  // still SUCCEED against an in-process server and record nothing. ---
+
+  it("still ALLOWS a custom lookup on a loopback IP LITERAL (127.0.0.1) — Node never runs it, so it connects", async () => {
+    // An IP literal is exempt: Node short-circuits DNS, the resolver is dead code, and the connect
+    // dials the literal directly. Even a resolver that "would" return a public IP is irrelevant.
     const server = await startLoopbackServer((_req, res) => res.end("ok"));
     const port = Number(new URL(server.url).port);
-    const controller = new AbortController();
-    controller.abort();
     try {
-      const settled = await settle({
-        host: "localhost",
-        port,
-        lookup: fixedLookup("127.0.0.1"),
-        signal: controller.signal,
-      });
-      expect(settled).toBeInstanceOf(Error);
-      expect((settled as Error).name).toBe("AbortError"); // signal preserved → connect aborted
-      expect(takeAttempts()).toEqual([]); // aborted before the resolver ran — nothing recorded
+      const settled = await settle({ host: "127.0.0.1", port, lookup: fixedLookup("8.8.8.8") });
+      expect(settled).toBeNull(); // connected to the in-process server
+      expect(takeAttempts()).toEqual([]); // literal is loopback, nothing recorded
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("still ALLOWS a plain net.connect to a loopback server with NO custom lookup (connects, records nothing)", async () => {
+    // The core positive path with no resolver in play: a genuine TCP connect to the in-process
+    // loopback server settles `connect` and records nothing.
+    const server = await startLoopbackServer((_req, res) => res.end("ok"));
+    const port = Number(new URL(server.url).port);
+    try {
+      const settled = await settle({ host: "127.0.0.1", port });
+      expect(settled).toBeNull();
+      expect(takeAttempts()).toEqual([]);
     } finally {
       await server.close();
     }
