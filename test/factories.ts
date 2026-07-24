@@ -4,8 +4,21 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Db, OpenedDb } from "../src/db/client.js";
 import { openDb } from "../src/db/client.js";
-import type { DigestDeliveryRow, PlayerRow, RefreshRunRow, StatLineRow } from "../src/db/schema.js";
-import { digestDeliveries, players, refreshRuns, seasonCalendar, statLines } from "../src/db/schema.js";
+import type {
+  DigestDeliveryRow,
+  PlayerRow,
+  PlayerTagRow,
+  RefreshRunRow,
+  StatLineRow,
+} from "../src/db/schema.js";
+import {
+  digestDeliveries,
+  playerTags,
+  players,
+  refreshRuns,
+  seasonCalendar,
+  statLines,
+} from "../src/db/schema.js";
 import type { FetchLike } from "../src/mlb/client.js";
 import { MlbClient } from "../src/mlb/client.js";
 import type {
@@ -165,6 +178,26 @@ export async function insertStatLine(
     .returning();
   const row = rows[0];
   if (row === undefined) throw new Error("insertStatLine failed");
+  return row;
+}
+
+/** A player_tags row (Phase A of #29). Defaults to a manual `status:rostered` tag. */
+export async function insertPlayerTag(
+  db: Db,
+  overrides: Partial<typeof playerTags.$inferInsert> & { playerId: number },
+): Promise<PlayerTagRow> {
+  const rows = await db
+    .insert(playerTags)
+    .values({
+      namespace: "status",
+      value: "rostered",
+      source: "manual",
+      createdAt: ISO_NOW,
+      ...overrides,
+    })
+    .returning();
+  const row = rows[0];
+  if (row === undefined) throw new Error("insertPlayerTag failed");
   return row;
 }
 

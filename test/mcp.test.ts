@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { digestDeliveries, players, refreshRuns, statLines } from "../src/db/schema.js";
+import { digestDeliveries, playerTags, players, refreshRuns, statLines } from "../src/db/schema.js";
 import { MlbClient } from "../src/mlb/client.js";
 import type { AppDeps } from "../src/server.js";
 import { createApp } from "../src/server.js";
@@ -41,6 +41,9 @@ const ALL_TOOLS = [
   "digest_preview",
   "send_digest",
   "run_refresh",
+  "player_tag_add",
+  "player_tag_remove",
+  "player_tags_list",
   "sql_query",
   "status",
 ];
@@ -121,7 +124,7 @@ describe("MCP server over Streamable HTTP", () => {
     };
   }
 
-  it("exposes exactly the twelve tools", async () => {
+  it("exposes exactly the fifteen tools", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([...ALL_TOOLS].sort());
     for (const tool of tools) {
@@ -804,5 +807,79 @@ describe("MCP server over Streamable HTTP", () => {
       const refresh = result.structuredContent?.refresh as Record<string, unknown> | null;
       expect(refresh?.state, JSON.stringify(row)).toBe(state);
     }
+  });
+
+  // --- Tag tools (Phase A of #29) ------------------------------------------
+
+  it("player_tag_add/list/remove round-trips a manual tag", async () => {
+    await call("watchlist_add", { personId: 691185 });
+
+    const added = await call("player_tag_add", { personId: 691185, namespace: "status", value: "rostered" });
+    expect(added.isError).toBeUndefined();
+    expect(added.structuredContent?.tag).toMatchObject({
+      namespace: "status",
+      value: "rostered",
+      source: "manual",
+    });
+
+    const listed = await call("player_tags_list", { personId: 691185 });
+    const tags = (listed.structuredContent?.tags ?? []) as Array<Record<string, unknown>>;
+    expect(tags.some((t) => t.namespace === "status" && t.value === "rostered")).toBe(true);
+    // Derived tags surface too (a Triple-A shortstop).
+    expect(tags.some((t) => t.namespace === "level" && t.value === "aaa")).toBe(true);
+
+    const removed = await call("player_tag_remove", { personId: 691185, namespace: "status", value: "rostered" });
+    expect(removed.structuredContent).toMatchObject({ removed: true });
+  });
+
+  it("watchlist_list filters by a tags selector", async () => {
+    await call("watchlist_add", { personId: 691185 });
+    await call("player_tag_add", { personId: 691185, namespace: "status", value: "rostered" });
+
+    const filtered = await call("watchlist_list", { tags: "level:aaa,status:rostered" });
+    const matched = (filtered.structuredContent?.players ?? []) as Array<Record<string, unknown>>;
+    expect(matched).toHaveLength(1);
+    expect(matched[0]?.externalId).toBe(691185);
+
+    const none = await call("watchlist_list", { tags: "status:scouted" });
+    expect((none.structuredContent?.players ?? []) as unknown[]).toHaveLength(0);
+  });
+
+  it("returns isError for a derived-namespace write and an unknown status value", async () => {
+    await call("watchlist_add", { personId: 691185 });
+    const derived = await call("player_tag_add", { personId: 691185, namespace: "level", value: "aaa" });
+    expect(derived.isError).toBe(true);
+    const unknown = await call("player_tag_add", { personId: 691185, namespace: "status", value: "bogus" });
+    expect(unknown.isError).toBe(true);
+  });
+
+  it("returns isError (PlayerNotFoundError) for a tag op on an unknown player", async () => {
+    const res = await call("player_tags_list", { personId: 424242 });
+    expect(res.isError).toBe(true);
+  });
+
+  it("tag tools reject a coercion-prone personId ([123]/true/'123') instead of tagging player 123", async () => {
+    // A real player 123 exists — a well-formed personId: 123 WOULD tag him. The
+    // strict (non-coercing) MCP shape must reject a malformed personId over this
+    // typed-JSON boundary rather than coerce [123]/true/"123" onto player 123.
+    await insertPlayer(opened.db, { externalId: 123, milbLevel: "Triple-A", position: "SS" });
+    for (const personId of [[123], true, "123"] as unknown[]) {
+      const label = JSON.stringify(personId);
+      const add = await call("player_tag_add", { personId, namespace: "status", value: "rostered" });
+      expect(add.isError, `add ${label}`).toBe(true);
+      const remove = await call("player_tag_remove", { personId, namespace: "status", value: "rostered" });
+      expect(remove.isError, `remove ${label}`).toBe(true);
+      const list = await call("player_tags_list", { personId });
+      expect(list.isError, `list ${label}`).toBe(true);
+    }
+    // None of the malformed calls mutated player 123 (or anyone): no tag rows.
+    expect(await opened.db.select().from(playerTags)).toHaveLength(0);
+  });
+
+  it("watchlist_list returns isError for a separators-only tags selector", async () => {
+    await call("watchlist_add", { personId: 691185 });
+    // `,,,` normalizes to zero tokens — a malformed selector, not an absent one.
+    const res = await call("watchlist_list", { tags: ",,," });
+    expect(res.isError).toBe(true);
   });
 });

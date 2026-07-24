@@ -1,7 +1,7 @@
 # MCP Reference
 
 The MCP server is Bryce's **primary interface** ([ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)):
-twelve tools over the same service layer and Zod schemas the [REST API](../api/README.md) and
+fifteen tools over the same service layer and Zod schemas the [REST API](../api/README.md) and
 [CLI](../cli/README.md) use, so a Claude client (web, mobile, or CLI) is the front end and there is
 no web UI. It is mounted at `/mcp` over Streamable HTTP, behind the bearer token. Domain terms —
 **Player**, **Refresh**, **Digest**, **Window**, **Offseason Sleep** — are defined in
@@ -37,7 +37,9 @@ upstream failure all surface. An unexpected (non-domain) error is not swallowed 
 
 List Watch List players.
 
-- **Inputs:** `active` — `"true"` (default, active only), `"false"` (deactivated), or `"all"`.
+- **Inputs:** `active` — `"true"` (default, active only), `"false"` (deactivated), or `"all"`; optional
+  `tags` — a comma-separated **AND** selector (e.g. `level:aaa,status:rostered`), where a bare namespace
+  (e.g. `prospect`) matches any value in it. Only players matching every token are returned.
 - **Success:** `{ "players": [...] }`.
 - **Side effects:** none (read-only).
 
@@ -161,6 +163,37 @@ Re-ingest the current season now.
   `{ skipped, playersRefreshed, statLinesInserted, statLinesUpdated }` for all.
 - **Side effects:** upserts Stat Lines. No-op during Offseason Sleep (`skipped: true`).
 
+### `player_tag_add`
+
+Add a **manual** tag to a Player, addressed by `personId` (MLB/MiLB) or `ncaaPlayerSeq` (NCAA) —
+exactly one.
+
+- **Inputs:** `personId` or `ncaaPlayerSeq`; `namespace` and `value`. Manual tags live in the
+  `status` namespace (`rostered` or `scouted`); a write to a derived namespace (`level`/`pos`/`prospect`)
+  or an unknown namespace/value is an error result.
+- **Success:** `{ tag: { id, playerId, namespace, value, source, createdAt } }`.
+- **Side effects:** inserts one `source='manual'` row (idempotent — re-adding is a no-op).
+
+### `player_tag_remove`
+
+Remove a **manual** tag from a Player, addressed by `personId` or `ncaaPlayerSeq` — exactly one.
+
+- **Inputs:** `personId` or `ncaaPlayerSeq`; `namespace` and `value`. A derived namespace is rejected.
+- **Success:** `{ removed: true }` (removing an absent manual tag is a no-op).
+- **Side effects:** deletes the matching `source='manual'` row, if any.
+
+### `player_tags_list`
+
+List **every** tag (derived and manual) for a Player, addressed by `personId` or `ncaaPlayerSeq` —
+exactly one.
+
+- **Inputs:** `personId` or `ncaaPlayerSeq`.
+- **Success:** `{ tags: [...] }`, ordered by namespace, value, source.
+- **Side effects:** none (read-only).
+
+See the [Player tag model reference](../domain/tags.md) for the full namespace vocabulary, the derived
+values, and the selector grammar (the `tags` filter on `watchlist_list` uses the same selector).
+
 ### `sql_query`
 
 Run a single read-only SQL query for ad-hoc analysis.
@@ -168,7 +201,7 @@ Run a single read-only SQL query for ad-hoc analysis.
 - **Inputs:** `sql` — one `SELECT`/`WITH`/`EXPLAIN` statement (writes are rejected and the connection
   itself is read-only); `params` — positional bind values for `?` placeholders (up to 50 strings,
   numbers, or nulls); `format` (`json` default, or `csv`). Tables: `players`, `stat_lines`,
-  `digest_deliveries`, `season_calendar`.
+  `player_tags`, `digest_deliveries`, `season_calendar`.
 - **Success:** for `json`, `{ columns, rows, rowCount, truncated }`. For `csv`, the result rows as a
   CSV **Export** returned inline as a text part (no `structuredContent`); when the 200-row cap is hit,
   a **second text part** carries a truncation warning so the CSV table itself stays uncorrupted
@@ -197,7 +230,7 @@ client end to end:
 API_TOKEN=... MCP_URL=https://your-host.example.com/mcp npm run connector:smoke
 ```
 
-It runs `initialize` → `tools/list` (asserts all twelve tools) → `status` → a read-only
+It runs `initialize` → `tools/list` (asserts all fifteen tools) → `status` → a read-only
 `digest_preview`, then checks that a no-bearer request still `401`s — and never prints a secret. See
 [Running Bryce → Cloudflare Access](../guides/running-bryce.md#cloudflare-access-in-front-of-the-tunnel)
 for the full flag set and the Cloudflare Access topology.

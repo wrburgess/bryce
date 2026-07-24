@@ -162,6 +162,45 @@ export const refreshRuns = sqliteTable(
   ],
 );
 
+export const playerTags = sqliteTable(
+  "player_tags",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    playerId: integer("player_id")
+      .notNull()
+      .references(() => players.id),
+    /** Tag family, e.g. `level`, `pos`, `prospect`, `status`. */
+    namespace: text("namespace").notNull(),
+    /** Tag value within the namespace, e.g. `aaa`, `ss`, `rostered`. */
+    value: text("value").notNull(),
+    /**
+     * The load-bearing column (Phase A of #29): `derived` rows are recomputed on
+     * every Refresh (level/pos/prospect), `manual` rows are user-set (status).
+     * Derivation rewrites ONLY `derived` rows, so the two never fight.
+     */
+    source: text("source", { enum: ["derived", "manual"] }).notNull(),
+    createdAt: text("created_at").notNull(),
+  },
+  (t) => [
+    // A tag's identity: one (namespace, value) per player, across BOTH sources.
+    uniqueIndex("player_tags_player_ns_value_uq").on(t.playerId, t.namespace, t.value),
+    // The selector's access path — WHERE namespace = ? (AND value = ?).
+    index("player_tags_ns_value_idx").on(t.namespace, t.value),
+    // At most ONE `level:` tag per player, enforced by the DB, not only by
+    // deriveTags: a partial unique index (SQLite honors the WHERE predicate), so
+    // dsl-supersedes-rookie can never leave two level rows behind.
+    uniqueIndex("player_tags_level_single_uq")
+      .on(t.playerId, t.namespace)
+      .where(sql`${t.namespace} = 'level'`),
+    // The invariants live in the DATABASE, DECLARED in the schema (rules/backend.md)
+    // — not only in hand-written migration SQL — so the drizzle snapshot records
+    // them and a future drizzle-kit table rebuild re-emits every CHECK.
+    check("player_tags_source_ck", sql`${t.source} in ('derived', 'manual')`),
+    check("player_tags_namespace_nonblank_ck", sql`length(${t.namespace}) > 0`),
+    check("player_tags_value_nonblank_ck", sql`length(${t.value}) > 0`),
+  ],
+);
+
 export const seasonCalendar = sqliteTable(
   "season_calendar",
   {
@@ -202,3 +241,5 @@ export type RefreshRunRow = typeof refreshRuns.$inferSelect;
 export type RefreshRunStatus = RefreshRunRow["status"];
 export type SeasonCalendarRow = typeof seasonCalendar.$inferSelect;
 export type NewSeasonCalendarRow = typeof seasonCalendar.$inferInsert;
+export type PlayerTagRow = typeof playerTags.$inferSelect;
+export type NewPlayerTagRow = typeof playerTags.$inferInsert;

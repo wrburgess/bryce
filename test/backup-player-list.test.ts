@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { players, statLines } from "../src/db/schema.js";
+import { playerTags, players, statLines } from "../src/db/schema.js";
 import {
   MAX_BACKUP_BYTES,
   PlayerBackupParseError,
@@ -17,7 +17,15 @@ import {
   restorePlayerListBackup,
 } from "../src/watchlist/service.js";
 import { makeBackupEntry, makeBackupEnvelope, makeTempDir } from "./backup-helpers.js";
-import { fakeClock, insertPlayer, insertStatLine, testDb } from "./factories.js";
+import {
+  InjectedFault,
+  fakeClock,
+  faultingDb,
+  insertPlayer,
+  insertPlayerTag,
+  insertStatLine,
+  testDb,
+} from "./factories.js";
 
 const NOW = new Date("2026-07-22T12:00:00.000Z");
 
@@ -370,5 +378,171 @@ describe("parsePlayerListBackup: strict validation", () => {
   it("rejects a payload over the size ceiling before parsing", () => {
     const huge = "a".repeat(MAX_BACKUP_BYTES + 1);
     expect(() => parsePlayerListBackup(huge)).toThrow(/size ceiling/);
+  });
+});
+
+describe("manual-tag backup round-trip (Phase A of #29)", () => {
+  let opened: OpenedDb;
+
+  beforeEach(() => {
+    opened = testDb();
+  });
+
+  afterEach(() => {
+    opened.close();
+  });
+
+  it("export carries ONLY manual tags, never derived ones", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    await insertPlayerTag(opened.db, { playerId: player.id, namespace: "status", value: "rostered", source: "manual" });
+    await insertPlayerTag(opened.db, { playerId: player.id, namespace: "level", value: "aaa", source: "derived" });
+
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+    expect(backup.players[0]?.tags).toEqual([{ namespace: "status", value: "rostered" }]);
+  });
+
+  it("ALWAYS emits tags (an empty array for a tagless player), self-describing", async () => {
+    await insertPlayer(opened.db, { externalId: 691185 });
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+    // An authoritative empty set — distinct from a legacy v1 backup that omits it.
+    expect(backup.players[0]?.tags).toEqual([]);
+    expect(() => parsePlayerListBackup(JSON.stringify(backup))).not.toThrow();
+  });
+
+  it("restore rebuilds derived tags AND re-applies the entry's manual tags", () => {
+    const row = {
+      ...makeBackupEntry({ externalId: 691185, level: "milb", milbLevel: "Triple-A", position: "SS" }),
+      tags: [{ namespace: "status", value: "rostered" }],
+    };
+    restorePlayerListBackup(opened.db, parse([row]), NOW);
+
+    const restored = opened.db.select().from(players).where(eq(players.externalId, 691185)).all()[0];
+    const tags = opened.db
+      .select()
+      .from(playerTags)
+      .where(eq(playerTags.playerId, restored?.id ?? -1))
+      .all();
+    const keys = new Set(tags.map((t) => `${t.namespace}:${t.value}:${t.source}`));
+    // Manual tag round-tripped...
+    expect(keys.has("status:rostered:manual")).toBe(true);
+    // ...and derived tags rebuilt from the restored identity columns.
+    expect(keys.has("level:aaa:derived")).toBe(true);
+    expect(keys.has("pos:ss:derived")).toBe(true);
+    expect(keys.has("prospect:prospect:derived")).toBe(true);
+  });
+
+  it("a v1 entry with no tags field restores derived tags and no manual tags", () => {
+    const row = makeBackupEntry({ externalId: 691185, level: "milb", milbLevel: "Triple-A", position: "SS" });
+    restorePlayerListBackup(opened.db, parse([row]), NOW);
+
+    const restored = opened.db.select().from(players).where(eq(players.externalId, 691185)).all()[0];
+    const tags = opened.db
+      .select()
+      .from(playerTags)
+      .where(eq(playerTags.playerId, restored?.id ?? -1))
+      .all();
+    expect(tags.every((t) => t.source === "derived")).toBe(true);
+    expect(tags.some((t) => t.namespace === "level" && t.value === "aaa")).toBe(true);
+  });
+
+  /** Manual tags on the pre-existing row before a restore matches it. */
+  const manualOf = (playerId: number): string[] =>
+    opened.db
+      .select()
+      .from(playerTags)
+      .where(eq(playerTags.playerId, playerId))
+      .all()
+      .filter((t) => t.source === "manual")
+      .map((t) => `${t.namespace}:${t.value}`);
+
+  it("reconciles manual tags to the backup's authoritative set (rostered replaces scouted)", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    await insertPlayerTag(opened.db, { playerId: player.id, namespace: "status", value: "scouted", source: "manual" });
+
+    const row = {
+      ...makeBackupEntry({ externalId: 691185, level: "milb", milbLevel: "Triple-A", position: "SS" }),
+      tags: [{ namespace: "status", value: "rostered" }],
+    };
+    restorePlayerListBackup(opened.db, parse([row]), NOW);
+
+    // The current scouted tag is gone; ONLY the authoritative rostered remains.
+    expect(manualOf(player.id)).toEqual(["status:rostered"]);
+  });
+
+  it("an authoritative empty tags array clears the player's manual tags (derived untouched)", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    await insertPlayerTag(opened.db, { playerId: player.id, namespace: "status", value: "rostered", source: "manual" });
+
+    const row = {
+      ...makeBackupEntry({ externalId: 691185, level: "milb", milbLevel: "Triple-A", position: "SS" }),
+      tags: [] as Array<{ namespace: string; value: string }>,
+    };
+    restorePlayerListBackup(opened.db, parse([row]), NOW);
+
+    expect(manualOf(player.id)).toEqual([]);
+    // Reconcile is manual-only: derived tags are still (re)built.
+    const derived = opened.db
+      .select()
+      .from(playerTags)
+      .where(eq(playerTags.playerId, player.id))
+      .all()
+      .filter((t) => t.source === "derived");
+    expect(derived.some((t) => t.namespace === "level" && t.value === "aaa")).toBe(true);
+  });
+
+  it("a legacy v1 entry (no tags field) leaves existing manual tags untouched", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    await insertPlayerTag(opened.db, { playerId: player.id, namespace: "status", value: "scouted", source: "manual" });
+
+    // makeBackupEntry omits `tags` entirely — a pre-#30 payload.
+    const row = makeBackupEntry({ externalId: 691185, level: "milb", milbLevel: "Triple-A", position: "SS" });
+    restorePlayerListBackup(opened.db, parse([row]), NOW);
+
+    // Absent tags means "leave manual tags untouched" — scouted survives.
+    expect(manualOf(player.id)).toEqual(["status:scouted"]);
+  });
+
+  it("skips a hand-edited derived-namespace (or unknown) tag rather than writing a bogus manual row", () => {
+    const row = {
+      ...makeBackupEntry({ externalId: 691185, level: "milb", milbLevel: "Triple-A", position: "SS" }),
+      tags: [
+        { namespace: "level", value: "aa" }, // derived namespace — must be skipped
+        { namespace: "bogus", value: "x" }, // unknown namespace — must be skipped
+        { namespace: "status", value: "scouted" }, // the one valid manual tag
+      ],
+    };
+    restorePlayerListBackup(opened.db, parse([row]), NOW);
+
+    const restored = opened.db.select().from(players).where(eq(players.externalId, 691185)).all()[0];
+    const manual = opened.db
+      .select()
+      .from(playerTags)
+      .where(eq(playerTags.playerId, restored?.id ?? -1))
+      .all()
+      .filter((t) => t.source === "manual");
+    // Only the valid status tag was written as a manual row; the bogus ones were dropped.
+    expect(manual.map((t) => `${t.namespace}:${t.value}`)).toEqual(["status:scouted"]);
+    // The derived level tag is the RECONCILED one (aaa), not the injected 'aa'.
+    const level = opened.db
+      .select()
+      .from(playerTags)
+      .where(eq(playerTags.playerId, restored?.id ?? -1))
+      .all()
+      .filter((t) => t.namespace === "level");
+    expect(level.map((t) => `${t.value}:${t.source}`)).toEqual(["aaa:derived"]);
+  });
+
+  it("rolls the tag writes back too when the restore transaction fails before COMMIT", () => {
+    const row = {
+      ...makeBackupEntry({ externalId: 691185, level: "milb", milbLevel: "Triple-A", position: "SS" }),
+      tags: [{ namespace: "status", value: "rostered" }],
+    };
+    // A fault injected AFTER the whole restore body runs (player imported, tags
+    // derived + manual tag applied) but BEFORE COMMIT — proving the tag writes
+    // share the import transaction and roll back with it (atomicity).
+    const faulting = faultingDb(opened.db, { failAt: "in-settle", passThrough: 0 });
+    expect(() => restorePlayerListBackup(faulting, parse([row]), NOW)).toThrow(InjectedFault);
+    expect(opened.db.select().from(players).all()).toHaveLength(0);
+    expect(opened.db.select().from(playerTags).all()).toHaveLength(0);
   });
 });
