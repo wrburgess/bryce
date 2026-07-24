@@ -14,6 +14,7 @@ import { parseGameLogPage } from "../ncaa/parse.js";
 import type { NcaaStatCategory } from "../ncaa/seasons.js";
 import { ncaaSeasonFor } from "../ncaa/seasons.js";
 import { syncDerivedTags } from "../tags/service.js";
+import type { RefreshTerminalStatus } from "./refresh-run.js";
 import { claimRefreshRun, renewRefreshRun, settleRefreshRun } from "./refresh-run.js";
 
 export interface RefreshDeps {
@@ -26,6 +27,18 @@ export interface RefreshDeps {
 
 const NCAA_CATEGORIES: readonly NcaaStatCategory[] = ["batting", "pitching", "fielding"];
 
+/** A swept sportId whose `getSeason` fetch threw (#23): its cached row is left untouched. */
+export interface CalendarFailure {
+  sportId: number;
+  reason: string;
+}
+
+/** A watched player whose refresh threw (#23): collected, not fatal to the sweep. */
+export interface PlayerFailure {
+  playerId: number;
+  reason: string;
+}
+
 export interface RefreshSummary {
   skipped: boolean;
   /**
@@ -37,11 +50,76 @@ export interface RefreshSummary {
    * successor's newer data.
    */
   reason: "offseason-sleep" | "already-running" | "superseded" | null;
+  /**
+   * The settled terminal status of a run that recorded one (#23): `ok`,
+   * `partial`, or `failed`, mirroring the `refresh_runs` row so no caller has to
+   * re-derive it. `null` on any SKIPPED sweep (offseason / already-running /
+   * superseded), which settles no status of its own.
+   */
+  status: RefreshTerminalStatus | null;
   playersRefreshed: number;
   statLinesInserted: number;
   statLinesUpdated: number;
+  /** Watched players deliberately skipped this sweep (out-of-season NCAA, no external id). */
+  playersSkipped: number;
+  /** Watched players whose refresh threw and was collected, not fatal (#23). */
+  playersFailed: number;
+  /** Per-sportId calendar fetch failures collected this sweep (#23); empty when clean. */
+  calendarFailures: CalendarFailure[];
+  /** Per-player refresh failures collected this sweep (#23); empty when clean. */
+  playerFailures: PlayerFailure[];
   /** The recorded run's id, or null when nothing was recorded (skip/no-op). */
   runId: number | null;
+}
+
+/**
+ * The pure status rule (#23, ADR 0043 vocabulary): a whole-list sweep is
+ *  - `ok` iff NOTHING was left behind — zero failures AND zero skips (this
+ *    includes the vacuous zero-active-player sweep: nothing to refresh is a
+ *    clean sweep, never a failure);
+ *  - `failed` iff it refreshed NObody AND at least one player failed — a blocked
+ *    run, nothing useful landed (skips alone never make a run `failed`);
+ *  - `partial` otherwise — safe partial success (some refreshed, and/or some
+ *    merely skipped with no blocking failure).
+ * Extracted and pure so the truth table is table-tested directly, not only
+ * through the orchestration.
+ */
+export function deriveRefreshStatus(counts: {
+  refreshed: number;
+  skipped: number;
+  failed: number;
+}): RefreshTerminalStatus {
+  if (counts.failed === 0 && counts.skipped === 0) return "ok";
+  if (counts.refreshed === 0 && counts.failed > 0) return "failed";
+  return "partial";
+}
+
+/**
+ * Compose an `error_message` from the collected failures, INDEPENDENT of the
+ * terminal status (#23, MF2): a calendar failure is recorded even on an
+ * otherwise-`ok` run, and a skip-only `partial` (no failures at all) records
+ * `null` — never the nonsensical "0 player(s) failed; 0 calendar fetch(es)
+ * failed". Returns null exactly when nothing failed.
+ */
+export function summarizeRefreshFailures(
+  calendarFailures: CalendarFailure[],
+  playerFailures: PlayerFailure[],
+): string | null {
+  if (calendarFailures.length === 0 && playerFailures.length === 0) return null;
+  const parts: string[] = [];
+  if (playerFailures.length > 0) {
+    parts.push(
+      `${playerFailures.length} player(s) failed: ` +
+        playerFailures.map((f) => `${f.playerId} (${f.reason})`).join("; "),
+    );
+  }
+  if (calendarFailures.length > 0) {
+    parts.push(
+      `${calendarFailures.length} calendar fetch(es) failed: ` +
+        calendarFailures.map((f) => `${f.sportId} (${f.reason})`).join("; "),
+    );
+  }
+  return parts.join("; ");
 }
 
 const STAT_GROUPS: readonly StatGroup[] = ["hitting", "pitching", "fielding"];
@@ -80,14 +158,7 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   // weekly heartbeat — not a freshness row — is the offseason liveness signal
   // (ADR 0031/0042). A stale freshness reading during sleep is expected.
   if (sleep.sleeping) {
-    return {
-      skipped: true,
-      reason: "offseason-sleep",
-      playersRefreshed: 0,
-      statLinesInserted: 0,
-      statLinesUpdated: 0,
-      runId: null,
-    };
+    return skippedSummary("offseason-sleep", null);
   }
 
   // Claim a run AFTER the sleep check (ADR 0043). A refusal means another sweep
@@ -95,23 +166,24 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   // run — so this one no-ops rather than double-sweeping.
   const claim = claimRefreshRun(db, { now: now(), playersTotal: activePlayers.length });
   if (!claim.claimed) {
-    return {
-      skipped: true,
-      reason: claim.reason,
-      playersRefreshed: 0,
-      statLinesInserted: 0,
-      statLinesUpdated: 0,
-      runId: null,
-    };
+    return skippedSummary(claim.reason, null);
   }
   const runId = claim.runId;
 
   let playersRefreshed = 0;
+  let playersSkipped = 0;
   let inserted = 0;
   let updated = 0;
+  // Calendar + per-player failures are COLLECTED (#23): a single upstream fault
+  // no longer aborts the whole sweep. They flow into the normal status
+  // computation below, never to the outer catch.
+  let calendarFailures: CalendarFailure[] = [];
+  const playerFailures: PlayerFailure[] = [];
   try {
     const season = currentSeason(deps);
-    await refreshCalendars(deps, season);
+    // getSeason failures are caught inside refreshCalendars and returned; a
+    // calendar DB-WRITE failure is NOT — it escapes to the outer catch (MF1).
+    calendarFailures = await refreshCalendars(deps, season);
     await refreshNcaaCalendar(deps, season, activePlayers);
 
     for (const player of activePlayers) {
@@ -122,25 +194,51 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
       // this run (the successor already marked it `failed`) and never letting a
       // stale write past this point. Any stale write is thus bounded to at most
       // the single player already in flight, which the successor re-fetches.
+      //
+      // This ownership check stays OUTSIDE the per-player try/catch: a
+      // `superseded` abort is NOT a player failure — it must early-return, not
+      // be collected and counted against the run.
       if (!renewRefreshRun(db, runId, now())) {
         return {
           skipped: true,
           reason: "superseded",
+          status: null,
           playersRefreshed,
           statLinesInserted: inserted,
           statLinesUpdated: updated,
+          playersSkipped,
+          playersFailed: playerFailures.length,
+          calendarFailures,
+          playerFailures,
           runId,
         };
       }
-      const result = await refreshOnePlayer(deps, player, season);
-      if (result === null) continue;
-      playersRefreshed += 1;
-      inserted += result.inserted;
-      updated += result.updated;
+      // Per-player boundary (#23): one player's fetch/write throw is collected
+      // as a failure and the sweep CONTINUES to the next player, rather than
+      // stranding the run. refreshOnePlayer buffers all HTTP before its atomic
+      // write, so a throw leaves no partial write for this player.
+      try {
+        const result = await refreshOnePlayer(deps, player, season);
+        if (result === null) {
+          playersSkipped += 1;
+          continue;
+        }
+        playersRefreshed += 1;
+        inserted += result.inserted;
+        updated += result.updated;
+      } catch (err) {
+        playerFailures.push({
+          playerId: player.id,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   } catch (err) {
-    // Record the failure on the run's own row, then re-throw: the caller's
-    // behaviour is unchanged (it still sees the throw), but the row now says so.
+    // MF1 fatal outer boundary: an UNEXPECTED throw — a calendar DB-upsert
+    // error, refreshNcaaCalendar, or the status/settle logic — is not a
+    // collected failure. Record it on the run's own row (ownership-conditional,
+    // so a double-settle is a safe no-op) and RE-THROW, so a genuinely broken
+    // sweep never strands its row `running` and the caller still sees the throw.
     settleRefreshRun(db, {
       runId,
       now: now(),
@@ -156,10 +254,17 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
     throw err;
   }
 
-  // `ok` only when every watched player was refreshed; a single skipped player
-  // (an out-of-season NCAA row, say) settles `partial` — freshness "≥1 watched
-  // player not refreshed" (ADR 0043; #23 owns the per-player WHY).
-  const status = playersRefreshed === activePlayers.length ? "ok" : "partial";
+  // Status from the collected counts (#23): `ok` only when nothing failed AND
+  // nothing was skipped; `failed` only when a blocked run refreshed nobody; else
+  // `partial` (safe partial success). errorMessage is composed from the
+  // failures INDEPENDENT of status (MF2), so an `ok` run that hit a calendar
+  // failure still records it, and a skip-only `partial` records null.
+  const status = deriveRefreshStatus({
+    refreshed: playersRefreshed,
+    skipped: playersSkipped,
+    failed: playerFailures.length,
+  });
+  const errorMessage = summarizeRefreshFailures(calendarFailures, playerFailures);
   const settled = settleRefreshRun(db, {
     runId,
     now: now(),
@@ -170,6 +275,7 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
       statLinesInserted: inserted,
       statLinesUpdated: updated,
     },
+    errorMessage,
   });
   // The settle is conditional on still owning the row. If it changed nothing, a
   // successor reaped this run while it awaited the LAST player's refresh — the
@@ -180,9 +286,14 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
     return {
       skipped: true,
       reason: "superseded",
+      status: null,
       playersRefreshed,
       statLinesInserted: inserted,
       statLinesUpdated: updated,
+      playersSkipped,
+      playersFailed: playerFailures.length,
+      calendarFailures,
+      playerFailures,
       runId,
     };
   }
@@ -190,9 +301,34 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   return {
     skipped: false,
     reason: null,
+    status,
     playersRefreshed,
     statLinesInserted: inserted,
     statLinesUpdated: updated,
+    playersSkipped,
+    playersFailed: playerFailures.length,
+    calendarFailures,
+    playerFailures,
+    runId,
+  };
+}
+
+/** A skip/no-op summary (offseason / already-running): recorded nothing, failed nothing. */
+function skippedSummary(
+  reason: "offseason-sleep" | "already-running",
+  runId: number | null,
+): RefreshSummary {
+  return {
+    skipped: true,
+    reason,
+    status: null,
+    playersRefreshed: 0,
+    statLinesInserted: 0,
+    statLinesUpdated: 0,
+    playersSkipped: 0,
+    playersFailed: 0,
+    calendarFailures: [],
+    playerFailures: [],
     runId,
   };
 }
@@ -201,12 +337,30 @@ export function currentSeason(deps: Pick<RefreshDeps, "now" | "tz">): string {
   return hostDate(deps.now(), deps.tz).slice(0, 4);
 }
 
-/** Fetch and cache season dates for every swept sportId (skipping unpublished seasons). */
-export async function refreshCalendars(deps: RefreshDeps, season: string): Promise<void> {
+/**
+ * Fetch and cache season dates for every swept sportId (skipping unpublished
+ * seasons). A `getSeason` fetch that THROWS is collected as a
+ * {@link CalendarFailure} and the sweep moves on to the next sportId, leaving
+ * that sportId's cached `season_calendar` row untouched (#23) — Refresh reads
+ * the cached calendar, so a stale row is a tolerable degradation, not a blocker.
+ * A calendar DB-WRITE failure is deliberately NOT caught: it escapes to the
+ * runRefresh outer boundary (MF1) rather than being silently swallowed.
+ */
+export async function refreshCalendars(
+  deps: RefreshDeps,
+  season: string,
+): Promise<CalendarFailure[]> {
   const { db, client, now } = deps;
   const fetchedAt = now().toISOString();
+  const failures: CalendarFailure[] = [];
   for (const sportId of SPORT_IDS) {
-    const s = await client.getSeason(sportId, season);
+    let s: Awaited<ReturnType<typeof client.getSeason>>;
+    try {
+      s = await client.getSeason(sportId, season);
+    } catch (err) {
+      failures.push({ sportId, reason: err instanceof Error ? err.message : String(err) });
+      continue;
+    }
     if (s === null) continue;
     await db
       .insert(seasonCalendar)
@@ -234,6 +388,7 @@ export async function refreshCalendars(deps: RefreshDeps, season: string): Promi
         },
       });
   }
+  return failures;
 }
 
 /**
@@ -349,12 +504,8 @@ export async function refreshNcaaPlayer(
     return { inserted: 0, updated: 0 };
   }
 
-  const existing = await db
-    .select({ gameId: statLines.gameId, statType: statLines.statType })
-    .from(statLines)
-    .where(eq(statLines.playerId, player.id));
-  const existingKeys = new Set(existing.map((r) => `${r.gameId}:${r.statType}`));
-
+  // Buffer ALL page fetches FIRST into identity + rows (#23): the atomic write
+  // below must never be held open across HTTP I/O.
   const timestamp = now().toISOString();
   const rows: NewStatLineRow[] = [];
   let latestFullName: string | null = null;
@@ -377,8 +528,13 @@ export async function refreshNcaaPlayer(
   if (latestSchoolName !== null && latestSchoolName !== player.schoolName) {
     identity.schoolName = latestSchoolName;
   }
-  await db.update(players).set(identity).where(eq(players.id, player.id));
 
+  // Insert/update counts (informational): read the pre-existing keys, then diff.
+  const existing = await db
+    .select({ gameId: statLines.gameId, statType: statLines.statType })
+    .from(statLines)
+    .where(eq(statLines.playerId, player.id));
+  const existingKeys = new Set(existing.map((r) => `${r.gameId}:${r.statType}`));
   let inserted = 0;
   let updated = 0;
   for (const row of rows) {
@@ -390,10 +546,16 @@ export async function refreshNcaaPlayer(
       existingKeys.add(key);
     }
   }
-  await upsertStatLines(db, rows);
+
+  // Atomic identity + stat lines (#23): one BEGIN IMMEDIATE transaction, so a
+  // throw mid-upsert rolls the identity update back with it.
+  writePlayerRefresh(db, { playerId: player.id, identity, rows });
+
   // Identity and this NCAA player's Stat Lines are now current — re-derive his
   // tags from the single entry point (idempotent; manual tags untouched).
-  syncDerivedTags(db, player.id, now());
+  // Best-effort AFTER the transaction (#23, MF5): a tag-sync failure must not
+  // mark the player failed nor corrupt his already-committed identity/stats.
+  syncDerivedTagsBestEffort(deps, player.id);
   return { inserted, updated };
 }
 
@@ -420,34 +582,27 @@ export async function refreshPlayer(
   // now-final line and the ADR 0029 upsert overwrites the row in place.
   const hostToday = hostDate(now(), tz);
 
+  // Buffer ALL network fetches FIRST (#23) — identity (person/team) then every
+  // game-log group — into `identity` + `rows`. The atomic write below must never
+  // be held open across HTTP I/O.
   const person = await client.getPerson(player.externalId);
-  const changes: Partial<typeof players.$inferInsert> = {
+  const identity: Partial<typeof players.$inferInsert> = {
     fullName: person.fullName,
     updatedAt: now().toISOString(),
   };
   if (person.primaryPosition?.abbreviation !== undefined) {
-    changes.position = person.primaryPosition.abbreviation;
+    identity.position = person.primaryPosition.abbreviation;
   }
   if (person.currentTeam !== undefined) {
     const team = await client.getTeam(person.currentTeam.id);
     const info = levelForSportId(team.sport.id);
     if (info !== null && info.level !== "ncaa") {
-      changes.level = info.level;
-      changes.milbLevel = info.milbLevel;
-      changes.teamName = team.name;
+      identity.level = info.level;
+      identity.milbLevel = info.milbLevel;
+      identity.teamName = team.name;
     }
   }
-  await db.update(players).set(changes).where(eq(players.id, player.id));
 
-  // One query, not one per split: preload this Player's existing line keys.
-  const existing = await db
-    .select({ gameId: statLines.gameId, statType: statLines.statType })
-    .from(statLines)
-    .where(eq(statLines.playerId, player.id));
-  const existingKeys = new Set(existing.map((r) => `${r.gameId}:${r.statType}`));
-
-  let inserted = 0;
-  let updated = 0;
   const rows: NewStatLineRow[] = [];
   for (const sportId of SPORT_IDS) {
     for (const group of STAT_GROUPS) {
@@ -468,6 +623,15 @@ export async function refreshPlayer(
     }
   }
 
+  // Insert/update counts (informational): one query preloads this Player's
+  // existing line keys, then diff against the buffered rows.
+  const existing = await db
+    .select({ gameId: statLines.gameId, statType: statLines.statType })
+    .from(statLines)
+    .where(eq(statLines.playerId, player.id));
+  const existingKeys = new Set(existing.map((r) => `${r.gameId}:${r.statType}`));
+  let inserted = 0;
+  let updated = 0;
   for (const row of rows) {
     const key = `${row.gameId}:${row.statType}`;
     if (existingKeys.has(key)) {
@@ -478,12 +642,37 @@ export async function refreshPlayer(
     }
   }
 
-  await upsertStatLines(db, rows);
+  // Atomic identity + stat lines (#23): one BEGIN IMMEDIATE transaction, so a
+  // throw mid-upsert rolls the identity/location update back with it — a call-up
+  // is never recorded without its games, nor vice versa.
+  writePlayerRefresh(db, { playerId: player.id, identity, rows });
+
   // Identity/location and this player's Stat Lines are now current — re-derive
   // his tags from the single entry point (covers the nightly sweep AND a first
-  // Refresh; idempotent, manual tags untouched).
-  syncDerivedTags(db, player.id, now());
+  // Refresh; idempotent, manual tags untouched). Best-effort AFTER the
+  // transaction (#23, MF5): a tag-sync failure must not mark the player failed
+  // nor corrupt his already-committed identity/stats.
+  syncDerivedTagsBestEffort(deps, player.id);
   return { inserted, updated };
+}
+
+/**
+ * Re-derive one player's tags, swallowing any failure with a stderr diagnostic
+ * (#23, MF5). The identity + stat lines are ALREADY committed by
+ * {@link writePlayerRefresh}; tag derivation is a downstream convenience, so a
+ * failure here must not fail the player nor roll back his refreshed data. The
+ * next successful Refresh re-derives and self-heals the tags.
+ */
+function syncDerivedTagsBestEffort(deps: Pick<RefreshDeps, "db" | "now">, playerId: number): void {
+  try {
+    syncDerivedTags(deps.db, playerId, deps.now());
+  } catch (err) {
+    process.stderr.write(
+      `refresh: tag sync failed for player id=${playerId} ` +
+        `(identity/stats already committed; will heal next refresh): ` +
+        `${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
 }
 
 function splitToRow(
@@ -511,20 +700,29 @@ function splitToRow(
   };
 }
 
+/** The transaction handle drizzle hands a `db.transaction` callback. */
+type TxHandle = Parameters<Parameters<Db["transaction"]>[0]>[0];
+/** A db-or-tx handle: the top-level Db, or a transaction handle. Both share the sync query API. */
+type StatLinesDb = Db | TxHandle;
+
 /**
- * Idempotent upsert on the ADR 0029 key. On conflict the stat payload is
- * refreshed but created_at is NEVER touched, so a correction updates storage
- * quietly without looking like a new row.
+ * The shared chunked upsert on the ADR 0029 key, over EITHER the top-level db or
+ * a transaction handle (#23 SC2). On conflict the stat payload is refreshed but
+ * created_at is NEVER touched, so a correction updates storage quietly without
+ * looking like a new row. Synchronous by construction (the better-sqlite3
+ * driver): callers may `await` the wrapper, or call this inside a
+ * `db.transaction((tx) => …)` callback with the tx handle. The single conflict
+ * set is factored HERE so it is never duplicated between the two callers.
  *
  * There is no longer a reported/unreported stamp to preserve: the Digest
  * selects by date window and writes nothing here (ADR 0035, superseding the
  * novelty model of ADR 0030). A correction simply shows up in the next window
  * that covers its game date.
  */
-export async function upsertStatLines(db: Db, rows: NewStatLineRow[]): Promise<void> {
+export function upsertStatLinesInto(db: StatLinesDb, rows: NewStatLineRow[]): void {
   for (let i = 0; i < rows.length; i += UPSERT_CHUNK) {
     const chunk = rows.slice(i, i + UPSERT_CHUNK);
-    await db
+    db
       .insert(statLines)
       .values(chunk)
       .onConflictDoUpdate({
@@ -542,8 +740,46 @@ export async function upsertStatLines(db: Db, rows: NewStatLineRow[]): Promise<v
           raw: sql`excluded.raw`,
           updatedAt: sql`excluded.updated_at`,
         },
-      });
+      })
+      .run();
   }
+}
+
+/**
+ * Idempotent chunked upsert on the ADR 0029 key — the top-level wrapper around
+ * {@link upsertStatLinesInto}. Kept async so existing `await` callers are
+ * unchanged, though the underlying driver is synchronous.
+ */
+export async function upsertStatLines(db: Db, rows: NewStatLineRow[]): Promise<void> {
+  upsertStatLinesInto(db, rows);
+}
+
+/**
+ * Persist one player's refreshed identity AND stat lines ATOMICALLY (#23): a
+ * single `BEGIN IMMEDIATE` transaction does the players identity `UPDATE` then
+ * the shared `upsertStatLinesInto` chunked upsert. Either both land or neither
+ * does — a game-log throw mid-upsert rolls the identity update back with it, so
+ * a call-up/transfer is never recorded without its games (and vice versa). All
+ * HTTP I/O MUST be buffered by the caller BEFORE this runs; the transaction
+ * never spans a network fetch.
+ *
+ * SCOPE (#23 SC4 / #81): this gives per-player atomicity only. It does NOT close
+ * the ingestion-wide write-coordination race tracked by issue #81 — a superseded
+ * run whose lease expired can still atomically write an OLDER snapshot after
+ * losing ownership. The lease-fencing renew/settle guards (ADR 0043) bound that
+ * exposure to a single in-flight player; the full fix is #81, out of scope here.
+ */
+export function writePlayerRefresh(
+  db: Db,
+  args: { playerId: number; identity: Partial<typeof players.$inferInsert>; rows: NewStatLineRow[] },
+): void {
+  db.transaction(
+    (tx) => {
+      tx.update(players).set(args.identity).where(eq(players.id, args.playerId)).run();
+      upsertStatLinesInto(tx, args.rows);
+    },
+    { behavior: "immediate" },
+  );
 }
 
 /**
@@ -558,12 +794,24 @@ export async function upsertStatLines(db: Db, rows: NewStatLineRow[]): Promise<v
 export async function runRefreshForPlayer(
   deps: RefreshDeps,
   playerId: number,
-): Promise<{ skipped: boolean; inserted: number; updated: number }> {
+): Promise<{
+  skipped: boolean;
+  inserted: number;
+  updated: number;
+  /**
+   * Calendar fetch failures encountered while priming this player's refresh
+   * (#23, MF3). Empty on the NCAA path (its calendar is seeded from bundled
+   * dates, never fetched) and on a skip; the MLB path surfaces any `getSeason`
+   * failure here AND on stderr, so a targeted refresh never reports clean
+   * success while the calendar refresh silently failed.
+   */
+  calendarFailures: CalendarFailure[];
+}> {
   const { db, now, tz } = deps;
   const activePlayers = await loadActivePlayers(db);
   const calendars = await loadCalendars(db);
   if (sleepWindow(calendars, activePlayers, now(), tz).sleeping) {
-    return { skipped: true, inserted: 0, updated: 0 };
+    return { skipped: true, inserted: 0, updated: 0, calendarFailures: [] };
   }
   const player = (await db.select().from(players).where(eq(players.id, playerId)))[0];
   if (player === undefined) {
@@ -573,12 +821,23 @@ export async function runRefreshForPlayer(
   if (player.level === "ncaa") {
     await refreshNcaaCalendar(deps, season, activePlayers);
     if (player.ncaaPlayerSeq === null) {
-      return { skipped: false, inserted: 0, updated: 0 };
+      return { skipped: false, inserted: 0, updated: 0, calendarFailures: [] };
     }
     const ncaaResult = await refreshNcaaPlayer(deps, player, season);
-    return { skipped: false, ...ncaaResult };
+    return { skipped: false, ...ncaaResult, calendarFailures: [] };
   }
-  await refreshCalendars(deps, season);
+  const calendarFailures = await refreshCalendars(deps, season);
+  if (calendarFailures.length > 0) {
+    // MF3: do NOT silently swallow a calendar failure on the single-player path.
+    // The player still proceeds (he never depended on the DB calendar), but the
+    // failure is explicit — returned to the caller AND logged.
+    process.stderr.write(
+      `refresh: ${calendarFailures.length} calendar fetch(es) failed during single-player ` +
+        `refresh of player id=${playerId}: ` +
+        calendarFailures.map((f) => `${f.sportId} (${f.reason})`).join("; ") +
+        "\n",
+    );
+  }
   const result = await refreshPlayer(deps, player, season);
-  return { skipped: false, ...result };
+  return { skipped: false, ...result, calendarFailures };
 }

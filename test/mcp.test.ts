@@ -555,6 +555,29 @@ describe("MCP server over Streamable HTTP", () => {
     expect(missing.isError).toBe(true);
   });
 
+  it("run_refresh surfaces the #23 status + failure arrays verbatim (no output-shape issue)", async () => {
+    // One refreshable player and one active MLB row with no externalId (skipped)
+    // → a `partial` whole-list run. The new fields must pass through the tool's
+    // structuredContent unchanged — the tool declares no outputSchema, so there
+    // is no zod shape to reject them.
+    await insertPlayer(opened.db, { externalId: 691185 });
+    await insertPlayer(opened.db, { externalId: null, level: "mlb", milbLevel: null, fullName: "No Id Guy" });
+
+    const all = await call("run_refresh");
+    expect(all.isError).toBeUndefined();
+    expect(all.structuredContent).toMatchObject({
+      skipped: false,
+      status: "partial",
+      playersRefreshed: 1,
+      playersSkipped: 1,
+      playersFailed: 0,
+      playerFailures: [],
+      calendarFailures: [],
+    });
+    // The text part carries the same JSON (clients that read only text).
+    expect(all.content[0]?.text).toContain('"status": "partial"');
+  });
+
   it("sql_query returns rows and rejects writes", async () => {
     await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
 

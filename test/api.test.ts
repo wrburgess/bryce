@@ -908,6 +908,42 @@ describe("REST API", () => {
       expect(res.status).toBe(404);
     });
 
+    it("returns 200 with a structured body for a whole-list `partial` run (#23, MF6)", async () => {
+      // One refreshable player and one active MLB row with no externalId (skipped
+      // by dispatch) → status `partial`, which is safe partial success → 200.
+      await insertPlayer(opened.db, { externalId: 691185 });
+      await insertPlayer(opened.db, { externalId: null, level: "mlb", milbLevel: null, fullName: "No Id Guy" });
+
+      const res = await app().request("/api/refresh", { method: "POST", headers: AUTH });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        skipped: false,
+        status: "partial",
+        playersRefreshed: 1,
+        playersSkipped: 1,
+        playersFailed: 0,
+        playerFailures: [],
+      });
+    });
+
+    it("returns 502 with a structured body for a whole-list `failed` run (#23, MF6)", async () => {
+      // The only player's fetch explodes → refreshed=0, failed>0 → blocked run.
+      await insertPlayer(opened.db, { externalId: 691185 });
+      deps.client = new MlbClient({
+        fetchImpl: (url: string) =>
+          url.includes("/people/") ? Promise.reject(new Error("mlb down")) : api.fetch(url),
+        delayMs: 0,
+      });
+
+      const res = await app().request("/api/refresh", { method: "POST", headers: AUTH });
+      expect(res.status).toBe(502);
+      const body = (await res.json()) as { status: string; playerFailures: unknown[] };
+      expect(body.status).toBe("failed");
+      expect(body.playerFailures).toHaveLength(1);
+      // Nothing was written for the failed player (buffer-before-write).
+      expect(await opened.db.select().from(statLines)).toHaveLength(0);
+    });
+
     it("refreshes one NCAA player by ncaaPlayerSeq, upserting his season", async () => {
       await insertPlayer(opened.db, {
         externalId: null,
