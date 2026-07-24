@@ -6,7 +6,7 @@
  */
 export type CliAdapter = (argv: string[]) => Promise<number>;
 
-type Option = { name: string; value?: boolean; aliases?: string[]; values?: readonly string[]; description: string };
+export type Option = { name: string; value?: boolean; aliases?: string[]; values?: readonly string[]; description: string; validate?: (value: string) => string | null };
 export type Command = {
   path: readonly string[];
   purpose: string;
@@ -21,9 +21,12 @@ const leaf = (
   load: Command["load"], options: readonly Option[] = [],
 ): Command => ({ path, purpose, usage, example, load, options });
 
-const value = (name: string, description: string, values?: readonly string[], aliases?: string[]): Option =>
-  ({ name, description, values, aliases });
+const value = (name: string, description: string, values?: readonly string[], aliases?: string[], validate?: Option["validate"]): Option =>
+  ({ name, description, values, aliases, validate });
 const flag = (name: string, description: string): Option => ({ name, description, value: false });
+const positiveInteger = (value: string): string | null => /^\d+$/.test(value) && Number(value) > 0 ? null : "a positive integer";
+const year = (value: string): string | null => /^\d{4}$/.test(value) ? null : "a four-digit year";
+const positiveIntegerList = (value: string): string | null => value.split(",").every((part) => positiveInteger(part.trim()) === null) ? null : "a comma-separated list of positive integers";
 
 /** Canonical built-in syntax/help metadata. Operational detail belongs in docs/cli. */
 export const COMMANDS: readonly Command[] = [
@@ -32,23 +35,23 @@ export const COMMANDS: readonly Command[] = [
   leaf(["players", "lists", "create"], "Create a named player list.", "bryce players lists create --name NAME", "bryce players lists create --name Prospects", () => import("./lists.js"), [value("name", "List name.")]),
   leaf(["players", "lists", "rename"], "Rename a named player list.", "bryce players lists rename --name OLD --to NEW", "bryce players lists rename --name Prospects --to 'Top 30'", () => import("./lists.js"), [value("name", "Current list name."), value("to", "New list name.")]),
   leaf(["players", "lists", "delete"], "Delete a named player list.", "bryce players lists delete --name NAME", "bryce players lists delete --name Prospects", () => import("./lists.js"), [value("name", "List name.")]),
-  leaf(["players", "lists", "add"], "Add players to a named list.", "bryce players lists add --name NAME [--person-ids IDS] [--ncaa-seqs IDS]", "bryce players lists add --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids."), value("ncaa-seqs", "Comma-separated NCAA ids.")]),
-  leaf(["players", "lists", "remove"], "Remove players from a named list.", "bryce players lists remove --name NAME [--person-ids IDS] [--ncaa-seqs IDS]", "bryce players lists remove --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids."), value("ncaa-seqs", "Comma-separated NCAA ids.")]),
+  leaf(["players", "lists", "add"], "Add players to a named list.", "bryce players lists add --name NAME [--person-ids IDS] [--ncaa-seqs IDS]", "bryce players lists add --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids.", undefined, undefined, positiveIntegerList), value("ncaa-seqs", "Comma-separated NCAA ids.", undefined, undefined, positiveIntegerList)]),
+  leaf(["players", "lists", "remove"], "Remove players from a named list.", "bryce players lists remove --name NAME [--person-ids IDS] [--ncaa-seqs IDS]", "bryce players lists remove --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids.", undefined, undefined, positiveIntegerList), value("ncaa-seqs", "Comma-separated NCAA ids.", undefined, undefined, positiveIntegerList)]),
   leaf(["players", "lists", "show"], "Show named lists or their members.", "bryce players lists show [--name NAME]", "bryce players lists show", () => import("./lists.js"), [value("name", "List name.")]),
   leaf(["players", "backup"], "Write a player-list backup.", "bryce players backup --out FILE", "bryce players backup --out backups/players.json", () => import("./players-backup.js"), [value("out", "Output file.")]),
   leaf(["players", "restore"], "Restore a player-list backup.", "bryce players restore --in FILE", "bryce players restore --in backups/players.json", () => import("./players-restore.js"), [value("in", "Input file.")]),
-  leaf(["players", "batch-add"], "Stage many players.", "bryce players batch-add [--person-ids IDS] [--ncaa-seqs IDS] [--names NAME] [--file FILE]", "bryce players batch-add --person-ids 691185", () => import("./batch-add.js"), [value("person-ids", "Comma-separated MLB ids."), value("ncaa-seqs", "Comma-separated NCAA ids."), value("names", "Player name; repeatable."), value("file", "Input file.")]),
+  leaf(["players", "batch-add"], "Stage many players.", "bryce players batch-add [--person-ids IDS] [--ncaa-seqs IDS] [--names NAME] [--file FILE]", "bryce players batch-add --person-ids 691185", () => import("./batch-add.js"), [value("person-ids", "Comma-separated MLB ids.", undefined, undefined, positiveIntegerList), value("ncaa-seqs", "Comma-separated NCAA ids.", undefined, undefined, positiveIntegerList), value("names", "Player name; repeatable."), value("file", "Input file.")]),
   leaf(["db", "migrate"], "Apply pending database migrations.", "bryce db migrate", "bryce db migrate", () => import("./migrate.js")),
   leaf(["db", "backup"], "Create a database snapshot.", "bryce db backup", "bryce db backup", () => import("./backup.js")),
   leaf(["db", "restore"], "Restore a database snapshot.", "bryce db restore --from FILE", "bryce db restore --from backups/bryce-YYYYMMDDTHHMMSSZ-000.db", () => import("./restore.js"), [value("from", "Snapshot file.")]),
-  leaf(["ncaa", "probe"], "Probe the NCAA scraper.", "bryce ncaa probe --seq N [--season YYYY] [--type TYPE]", "bryce ncaa probe --seq 2649785", () => import("./ncaa-probe.js"), [value("seq", "NCAA player sequence."), value("season", "Season year."), value("type", "Stat type.", ["batting", "pitching", "fielding"])]),
+  leaf(["ncaa", "probe"], "Probe the NCAA scraper.", "bryce ncaa probe --seq N [--season YYYY] [--type TYPE]", "bryce ncaa probe --seq 2649785", () => import("./ncaa-probe.js"), [value("seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("season", "Season year.", undefined, undefined, year), value("type", "Stat type.", ["batting", "pitching", "fielding"])]),
   leaf(["connector", "smoke"], "Smoke-test a running MCP connector.", "bryce connector smoke [--mutate]", "bryce connector smoke", () => import("./connector-smoke.js"), [flag("mutate", "Also run the configured mutation probe.")]),
-  leaf(["seed", "add"], "Add a watch-list player.", "bryce seed add (--person-id N|--ncaa-seq N|--search NAME) [--pick I]", "bryce seed add --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id."), value("ncaa-seq", "NCAA player sequence."), value("search", "Player name."), value("pick", "One-based search result.")]),
-  leaf(["seed", "deactivate"], "Deactivate a watch-list player.", "bryce seed deactivate (--person-id N|--ncaa-seq N)", "bryce seed deactivate --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id."), value("ncaa-seq", "NCAA player sequence.")]),
+  leaf(["seed", "add"], "Add a watch-list player.", "bryce seed add (--person-id N|--ncaa-seq N|--search NAME) [--pick I]", "bryce seed add --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("search", "Player name."), value("pick", "One-based search result.", undefined, undefined, positiveInteger)]),
+  leaf(["seed", "deactivate"], "Deactivate a watch-list player.", "bryce seed deactivate (--person-id N|--ncaa-seq N)", "bryce seed deactivate --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger)]),
   leaf(["seed", "list"], "List watch-list players.", "bryce seed list [--tags EXPR]", "bryce seed list --tags status:rostered", () => import("./seed.js"), [value("tags", "Tag selector.")]),
-  leaf(["seed", "tag", "add"], "Add a manual player tag.", "bryce seed tag add (--person-id N|--ncaa-seq N) --tag TAG", "bryce seed tag add --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id."), value("ncaa-seq", "NCAA player sequence."), value("tag", "Manual tag.")]),
-  leaf(["seed", "tag", "remove"], "Remove a manual player tag.", "bryce seed tag remove (--person-id N|--ncaa-seq N) --tag TAG", "bryce seed tag remove --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id."), value("ncaa-seq", "NCAA player sequence."), value("tag", "Manual tag.")]),
-  leaf(["seed", "tag", "list"], "List player tags.", "bryce seed tag list (--person-id N|--ncaa-seq N)", "bryce seed tag list --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id."), value("ncaa-seq", "NCAA player sequence.")]),
+  leaf(["seed", "tag", "add"], "Add a manual player tag.", "bryce seed tag add (--person-id N|--ncaa-seq N) --tag TAG", "bryce seed tag add --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("tag", "Manual tag.")]),
+  leaf(["seed", "tag", "remove"], "Remove a manual player tag.", "bryce seed tag remove (--person-id N|--ncaa-seq N) --tag TAG", "bryce seed tag remove --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("tag", "Manual tag.")]),
+  leaf(["seed", "tag", "list"], "List player tags.", "bryce seed tag list (--person-id N|--ncaa-seq N)", "bryce seed tag list --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger)]),
   leaf(["seed", "tag", "rebuild"], "Rebuild derived tags.", "bryce seed tag rebuild", "bryce seed tag rebuild", () => import("./seed.js")),
   leaf(["server"], "Run the REST and MCP server.", "bryce server", "bryce server", () => import("../server.js")),
 ];
@@ -56,10 +59,8 @@ export const COMMANDS: readonly Command[] = [
 const write = (line: string, error = false): void => {
   (error ? process.stderr : process.stdout).write(`${line}\n`);
 };
-const children = (path: readonly string[]): string[] => [...new Set(COMMANDS.filter((c) => c.path.length > path.length && path.every((p, i) => c.path[i] === p)).map((c) => c.path[path.length]!))].sort();
-
-export function renderHelp(path: readonly string[] = []): string {
-  const exact = COMMANDS.find((command) => command.path.join("\0") === path.join("\0"));
+export function renderHelp(path: readonly string[] = [], commands: readonly Command[] = COMMANDS): string {
+  const exact = commands.find((command) => command.path.join("\0") === path.join("\0"));
   if (exact !== undefined) {
     const optionLines = (exact.options ?? []).map((option) => {
       const names = [`--${option.name}`, ...(option.aliases ?? []).map((alias) => `-${alias}`)].join(", ");
@@ -68,23 +69,23 @@ export function renderHelp(path: readonly string[] = []): string {
     return [exact.purpose, "", `Usage: ${exact.usage}`, ...(optionLines.length ? ["", "Options:", ...optionLines] : []), "", `Example: ${exact.example}`].join("\n");
   }
   const label = path.length === 0 ? "bryce" : `bryce ${path.join(" ")}`;
-  const entries = children(path).map((child) => `  ${child}`);
+  const entries = [...new Set(commands.filter((c) => c.path.length > path.length && path.every((p, i) => c.path[i] === p)).map((c) => c.path[path.length]!))].sort().map((child) => `  ${child}`);
   return [`Usage: ${label} <command>`, "", "Commands:", ...entries, "", `Run '${label} help <command>' for command help.`].join("\n");
 }
 
 type Resolution = { command?: Command; argv?: string[]; help?: readonly string[]; error?: string };
-export function resolve(argv: readonly string[]): Resolution {
+export function resolve(argv: readonly string[], commands: readonly Command[] = COMMANDS): Resolution {
   if (argv.length === 0 || ["help", "--help", "-h"].includes(argv[0]!)) {
     const path = argv[0] === "help" ? argv.slice(1) : [];
     return { help: path };
   }
-  const candidates = COMMANDS.filter((command) => command.path[0] === argv[0]);
+  const candidates = commands.filter((command) => command.path[0] === argv[0]);
   if (candidates.length === 0) return { error: `unknown command '${argv[0]}'` };
   let pathLength = 0;
   for (let index = 1; index <= argv.length; index += 1) {
     const path = argv.slice(0, index);
-    const exact = COMMANDS.find((command) => command.path.length === index && command.path.every((segment, segmentIndex) => segment === path[segmentIndex]));
-    const hasChild = COMMANDS.some((command) => command.path.length > index && path.every((segment, segmentIndex) => command.path[segmentIndex] === segment));
+    const exact = commands.find((command) => command.path.length === index && command.path.every((segment, segmentIndex) => segment === path[segmentIndex]));
+    const hasChild = commands.some((command) => command.path.length > index && path.every((segment, segmentIndex) => command.path[segmentIndex] === segment));
     if (hasChild && ["help", "--help", "-h"].includes(argv[index] ?? "")) return { help: path };
     if (exact !== undefined && (!hasChild || argv[index] === undefined || argv[index]!.startsWith("-"))) {
       return { command: exact, argv: argv.slice(index) };
@@ -115,26 +116,28 @@ export function preflight(command: Command, argv: readonly string[]): string | n
     const candidate = inline ?? argv[++index];
     if (candidate === undefined || candidate.startsWith("-")) return `option '${name}' requires a value`;
     if (option.values !== undefined && !option.values.includes(candidate)) return `invalid value '${candidate}' for '${name}'; expected ${option.values.join(", ")}`;
+    const validation = option.validate?.(candidate);
+    if (validation !== undefined && validation !== null) return `invalid value '${candidate}' for '${name}'; expected ${validation}`;
   }
   return null;
 }
 
-export async function runRouter(argv = process.argv.slice(2), output: (line: string, error?: boolean) => void = write): Promise<number> {
-  const resolution = resolve(argv);
+export async function runRouter(argv = process.argv.slice(2), output: (line: string, error?: boolean) => void = write, commands: readonly Command[] = COMMANDS): Promise<number> {
+  const resolution = resolve(argv, commands);
   if (resolution.help !== undefined) {
-    if (!COMMANDS.some((command) => resolution.help!.every((part, index) => command.path[index] === part))) {
+    if (!commands.some((command) => resolution.help!.every((part, index) => command.path[index] === part))) {
       output(`error: unknown command '${resolution.help.join(" ")}'`, true);
       return 1;
     }
-    output(renderHelp(resolution.help));
+    output(renderHelp(resolution.help, commands));
     return 0;
   }
   if (resolution.error !== undefined || resolution.command === undefined || resolution.argv === undefined) {
-    output(`error: ${resolution.error ?? "invalid command"}\n${renderHelp()}`, true);
+    output(`error: ${resolution.error ?? "invalid command"}\n${renderHelp([], commands)}`, true);
     return 1;
   }
   if (["--help", "-h"].includes(resolution.argv[0] ?? "")) {
-    output(renderHelp(resolution.command.path));
+    output(renderHelp(resolution.command.path, commands));
     return 0;
   }
   const failure = preflight(resolution.command, resolution.argv);

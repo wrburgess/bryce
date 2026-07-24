@@ -14,6 +14,7 @@ import { bearerAuth } from "./server/auth.js";
 import type { ServiceDeps } from "./server/deps.js";
 import { healthSnapshot } from "./server/health.js";
 import { isMain } from "./cli/main.js";
+import { exitAfterDrain } from "./cli/main.js";
 
 /**
  * Phase 2 HTTP server (ADR 0027): the MCP server at /mcp is the primary
@@ -58,6 +59,31 @@ export function createApp(deps: AppDeps): Hono {
   return app;
 }
 
+export interface ClosableListener {
+  close: (callback: () => void) => unknown;
+}
+
+/**
+ * Signal handlers override Node's default termination, so they must close the
+ * listener themselves. Closing first stops new requests; only then do we drain
+ * diagnostics and exit. The injectable seams make this lifecycle testable.
+ */
+export function createShutdown(
+  listener: ClosableListener,
+  release: () => void,
+  finish: (code: number) => Promise<never> = exitAfterDrain,
+): () => void {
+  let shuttingDown = false;
+  return () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    listener.close(() => {
+      release();
+      void finish(0);
+    });
+  };
+}
+
 /** Start the service through the same explicit argv/status adapter as every CLI. */
 export async function main(argv = process.argv.slice(2)): Promise<number> {
   if (argv.length > 0) {
@@ -78,13 +104,13 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   // handlers must ALSO exit: registering a SIGINT/SIGTERM listener overrides
   // Node's default terminate-on-signal, so without the explicit exit the server
   // would become un-killable.
-  process.once("exit", () => started.lock?.release());
-  const shutdown = (): void => {
+  let lockReleased = false;
+  const releaseLock = (): void => {
+    if (lockReleased) return;
+    lockReleased = true;
     started.lock?.release();
-    process.exitCode = 0;
   };
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  process.once("exit", releaseLock);
   // startupDb has just created/migrated the file, so fileMustExist is satisfied.
   const { sqlite: readonlySqlite } = openReadonlyDb(config.databasePath);
   const app = createApp({
@@ -101,7 +127,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     digestTo: config.digestTo ?? "console@localhost",
     digestFrom: config.digestFrom ?? "bryce@localhost",
   });
-  serve({ fetch: app.fetch, port: config.serverPort });
+  const listener = serve({ fetch: app.fetch, port: config.serverPort });
+  const shutdown = createShutdown(listener, releaseLock);
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
   process.stdout.write(`server listening port=${config.serverPort}\n`);
   return 0;
 }

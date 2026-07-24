@@ -1,7 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { digestDeliveries } from "../src/db/schema.js";
-import { createApp } from "../src/server.js";
+import { createApp, createShutdown } from "../src/server.js";
+import { vi } from "vitest";
+
+describe("server shutdown", () => {
+  it("closes the listener once, releases its lock, then drains before exit", async () => {
+    let closeCallback: (() => void) | undefined;
+    const close = vi.fn((callback: () => void) => { closeCallback = callback; });
+    const release = vi.fn();
+    const finish = vi.fn(async () => undefined as never);
+    const shutdown = createShutdown({ close }, release, finish);
+
+    shutdown();
+    shutdown();
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+
+    closeCallback?.();
+    await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(1));
+    expect(finish).toHaveBeenCalledWith(0);
+  });
+});
 import {
   CapturingMailer,
   MID_SEASON,
