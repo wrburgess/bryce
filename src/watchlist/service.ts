@@ -1,4 +1,6 @@
 import { and, eq } from "drizzle-orm";
+import type { BatchAddEntry } from "../api/schemas.js";
+import { BatchAddInputSchema } from "../api/schemas.js";
 import type { Db } from "../db/client.js";
 import type { PlayerRow } from "../db/schema.js";
 import { playerTags, players } from "../db/schema.js";
@@ -7,6 +9,7 @@ import { canonicalizeName } from "../domain/names.js";
 import { hostDate } from "../domain/season.js";
 import { runRefreshForPlayer } from "../jobs/refresh.js";
 import type { MlbClient } from "../mlb/client.js";
+import { MlbApiError } from "../mlb/client.js";
 import { levelForSportId } from "../mlb/levels.js";
 import type { Person } from "../mlb/schemas.js";
 import type { NcaaClient } from "../ncaa/client.js";
@@ -100,21 +103,30 @@ export interface PlayerSearchResult {
   teamName: string | null;
 }
 
+/** Team lookups memoized within one call so shared teams cost one API request. */
+type TeamCache = Map<number, Awaited<ReturnType<MlbClient["getTeam"]>>>;
+
 /**
- * Add a Player by MLB Stats API personId. A duplicate add is a no-op update
- * (same Player, refreshed identity fields, re-activated). A brand-new add runs
- * his first Refresh — instant season backfill (ADR 0030) — unless the pipeline
- * is in Offseason Sleep (ADR 0031), exactly like the nightly job.
+ * Resolve an MLB personId to identity and insert/re-activate his row — the
+ * network-free-of-Refresh CORE shared by single-add (`addPlayer`) and batch-add
+ * (`batchAddPlayers`). No first Refresh is run here; the caller decides whether
+ * to run one. A null person is an UnknownPersonError; an existing row is a no-op
+ * identity refresh + re-activation. `teamCache` is threaded so a batch of
+ * teammates resolves the shared team once.
  */
-export async function addPlayer(deps: WatchlistDeps, personId: number): Promise<AddPlayerResult> {
-  const { db, client, now } = deps;
+export async function upsertMlbPlayer(
+  deps: Pick<WatchlistDeps, "db" | "client">,
+  personId: number,
+  nowIso: string,
+  teamCache: TeamCache,
+): Promise<{ action: "added" | "updated"; player: PlayerRow }> {
+  const { db, client } = deps;
   const person = await client.findPerson(personId);
   if (person === null) {
     throw new UnknownPersonError(personId);
   }
 
   const existing = (await db.select().from(players).where(eq(players.externalId, personId)))[0];
-  const nowIso = now().toISOString();
 
   if (existing !== undefined) {
     const updatedRows = await db
@@ -126,10 +138,10 @@ export async function addPlayer(deps: WatchlistDeps, personId: number): Promise<
     if (updated === undefined) {
       throw new Error(`update failed for player id ${existing.id}`);
     }
-    return { action: "updated", player: updated, refresh: null };
+    return { action: "updated", player: updated };
   }
 
-  const location = await resolveLocation(person, client);
+  const location = await resolveLocation(person, client, teamCache);
   const insertedRows = await db
     .insert(players)
     .values({
@@ -148,19 +160,36 @@ export async function addPlayer(deps: WatchlistDeps, personId: number): Promise<
   if (inserted === undefined) {
     throw new Error("insert failed");
   }
+  return { action: "added", player: inserted };
+}
+
+/**
+ * Add a Player by MLB Stats API personId. A duplicate add is a no-op update
+ * (same Player, refreshed identity fields, re-activated). A brand-new add runs
+ * his first Refresh — instant season backfill (ADR 0030) — unless the pipeline
+ * is in Offseason Sleep (ADR 0031), exactly like the nightly job.
+ */
+export async function addPlayer(deps: WatchlistDeps, personId: number): Promise<AddPlayerResult> {
+  const { db, client, now } = deps;
+  const nowIso = now().toISOString();
+  const { action, player } = await upsertMlbPlayer(deps, personId, nowIso, new Map());
+
+  if (action === "updated") {
+    return { action, player, refresh: null };
+  }
 
   // Adding a Player IS his first Refresh (ADR 0030) — unless the pipeline sleeps.
   const refresh = await runRefreshForPlayer(
     { db, client, ncaaClient: deps.ncaaClient, now, tz: deps.tz },
-    inserted.id,
+    player.id,
   );
   // SC1: a completed Refresh already synced tags via refreshPlayer; only derive
   // here when the first Refresh was SKIPPED (Offseason Sleep), so tags still
   // land from the inserted identity columns and we avoid double-derivation.
   if (refresh === null || refresh.skipped) {
-    syncDerivedTags(db, inserted.id, now());
+    syncDerivedTags(db, player.id, now());
   }
-  return { action: "added", player: inserted, refresh };
+  return { action: "added", player, refresh };
 }
 
 /**
@@ -176,8 +205,39 @@ export async function addNcaaPlayer(
   deps: WatchlistDeps,
   playerSeq: number,
 ): Promise<AddPlayerResult> {
-  const { db, ncaaClient, now, tz } = deps;
-  const season = hostDate(now(), tz).slice(0, 4);
+  const { db, client, ncaaClient, now, tz } = deps;
+  const nowIso = now().toISOString();
+  const { action, player } = await upsertNcaaPlayer(deps, playerSeq, nowIso);
+
+  if (action === "updated") {
+    return { action, player, refresh: null };
+  }
+
+  const refresh = await runRefreshForPlayer({ db, client, ncaaClient, now, tz }, player.id);
+  // SC1: mirror addPlayer — only derive here when the first Refresh was SKIPPED
+  // (Offseason Sleep); a completed Refresh already synced via refreshNcaaPlayer.
+  if (refresh === null || refresh.skipped) {
+    syncDerivedTags(db, player.id, now());
+  }
+  return { action: "added", player, refresh };
+}
+
+/**
+ * Resolve an NCAA stats_player_seq to identity (name/school, from his game-log
+ * page) and insert/re-activate his row — the Refresh-free CORE shared by
+ * single-add (`addNcaaPlayer`) and batch-add (`batchAddPlayers`). Error handling
+ * mirrors the single-add path: only a genuine not-found (HTTP 404 or a page with
+ * no resolvable player) becomes UnknownNcaaPlayerError; a non-404 NcaaApiError
+ * and an unbundled season (UnsupportedNcaaSeasonError) propagate untouched. The
+ * season is derived from the single captured clock (nowIso) — no second read.
+ */
+export async function upsertNcaaPlayer(
+  deps: Pick<WatchlistDeps, "db" | "ncaaClient" | "tz">,
+  playerSeq: number,
+  nowIso: string,
+): Promise<{ action: "added" | "updated"; player: PlayerRow }> {
+  const { db, ncaaClient, tz } = deps;
+  const season = hostDate(new Date(nowIso), tz).slice(0, 4);
 
   let identity: { fullName: string; schoolName: string };
   try {
@@ -197,7 +257,6 @@ export async function addNcaaPlayer(
   const existing = (
     await db.select().from(players).where(eq(players.ncaaPlayerSeq, playerSeq))
   )[0];
-  const nowIso = now().toISOString();
 
   if (existing !== undefined) {
     const updatedRows = await db
@@ -214,7 +273,7 @@ export async function addNcaaPlayer(
     if (updated === undefined) {
       throw new Error(`update failed for player id ${existing.id}`);
     }
-    return { action: "updated", player: updated, refresh: null };
+    return { action: "updated", player: updated };
   }
 
   const insertedRows = await db
@@ -236,14 +295,180 @@ export async function addNcaaPlayer(
   if (inserted === undefined) {
     throw new Error("insert failed");
   }
+  return { action: "added", player: inserted };
+}
 
-  const refresh = await runRefreshForPlayer({ db, client: deps.client, ncaaClient, now, tz }, inserted.id);
-  // SC1: mirror addPlayer — only derive here when the first Refresh was SKIPPED
-  // (Offseason Sleep); a completed Refresh already synced via refreshNcaaPlayer.
-  if (refresh === null || refresh.skipped) {
-    syncDerivedTags(db, inserted.id, now());
+/**
+ * Why a batch entry did not become an active Player. `person_not_found` /
+ * `name_no_match` / `name_ambiguous` / `ncaa_not_found` are SOFT outcomes
+ * (`unresolved` — the identity did not resolve); `unsupported_season` /
+ * `upstream_error` are HARD failures (`failed` — something upstream broke).
+ */
+export type BatchAddReasonCode =
+  | "person_not_found"
+  | "name_no_match"
+  | "name_ambiguous"
+  | "ncaa_not_found"
+  | "unsupported_season"
+  | "upstream_error";
+
+/** A disambiguation candidate offered when a name matches more than one player. */
+export interface BatchAddCandidate {
+  personId: number;
+  fullName: string;
+  teamName: string | null;
+  position: string | null;
+}
+
+/**
+ * One entry's outcome, discriminated on `status`. `entry` echoes the NORMALIZED
+ * parsed entry (trimmed name). `candidates` is present ONLY for name_ambiguous;
+ * `message` is display-only diagnostic text on a hard failure.
+ */
+export type BatchAddEntryResult =
+  | { status: "added"; entry: BatchAddEntry; player: PlayerRow }
+  | { status: "updated"; entry: BatchAddEntry; player: PlayerRow }
+  | { status: "unresolved"; entry: BatchAddEntry; reason: BatchAddReasonCode; candidates?: BatchAddCandidate[] }
+  | { status: "failed"; entry: BatchAddEntry; reason: BatchAddReasonCode; message?: string };
+
+export interface BatchAddSummary {
+  added: number;
+  updated: number;
+  unresolved: number;
+  failed: number;
+  total: number;
+}
+
+export interface BatchAddPlayersResult {
+  summary: BatchAddSummary;
+  entries: BatchAddEntryResult[];
+}
+
+/** Project an MLB people-search hit into a disambiguation candidate. */
+function toBatchCandidate(person: Person): BatchAddCandidate {
+  return {
+    personId: person.id,
+    fullName: person.fullName,
+    teamName: person.currentTeam?.name ?? null,
+    position: person.primaryPosition?.abbreviation ?? null,
+  };
+}
+
+/**
+ * Classify a per-entry throw into its outcome (ADR 0045 error taxonomy). A clean
+ * not-found is SOFT (`unresolved`); an upstream/season failure is HARD
+ * (`failed`). A ZodError from parsing an UPSTREAM response, or any other
+ * unexpected error, is an upstream_error — the top-level INPUT ZodError never
+ * reaches here (it aborts the whole call in `batchAddPlayers`).
+ */
+function classifyBatchFailure(entry: BatchAddEntry, err: unknown): BatchAddEntryResult {
+  if (err instanceof UnknownPersonError) {
+    return { status: "unresolved", entry, reason: "person_not_found" };
   }
-  return { action: "added", player: inserted, refresh };
+  if (err instanceof UnknownNcaaPlayerError) {
+    return { status: "unresolved", entry, reason: "ncaa_not_found" };
+  }
+  if (err instanceof UnsupportedNcaaSeasonError) {
+    return { status: "failed", entry, reason: "unsupported_season", message: err.message };
+  }
+  if (err instanceof MlbApiError || err instanceof NcaaApiError) {
+    return { status: "failed", entry, reason: "upstream_error", message: err.message };
+  }
+  return {
+    status: "failed",
+    entry,
+    reason: "upstream_error",
+    message: err instanceof Error ? err.message : String(err),
+  };
+}
+
+/**
+ * Batch-add typed identity entries to the Watch List (issue #68 / ADR 0045).
+ *
+ * The batch's SHAPE is validated strictly up front — over-cap, blank, untyped,
+ * multi-key, unknown-key, or in-batch duplicate throws a ZodError that aborts
+ * the whole call BEFORE any network or write (the only abort path). Each entry
+ * is then resolved best-effort, in input order, under its OWN try/catch:
+ * capture-and-continue, so one entry's failure never aborts the batch and never
+ * rolls back an earlier insert (batch-add is deliberately NON-transactional,
+ * unlike restorePlayerListBackup).
+ *
+ * Crucially, NO first Refresh runs (no runRefreshForPlayer / refresh_runs row /
+ * stat_lines write): batch-add STAGES identity and defers the season backfill to
+ * the next Refresh, which sweeps loadActivePlayers (ADR 0030/0045). One clock and
+ * one team cache are captured for the whole call — uniform timestamps, shared
+ * teams fetched once.
+ */
+export async function batchAddPlayers(
+  deps: WatchlistDeps,
+  input: unknown,
+): Promise<BatchAddPlayersResult> {
+  // A bad shape aborts the whole call before any network or write (ADR 0045).
+  const parsed = BatchAddInputSchema.parse(input);
+
+  const nowIso = deps.now().toISOString();
+  const teamCache: TeamCache = new Map();
+  const entries: BatchAddEntryResult[] = [];
+
+  for (const entry of parsed.entries) {
+    try {
+      if (entry.personId !== undefined) {
+        const { action, player } = await upsertMlbPlayer(deps, entry.personId, nowIso, teamCache);
+        entries.push({ status: action, entry, player });
+      } else if (entry.ncaaPlayerSeq !== undefined) {
+        const { action, player } = await upsertNcaaPlayer(deps, entry.ncaaPlayerSeq, nowIso);
+        entries.push({ status: action, entry, player });
+      } else {
+        // A name is an MLB-only people-search convenience; it must resolve to
+        // EXACTLY one hit — 0 or >1 is unresolved, never a guessed pick.
+        const people = await deps.client.searchPeople(entry.name ?? "");
+        if (people.length === 0) {
+          entries.push({ status: "unresolved", entry, reason: "name_no_match" });
+        } else if (people.length > 1) {
+          entries.push({
+            status: "unresolved",
+            entry,
+            reason: "name_ambiguous",
+            candidates: people.map(toBatchCandidate),
+          });
+        } else {
+          const hit = people[0];
+          if (hit === undefined) {
+            entries.push({ status: "unresolved", entry, reason: "name_no_match" });
+          } else {
+            const { action, player } = await upsertMlbPlayer(deps, hit.id, nowIso, teamCache);
+            entries.push({ status: action, entry, player });
+          }
+        }
+      }
+    } catch (err) {
+      entries.push(classifyBatchFailure(entry, err));
+    }
+  }
+
+  // Batch-add STAGES identity with NO inline Refresh, so — unlike addPlayer,
+  // whose completed first Refresh derives tags — a newly staged player has no
+  // derived tags yet. Derive them now from the identity columns just written
+  // (reusing the single captured clock; idempotent, manual tags untouched), so
+  // a batch-added player is not left untagged until the next Refresh. Mirrors
+  // addPlayer's skipped-Refresh branch: only a NEW add needs it — an updated /
+  // re-activated row keeps its tags, and upsert's update path never touches a
+  // tag-relevant column.
+  const derivedAt = new Date(nowIso);
+  for (const result of entries) {
+    if (result.status === "added") {
+      syncDerivedTags(deps.db, result.player.id, derivedAt);
+    }
+  }
+
+  const summary: BatchAddSummary = {
+    added: entries.filter((e) => e.status === "added").length,
+    updated: entries.filter((e) => e.status === "updated").length,
+    unresolved: entries.filter((e) => e.status === "unresolved").length,
+    failed: entries.filter((e) => e.status === "failed").length,
+    total: entries.length,
+  };
+  return { summary, entries };
 }
 
 /**

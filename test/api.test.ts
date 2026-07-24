@@ -278,6 +278,77 @@ describe("REST API", () => {
     });
   });
 
+  describe("POST /api/players/batch", () => {
+    it("stages a batch and returns 200 with a summary + per-entry outcomes (no inline backfill)", async () => {
+      const res = await app().request("/api/players/batch", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ entries: [{ personId: 691185 }, { ncaaPlayerSeq: 2649785 }] }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        summary: { added: number; total: number };
+        entries: Array<{ status: string }>;
+      };
+      expect(body.summary).toMatchObject({ added: 2, total: 2 });
+      expect(body.entries.map((e) => e.status)).toEqual(["added", "added"]);
+
+      // Two players STAGED, but the batch ran no first Refresh — deferred backfill.
+      expect(await opened.db.select().from(players)).toHaveLength(2);
+      expect(await opened.db.select().from(statLines)).toHaveLength(0);
+    });
+
+    it("keeps a soft per-entry failure INSIDE the 200 body (never the 4xx/5xx seam)", async () => {
+      api.options.searchResults = []; // the name resolves to zero hits
+      const res = await app().request("/api/players/batch", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ entries: [{ personId: 691185 }, { name: "Nobody At All" }] }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        summary: { added: number; unresolved: number };
+        entries: Array<{ status: string; reason?: string }>;
+      };
+      expect(body.summary).toMatchObject({ added: 1, unresolved: 1 });
+      expect(body.entries[1]).toMatchObject({ status: "unresolved", reason: "name_no_match" });
+      expect(await opened.db.select().from(players)).toHaveLength(1);
+    });
+
+    it("400s a bad shape (empty entries) and writes nothing", async () => {
+      const res = await app().request("/api/players/batch", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ entries: [] }),
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe("invalid-input");
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+
+    it("400s a non-coercing identity (personId: true, never coerced to 1) and writes nothing", async () => {
+      const res = await app().request("/api/players/batch", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ entries: [{ personId: true }] }),
+      });
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toBe("invalid-input");
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+
+    it("413s a body over the 64 KB ceiling before parsing", async () => {
+      const huge = JSON.stringify({ entries: [{ name: "x".repeat(70_000) }] });
+      const res = await app().request("/api/players/batch", {
+        method: "POST",
+        headers: { ...JSON_AUTH, "content-length": String(huge.length) },
+        body: huge,
+      });
+      expect(res.status).toBe(413);
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+  });
+
   describe("POST /api/players/ncaa/:seq/deactivate", () => {
     it("deactivates an NCAA player by seq, keeping history", async () => {
       const ncaa = await insertPlayer(opened.db, {

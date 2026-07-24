@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { Hono } from "hono";
 import type { Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { ZodError } from "zod";
 import { players } from "../db/schema.js";
 import { assembleDigest } from "../digest/assemble.js";
@@ -32,6 +33,7 @@ import {
   UnknownPersonError,
   addNcaaPlayer,
   addPlayer,
+  batchAddPlayers,
   deactivatePlayer,
   listPlayers,
   searchPlayers,
@@ -55,6 +57,9 @@ import {
  * every behavior lives in the shared service layer the MCP tools also use.
  * Mounted under /api behind the bearer middleware (src/server/auth.ts).
  */
+
+/** Body-size ceiling for POST /players/batch — a cheap DoS guard for the 25-entry cap. */
+const MAX_BATCH_BODY_BYTES = 64 * 1024;
 
 /**
  * A non-JSON Presentation/Export body as a downloadable file (ADR 0037): set a
@@ -170,6 +175,23 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     const result = await addNcaaPlayer(deps, body.ncaaPlayerSeq);
     return c.json(result, result.action === "added" ? 201 : 200);
   });
+
+  // Batch-add (issue #68 / ADR 0045). A bad shape (over-cap, blank, untyped,
+  // in-batch duplicate) is a ZodError the service throws -> onError -> 400. Soft
+  // per-entry outcomes (unresolved/failed) stay INSIDE the 200 body — they never
+  // take the 404/502 error seam. A 64 KB body limit is a cheap DoS guard sized
+  // for the 25-entry cap; the middleware short-circuits an oversize body with 413.
+  api.post(
+    "/players/batch",
+    bodyLimit({
+      maxSize: MAX_BATCH_BODY_BYTES,
+      onError: (c) => c.json({ error: "payload-too-large" }, 413),
+    }),
+    async (c) => {
+      const result = await batchAddPlayers(deps, await c.req.json());
+      return c.json(result, 200);
+    },
+  );
 
   api.post("/players/ncaa/:seq/deactivate", async (c) => {
     const ncaaPlayerSeq = NcaaPlayerSeqSchema.parse(c.req.param("seq"));

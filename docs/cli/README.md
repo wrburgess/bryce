@@ -194,6 +194,43 @@ invalid payload or a split-identity conflict fails the whole import with a non-z
 |---|---|---|
 | `--in FILE` | **yes** | The Player List Backup JSON to import. |
 
+## `players:batch-add` — stage many Players in one call
+
+```sh
+npm run players:batch-add -- --person-ids 691185,700001 --ncaa-seqs 2649785
+npm run players:batch-add -- --names "Bobby Witt Jr." --names "Gunnar Henderson"
+npm run players:batch-add -- --file roster.txt
+```
+
+Stages up to **25** Players onto the Watch List in one call ([#68](https://github.com/wrburgess/bryce/issues/68),
+[ADR 0045](../adr/0045-batch-add-stages-by-identity-best-effort-defers-backfill.md)). Each Player's
+**identity** is resolved and his row is staged **now**, but — unlike `seed add` — **no first Refresh
+runs inline**: his Stat Lines appear at the next `npm run refresh`. Prints one greppable
+`outcome status=... ` line per entry, then a `summary added=… updated=… unresolved=… failed=… total=…`
+line. All flags and the file merge into one batch.
+
+| Flag | Notes |
+|---|---|
+| `--person-ids 1,2,3` | Comma-separated MLB personIds. Repeatable; a non-integer token is a usage error. |
+| `--ncaa-seqs 10,20` | Comma-separated NCAA `stats_player_seq`. Repeatable; a non-integer token is a usage error. |
+| `--names NAME` | One MLB/MiLB name to people-search (must resolve to exactly one Player). Repeat the flag per name. |
+| `--file PATH` | A paste-friendly file of tagged lines (below), combinable with the flags. |
+
+**File grammar** — each line is trimmed; blank lines and `#` comments are ignored:
+
+| Line | Becomes |
+|---|---|
+| `ncaa:<n>` | An NCAA `stats_player_seq` (a non-numeric `ncaa:` value is a usage error). |
+| `name:<x>` | An explicit name — the escape hatch for a name that is all digits. |
+| `<digits>` | An MLB personId. |
+| anything else | A name. |
+
+**Exit codes.** A completed batch (valid shape) exits **0** *even when some entries are `unresolved`
+or `failed`* — those are per-entry outcomes, not a run failure. It exits **1** on a **usage error**:
+an unknown flag, a non-integer id token, an unreadable file, a file over the **64 KB** ceiling, or a
+**shape rejection** — an empty batch, over the 25 cap, or an in-batch duplicate (a `personId` N and an
+`ncaaPlayerSeq` N are *different* Players, never a duplicate). A shape rejection writes nothing.
+
 ## `server` — start the HTTP server
 
 ```sh
