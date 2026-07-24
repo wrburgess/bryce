@@ -143,7 +143,7 @@ describe("digest CLI", () => {
       expect(await runDigestCli(["--window", "7d"], deps())).toBe(0);
       expect(output[0]).toContain("statLines=2");
       expect(output[0]).toContain("window=Last 7 Days (Jul 12-18)");
-      expect(mailer.sent[0]?.subject).toBe("MLB Daily Tracker - Last 7 Days (Jul 12-18)");
+      expect(mailer.sent[0]?.subject).toBe("ScoreKeeps Baseball (Default) - Prev 7 Days");
 
       expect(await runDigestCli(["--force"], deps())).toBe(0);
       expect(output[1]).toContain("statLines=1");
@@ -205,6 +205,8 @@ describe("digest CLI", () => {
       const body = `${mailer.sent[0]?.html}\n${mailer.sent[0]?.text}`;
       expect(body).toContain("Listed Guy".split(" ")[1]); // surname (renderer abbreviates)
       expect(body).not.toContain("Acosta");
+      expect(mailer.sent[0]?.subject).toBe("ScoreKeeps Baseball (L) - Sat, July 18, 2026");
+      expect(mailer.sent[0]?.text).toContain("ScoreKeeps Baseball - L List - Sat, July 18, 2026");
     });
 
     it("--list fails closed on an unknown list: exits 1 and sends nothing (#70)", async () => {

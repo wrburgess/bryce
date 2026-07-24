@@ -437,7 +437,7 @@ describe("MCP server over Streamable HTTP", () => {
       from: "2026-07-18",
       to: "2026-07-18",
     });
-    expect((result.structuredContent?.mail as { subject: string }).subject).toBe("MLB Daily Tracker - Sat, July 18, 2026");
+    expect((result.structuredContent?.mail as { subject: string }).subject).toBe("ScoreKeeps Baseball (Default) - Sat, July 18, 2026");
 
     expect(mailer.sent).toHaveLength(0);
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
@@ -488,6 +488,28 @@ describe("MCP server over Streamable HTTP", () => {
     expect(mailer.sent).toHaveLength(1);
     expect(mailer.sent[0]?.text).toContain("M Acosta");
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(1);
+  });
+
+  it("send_digest carries a named list into the public title and scopes its content", async () => {
+    const member = await insertPlayer(opened.db, { externalId: 821, fullName: "Trade Member" });
+    await insertStatLine(opened.db, { playerId: member.id, gameDate: "2026-07-18" });
+    const excluded = await insertPlayer(opened.db, { externalId: 822, fullName: "Excluded Prospect" });
+    await insertStatLine(opened.db, { playerId: excluded.id, gameDate: "2026-07-18" });
+    expect((await call("list_create", { name: "Tradebait" })).isError).toBeUndefined();
+    expect(
+      (await call("list_add_players", { name: "Tradebait", players: [{ personId: 821 }] })).isError,
+    ).toBeUndefined();
+
+    const result = await call("send_digest", { list: "Tradebait" });
+    expect(result.structuredContent).toMatchObject({ action: "sent", playerCount: 1, statLineCount: 1 });
+    expect(mailer.sent).toHaveLength(1);
+    expect(mailer.sent[0]?.subject).toBe("ScoreKeeps Baseball (Tradebait) - Sat, July 18, 2026");
+    expect(mailer.sent[0]?.text.split("\n")[0]).toBe(
+      "ScoreKeeps Baseball - Tradebait List - Sat, July 18, 2026",
+    );
+    expect(mailer.sent[0]?.text).toContain("T Member");
+    expect(mailer.sent[0]?.text).not.toContain("Prospect");
+    expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
   });
 
   it("send_digest accepts force, replaying without recording", async () => {
@@ -627,9 +649,9 @@ describe("MCP server over Streamable HTTP", () => {
       pitchers: [],
       unknownFields: [],
       mail: {
-        subject: "MLB Daily Tracker - Sat, July 18, 2026",
-        html: "<h1>Sat, July 18, 2026</h1>\n<p>No games in this window.</p>",
-        text: "Sat, July 18, 2026\n\nNo games in this window.\n",
+        subject: "ScoreKeeps Baseball (Default) - Sat, July 18, 2026",
+        html: "<h1>ScoreKeeps Baseball - Default List - Sat, July 18, 2026</h1>\n<p>No games in this window.</p>",
+        text: "ScoreKeeps Baseball - Default List - Sat, July 18, 2026\n\nNo games in this window.\n",
       },
     };
     const omitted = await call("digest_preview");
@@ -907,7 +929,10 @@ describe("MCP server over Streamable HTTP", () => {
       await call("list_add_players", { name: "L", players: [{ personId: 601 }] });
 
       const preview = await call("digest_preview", { window: "1d", list: "L" });
-      expect(preview.structuredContent).toMatchObject({ playerCount: 1 });
+      expect(preview.structuredContent).toMatchObject({
+        playerCount: 1,
+        mail: { subject: "ScoreKeeps Baseball (L) - Sat, July 18, 2026" },
+      });
 
       const stat = await call("stat_lines", { list: "L" });
       const lines = stat.structuredContent?.statLines as Array<{ playerId: number }>;

@@ -41,6 +41,8 @@ export interface DigestDeps {
    * unaffected.
    */
   listId?: number;
+  /** Validated named-list display name, preserved for the rendered Digest. */
+  listName?: string;
   /**
    * Operator override of the once-a-day / once-a-week bookkeeping (testing).
    * When force is what let the run proceed, the run is a REPLAY: it sends and
@@ -348,7 +350,13 @@ async function runOnDemandReport(
   warn: (message: string) => void,
 ): Promise<DigestResult> {
   const { db, now, tz } = deps;
-  const assembly = await assembleDigest(db, { now, tz, spec: deps.spec, listId: deps.listId });
+  const assembly = await assembleDigest(db, {
+    now,
+    tz,
+    spec: deps.spec,
+    listId: deps.listId,
+    listName: deps.listName,
+  });
   reportUnknownFields(assembly, warn);
 
   const mail = renderDigest(assembly);

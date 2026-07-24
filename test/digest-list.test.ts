@@ -62,6 +62,7 @@ describe("scoped digest (#70)", () => {
       tz: TEST_TZ,
       spec: "1d",
       listId: list.id,
+      listName: list.name,
     });
     expect(rowNames(scoped)).toEqual(["Member Idle", "Member Withstats"]);
     expect(scoped.playerCount).toBe(1); // only the member with a line is counted
@@ -93,6 +94,7 @@ describe("scoped digest (#70)", () => {
       tz: TEST_TZ,
       spec: "1d",
       listId: list.id,
+      listName: list.name,
     });
     expect(scoped.batters).toEqual([]);
     expect(scoped.pitchers).toEqual([]);
@@ -159,6 +161,7 @@ describe("scoped digest (#70)", () => {
       from: "bryce@example.com",
       spec: "1d",
       listId: list.id,
+      listName: list.name,
     });
     expect(result.action).toBe("sent");
     expect(result.playerCount).toBe(1);
@@ -167,5 +170,6 @@ describe("scoped digest (#70)", () => {
     const body = `${mailer.sent[0]?.html}\n${mailer.sent[0]?.text}`;
     expect(body).toContain("Memberrow");
     expect(body).not.toContain("Nonmemberrow");
+    expect(mailer.sent[0]?.subject).toBe("ScoreKeeps Baseball (L) - Sat, July 18, 2026");
   });
 });

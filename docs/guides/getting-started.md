@@ -1,12 +1,12 @@
 # Getting Started
 
 From nothing to your first digest email, step by step. No prior knowledge of this codebase is
-assumed — if you can use GitHub, you can run Bryce. Production operations (scheduling, remote
+assumed — if you can use GitHub, you can run ScoreKeeps Baseball Tracker (the development project is named Bryce). Production operations (scheduling, remote
 access, backup) live in [Running Bryce](running-bryce.md); this guide gets you testing locally.
 
 **What Bryce is, in one paragraph:** you keep a personal watch list of baseball players (MLB,
 minor league, NCAA). A nightly *Refresh* pulls each player's full season game log; a daily *Digest*
-emails you every stat line it hasn't reported before, grouped MLB → MiLB → NCAA. There's no web
+emails a windowed roll-up of the last completed day (or a requested reporting window). There's no web
 UI — you manage the watch list from the command line, a small REST API, or by asking Claude
 through the built-in MCP server.
 
@@ -135,9 +135,9 @@ Adding a player immediately fetches his **entire current-season game log** (his 
 so expect it to take a few seconds and print what it ingested. If you already know a player's MLB
 Stats API personId you can use `add --person-id 702616` instead.
 
-**NCAA players** are added by their stats.ncaa.org ID (`stats_player_seq`) — see
-[Running Bryce → NCAA players](running-bryce.md#ncaa-players) for how to read it off a player's
-stats.ncaa.org page URL:
+**NCAA players** are added by their stats.ncaa.org ID (`stats_player_seq`). Search for the player on
+stats.ncaa.org, open the player's page, and copy the `stats_player_seq` value from its URL — see
+[Running Bryce → NCAA players](running-bryce.md#ncaa-players) for an example:
 
 ```bash
 npm run seed -- add --ncaa-seq 2649785
@@ -168,19 +168,21 @@ category.
 npm run digest
 ```
 
-Builds the digest of every stat line not yet reported and "sends" it — with
+Builds the default one-day digest for the last completed host date and "sends" it — with
 `MAILER_PROVIDER=console` it prints the email (subject, HTML, and plain text) straight to your
-terminal. You should see your players' lines grouped by level, in the fixed format — e.g.
+terminal. You can request a different Digest window (for example, `npm run digest -- --window 7d`);
+the complete supported-window list and syntax live in the [CLI Digest reference](../cli/README.md#digest--build-and-send-a-windowed-digest).
+You should see your players' lines grouped by level, in the fixed format — e.g.
 `PA 4, H 2, BB 1, K 1, 2B 0, 3B 0, HR 1, RBI 3, R 2, SB 0, CS 0, E 0` for hitters or
 `IP 6.1, ER 2, K 8, K/9 11.4, BB 1, HA 4, HRA 1, ERA 2.84, WHIP 0.79, QS 1, S 0, BS 0, HLD 0, RW 0, RL 0`
 for pitchers (every stat always shown, zeros included; ERA/WHIP/K-9 are that game's rates only) —
-with a "No new stats" list for in-season players who didn't play.
+with in-season players who did not play shown as zero rows when applicable.
 
 Two behaviors that surprise people, both by design:
 
-- **Report-once:** sending marks those lines as reported (yes, even with the console mailer), so
-  an immediate second `npm run digest` reports nothing new. One digest per day, even when empty —
-  an empty digest is proof the pipeline is alive.
+- **Daily delivery:** the scheduled one-day digest sends at most once per day (yes, even with the
+  console mailer); requested multi-day windows are on-demand and can be run again safely. One
+  scheduled digest per day, even when empty — an empty digest is proof the pipeline is alive.
 - **Out-of-season players are omitted entirely**, not listed under "No new stats". From the World
   Series to the earliest watched opening day the whole pipeline sleeps, and a weekly heartbeat
   email replaces the daily digest.
@@ -263,7 +265,7 @@ npm run digest  # database migrations apply automatically on the next run of any
 |---|---|
 | `npm install` fails on `better-sqlite3` | Node too old — re-check `node --version` ≥ 22 |
 | Server exits immediately on start | `API_TOKEN` missing or blank in `.env` — it fails closed by design |
-| `npm run digest` says nothing new | Everything was already reported today (report-once), or all players are out of season |
+| `npm run digest` shows no games | No watched player appeared in the selected window; the scheduled daily Digest still sends an empty report, while Offseason Sleep replaces it with a weekly heartbeat |
 | Weekly "heartbeat" email instead of a daily digest | Offseason Sleep (World Series → earliest watched opening day) — expected |
 | Real email not arriving | `DIGEST_FROM` not a verified Postmark Sender Signature, or wrong server token |
 | NCAA add/probe fails with a 403 or parse error | stats.ncaa.org edge/selector drift — run the probe and see [Running Bryce → NCAA players](running-bryce.md#ncaa-players) |

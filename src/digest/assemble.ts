@@ -47,6 +47,12 @@ export interface DigestRow {
 
 export interface DigestAssembly {
   window: ResolvedWindow;
+  /**
+   * Validated named-list display name for presentation, when this is a scoped
+   * digest. Kept apart from `window` so structured window metadata remains
+   * canonical and list naming does not need to be reconstructed by renderers.
+   */
+  listName?: string;
   batters: DigestRow[];
   pitchers: DigestRow[];
   /** Distinct players with lines in the window (zero rows are not counted). */
@@ -78,6 +84,8 @@ export interface AssembleDeps {
    * `seasonStartFor` — so an off-list player can never leak as a zero row.
    */
   listId?: number;
+  /** Display name paired with `listId`, carried to the public presentation. */
+  listName?: string;
 }
 
 interface Split {
@@ -182,6 +190,7 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
 
   return {
     window,
+    listName: deps.listName,
     batters,
     pitchers,
     playerCount: playersWithLines.size,
