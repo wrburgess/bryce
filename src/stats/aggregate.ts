@@ -150,6 +150,10 @@ const stolenBasePercentage: Formula = slashLine((a) =>
   ratio(c(a, "stolenBases"), c(a, "stolenBases") + c(a, "caughtStealing")),
 );
 
+const caughtStealingPercentage: Formula = slashLine((a) =>
+  ratio(c(a, "caughtStealing"), c(a, "stolenBases") + c(a, "caughtStealing")),
+);
+
 /** Formulas shared by batting and pitching (pitching's are "against" versions). */
 const SHARED: Readonly<Record<string, Formula>> = {
   avg: slashLine((a) => ratio(c(a, "hits"), c(a, "atBats"))),
@@ -161,9 +165,7 @@ const SHARED: Readonly<Record<string, Formula>> = {
     return o === null || s === null ? null : o + s;
   }),
   stolenBasePercentage,
-  caughtStealingPercentage: slashLine((a) =>
-    ratio(c(a, "caughtStealing"), c(a, "stolenBases") + c(a, "caughtStealing")),
-  ),
+  caughtStealingPercentage,
   groundOutsToAirouts: fixed(2, (a) => ratio(c(a, "groundOuts"), c(a, "airOuts"))),
 };
 
@@ -210,6 +212,7 @@ const FIELDING_RATES: Readonly<Record<string, Formula>> = {
   // Derivable here too: stolenBases and caughtStealing are fielding counters
   // (catcher stats). Same formula object as SHARED's — see stolenBasePercentage above.
   stolenBasePercentage,
+  caughtStealingPercentage,
 };
 
 const FORMULAS: Readonly<Record<StatType, Readonly<Record<string, Formula>>>> = {

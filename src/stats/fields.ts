@@ -130,6 +130,8 @@ const FIELDING: Readonly<Record<string, FieldClass>> = {
   assists: "counter",
   catchersInterference: "counter",
   caughtStealing: "counter",
+  // Derivable from the same catcher SB/CS counters as stolenBasePercentage.
+  caughtStealingPercentage: "rate",
   chances: "counter",
   // Excluded, not rate — and the reason is the contract above, NOT missing
   // data. Earned runs are technically recoverable (ER = catcherERA * IP / 9),
