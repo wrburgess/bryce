@@ -223,7 +223,6 @@ export async function createPlayerListBackup(
       listName: playerLists.name,
       externalId: players.externalId,
       ncaaPlayerSeq: players.ncaaPlayerSeq,
-      playerId: players.id,
     })
     .from(listMembers)
     .innerJoin(playerLists, eq(listMembers.listId, playerLists.id))

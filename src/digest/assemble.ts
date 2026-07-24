@@ -1,7 +1,7 @@
-import { and, eq, gte, inArray, lte, sql } from "drizzle-orm";
+import { and, eq, exists, gte, inArray, lte, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { PlayerRow, StatLineRow } from "../db/schema.js";
-import { players, statLines } from "../db/schema.js";
+import { listMembers, players, statLines } from "../db/schema.js";
 import type { CalendarEntry } from "../domain/season.js";
 import { hostDate, isInSeason, sportIdForPlayer } from "../domain/season.js";
 import type { ResolvedWindow, WindowSpec } from "../domain/window.js";
@@ -108,14 +108,22 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
     deps.asOf ?? null,
   );
 
-  // Scope the main join to the list's members too. An EMPTY named list must
-  // select nothing (a false predicate), never fall through to all-active.
+  // Scope the main join to the list's members with a correlated EXISTS against
+  // list_members, keyed by list_id. It is constant-size regardless of list size
+  // (no per-member bind param, so no SQLite ~999-param ceiling), and an EMPTY
+  // named list selects nothing naturally — EXISTS is false with no member rows,
+  // no `1 = 0` special-case needed. No list ⇒ nothing added (path unchanged).
   const scopeCondition =
-    memberIds === null
+    deps.listId === undefined
       ? undefined
-      : memberIds.length > 0
-        ? inArray(players.id, memberIds)
-        : sql`1 = 0`;
+      : exists(
+          db
+            .select({ x: sql`1` })
+            .from(listMembers)
+            .where(
+              and(eq(listMembers.listId, deps.listId), eq(listMembers.playerId, players.id)),
+            ),
+        );
 
   // One join, not one query per player (rules/backend.md).
   const rows = await db
