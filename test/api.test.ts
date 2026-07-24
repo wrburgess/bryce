@@ -1061,6 +1061,20 @@ describe("REST API", () => {
       expect(blank.status).toBe(400);
     });
 
+    it("POST /api/lists rejects a name with a control character (400), creating nothing", async () => {
+      const bad = await app().request("/api/lists", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ name: "a\nb" }),
+      });
+      expect(bad.status).toBe(400);
+
+      // The ZodError seam fails closed BEFORE any write — no list exists.
+      const listed = await app().request("/api/lists", { headers: AUTH });
+      const body = (await listed.json()) as { lists: unknown[] };
+      expect(body.lists).toEqual([]);
+    });
+
     it("GET /digest/preview?list= scopes the preview, and an unknown list 404s", async () => {
       await createList("L");
       const member = await insertPlayer(opened.db, { externalId: 601, fullName: "Preview Member" });

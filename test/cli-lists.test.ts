@@ -103,6 +103,16 @@ describe("lists CLI", () => {
     expect(err[0]).toMatch(/^error=/);
   });
 
+  it("sad path: a control char in the create name exits 1 and writes nothing", async () => {
+    const code = await runLists(["create", "--name", "a\nb"], deps());
+    expect(code).toBe(1);
+    expect(err[0]).toMatch(/^error=/);
+    // Validation fails closed at the service, before any insert — no list exists.
+    const listCode = await runLists(["show"], deps());
+    expect(listCode).toBe(0);
+    expect(out).toEqual(["total=0"]);
+  });
+
   it("sad path: an unknown subcommand exits 1 with usage", async () => {
     const code = await runLists(["frobnicate"], deps());
     expect(code).toBe(1);

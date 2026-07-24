@@ -867,6 +867,11 @@ describe("MCP server over Streamable HTTP", () => {
       expect(dup.content[0]?.text).toContain("already exists");
     });
 
+    it("list_create rejects a name with a control character (isError)", async () => {
+      const bad = await call("list_create", { name: "a\nb" });
+      expect(bad.isError).toBe(true);
+    });
+
     it("digest_preview and stat_lines accept a list scope; unknown list isError", async () => {
       await call("list_create", { name: "L" });
       const member = await insertPlayer(opened.db, { externalId: 601 });

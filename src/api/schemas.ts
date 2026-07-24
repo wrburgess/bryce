@@ -170,7 +170,12 @@ export const BatchAddInputSchema = BatchAddInputBase.superRefine((val, ctx) => {
  * or ncaaPlayerSeq (like Deactivate). REST bodies and MCP typed input funnel
  * through the same shapes (ADR 0027).
  */
-export const ListNameSchema = z.string().trim().min(1).max(BATCH_STRING_MAX);
+export const ListNameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(BATCH_STRING_MAX)
+  .refine((s) => !/\p{Cc}/u.test(s), "list name must not contain a control character");
 
 /** Per-call cap on member refs — a cheap bound, not a latency one (all DB-local). */
 export const MAX_LIST_MEMBER_REFS = 100;

@@ -39,10 +39,10 @@ export class DuplicateListNameError extends Error {
   }
 }
 
-/** A blank or whitespace-only list name reached the service (boundary schemas also reject it). */
+/** A blank/whitespace-only or control-char-bearing list name reached the service (boundary schemas also reject it). */
 export class BlankListNameError extends Error {
   constructor() {
-    super("list name must not be blank");
+    super("list name must not be blank or contain a control character");
     this.name = "BlankListNameError";
   }
 }
@@ -60,6 +60,10 @@ export interface ListSummary {
 function requireName(name: string): string {
   const trimmed = name.trim();
   if (trimmed.length === 0) throw new BlankListNameError();
+  // Reject any control character (defense-in-depth, rules/backend.md): a
+  // newline/tab in a name could forge extra greppable output lines. This is the
+  // CLI's validation path, which does not funnel through the Zod boundary.
+  if (/\p{Cc}/u.test(trimmed)) throw new BlankListNameError();
   return trimmed;
 }
 
