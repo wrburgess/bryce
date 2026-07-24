@@ -5,7 +5,9 @@ The command-line entry points to Bryce's pipeline, run as npm scripts on the hos
 [MCP tools](../mcp/README.md) use. Each job's **summary** is a deterministic `key=value` line and
 every command exits non-zero on failure — but the output is not purely ASCII `key=value`: `digest`
 with `MAILER_PROVIDER=console` prints the full rendered email above its summary, and `seed`/`list`
-echo upstream player names that may contain non-ASCII characters (e.g. `José`). Domain terms below —
+echo the canonical (NFC) player identity, which may contain non-ASCII characters (e.g. `José`), in
+UTF-8 — a deliberate policy scoping the ASCII-safe-stdout rule to machine output
+([ADR 0047](../adr/0047-app-clis-emit-utf8-ascii-scopes-to-machine-output.md)). Domain terms below —
 **Player**, **Refresh**, **Digest**, **Window**, **Offseason Sleep** — are defined in
 [`docs/domain/CONTEXT.md`](../domain/CONTEXT.md).
 
