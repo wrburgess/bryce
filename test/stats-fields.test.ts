@@ -18,6 +18,7 @@ describe("classifyField", () => {
       expect(classifyField("pitching", key)).toBe("rate");
     }
     expect(classifyField("fielding", "fielding")).toBe("rate");
+    expect(classifyField("fielding", "caughtStealingPercentage")).toBe("rate");
   });
 
   it("classifies baseball-notation innings separately from counters", () => {

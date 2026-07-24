@@ -394,6 +394,7 @@ describe("deriveRate — fielding rates", () => {
       { stolenBases: 1, caughtStealing: 2 },
     ]);
     expect(deriveRate(agg, "stolenBasePercentage")).toBe(".667");
+    expect(deriveRate(agg, "caughtStealingPercentage")).toBe(".333");
   });
 });
 

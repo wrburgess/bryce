@@ -210,6 +210,7 @@ const FIELDING_RATES: Readonly<Record<string, Formula>> = {
   // Derivable here too: stolenBases and caughtStealing are fielding counters
   // (catcher stats). Same formula object as SHARED's — see stolenBasePercentage above.
   stolenBasePercentage,
+  caughtStealingPercentage: SHARED.caughtStealingPercentage!,
 };
 
 const FORMULAS: Readonly<Record<StatType, Readonly<Record<string, Formula>>>> = {

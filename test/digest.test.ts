@@ -336,6 +336,30 @@ describe("runDigest", () => {
     expect(warnings[0]).toContain("warpFielding");
   });
 
+  it("accepts the derived catcher caught-stealing percentage from a fielding split", async () => {
+    // MLB emits this rate alongside the catcher SB/CS counters. The Digest must
+    // recompute it from those counters, not warn that a known source field is
+    // unknown just because the fielding table also carries it.
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 990102,
+      statType: "batting",
+      gameDate: "2026-07-18",
+    });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 990102,
+      statType: "fielding",
+      gameDate: "2026-07-18",
+      stats: { errors: 0, stolenBases: 2, caughtStealing: 1, caughtStealingPercentage: ".333" },
+    });
+
+    const warnings: string[] = [];
+    await runDigest({ ...deps(), spec: "7d", warn: (m) => warnings.push(m) });
+    expect(warnings).toEqual([]);
+  });
+
   it("recovers a prior failed slot even when TODAY is in Offseason Sleep", async () => {
     // Recovery must run BEFORE the sleep check. A digest that failed on the
     // season's last day would otherwise never recover: the next run is already
