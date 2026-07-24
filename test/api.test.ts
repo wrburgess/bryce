@@ -763,6 +763,42 @@ describe("REST API", () => {
       expect(mailer.sent).toHaveLength(1); // fail closed: nothing else went out
     });
 
+    it("sends a named-list Digest with its public title and only that list's content", async () => {
+      const member = await insertPlayer(opened.db, { externalId: 811, fullName: "Prospect Member" });
+      await insertStatLine(opened.db, { playerId: member.id, gameDate: "2026-07-18" });
+      const excluded = await insertPlayer(opened.db, { externalId: 812, fullName: "Excluded Veteran" });
+      await insertStatLine(opened.db, { playerId: excluded.id, gameDate: "2026-07-18" });
+
+      const created = await app().request("/api/lists", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ name: "Prospects" }),
+      });
+      expect(created.status).toBe(201);
+      const added = await app().request("/api/lists/Prospects/members", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ players: [{ personId: 811 }] }),
+      });
+      expect(added.status).toBe(200);
+
+      const sent = await app().request("/api/digest/send", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ list: "Prospects" }),
+      });
+      expect(sent.status).toBe(200);
+      expect(await sent.json()).toMatchObject({ action: "sent", playerCount: 1, statLineCount: 1 });
+      expect(mailer.sent).toHaveLength(1);
+      expect(mailer.sent[0]?.subject).toBe("ScoreKeeps Baseball (Prospects) - Sat, July 18, 2026");
+      expect(mailer.sent[0]?.text.split("\n")[0]).toBe(
+        "ScoreKeeps Baseball - Prospects List - Sat, July 18, 2026",
+      );
+      expect(mailer.sent[0]?.text).toContain("P Member");
+      expect(mailer.sent[0]?.text).not.toContain("Veteran");
+      expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
+    });
+
     it("accepts a new long window (28d) on the on-demand path, recording no delivery", async () => {
       const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
       await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });

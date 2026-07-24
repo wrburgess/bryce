@@ -490,6 +490,28 @@ describe("MCP server over Streamable HTTP", () => {
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(1);
   });
 
+  it("send_digest carries a named list into the public title and scopes its content", async () => {
+    const member = await insertPlayer(opened.db, { externalId: 821, fullName: "Trade Member" });
+    await insertStatLine(opened.db, { playerId: member.id, gameDate: "2026-07-18" });
+    const excluded = await insertPlayer(opened.db, { externalId: 822, fullName: "Excluded Prospect" });
+    await insertStatLine(opened.db, { playerId: excluded.id, gameDate: "2026-07-18" });
+    expect((await call("list_create", { name: "Tradebait" })).isError).toBeUndefined();
+    expect(
+      (await call("list_add_players", { name: "Tradebait", players: [{ personId: 821 }] })).isError,
+    ).toBeUndefined();
+
+    const result = await call("send_digest", { list: "Tradebait" });
+    expect(result.structuredContent).toMatchObject({ action: "sent", playerCount: 1, statLineCount: 1 });
+    expect(mailer.sent).toHaveLength(1);
+    expect(mailer.sent[0]?.subject).toBe("ScoreKeeps Baseball (Tradebait) - Sat, July 18, 2026");
+    expect(mailer.sent[0]?.text.split("\n")[0]).toBe(
+      "ScoreKeeps Baseball - Tradebait List - Sat, July 18, 2026",
+    );
+    expect(mailer.sent[0]?.text).toContain("T Member");
+    expect(mailer.sent[0]?.text).not.toContain("Prospect");
+    expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
+  });
+
   it("send_digest accepts force, replaying without recording", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
