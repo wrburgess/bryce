@@ -81,6 +81,19 @@ describe("isLoopback normalization", () => {
       expect(isLoopback(host), host).toBe(false);
     }
   });
+
+  it("does NOT treat a 127.-prefixed hostname as loopback (only a real IPv4 literal is)", () => {
+    // A valid DNS name that merely starts with "127." can resolve to a public address;
+    // only a genuine dotted-quad in 127/8 (or its IPv4-mapped IPv6 form) is loopback.
+    for (const host of [
+      "127.attacker.com",
+      "127.0.0.1.attacker.com",
+      "127notaloopback",
+      "::ffff:127.attacker.com",
+    ]) {
+      expect(isLoopback(host), host).toBe(false);
+    }
+  });
 });
 
 describe("guard mechanics", () => {
@@ -212,6 +225,89 @@ describe("per-entry-point overloads", () => {
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("hello");
     expect(attempts()).toEqual([]);
+  });
+});
+
+describe("loopback allow-list is IP-literal-exact, not a textual 127. prefix (P1)", () => {
+  it("blocks a 127.-prefixed HOSTNAME on the fetch surface (throws + records)", async () => {
+    // "127.attacker.com" is a real DNS name that can resolve to a public address —
+    // the guard must not mistake its textual prefix for the loopback block.
+    await expect(fetch("https://127.attacker.com/")).rejects.toBeInstanceOf(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "fetch", host: "127.attacker.com", port: 443 }]);
+  });
+
+  it("blocks a 127.-prefixed HOSTNAME on the socket surface (throws + records)", () => {
+    expect(() => net.connect({ host: "127.attacker.com", port: 443 })).toThrow(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "127.attacker.com", port: 443 }]);
+  });
+
+  it("still allows a genuine 127/8 IPv4 literal, unrecorded", () => {
+    // A real dotted-quad in 127/8 is loopback: no throw, no record.
+    const socket = net.connect({ host: "127.0.0.1", port: 65535 });
+    socket.on("error", () => undefined);
+    socket.destroy();
+    expect(takeAttempts()).toEqual([]);
+  });
+
+  it("allows ::ffff:127.0.0.1 but blocks ::ffff:8.8.8.8 on the socket surface", () => {
+    const ok = net.connect({ host: "::ffff:127.0.0.1", port: 65535 });
+    ok.on("error", () => undefined);
+    ok.destroy();
+    expect(takeAttempts()).toEqual([]);
+    expect(() => net.connect({ host: "::ffff:8.8.8.8", port: 443 })).toThrow(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "::ffff:8.8.8.8", port: 443 }]);
+  });
+});
+
+describe("a custom DNS lookup cannot smuggle egress past an allowed name (P2)", () => {
+  /**
+   * A fake resolver that maps any name to `addr`, honoring Node's `all` option. Node's
+   * default connect path calls `lookup` with `{ all: true }` and expects an array shape,
+   * so a real custom resolver must handle both — this mirrors that contract.
+   */
+  function fixedLookup(addr: string): net.LookupFunction {
+    const family = net.isIP(addr) || 4;
+    return (_hostname, options, cb) => {
+      if (options && (options as { all?: boolean }).all) cb(null, [{ address: addr, family }]);
+      else cb(null, addr, family);
+    };
+  }
+
+  /** Connect and resolve once the socket settles: the error on failure, or null on connect. */
+  function settle(options: net.NetConnectOpts): Promise<Error | null> {
+    return new Promise<Error | null>((resolve) => {
+      const socket = net.connect(options);
+      socket.on("error", (err) => {
+        socket.destroy();
+        resolve(err);
+      });
+      socket.on("connect", () => {
+        socket.destroy();
+        resolve(null);
+      });
+    });
+  }
+
+  it("blocks + records the resolved IP when a custom lookup returns a non-loopback address", async () => {
+    // "localhost" is an allowed NAME, but the resolver hands back a public IP; the guard
+    // must re-validate the resolved address and fail closed, recording the resolved IP.
+    const settled = await settle({ host: "localhost", port: 443, lookup: fixedLookup("8.8.8.8") });
+    expect(settled).toBeInstanceOf(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "8.8.8.8", port: 443 }]);
+  });
+
+  it("still allows a custom lookup that resolves an allowed name to loopback (unrecorded)", async () => {
+    // Positive control: legitimate loopback resolution through a custom lookup must
+    // connect to the in-process server and leave the attempts buffer empty.
+    const server = await startLoopbackServer((_req, res) => res.end("ok"));
+    const port = Number(new URL(server.url).port);
+    try {
+      const settled = await settle({ host: "localhost", port, lookup: fixedLookup("127.0.0.1") });
+      expect(settled).toBeNull();
+      expect(takeAttempts()).toEqual([]);
+    } finally {
+      await server.close();
+    }
   });
 });
 

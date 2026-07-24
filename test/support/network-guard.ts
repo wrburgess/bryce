@@ -111,8 +111,17 @@ export function isLoopback(host: string | undefined | null): boolean {
   if (h === "localhost") return true;
   if (h === "::1") return true;
   if (h === "0.0.0.0") return true;
-  if (/^127\./.test(h)) return true;
-  if (h.startsWith("::ffff:") && /^127\./.test(h.slice("::ffff:".length))) return true;
+  // Only a GENUINE 127/8 IPv4 literal (dotted quad) is loopback — never a hostname
+  // that merely *starts with* "127." A name like "127.attacker.com" is a valid DNS
+  // record that can resolve to a public address, so a textual-prefix match would let
+  // it slip past the guard. `net.isIP === 4` confirms a real dotted-quad literal.
+  if (netModule.isIP(h) === 4 && h.startsWith("127.")) return true;
+  // IPv4-mapped IPv6 loopback (`::ffff:127.x`): the mapped tail must itself be a real
+  // 127/8 IPv4 literal, not just a "127."-prefixed string (`::ffff:127.attacker.com`).
+  if (h.startsWith("::ffff:")) {
+    const tail = h.slice("::ffff:".length);
+    if (netModule.isIP(tail) === 4 && tail.startsWith("127.")) return true;
+  }
   return false;
 }
 
@@ -224,10 +233,71 @@ function connectTarget(args: unknown[]): { host: string | undefined; port: numbe
 function guardSocketArgs(args: unknown[]): void {
   const { host, port, path } = connectTarget(args);
   if (path !== undefined) return; // unix socket / pipe — no host, allowed
-  if (isLoopback(host)) return; // loopback or absent host — allowed
+  if (isLoopback(host)) {
+    // Allowed because the host is loopback/absent. But an allowed *name* (not an IP
+    // literal) still goes through DNS: a caller-supplied `options.lookup` could resolve
+    // it to a non-loopback address that Node then dials directly, never re-entering this
+    // wrapper. Harden any such lookup so every resolved address is re-validated.
+    hardenCustomLookup(args, host, port);
+    return;
+  }
   const normHost = normalizeHost(host as string);
   record({ surface: "socket", host: normHost, port });
   throw new NetworkBlockedError(`Blocked socket egress to ${normHost}:${port ?? "?"}`);
+}
+
+type LookupCallback = (err: Error | null, address?: unknown, family?: number) => void;
+type LookupFn = (hostname: string, options: unknown, callback: LookupCallback) => void;
+
+/** Custom `lookup` fns we've already wrapped, so a re-entrant connect never stacks wrappers. */
+const guardedLookups = new WeakSet<object>();
+
+/**
+ * Close the "resolve-an-allowed-name-to-a-public-IP" bypass (issue #25). When a connect
+ * is allowed only because the host is an allowed NAME (not an IP literal) and the caller
+ * supplied a custom DNS `lookup`, replace that lookup in place with a wrapper that
+ * re-validates EVERY resolved address through `isLoopback`. A non-loopback result is
+ * recorded as a redacted `socket` attempt (the resolved IP — never the name, MF7) and the
+ * connection is failed closed, instead of Node silently dialing the smuggled address.
+ * IP literals never trigger DNS, and a connect without a custom lookup is left untouched.
+ */
+function hardenCustomLookup(args: unknown[], host: string | undefined, port: number | null): void {
+  if (host === undefined || netModule.isIP(host) !== 0) return; // IP literal → no DNS lookup
+  const first = args[0];
+  if (typeof first !== "object" || first === null) return;
+  const opts = first as { lookup?: unknown };
+  if (typeof opts.lookup !== "function") return;
+  const originalLookup = opts.lookup as LookupFn;
+  if (guardedLookups.has(originalLookup)) return; // already hardened — don't re-wrap
+  const guardedLookup: LookupFn = function (hostname, lookupOptions, callback): void {
+    originalLookup(hostname, lookupOptions, (err, address, family) => {
+      if (err) {
+        callback(err, address, family);
+        return;
+      }
+      // Node uses two callback shapes: (err, address, family) and — when the resolver
+      // is asked with `{ all: true }` (Node's default connect path) — (err, [{ address,
+      // family }, ...]). Validate whichever came back; a single leak fails the connect.
+      const resolved: unknown[] = Array.isArray(address) ? address : [address];
+      for (const entry of resolved) {
+        let addr: string | undefined;
+        if (typeof entry === "string") addr = entry;
+        else if (typeof entry === "object" && entry !== null) {
+          const value = (entry as { address?: unknown }).address;
+          addr = typeof value === "string" ? value : undefined;
+        }
+        if (addr !== undefined && !isLoopback(addr)) {
+          const normAddr = normalizeHost(addr);
+          record({ surface: "socket", host: normAddr, port });
+          callback(new NetworkBlockedError(`Blocked socket egress to ${normAddr}:${port ?? "?"}`));
+          return;
+        }
+      }
+      callback(err, address, family);
+    });
+  };
+  guardedLookups.add(guardedLookup);
+  opts.lookup = guardedLookup;
 }
 
 function makeGuardedConnect<F>(original: F): F {
