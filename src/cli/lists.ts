@@ -21,9 +21,11 @@ import { isMain } from "./main.js";
 
 /**
  * Named-list CLI (issue #70 / ADR 0046): a thin presenter over the list service
- * (src/lists/service.ts). Output is deterministic, greppable, ASCII-only
- * key=value lines (rules/scripting.md); a failure writes an `error=` line and
- * exits non-zero. Distinct from `seed list` (which prints players).
+ * (src/lists/service.ts). Output is deterministic, greppable key=value lines; as
+ * a human-facing app CLI it echoes the member's canonical (NFC) identity and the
+ * user-supplied list name verbatim in UTF-8 — not ASCII-folded (ADR 0047,
+ * scoping rules/scripting.md). A failure writes an `error=` line and exits
+ * non-zero. Distinct from `seed list` (which prints players).
  *
  * Subcommands:
  *   create --name NAME                    create a new list

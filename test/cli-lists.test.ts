@@ -56,6 +56,25 @@ describe("lists CLI", () => {
     expect(out.at(-1)).toBe("total=1");
   });
 
+  // ADR 0047: players:lists is a human-facing app CLI. `show` renders the member's
+  // stored (canonical NFC) identity in UTF-8 — never ASCII-folded — the same policy
+  // seed follows. The name carries precomposed non-ASCII letters (é, ñ) written as
+  // explicit escapes so a genuine non-ASCII byte is present in the fixture.
+  it("show --name: echoes a member's non-ASCII identity in UTF-8 (ADR 0047)", async () => {
+    const NAME = "Jos\u00e9 Acu\u00f1a"; // "Jose Acuna" with precomposed (NFC) e-acute and n-tilde
+    await createList(opened.db, "L", clock.now());
+    const p = await insertPlayer(opened.db, { fullName: NAME });
+    await addToList(opened.db, "L", [p.externalId!], clock.now());
+
+    const code = await runLists(["show", "--name", "L"], deps());
+    expect(code).toBe(0);
+    const line = out.find((l) => l.startsWith("member "));
+    expect(line).toBeDefined();
+    expect(line as string).toContain(`name=${NAME}`); // verbatim UTF-8
+    expect(line as string).not.toContain("Acu?a"); // not ASCII-folded
+    expect(line as string).not.toMatch(/\\u[0-9a-f]{4}/i); // not `\uXXXX`-escaped
+  });
+
   it("show (all): lists live lists with member counts", async () => {
     const list = await createList(opened.db, "Alpha", clock.now());
     const p = await insertPlayer(opened.db);
