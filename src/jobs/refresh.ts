@@ -189,6 +189,13 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   // computation below, never to the outer catch.
   let calendarFailures: CalendarFailure[] = [];
   const playerFailures: PlayerFailure[] = [];
+  // Terminal status + errorMessage are COMPUTED inside the try (their inputs
+  // include fallible DB reads) but CONSUMED by the terminal settle outside it, so
+  // they are declared here. Definite-assignment (`!`): the only path that reaches
+  // the terminal settle is a normal completion of the try, which always assigns
+  // both; any throw first goes to the MF1 catch, which re-throws.
+  let status!: RefreshTerminalStatus;
+  let errorMessage!: string | null;
   // Hoisted above the try so the settle-time freshness check (P1) can re-check
   // season membership for the SAME season the calendars were fetched for.
   const season = currentSeason(deps);
@@ -245,16 +252,63 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
         });
       }
     }
+
+    // A calendar failure BLOCKS `fresh` (P1) only when it would leave the digest
+    // silently incomplete: a getSeason FETCH threw for a sport that — judged
+    // against the POST-refresh state — a watched player is at, and no calendar row
+    // with USABLE dates exists to fall back on. The digest reads a player's CURRENT
+    // level and calls isInSeason, which returns false when the calendar row is
+    // missing OR lacks a start/end; so those idle players would be dropped with no
+    // warning, and such a run must settle at least `partial`.
+    //
+    // These reads are re-run at settle time (post-refresh): loadActivePlayers so a
+    // call-up/demotion during the sweep is reflected in the watched sportIds, and
+    // loadCalendars so a sportId that DID refresh is not counted stale. They live
+    // INSIDE this try so a fallible DB read that throws (I/O error, closed
+    // connection) is caught by the MF1 boundary below — settled `failed` and
+    // re-thrown — rather than stranding the run `running` past its lease. Only a
+    // sport in calendarFailures (an actual fetch throw) can block — a getSeason
+    // that returned null (unpublished season) is not a failure and never blocks.
+    // NCAA (sportId 22) is seeded from bundled dates, never fetched here, so it
+    // never appears in calendarFailures and is unaffected.
+    const finalPlayers = await loadActivePlayers(db);
+    const finalCalendars = await loadCalendars(db);
+    const watchedSportIds = new Set(
+      finalPlayers.map((p) => sportIdForPlayer(p)).filter((id): id is number => id !== null),
+    );
+    const failedSportIds = new Set(calendarFailures.map((f) => f.sportId));
+    const calendarBlocksFresh = [...watchedSportIds].some(
+      (sportId) =>
+        failedSportIds.has(sportId) &&
+        !finalCalendars.some(
+          (c) => c.sportId === sportId && c.season === season && calendarHasUsableDates(c),
+        ),
+    );
+
+    // Status from the collected counts (#23): `ok` only when nothing failed,
+    // nothing was skipped, AND no calendar failure blocks `fresh`; `failed` only
+    // when a blocked run refreshed nobody; else `partial` (safe partial success).
+    // errorMessage is composed from the failures INDEPENDENT of status (MF2), so
+    // an `ok` run that hit a (cached-fallback) calendar failure still records it,
+    // and a skip-only `partial` records null.
+    status = deriveRefreshStatus({
+      refreshed: playersRefreshed,
+      skipped: playersSkipped,
+      failed: playerFailures.length,
+      calendarBlocksFresh,
+    });
+    errorMessage = summarizeRefreshFailures(calendarFailures, playerFailures);
   } catch (err) {
     // MF1 fatal outer boundary: an UNEXPECTED throw during calendar/player
-    // ORCHESTRATION — a calendar DB-upsert error, refreshNcaaCalendar, or a
-    // renewRefreshRun DB error — is not a collected failure. Record it on the
-    // run's own row (ownership-conditional, so a double-settle is a safe no-op)
-    // and RE-THROW, so a genuinely broken sweep never strands its row `running`
-    // and the caller still sees the throw. NOTE the TERMINAL settle below sits
-    // OUTSIDE this try: if IT throws, this catch does NOT run — that narrow
-    // window is backstopped by the lease-reap in claimRefreshRun (a later run
-    // reaps the stranded `running` row once its lease expires), not by here.
+    // ORCHESTRATION — a calendar DB-upsert error, refreshNcaaCalendar, a
+    // renewRefreshRun DB error, or the post-loop settle-time DB reads
+    // (loadActivePlayers/loadCalendars) — is not a collected failure. Record it on
+    // the run's own row (ownership-conditional, so a double-settle is a safe
+    // no-op) and RE-THROW, so a genuinely broken sweep never strands its row
+    // `running` and the caller still sees the throw. NOTE the TERMINAL settle
+    // below sits OUTSIDE this try: if IT throws, this catch does NOT run — that
+    // narrow window is backstopped by the lease-reap in claimRefreshRun (a later
+    // run reaps the stranded `running` row once its lease expires), not by here.
     settleRefreshRun(db, {
       runId,
       now: now(),
@@ -270,48 +324,7 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
     throw err;
   }
 
-  // A calendar failure BLOCKS `fresh` (P1) only when it would leave the digest
-  // silently incomplete: a getSeason FETCH threw for a sport that — judged
-  // against the POST-refresh state — a watched player is at, and no calendar row
-  // with USABLE dates exists to fall back on. The digest reads a player's CURRENT
-  // level and calls isInSeason, which returns false when the calendar row is
-  // missing OR lacks a start/end; so those idle players would be dropped with no
-  // warning, and such a run must settle at least `partial`.
-  //
-  // Both inputs are re-read at SETTLE time (post-refresh): loadActivePlayers so a
-  // call-up/demotion during the sweep is reflected in the watched sportIds, and
-  // loadCalendars so a sportId that DID refresh is not counted stale. Only a
-  // sport in calendarFailures (an actual fetch throw) can block — a getSeason
-  // that returned null (unpublished season) is not a failure and never blocks.
-  // NCAA (sportId 22) is seeded from bundled dates, never fetched here, so it
-  // never appears in calendarFailures and is unaffected.
-  const finalPlayers = await loadActivePlayers(db);
-  const finalCalendars = await loadCalendars(db);
-  const watchedSportIds = new Set(
-    finalPlayers.map((p) => sportIdForPlayer(p)).filter((id): id is number => id !== null),
-  );
-  const failedSportIds = new Set(calendarFailures.map((f) => f.sportId));
-  const calendarBlocksFresh = [...watchedSportIds].some(
-    (sportId) =>
-      failedSportIds.has(sportId) &&
-      !finalCalendars.some(
-        (c) => c.sportId === sportId && c.season === season && calendarHasUsableDates(c),
-      ),
-  );
-
-  // Status from the collected counts (#23): `ok` only when nothing failed, nothing
-  // was skipped, AND no calendar failure blocks `fresh`; `failed` only when a
-  // blocked run refreshed nobody; else `partial` (safe partial success).
-  // errorMessage is composed from the failures INDEPENDENT of status (MF2), so an
-  // `ok` run that hit a (cached-fallback) calendar failure still records it, and a
-  // skip-only `partial` records null.
-  const status = deriveRefreshStatus({
-    refreshed: playersRefreshed,
-    skipped: playersSkipped,
-    failed: playerFailures.length,
-    calendarBlocksFresh,
-  });
-  const errorMessage = summarizeRefreshFailures(calendarFailures, playerFailures);
+  // Terminal settle uses the status/errorMessage computed INSIDE the try above.
   const settled = settleRefreshRun(db, {
     runId,
     now: now(),

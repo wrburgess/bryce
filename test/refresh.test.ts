@@ -93,6 +93,42 @@ function calendarWriteThrows(db: Db, err: Error): Db {
   }) as Db;
 }
 
+/**
+ * A db proxy that makes the Nth `select().from(seasonCalendar)` throw. runRefresh
+ * calls loadCalendars (its only `select().from(seasonCalendar)`) exactly twice —
+ * once at the top for the sleep check, once at SETTLE time (post-loop, P1) — so
+ * `nth: 2` targets the settle-time read that must sit inside the MF1 boundary.
+ */
+function seasonCalendarSelectThrows(db: Db, err: Error, nth: number): Db {
+  let count = 0;
+  return new Proxy(db, {
+    get(target, prop) {
+      const value: unknown = Reflect.get(target, prop);
+      if (prop !== "select") {
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (...selectArgs: unknown[]): unknown => {
+        const builder = (value as (...a: unknown[]) => unknown).apply(target, selectArgs);
+        return new Proxy(builder as object, {
+          get(b, p) {
+            const bv: unknown = Reflect.get(b, p);
+            if (p === "from") {
+              return (table: unknown) => {
+                if (table === seasonCalendar) {
+                  count += 1;
+                  if (count === nth) throw err;
+                }
+                return (bv as (arg: unknown) => unknown).call(b, table);
+              };
+            }
+            return typeof bv === "function" ? bv.bind(b) : bv;
+          },
+        });
+      };
+    },
+  }) as Db;
+}
+
 /** A minimal NewStatLineRow for the direct writePlayerRefresh atomicity test (MF4). */
 function statRow(playerId: number, gameId: number): NewStatLineRow {
   return {
@@ -1225,6 +1261,28 @@ describe("runRefresh — continue after failures (#23)", () => {
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({ status: "failed" });
     expect(runs[0]?.errorMessage).toContain("calendar db write boom");
+    expect(runs[0]?.finishedAt).not.toBeNull();
+  });
+
+  it("settles `failed` AND re-throws when a SETTLE-TIME DB read throws (MF1 covers post-refresh reads)", async () => {
+    await insertPlayer(opened.db, { externalId: 691185 });
+    const boom = new Error("settle-time read boom");
+    // Throw on the SECOND select().from(seasonCalendar): the 1st is the top-of-run
+    // sleep-check load; the 2nd is the POST-LOOP settle-time loadCalendars, which
+    // now lives INSIDE the MF1 try. A throw there must settle `failed` + re-throw,
+    // not strand the run `running` until the lease reap.
+    const faultDb = seasonCalendarSelectThrows(opened.db, boom, 2);
+
+    // (b) The unexpected error PROPAGATES to the caller...
+    await expect(runRefresh({ ...deps(), db: faultDb })).rejects.toThrow("settle-time read boom");
+
+    // (a) ...AND the run's own row is settled `failed`, never stranded `running`.
+    // (If the settle-time reads were OUTSIDE the try, (b) would still pass but this
+    // row would stay `running`, so this assertion is what guards the fix.)
+    const runs = await opened.db.select().from(refreshRuns);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "failed" });
+    expect(runs[0]?.errorMessage).toContain("settle-time read boom");
     expect(runs[0]?.finishedAt).not.toBeNull();
   });
 
