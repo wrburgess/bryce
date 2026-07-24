@@ -365,6 +365,44 @@ describe("a custom DNS lookup cannot smuggle egress past an allowed name (P2)", 
       await server.close();
     }
   });
+
+  // --- D3: a PROTOTYPE-BACKED options object must keep its inherited/non-enumerable fields ---
+  // A shallow spread `{ ...opts }` copies only OWN ENUMERABLE keys, so when host/port/lookup
+  // live on the prototype (or are non-enumerable) they vanish and native `net.connect` reads
+  // host/port as missing → `ERR_MISSING_ARGS`. `Object.create(opts)` preserves the full
+  // property-read semantics while overriding only `lookup`.
+
+  it("D3: accepts a PROTOTYPE-BACKED options object (inherited host/port/lookup) and connects", async () => {
+    const server = await startLoopbackServer((_req, res) => res.end("ok"));
+    const port = Number(new URL(server.url).port);
+    try {
+      // host/port/lookup live on the PROTOTYPE, not as own-enumerable keys — a shallow
+      // spread would drop them and connect would fail with ERR_MISSING_ARGS.
+      const protoBacked = Object.create({
+        host: "localhost",
+        port,
+        lookup: fixedLookup("127.0.0.1"),
+      }) as net.NetConnectOpts;
+      const settled = await settle(protoBacked);
+      expect(settled).toBeNull(); // connected — no ERR_MISSING_ARGS / TypeError
+      expect(takeAttempts()).toEqual([]); // loopback resolution, nothing recorded
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("D3: still BLOCKS a prototype-backed options object whose custom lookup resolves to a public IP", async () => {
+    // The guard must re-validate the resolved address even when host/port/lookup are
+    // inherited: the allowed NAME (localhost) resolving to 8.8.8.8 is recorded + failed closed.
+    const protoBacked = Object.create({
+      host: "localhost",
+      port: 443,
+      lookup: fixedLookup("8.8.8.8"),
+    }) as net.NetConnectOpts;
+    const settled = await settle(protoBacked);
+    expect(settled).toBeInstanceOf(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "8.8.8.8", port: 443 }]);
+  });
 });
 
 describe("redirect canary — proves the socket patch catches undici's real connections", () => {

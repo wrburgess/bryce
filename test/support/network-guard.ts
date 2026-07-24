@@ -307,12 +307,28 @@ function hardenCustomLookup(args: unknown[], host: string | undefined, port: num
     });
   };
   guardedLookups.add(guardedLookup);
-  // Never mutate the caller's options object: native `net.connect` accepts a FROZEN
-  // options object, and an in-place `opts.lookup = …` would throw a synchronous TypeError
-  // on it, breaking a valid loopback connect before its resolver ever runs (Delta-2).
-  // `args[0]` is our own wrapper-local array element, so swapping in a shallow copy that
-  // carries the guarded lookup leaves every caller field intact and the caller object untouched.
-  args[0] = { ...opts, lookup: guardedLookup };
+  // Hand the original connect a DERIVED options object that overrides only `lookup`,
+  // without mutating the caller's own object (which native `net.connect` may pass FROZEN —
+  // an in-place `opts.lookup = …` would throw a synchronous TypeError and break a valid
+  // loopback connect before its resolver ran, Delta-2). A shallow spread `{ ...opts }`
+  // would drop inherited and non-enumerable fields — when `opts` is prototype-backed
+  // (`Object.create({ host, port, lookup })`) the spread copies only own-enumerable keys,
+  // so `net.connect` reads host/port as missing and fails with `ERR_MISSING_ARGS` (D3).
+  // `Object.create(opts)` instead inherits EVERY readable property (own enumerable, own
+  // non-enumerable, and inherited) through the prototype chain, leaving the caller's object
+  // untouched. Define `lookup` with `Object.defineProperty` rather than `wrapped.lookup = …`:
+  // a plain assignment walks the prototype chain and, when `opts` is frozen, finds the
+  // inherited `lookup` as a NON-WRITABLE data property, so `[[Set]]` throws in strict mode.
+  // `defineProperty` creates an OWN property directly, shadowing the inherited one (the
+  // derived child is extensible even when `opts` is frozen).
+  const wrapped = Object.create(opts) as typeof opts;
+  Object.defineProperty(wrapped, "lookup", {
+    value: guardedLookup,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+  args[0] = wrapped;
 }
 
 function makeGuardedConnect<F>(original: F): F {
