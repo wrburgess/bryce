@@ -26,6 +26,9 @@ jobs:
         run: npm run typecheck
       - name: Lint
         run: npm run lint
+      # `npm test` is the single, fully-offline test invocation: the network-egress
+      # guard (issue #25) is active and the live tier (`npm run test:live`) is
+      # excluded, so no required check ever reaches an external service.
       - name: Test
         run: npm test
       - name: Dependency audit (runtime deps)
