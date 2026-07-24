@@ -340,7 +340,15 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     const raw = await c.req.text();
     const body = RefreshInputSchema.parse(raw.trim().length === 0 ? {} : JSON.parse(raw));
     if (body.personId === undefined && body.ncaaPlayerSeq === undefined) {
-      return c.json(await runRefresh(deps));
+      // Whole-list refresh contract change (#23): a `failed` status — a BLOCKED
+      // run that refreshed nobody — maps to 502, mirroring the digest endpoint
+      // precedent above (`result.action === "failed" ? 502 : 200`). `ok`,
+      // `partial` (safe partial success), and any skipped sweep return 200 with
+      // the structured summary (status + per-failure arrays) instead of the old
+      // thrown 5xx on the first per-player error. A genuinely unexpected error
+      // still 5xx's via onError.
+      const summary = await runRefresh(deps);
+      return c.json(summary, summary.status === "failed" ? 502 : 200);
     }
     const where =
       body.ncaaPlayerSeq !== undefined

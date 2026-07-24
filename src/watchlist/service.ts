@@ -12,6 +12,7 @@ import type {
 import { canonicalizeName } from "../domain/names.js";
 import { addPlayerIdsToList, resolveListByName } from "../lists/service.js";
 import { hostDate } from "../domain/season.js";
+import type { CalendarFailure } from "../jobs/refresh.js";
 import { runRefreshForPlayer } from "../jobs/refresh.js";
 import type { MlbClient } from "../mlb/client.js";
 import { MlbApiError } from "../mlb/client.js";
@@ -88,6 +89,8 @@ export interface FirstRefreshSummary {
   skipped: boolean;
   inserted: number;
   updated: number;
+  /** Calendar fetch failures encountered priming this player's refresh (#23, MF3). */
+  calendarFailures: CalendarFailure[];
 }
 
 export interface AddPlayerResult {

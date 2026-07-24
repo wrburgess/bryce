@@ -1,12 +1,13 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { players, seasonCalendar, statLines } from "../src/db/schema.js";
+import { players, refreshRuns, seasonCalendar, statLines } from "../src/db/schema.js";
 import type { DigestDeps } from "../src/jobs/digest.js";
 import { runDigest } from "../src/jobs/digest.js";
 import type { RefreshDeps } from "../src/jobs/refresh.js";
 import { runRefresh } from "../src/jobs/refresh.js";
 import { MlbClient } from "../src/mlb/client.js";
+import { NcaaClient } from "../src/ncaa/client.js";
 import {
   CapturingMailer,
   FakeNcaaApi,
@@ -364,5 +365,80 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
     await runRefresh(deps());
     const stable = (await opened.db.select().from(players).where(eq(players.id, player.id)))[0];
     expect(stable?.fullName).toBe(nfc);
+  });
+
+  // --- #23: NCAA routes through the same collect-and-continue boundary --------
+
+  it("collects an NCAA player's page-fetch failure and still refreshes an MLB neighbor (MLB+NCAA equivalence)", async () => {
+    const ncaa = await insertNcaa(); // seq 2649785, inserted first → swept first
+    const mlb = await insertPlayer(opened.db, {
+      externalId: 691185,
+      level: "milb",
+      milbLevel: "Triple-A",
+    });
+    api.options.gameLogs = {
+      "11:hitting": makeGameLogBody("hitting", [
+        makeSplit({ date: "2026-03-14", game: { gamePk: 900001, gameNumber: 1 } }),
+      ]),
+    };
+
+    // The NCAA client rejects the NCAA player's page fetch; the MLB path is
+    // untouched — proving both ingest paths share the per-player boundary (#23).
+    const failingNcaa = new NcaaClient({
+      fetchImpl: (url: string, headers: Record<string, string>) =>
+        url.includes("stats_player_seq=2649785")
+          ? Promise.reject(new Error("ncaa page down"))
+          : ncaaApi.fetch(url, headers),
+      delayMs: 0,
+    });
+
+    const summary = await runRefresh({ ...deps(), ncaaClient: failingNcaa });
+    expect(summary.status).toBe("partial");
+    expect(summary.playersRefreshed).toBe(1); // the MLB neighbor
+    expect(summary.playersFailed).toBe(1); // the NCAA player
+    expect(summary.playerFailures).toEqual([
+      { playerId: ncaa.id, reason: expect.stringContaining("ncaa page down") },
+    ]);
+
+    // NCAA player wrote NOTHING (buffer-before-write); MLB neighbor landed his line.
+    expect(await opened.db.select().from(statLines).where(eq(statLines.playerId, ncaa.id))).toHaveLength(0);
+    expect(await opened.db.select().from(statLines).where(eq(statLines.playerId, mlb.id))).toHaveLength(1);
+
+    const runs = await opened.db.select().from(refreshRuns);
+    expect(runs[0]).toMatchObject({ status: "partial", playersRefreshed: 1, playersTotal: 2 });
+    expect(runs[0]?.errorMessage).toContain("ncaa page down");
+  });
+
+  it("isolates a middle NCAA player's failure among NCAA players (neighbors refresh, no partial write)", async () => {
+    const first = await insertNcaa(); // seq 2649785
+    const middle = await insertNcaa({ ncaaPlayerSeq: 2650000, fullName: "Middle Guy", schoolName: "Duke" });
+    const last = await insertNcaa({ ncaaPlayerSeq: 2650001, fullName: "Last Guy", schoolName: "Rice" });
+    // Pages for the two extra players (middle's fetch is rejected, so his page is
+    // never consulted; last needs real pages to refresh).
+    ncaaApi.options.pages!["2650001:batting"] = battingPage("Last Guy", "Rice");
+    ncaaApi.options.pages!["2650001:pitching"] = pitchingPage("Last Guy", "Rice");
+    ncaaApi.options.pages!["2650001:fielding"] = fieldingPage("Last Guy", "Rice");
+
+    const failingMiddle = new NcaaClient({
+      fetchImpl: (url: string, headers: Record<string, string>) =>
+        url.includes("stats_player_seq=2650000")
+          ? Promise.reject(new Error("middle ncaa down"))
+          : ncaaApi.fetch(url, headers),
+      delayMs: 0,
+    });
+
+    const summary = await runRefresh({ ...deps(), ncaaClient: failingMiddle });
+    expect(summary.status).toBe("partial");
+    expect(summary.playersRefreshed).toBe(2); // first + last
+    expect(summary.playersFailed).toBe(1); // middle
+    expect(summary.playerFailures).toEqual([
+      { playerId: middle.id, reason: expect.stringContaining("middle ncaa down") },
+    ]);
+
+    expect((await opened.db.select().from(statLines).where(eq(statLines.playerId, first.id))).length).toBeGreaterThan(0);
+    expect((await opened.db.select().from(statLines).where(eq(statLines.playerId, last.id))).length).toBeGreaterThan(0);
+    // Middle wrote nothing and his identity (fullName) is untouched.
+    expect(await opened.db.select().from(statLines).where(eq(statLines.playerId, middle.id))).toHaveLength(0);
+    expect((await opened.db.select().from(players).where(eq(players.id, middle.id)))[0]?.fullName).toBe("Middle Guy");
   });
 });
