@@ -85,7 +85,7 @@ describe("watch-list service", () => {
         position: "SS",
         active: true,
       });
-      expect(result.refresh).toEqual({ skipped: false, inserted: 2, updated: 0 });
+      expect(result.refresh).toEqual({ skipped: false, inserted: 2, updated: 0, calendarFailures: [] });
 
       const rows = await opened.db.select().from(players);
       expect(rows).toHaveLength(1);
@@ -103,7 +103,7 @@ describe("watch-list service", () => {
       const result = await addPlayer(deps(), 700000);
 
       expect(result.action).toBe("added");
-      expect(result.refresh).toEqual({ skipped: true, inserted: 0, updated: 0 });
+      expect(result.refresh).toEqual({ skipped: true, inserted: 0, updated: 0, calendarFailures: [] });
       const winterAdd = (
         await opened.db.select().from(players).where(eq(players.externalId, 700000))
       )[0];
@@ -130,7 +130,7 @@ describe("watch-list service", () => {
 
       api.options.person = makePerson({ id: 700000, fullName: "Winter Add" });
       const result = await addPlayer(deps(), 700000);
-      expect(result.refresh).toEqual({ skipped: true, inserted: 0, updated: 0 });
+      expect(result.refresh).toEqual({ skipped: true, inserted: 0, updated: 0, calendarFailures: [] });
 
       // Tags still land from the inserted identity columns (SC1: the add-path sync).
       const tags = await opened.db
@@ -264,7 +264,7 @@ describe("watch-list service", () => {
         schoolName: "LSU",
         active: true,
       });
-      expect(result.refresh).toEqual({ skipped: false, inserted: 2, updated: 0 });
+      expect(result.refresh).toEqual({ skipped: false, inserted: 2, updated: 0, calendarFailures: [] });
 
       const lines = await opened.db.select().from(statLines);
       expect(lines).toHaveLength(2);
@@ -334,7 +334,7 @@ describe("watch-list service", () => {
       clock.set(OFFSEASON); // 2026-12-05, NCAA season long over
       const result = await addNcaaPlayer(deps(), 2650000);
       expect(result.action).toBe("added");
-      expect(result.refresh).toEqual({ skipped: true, inserted: 0, updated: 0 });
+      expect(result.refresh).toEqual({ skipped: true, inserted: 0, updated: 0, calendarFailures: [] });
       expect(result.player.schoolName).toBe("Duke");
       const added = (
         await opened.db.select().from(players).where(eq(players.ncaaPlayerSeq, 2650000))

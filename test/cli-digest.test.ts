@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import type { DigestCliDeps } from "../src/cli/digest.js";
-import { parseForce, parseWindow, runDigestCli } from "../src/cli/digest.js";
+import { parseForce, parseList, parseWindow, runDigestCli } from "../src/cli/digest.js";
+import { addToList, createList } from "../src/lists/service.js";
 import {
   CapturingMailer,
   MID_SEASON,
@@ -68,6 +69,25 @@ describe("digest CLI", () => {
     it("normalizes case and surrounding whitespace", () => {
       expect(parseWindow(["--window", "7D"])).toBe("7d");
       expect(parseWindow(["--window", " ytd "])).toBe("ytd");
+    });
+  });
+
+  describe("parseList (#70)", () => {
+    it("is undefined when absent (unscoped)", () => {
+      expect(parseList([])).toBeUndefined();
+      expect(parseList(["--force"])).toBeUndefined();
+    });
+
+    it("accepts --list <name> and --list=<name>, trimmed", () => {
+      expect(parseList(["--list", "Prospects"])).toBe("Prospects");
+      expect(parseList(["--list=Top 30"])).toBe("Top 30");
+      expect(parseList(["--list", "  Spaced  "])).toBe("Spaced");
+    });
+
+    it("is null when the flag is present but blank, so the CLI fails closed", () => {
+      expect(parseList(["--list"])).toBeNull();
+      expect(parseList(["--list="])).toBeNull();
+      expect(parseList(["--list", "--force"])).toBeNull();
     });
   });
 
@@ -168,6 +188,29 @@ describe("digest CLI", () => {
       expect(output).toEqual([
         "digest kind=digest action=failed statLines=1 players=1 window=Jul 18 reason=postmark down",
       ]);
+    });
+
+    it("--list reaches runDigest: only the list's members are sent (#70)", async () => {
+      // beforeEach seeded "Maximo Acosta" (NOT a member). Add a second, listed
+      // player; the scoped send must cover only him.
+      const listed = await insertPlayer(opened.db, { fullName: "Listed Guy" });
+      await insertStatLine(opened.db, { playerId: listed.id, gameDate: "2026-07-18" });
+      const clock = fakeClock(MID_SEASON);
+      await createList(opened.db, "L", clock.now());
+      await addToList(opened.db, "L", [listed.externalId!], clock.now());
+
+      expect(await runDigestCli(["--list", "L"], deps())).toBe(0);
+      expect(output[0]).toContain("players=1");
+      expect(mailer.sent).toHaveLength(1);
+      const body = `${mailer.sent[0]?.html}\n${mailer.sent[0]?.text}`;
+      expect(body).toContain("Listed Guy".split(" ")[1]); // surname (renderer abbreviates)
+      expect(body).not.toContain("Acosta");
+    });
+
+    it("--list fails closed on an unknown list: exits 1 and sends nothing (#70)", async () => {
+      expect(await runDigestCli(["--list", "ghost"], deps())).toBe(1);
+      expect(mailer.sent).toHaveLength(0);
+      expect(errors[0]).toContain('no list named "ghost"');
     });
   });
 });

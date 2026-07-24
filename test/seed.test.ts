@@ -256,15 +256,71 @@ describe("seed CLI", () => {
     }
   });
 
-  it("emits ASCII-only stdout (rules/scripting.md)", async () => {
-    await runSeed(["add", "--person-id", "691185"], deps());
-    await runSeed(["list"], deps());
-    await runSeed(["bogus"], deps());
-    expect(output.length).toBeGreaterThan(3);
-    for (const line of output) {
-      // Printable ASCII only — no unicode arrows, no emoji, no control bytes.
-      expect(line).toMatch(/^[\x20-\x7E]*$/);
-    }
+  // seed is a human-facing app CLI on the HC's UTF-8 host, so it echoes the
+  // CANONICAL (NFC) player identity in UTF-8 — never ASCII-folded (Option 1 /
+  // ADR 0047). The fixture name arrives DECOMPOSED (NFD: base `n` + combining
+  // tilde U+0303); the ingestion boundary normalizes it to NFC (ADR 0041), so
+  // asserting the precomposed form appears verbatim proves BOTH normalization
+  // and UTF-8 preservation (no fold, no `\uXXXX` escape, no `?` substitution).
+  // This is a contract/characterization test: it documents the intended policy
+  // (its predecessor asserted the now-retired "ASCII-only stdout" contract).
+  describe("preserves canonical (NFC) non-ASCII player identity on stdout (Option 1 / ADR 0047)", () => {
+    const NFD_NAME = "Maximo Acun\u0303a"; // "Maximo Acuna" DECOMPOSED: base `n` + combining tilde U+0303
+    const NFC_NAME = "Maximo Acu\u00f1a"; // "Maximo Acuna" PRECOMPOSED (U+00F1) - the canonical stored form
+
+    const expectCanonical = (line: string | undefined): void => {
+      expect(line).toBeDefined();
+      const l = line as string;
+      expect(l).toContain(`name=${NFC_NAME}`); // canonical NFC identity, echoed in UTF-8
+      expect(l).not.toContain(NFD_NAME); // normalized at ingestion, not the decomposed input
+      expect(l).not.toContain("Acu?a"); // not ASCII-folded
+      expect(l).not.toMatch(/\\u[0-9a-f]{4}/i); // not `\uXXXX`-escaped
+      expect(l).not.toContain("\n"); // still one greppable line
+    };
+
+    it("MLB add and list echo the canonical name", async () => {
+      api.options.person = makePerson({ id: 691185, fullName: NFD_NAME });
+      await runSeed(["add", "--person-id", "691185"], deps());
+      expectCanonical(output.find((l) => l.startsWith("added player")));
+
+      output = [];
+      await runSeed(["list"], deps());
+      expectCanonical(output.find((l) => l.startsWith("player ")));
+    });
+
+    it("deactivate echoes the canonical name", async () => {
+      api.options.person = makePerson({ id: 691185, fullName: NFD_NAME });
+      await runSeed(["add", "--person-id", "691185"], deps());
+      output = [];
+      await runSeed(["deactivate", "--person-id", "691185"], deps());
+      expectCanonical(output.find((l) => l.startsWith("deactivated player")));
+    });
+
+    it("search-candidate listing echoes the canonical name", async () => {
+      api.options.searchResults = [
+        makePerson({ id: 111, fullName: NFD_NAME }),
+        makePerson({ id: 222, fullName: "Other Guy" }),
+      ];
+      await runSeed(["add", "--search", "acosta"], deps());
+      expectCanonical(output.find((l) => l.startsWith("[1] ")));
+    });
+
+    it("NCAA add echoes the canonical name", async () => {
+      clock.set("2026-03-15T17:00:00Z"); // NCAA In Season
+      ncaaApi.options.pages = {
+        "2649785:batting": makeNcaaGameLogHtml({
+          fullName: NFD_NAME,
+          schoolName: "LSU",
+          rows: [
+            { date: "2026-03-13", opponentName: "Georgia", isHome: true, contestId: 6001, stats: { AB: 4, H: 2, HR: 1 } },
+          ],
+        }),
+        "2649785:pitching": makeNcaaGameLogHtml({ fullName: NFD_NAME, schoolName: "LSU", rows: [] }),
+        "2649785:fielding": makeNcaaGameLogHtml({ fullName: NFD_NAME, schoolName: "LSU", rows: [] }),
+      };
+      await runSeed(["add", "--ncaa-seq", "2649785"], deps());
+      expectCanonical(output.find((l) => l.startsWith("added player")));
+    });
   });
 
   describe("tag commands", () => {

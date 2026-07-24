@@ -8,6 +8,7 @@ import { MlbClient } from "../src/mlb/client.js";
 import { runRefresh } from "../src/jobs/refresh.js";
 import type { WatchlistDeps } from "../src/watchlist/service.js";
 import { batchAddPlayers } from "../src/watchlist/service.js";
+import { UnknownListError, createList, listMembersOf } from "../src/lists/service.js";
 import {
   FakeNcaaApi,
   FakeStatsApi,
@@ -375,13 +376,26 @@ describe("batchAddPlayers", () => {
       expect(result.summary.added).toBe(25);
     });
 
-    it("accepts the optional `list` seam (#70) without changing behavior", async () => {
+    it("adds staged players to an existing `list` (#70)", async () => {
+      const list = await createList(opened.db, "prospects", clock.now());
       const result = await batchAddPlayers(deps(), {
         entries: [{ personId: 691185 }],
         list: "prospects",
       });
       expect(result.summary).toMatchObject({ added: 1, total: 1 });
-      expect(await opened.db.select().from(players)).toHaveLength(1);
+      const player = (await opened.db.select().from(players))[0]!;
+      // The staged player is now an active member of the named list.
+      const members = await listMembersOf(opened.db, "prospects");
+      expect(members.map((m) => m.id)).toEqual([player.id]);
+      expect(list.name).toBe("prospects");
+    });
+
+    it("rejects the whole call when `list` names no existing list (#70)", async () => {
+      await expect(
+        batchAddPlayers(deps(), { entries: [{ personId: 691185 }], list: "ghost" }),
+      ).rejects.toBeInstanceOf(UnknownListError);
+      // Fail-closed BEFORE any write: nothing staged.
+      expect(await opened.db.select().from(players)).toHaveLength(0);
     });
 
     it("treats personId N and ncaaPlayerSeq N as DIFFERENT humans, not a duplicate", async () => {

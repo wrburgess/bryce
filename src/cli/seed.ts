@@ -31,8 +31,11 @@ import { isMain } from "./main.js";
 
 /**
  * Watch-list seeding CLI: a thin presenter over the watch-list service
- * (src/watchlist/service.ts). Output is deterministic, greppable, ASCII-only
- * key=value lines (rules/scripting.md); exit code is non-zero on failure.
+ * (src/watchlist/service.ts). Output is deterministic, greppable key=value
+ * lines; as a human-facing app CLI on the HC's UTF-8 host it echoes the
+ * canonical (NFC) player identity verbatim in UTF-8 — not ASCII-folded
+ * (Option 1 / ADR 0047, scoping rules/scripting.md). Exit code is non-zero on
+ * failure.
  *
  * Subcommands:
  *   add --person-id N          add by MLB Stats API personId

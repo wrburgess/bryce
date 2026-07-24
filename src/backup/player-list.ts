@@ -1,9 +1,9 @@
 import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, rmSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
-import { eq } from "drizzle-orm";
+import { eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
-import { playerTags } from "../db/schema.js";
+import { listMembers, playerLists, playerTags, players } from "../db/schema.js";
 import { canonicalizeName } from "../domain/names.js";
 import { listPlayers } from "../watchlist/service.js";
 import { fsyncDir } from "./snapshot.js";
@@ -21,7 +21,14 @@ import { fsyncDir } from "./snapshot.js";
  * per-row identity rules consistent with ADR 0032.
  */
 
-export const PLAYER_BACKUP_VERSION = 1 as const;
+/**
+ * The version `createPlayerListBackup` EMITS. Bumped to 2 for named lists
+ * (issue #70 / ADR 0046): a v2 payload adds optional `lists` (live list
+ * definitions) and `members` (each referencing a player by natural id and a list
+ * by name). The parser still accepts a v1 payload (no lists/members) — the bump
+ * is backward compatible.
+ */
+export const PLAYER_BACKUP_VERSION = 2 as const;
 
 /** Refuse absurd inputs before Zod even runs — a cheap denial-of-service guard. */
 export const MAX_BACKUP_BYTES = 16 * 1024 * 1024;
@@ -113,14 +120,81 @@ const playerEntrySchema = z
     }
   });
 
+/**
+ * A live list definition in a v2 backup. Name is non-blank after normalization;
+ * timestamps are optional (an insert falls back to `now`).
+ */
+const backupListSchema = z
+  .object({
+    name: z.string().min(1),
+    createdAt: isoTimestamp.optional(),
+    updatedAt: isoTimestamp.optional(),
+  })
+  .strict()
+  .superRefine((row, ctx) => {
+    if (row.name.trim().length === 0) {
+      ctx.addIssue({ code: "custom", path: ["name"], message: "list name is blank" });
+    } else if (/\p{Cc}/u.test(row.name)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["name"],
+        message: "list name must not contain a control character",
+      });
+    }
+  });
+
+/**
+ * A membership in a v2 backup: a list (by name) plus a player (by natural id —
+ * exactly one of externalId or ncaaPlayerSeq, mirroring a player row's identity
+ * rule). Resolved against the just-restored players on import.
+ */
+const backupMemberSchema = z
+  .object({
+    list: z.string().min(1),
+    externalId: z.number().int().positive().nullable().default(null),
+    ncaaPlayerSeq: z.number().int().positive().nullable().default(null),
+  })
+  .strict()
+  .superRefine((row, ctx) => {
+    const present = (row.externalId != null ? 1 : 0) + (row.ncaaPlayerSeq != null ? 1 : 0);
+    if (present !== 1) {
+      ctx.addIssue({
+        code: "custom",
+        message: "a member must carry exactly one natural id (externalId or ncaaPlayerSeq)",
+      });
+    }
+    if (row.list.trim().length === 0) {
+      ctx.addIssue({ code: "custom", path: ["list"], message: "list name is blank" });
+    } else if (/\p{Cc}/u.test(row.list)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["list"],
+        message: "member list name must not contain a control character",
+      });
+    }
+  });
+
 export const playerListBackupSchema = z
   .object({
-    version: z.literal(PLAYER_BACKUP_VERSION),
+    // v1 or v2: a v1 payload (no lists/members) still restores (ADR 0046).
+    version: z.union([z.literal(1), z.literal(2)]),
     exportedAt: isoTimestamp.optional(),
     players: z.array(playerEntrySchema),
+    lists: z.array(backupListSchema).optional(),
+    members: z.array(backupMemberSchema).optional(),
   })
   .strict()
   .superRefine((env, ctx) => {
+    // Fail-closed on the version field: v1 predates named lists (ADR 0046), so a
+    // v1 payload MUST NOT carry list/member data. Rejecting it here keeps the
+    // version field trustworthy — list/member data requires version 2.
+    if (env.version === 1 && ((env.lists?.length ?? 0) > 0 || (env.members?.length ?? 0) > 0)) {
+      ctx.addIssue({
+        code: "custom",
+        message: "version 1 backups must not carry lists or members (use version 2)",
+      });
+    }
+
     // Natural-id uniqueness WITHIN the payload — two rows sharing an identity
     // would fight over the same DB row on import.
     const seenExternal = new Set<number>();
@@ -150,6 +224,8 @@ export const playerListBackupSchema = z
   });
 
 export type PlayerBackupEntry = z.infer<typeof playerEntrySchema>;
+export type PlayerBackupList = z.infer<typeof backupListSchema>;
+export type PlayerBackupMember = z.infer<typeof backupMemberSchema>;
 export type PlayerListBackup = z.infer<typeof playerListBackupSchema>;
 
 export class PlayerBackupParseError extends Error {
@@ -159,12 +235,37 @@ export class PlayerBackupParseError extends Error {
   }
 }
 
-/** Serialize every Player row into a versioned, re-importable backup envelope. */
+/**
+ * Serialize every Player row into a versioned, re-importable backup envelope
+ * (version 2). LIVE named lists and their memberships are included so the HC's
+ * roster choices survive a restore (soft-deleted lists are excluded — a deleted
+ * list is not a roster choice to preserve). Each membership references its player
+ * by natural id and its list by name.
+ */
 export async function createPlayerListBackup(
   db: Db,
   now: () => Date = () => new Date(),
 ): Promise<PlayerListBackup> {
   const rows = await listPlayers(db, "all");
+
+  const liveLists = await db
+    .select()
+    .from(playerLists)
+    .where(isNull(playerLists.deletedAt))
+    .orderBy(playerLists.name);
+
+  const memberRows = await db
+    .select({
+      listName: playerLists.name,
+      externalId: players.externalId,
+      ncaaPlayerSeq: players.ncaaPlayerSeq,
+    })
+    .from(listMembers)
+    .innerJoin(playerLists, eq(listMembers.listId, playerLists.id))
+    .innerJoin(players, eq(listMembers.playerId, players.id))
+    .where(isNull(playerLists.deletedAt))
+    .orderBy(playerLists.name, players.id);
+
   // One query for every MANUAL tag, grouped by player (never a query per player):
   // derived tags are not backed up — they rebuild on the next Refresh.
   const manualTags = await db.select().from(playerTags).where(eq(playerTags.source, "manual"));
@@ -174,6 +275,7 @@ export async function createPlayerListBackup(
     list.push({ namespace: t.namespace, value: t.value });
     tagsByPlayer.set(t.playerId, list);
   }
+
   return {
     version: PLAYER_BACKUP_VERSION,
     exportedAt: now().toISOString(),
@@ -202,6 +304,18 @@ export async function createPlayerListBackup(
         tags,
       };
     }),
+    lists: liveLists.map((l) => ({
+      name: l.name,
+      createdAt: l.createdAt,
+      updatedAt: l.updatedAt,
+    })),
+    // Prefer externalId when a player carries both (a promoted NCAA -> pro row);
+    // either resolves to the same player id on import.
+    members: memberRows.map((m) =>
+      m.externalId != null
+        ? { list: m.listName, externalId: m.externalId, ncaaPlayerSeq: null }
+        : { list: m.listName, externalId: null, ncaaPlayerSeq: m.ncaaPlayerSeq },
+    ),
   };
 }
 

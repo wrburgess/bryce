@@ -908,6 +908,42 @@ describe("REST API", () => {
       expect(res.status).toBe(404);
     });
 
+    it("returns 200 with a structured body for a whole-list `partial` run (#23, MF6)", async () => {
+      // One refreshable player and one active MLB row with no externalId (skipped
+      // by dispatch) → status `partial`, which is safe partial success → 200.
+      await insertPlayer(opened.db, { externalId: 691185 });
+      await insertPlayer(opened.db, { externalId: null, level: "mlb", milbLevel: null, fullName: "No Id Guy" });
+
+      const res = await app().request("/api/refresh", { method: "POST", headers: AUTH });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({
+        skipped: false,
+        status: "partial",
+        playersRefreshed: 1,
+        playersSkipped: 1,
+        playersFailed: 0,
+        playerFailures: [],
+      });
+    });
+
+    it("returns 502 with a structured body for a whole-list `failed` run (#23, MF6)", async () => {
+      // The only player's fetch explodes → refreshed=0, failed>0 → blocked run.
+      await insertPlayer(opened.db, { externalId: 691185 });
+      deps.client = new MlbClient({
+        fetchImpl: (url: string) =>
+          url.includes("/people/") ? Promise.reject(new Error("mlb down")) : api.fetch(url),
+        delayMs: 0,
+      });
+
+      const res = await app().request("/api/refresh", { method: "POST", headers: AUTH });
+      expect(res.status).toBe(502);
+      const body = (await res.json()) as { status: string; playerFailures: unknown[] };
+      expect(body.status).toBe("failed");
+      expect(body.playerFailures).toHaveLength(1);
+      // Nothing was written for the failed player (buffer-before-write).
+      expect(await opened.db.select().from(statLines)).toHaveLength(0);
+    });
+
     it("refreshes one NCAA player by ncaaPlayerSeq, upserting his season", async () => {
       await insertPlayer(opened.db, {
         externalId: null,
@@ -975,6 +1011,184 @@ describe("REST API", () => {
     expect(await res.json()).toMatchObject({ action: "sent", statLineCount: 0 });
     const kept = await opened.db.select().from(statLines).where(eq(statLines.playerId, gone.id));
     expect(kept).toHaveLength(1); // his history is kept, just never selected
+  });
+
+  describe("named lists (#70 / ADR 0046)", () => {
+    async function createList(name: string): Promise<Response> {
+      return app().request("/api/lists", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ name }),
+      });
+    }
+
+    it("POST /api/lists creates a list (201), GET /api/lists lists it", async () => {
+      const created = await createList("Prospects");
+      expect(created.status).toBe(201);
+      expect(await created.json()).toMatchObject({ list: { name: "Prospects" } });
+
+      const listed = await app().request("/api/lists", { headers: AUTH });
+      expect(listed.status).toBe(200);
+      const body = (await listed.json()) as { lists: Array<{ name: string; memberCount: number }> };
+      expect(body.lists).toEqual([{ ...body.lists[0], name: "Prospects", memberCount: 0 }]);
+    });
+
+    it("adds and shows members; membership is scoped to active players", async () => {
+      await createList("L");
+      const p = await insertPlayer(opened.db, { externalId: 501, fullName: "Listed Guy" });
+
+      const added = await app().request("/api/lists/L/members", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ players: [{ personId: 501 }] }),
+      });
+      expect(added.status).toBe(200);
+      expect(await added.json()).toMatchObject({ added: 1 });
+
+      const shown = await app().request("/api/lists/L", { headers: AUTH });
+      const body = (await shown.json()) as { members: Array<{ id: number }> };
+      expect(body.members.map((m) => m.id)).toEqual([p.id]);
+    });
+
+    it("PATCH renames and DELETE soft-deletes (name frees for reuse)", async () => {
+      await createList("Old");
+      const renamed = await app().request("/api/lists/Old", {
+        method: "PATCH",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ name: "New" }),
+      });
+      expect(await renamed.json()).toMatchObject({ list: { name: "New" } });
+
+      const deleted = await app().request("/api/lists/New", { method: "DELETE", headers: AUTH });
+      expect(deleted.status).toBe(200);
+      // The name is free again.
+      expect((await createList("New")).status).toBe(201);
+    });
+
+    it("DELETE /api/lists/:name/members removes a member", async () => {
+      await createList("L");
+      await insertPlayer(opened.db, { externalId: 502 });
+      await app().request("/api/lists/L/members", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ players: [{ personId: 502 }] }),
+      });
+      const removed = await app().request("/api/lists/L/members", {
+        method: "DELETE",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ players: [{ personId: 502 }] }),
+      });
+      expect(await removed.json()).toMatchObject({ removed: 1 });
+    });
+
+    it("sad paths: unknown list 404, duplicate name 409, blank name 400", async () => {
+      const unknown = await app().request("/api/lists/ghost", { headers: AUTH });
+      expect(unknown.status).toBe(404);
+
+      await createList("Dupes");
+      const dup = await createList("Dupes");
+      expect(dup.status).toBe(409);
+
+      const blank = await app().request("/api/lists", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ name: "   " }),
+      });
+      expect(blank.status).toBe(400);
+    });
+
+    it("POST /api/lists rejects a name with a control character (400), creating nothing", async () => {
+      const bad = await app().request("/api/lists", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ name: "a\nb" }),
+      });
+      expect(bad.status).toBe(400);
+
+      // The ZodError seam fails closed BEFORE any write — no list exists.
+      const listed = await app().request("/api/lists", { headers: AUTH });
+      const body = (await listed.json()) as { lists: unknown[] };
+      expect(body.lists).toEqual([]);
+    });
+
+    it("GET /digest/preview?list= scopes the preview, and an unknown list 404s", async () => {
+      await createList("L");
+      const member = await insertPlayer(opened.db, { externalId: 601, fullName: "Preview Member" });
+      await insertStatLine(opened.db, { playerId: member.id, gameDate: "2026-07-18" });
+      const nonMember = await insertPlayer(opened.db, { externalId: 602, fullName: "Preview Other" });
+      await insertStatLine(opened.db, { playerId: nonMember.id, gameDate: "2026-07-18" });
+      await app().request("/api/lists/L/members", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ players: [{ personId: 601 }] }),
+      });
+
+      const scoped = await app().request("/api/digest/preview?list=L", { headers: AUTH });
+      const body = (await scoped.json()) as { playerCount: number };
+      expect(body.playerCount).toBe(1);
+
+      const bad = await app().request("/api/digest/preview?list=ghost", { headers: AUTH });
+      expect(bad.status).toBe(404);
+    });
+
+    it("GET /stat-lines?list= scopes to the list's members", async () => {
+      await createList("L");
+      const member = await insertPlayer(opened.db, { externalId: 701 });
+      await insertStatLine(opened.db, { playerId: member.id, gameId: 810001 });
+      const nonMember = await insertPlayer(opened.db, { externalId: 702 });
+      await insertStatLine(opened.db, { playerId: nonMember.id, gameId: 810002 });
+      await app().request("/api/lists/L/members", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ players: [{ personId: 701 }] }),
+      });
+
+      const res = await app().request("/api/stat-lines?list=L", { headers: AUTH });
+      const body = (await res.json()) as { statLines: Array<{ playerId: number }> };
+      expect(body.statLines.map((s) => s.playerId)).toEqual([member.id]);
+
+      const bad = await app().request("/api/stat-lines?list=ghost", { headers: AUTH });
+      expect(bad.status).toBe(404);
+    });
+
+    it("GET /stat-lines?list= excludes a deactivated member's lines (active is the master gate)", async () => {
+      await createList("L");
+      // Two members of L, each with a stat line...
+      const activeMember = await insertPlayer(opened.db, { externalId: 711 });
+      await insertStatLine(opened.db, { playerId: activeMember.id, gameId: 811001 });
+      const goneMember = await insertPlayer(opened.db, { externalId: 712 });
+      await insertStatLine(opened.db, { playerId: goneMember.id, gameId: 811002 });
+      await app().request("/api/lists/L/members", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ players: [{ personId: 711 }, { personId: 712 }] }),
+      });
+      // ...then DEACTIVATE one. His membership row stays, but a named-list scope
+      // selects only ACTIVE members (ADR 0046 decision 2), so his lines must NOT
+      // appear. Without the active filter in the q.list branch this returns both.
+      await opened.db.update(players).set({ active: false }).where(eq(players.id, goneMember.id));
+
+      const res = await app().request("/api/stat-lines?list=L", { headers: AUTH });
+      const body = (await res.json()) as { statLines: Array<{ playerId: number }> };
+      expect(body.statLines.map((s) => s.playerId)).toEqual([activeMember.id]);
+    });
+
+    it("GET /stat-lines?list= for an EMPTY list selects zero rows, not all players", async () => {
+      await createList("Empty");
+      // Stat lines DO exist — but only for players who are NOT in the empty list.
+      const outsider = await insertPlayer(opened.db, { externalId: 703 });
+      await insertStatLine(opened.db, { playerId: outsider.id, gameId: 810003 });
+      const otherOutsider = await insertPlayer(opened.db, { externalId: 704 });
+      await insertStatLine(opened.db, { playerId: otherOutsider.id, gameId: 810004 });
+
+      const res = await app().request("/api/stat-lines?list=Empty", { headers: AUTH });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { statLines: Array<{ playerId: number }> };
+      // An empty list scopes to NOTHING. If the empty-list branch fell through to
+      // all players, both outsiders' lines would leak in — so [] proves scoping,
+      // not merely an absence of data.
+      expect(body.statLines).toEqual([]);
+    });
   });
 
   describe("player tag routes (Phase A of #29)", () => {

@@ -6,7 +6,7 @@ import { isMain } from "./main.js";
 /**
  * Connector smoke diagnostic (issue #37): drives the REAL MCP SDK client over
  * Streamable HTTP against a running Bryce `/mcp`, proving a connector can
- * initialize, discover the fifteen tools, read health/preview, and that an
+ * initialize, discover the full tool set, read health/preview, and that an
  * unauthenticated request still fails closed. Env-only config, no secret ever
  * echoed. An opt-in `--mutate` exercises the write path against a designated
  * already-inactive staging sentinel only.
@@ -19,7 +19,7 @@ import { isMain } from "./main.js";
  * executes the smoke and every path is testable in-process (test/connector-smoke.test.ts).
  */
 
-/** The fifteen tools the server advertises (mirrors test/mcp.test.ts ALL_TOOLS). */
+/** Every tool the server advertises (mirrors test/mcp.test.ts ALL_TOOLS). */
 export const ALL_TOOLS = [
   "watchlist_list",
   "watchlist_add",
@@ -36,6 +36,13 @@ export const ALL_TOOLS = [
   "player_tags_list",
   "sql_query",
   "status",
+  "lists_list",
+  "list_create",
+  "list_rename",
+  "list_delete",
+  "list_members",
+  "list_add_players",
+  "list_remove_players",
 ] as const;
 
 export const DEFAULT_MCP_URL = "http://localhost:3000/mcp";
@@ -281,7 +288,7 @@ const toolErrorText = (res: SmokeToolResult): string =>
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
 
-/** initialize is implicit in connect(); this asserts the EXACT fifteen tool set. */
+/** initialize is implicit in connect(); this asserts the EXACT advertised tool set. */
 async function checkToolList(client: SmokeMcpClient): Promise<CheckResult> {
   const { tools } = await client.listTools();
   const names = new Set(tools.map((t) => t.name));

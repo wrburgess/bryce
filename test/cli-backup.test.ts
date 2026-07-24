@@ -186,7 +186,7 @@ describe("CLI logic in-process", () => {
         write,
       });
       expect(code).toBe(0);
-      expect(out[0]).toBe("player-list restored inserted=1 updated=0 total=1");
+      expect(out[0]).toBe("player-list restored inserted=1 updated=0 total=1 lists=0 members=0");
       expect((await live.opened.db.select().from(players))[0]?.externalId).toBe(700009);
     });
 

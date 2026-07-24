@@ -33,6 +33,15 @@ export interface DigestDeps {
   /** Which date window this run reports. */
   spec: WindowSpec;
   /**
+   * Scope an ON-DEMAND send to a named list's active members (issue #70 /
+   * ADR 0046). A named-list send is never the scheduled daily slot — the slot
+   * key `(kind, date_covered)` has no list dimension — so any run carrying a
+   * listId is routed to the on-demand path (no claim, no delivery row),
+   * whatever its window. The scheduler passes no list, so the daily 1d slot is
+   * unaffected.
+   */
+  listId?: number;
+  /**
    * Operator override of the once-a-day / once-a-week bookkeeping (testing).
    * When force is what let the run proceed, the run is a REPLAY: it sends and
    * writes NOTHING (see src/jobs/delivery-claim.ts). It never overrides an
@@ -140,7 +149,10 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   // It also ignores Offseason Sleep. Sleep stops the daily artifact mailing
   // nothing every day for months. Answering an explicit "give me my season to
   // date" with a liveness heartbeat is not that, it is refusing the question.
-  if (deps.spec !== "1d") {
+  // A named-list send is on-demand by definition (ADR 0046 decision 4): it never
+  // takes the daily slot, whose key has no list dimension. Route any run with a
+  // list — or any non-1d window — to the on-demand path.
+  if (deps.spec !== "1d" || deps.listId !== undefined) {
     return runOnDemandReport(deps, warn);
   }
 
@@ -336,7 +348,7 @@ async function runOnDemandReport(
   warn: (message: string) => void,
 ): Promise<DigestResult> {
   const { db, now, tz } = deps;
-  const assembly = await assembleDigest(db, { now, tz, spec: deps.spec });
+  const assembly = await assembleDigest(db, { now, tz, spec: deps.spec, listId: deps.listId });
   reportUnknownFields(assembly, warn);
 
   const mail = renderDigest(assembly);
