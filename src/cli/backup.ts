@@ -4,7 +4,7 @@ import { loadDotEnv } from "../env.js";
 import { MIGRATIONS_FOLDER } from "../db/client.js";
 import { startupDb } from "../db/startup.js";
 import { createSnapshot, pruneSnapshots } from "../backup/snapshot.js";
-import { isMain } from "./main.js";
+import { exitAfterDrain, isMain } from "./main.js";
 
 /**
  * `db:backup` — take a Snapshot of the live database and prune to keep-last-N.
@@ -37,7 +37,7 @@ export async function runBackup(argv: string[], deps: BackupRunDeps): Promise<nu
   return 0;
 }
 
-export async function main(): Promise<number> {
+export async function main(argv = process.argv.slice(2)): Promise<number> {
   loadDotEnv();
   const config = loadConfig();
   const started = await startupDb(config.databasePath, {
@@ -46,7 +46,7 @@ export async function main(): Promise<number> {
     migrationsFolder: MIGRATIONS_FOLDER,
   });
   try {
-    return await runBackup(process.argv.slice(2), {
+    return await runBackup(argv, {
       sqlite: started.sqlite,
       backupDir: config.backupDir,
       keepLast: config.backupKeepLast,
@@ -60,11 +60,9 @@ export async function main(): Promise<number> {
 
 if (isMain(import.meta.url)) {
   main()
-    .then((code) => {
-      process.exitCode = code;
-    })
+    .then(exitAfterDrain)
     .catch((err: unknown) => {
       process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
-      process.exitCode = 1;
+      return exitAfterDrain(1);
     });
 }

@@ -58,7 +58,12 @@ export function createApp(deps: AppDeps): Hono {
   return app;
 }
 
-if (isMain(import.meta.url)) {
+/** Start the service through the same explicit argv/status adapter as every CLI. */
+export async function main(argv = process.argv.slice(2)): Promise<number> {
+  if (argv.length > 0) {
+    process.stderr.write(`error: server takes no arguments; got ${argv.join(" ")}\n`);
+    return 1;
+  }
   loadDotEnv();
   const config = loadConfig();
   // startupDb registers this process in the interlock registry, self-heals the
@@ -76,7 +81,7 @@ if (isMain(import.meta.url)) {
   process.once("exit", () => started.lock?.release());
   const shutdown = (): void => {
     started.lock?.release();
-    process.exit(0);
+    process.exitCode = 0;
   };
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);
@@ -98,4 +103,12 @@ if (isMain(import.meta.url)) {
   });
   serve({ fetch: app.fetch, port: config.serverPort });
   process.stdout.write(`server listening port=${config.serverPort}\n`);
+  return 0;
+}
+
+if (isMain(import.meta.url)) {
+  main().then((code) => { process.exitCode = code; }).catch((error: unknown) => {
+    process.exitCode = 1;
+    process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
+  });
 }

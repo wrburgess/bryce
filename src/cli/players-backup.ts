@@ -9,7 +9,7 @@ import {
   createPlayerListBackup,
   writePlayerListBackupFile,
 } from "../backup/player-list.js";
-import { isMain } from "./main.js";
+import { exitAfterDrain, isMain } from "./main.js";
 
 /**
  * `players:backup --out FILE` — write a portable Player List Backup (every Player
@@ -93,7 +93,7 @@ export async function runPlayersBackup(argv: string[], deps: PlayersBackupRunDep
   return 0;
 }
 
-export async function main(): Promise<number> {
+export async function main(argv = process.argv.slice(2)): Promise<number> {
   loadDotEnv();
   const config = loadConfig();
   const started = await startupDb(config.databasePath, {
@@ -102,7 +102,7 @@ export async function main(): Promise<number> {
     migrationsFolder: MIGRATIONS_FOLDER,
   });
   try {
-    return await runPlayersBackup(process.argv.slice(2), {
+    return await runPlayersBackup(argv, {
       db: started.db,
       databasePath: config.databasePath,
       now: () => new Date(),
@@ -115,11 +115,9 @@ export async function main(): Promise<number> {
 
 if (isMain(import.meta.url)) {
   main()
-    .then((code) => {
-      process.exitCode = code;
-    })
+    .then(exitAfterDrain)
     .catch((err: unknown) => {
       process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
-      process.exitCode = 1;
+      return exitAfterDrain(1);
     });
 }

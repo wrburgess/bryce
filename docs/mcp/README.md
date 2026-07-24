@@ -2,7 +2,7 @@
 
 The MCP server is Bryce's **primary interface** ([ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)):
 twenty-two tools over the same service layer and Zod schemas the [REST API](../api/README.md) and
-[CLI](../cli/README.md) use, so a Claude client (web, mobile, or CLI) is the front end and there is
+[CLI](../cli/README.md) use (whose activated `bryce` command is the preferred operator entry point), so a Claude client (web, mobile, or CLI) is the front end and there is
 no web UI. It is mounted at `/mcp` over Streamable HTTP, behind the bearer token. Domain terms —
 **Player**, **Refresh**, **Digest**, **Window**, **Offseason Sleep** — are defined in
 [`docs/domain/CONTEXT.md`](../domain/CONTEXT.md).

@@ -4,6 +4,9 @@
   "private": true,
   "description": "Single-user daily digest of stat lines for a personal watch list of baseball players (MLB/MiLB pipeline, Phase 1).",
   "type": "module",
+  "bin": {
+    "bryce": "bin/bryce"
+  },
   "engines": {
     "node": ">=22"
   },
