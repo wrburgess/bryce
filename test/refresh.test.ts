@@ -4,7 +4,12 @@ import type { Db, OpenedDb } from "../src/db/client.js";
 import type { NewStatLineRow } from "../src/db/schema.js";
 import { playerTags, players, refreshRuns, seasonCalendar, statLines } from "../src/db/schema.js";
 import type { RefreshDeps } from "../src/jobs/refresh.js";
-import { deriveRefreshStatus, runRefresh, writePlayerRefresh } from "../src/jobs/refresh.js";
+import {
+  deriveRefreshStatus,
+  runRefresh,
+  runRefreshForPlayer,
+  writePlayerRefresh,
+} from "../src/jobs/refresh.js";
 import { SUPERSEDED_MESSAGE, claimRefreshRun } from "../src/jobs/refresh-run.js";
 import { MlbClient } from "../src/mlb/client.js";
 import {
@@ -62,6 +67,28 @@ function tagWritesThrow(db: Db, err: Error): Db {
           });
           return fn(txProxy);
         }, config);
+    },
+  }) as Db;
+}
+
+/**
+ * A db proxy that makes `insert(seasonCalendar)` throw — an UNEXPECTED,
+ * NON-collected failure in the calendar phase (the seasonCalendar upsert sits
+ * OUTSIDE refreshCalendars' getSeason try/catch). It must escape to runRefresh's
+ * MF1 outer boundary. Claim/settle transactions touch `refresh_runs`, never
+ * `season_calendar`, so they run untouched.
+ */
+function calendarWriteThrows(db: Db, err: Error): Db {
+  return new Proxy(db, {
+    get(target, prop) {
+      const value: unknown = Reflect.get(target, prop);
+      if (prop === "insert") {
+        return (table: unknown) => {
+          if (table === seasonCalendar) throw err;
+          return (value as (arg: unknown) => unknown).call(target, table);
+        };
+      }
+      return typeof value === "function" ? value.bind(target) : value;
     },
   }) as Db;
 }
@@ -957,9 +984,11 @@ describe("runRefresh — continue after failures (#23)", () => {
     expect(aFirst).toHaveLength(1);
     expect(await opened.db.select().from(statLines).where(eq(statLines.playerId, b.id))).toHaveLength(0);
     const aCreatedAt = aFirst[0]?.createdAt;
+    const aUpdatedAtBefore = aFirst[0]?.updatedAt; // captured BEFORE the retry
 
-    // Retry clean: both refresh → ok. A's row is updated IN PLACE (same
-    // created_at, no duplicate); B's row now lands.
+    // Retry clean at a LATER clock: both refresh → ok. A's row is updated IN
+    // PLACE (same created_at, no duplicate), and its updated_at ADVANCES; B's
+    // row now lands.
     clock.set("2026-07-20T17:00:00Z");
     const second = await runRefresh(deps());
     expect(second.status).toBe("ok");
@@ -967,7 +996,9 @@ describe("runRefresh — continue after failures (#23)", () => {
     const aSecond = await opened.db.select().from(statLines).where(eq(statLines.playerId, a.id));
     expect(aSecond).toHaveLength(1); // no duplicate
     expect(aSecond[0]?.createdAt).toBe(aCreatedAt); // created_at preserved
-    expect(aSecond[0]?.updatedAt).not.toBe(aCreatedAt); // updated_at MAY move
+    // updated_at ADVANCED on the in-place re-upsert (ISO strings sort lexically).
+    expect(aSecond[0]?.updatedAt).not.toBe(aUpdatedAtBefore);
+    expect(aSecond[0]!.updatedAt > aUpdatedAtBefore!).toBe(true);
     expect(await opened.db.select().from(statLines).where(eq(statLines.playerId, b.id))).toHaveLength(1);
   });
 
@@ -1025,5 +1056,49 @@ describe("runRefresh — continue after failures (#23)", () => {
     expect(healed.status).toBe("ok");
     const tags = await opened.db.select().from(playerTags).where(eq(playerTags.playerId, player.id));
     expect(tags.some((t) => t.namespace === "level" && t.value === "aaa")).toBe(true);
+  });
+
+  it("settles `failed` AND re-throws on an UNEXPECTED throw in the calendar phase (MF1 outer boundary)", async () => {
+    await insertPlayer(opened.db, { externalId: 691185 });
+    const boom = new Error("calendar db write boom");
+    // The seasonCalendar upsert throws — an unexpected fault OUTSIDE the collected
+    // getSeason boundary. It must reach the MF1 outer catch, not be swallowed.
+    const faultDb = calendarWriteThrows(opened.db, boom);
+
+    // (b) The unexpected error PROPAGATES to the caller...
+    await expect(runRefresh({ ...deps(), db: faultDb })).rejects.toThrow("calendar db write boom");
+
+    // (a) ...AND the run's own row is settled `failed`, never stranded `running`.
+    // (Removing the outer catch keeps (b) passing but leaves this row `running`,
+    // so this assertion is what genuinely guards the boundary.)
+    const runs = await opened.db.select().from(refreshRuns);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "failed" });
+    expect(runs[0]?.errorMessage).toContain("calendar db write boom");
+    expect(runs[0]?.finishedAt).not.toBeNull();
+  });
+
+  it("runRefreshForPlayer surfaces a getSeason failure in a NON-empty calendarFailures (MF3)", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    // The MLB single-player path fetches the calendar; sportId 1's getSeason
+    // throws, so the result must REPORT it rather than claim clean success.
+    const failSeason1 = new MlbClient({
+      fetchImpl: (url: string) => {
+        const u = new URL(url);
+        return u.pathname.endsWith("/seasons") && u.searchParams.get("sportId") === "1"
+          ? Promise.reject(new Error("season 1 down"))
+          : api.fetch(url);
+      },
+      delayMs: 0,
+    });
+
+    const result = await runRefreshForPlayer({ ...deps(), client: failSeason1 }, player.id);
+    expect(result.skipped).toBe(false);
+    // The player still refreshed (he never depended on the DB calendar)...
+    expect(result.inserted).toBeGreaterThan(0);
+    // ...but the calendar failure is SURFACED, not dropped.
+    expect(result.calendarFailures).toEqual([
+      { sportId: 1, reason: expect.stringContaining("season 1 down") },
+    ]);
   });
 });

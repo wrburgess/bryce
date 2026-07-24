@@ -234,11 +234,15 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
       }
     }
   } catch (err) {
-    // MF1 fatal outer boundary: an UNEXPECTED throw — a calendar DB-upsert
-    // error, refreshNcaaCalendar, or the status/settle logic — is not a
-    // collected failure. Record it on the run's own row (ownership-conditional,
-    // so a double-settle is a safe no-op) and RE-THROW, so a genuinely broken
-    // sweep never strands its row `running` and the caller still sees the throw.
+    // MF1 fatal outer boundary: an UNEXPECTED throw during calendar/player
+    // ORCHESTRATION — a calendar DB-upsert error, refreshNcaaCalendar, or a
+    // renewRefreshRun DB error — is not a collected failure. Record it on the
+    // run's own row (ownership-conditional, so a double-settle is a safe no-op)
+    // and RE-THROW, so a genuinely broken sweep never strands its row `running`
+    // and the caller still sees the throw. NOTE the TERMINAL settle below sits
+    // OUTSIDE this try: if IT throws, this catch does NOT run — that narrow
+    // window is backstopped by the lease-reap in claimRefreshRun (a later run
+    // reaps the stranded `running` row once its lease expires), not by here.
     settleRefreshRun(db, {
       runId,
       now: now(),
