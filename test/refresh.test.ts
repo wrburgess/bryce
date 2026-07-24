@@ -679,25 +679,34 @@ describe("runRefresh records a freshness run (ADR 0043)", () => {
 });
 
 /**
- * The pure status rule (#23 SC1/MF7): every (refreshed, skipped, failed) branch,
- * table-tested directly. NOTE the R=0,S>0,F>0 cell resolves to `failed`, per the
- * authoritative rule "`failed` iff refreshed=0 AND failed>0" (skips never rescue
- * a run that refreshed nobody and hit failures).
+ * The pure status rule (#23 SC1/MF7, P1): every (refreshed, skipped, failed,
+ * calendarBlocksFresh) branch, table-tested directly. NOTE the R=0,S>0,F>0 cell
+ * resolves to `failed`, per the authoritative rule "`failed` iff refreshed=0 AND
+ * failed>0" (skips never rescue a run that refreshed nobody and hit failures).
+ * The `cb` (calendarBlocksFresh) column downgrades an otherwise-`ok` run to
+ * `partial` but NEVER overrides a `failed` (blocked) run.
  */
-describe("deriveRefreshStatus truth table (#23 SC1/MF7)", () => {
+describe("deriveRefreshStatus truth table (#23 SC1/MF7, P1)", () => {
   const cases = [
-    { r: 0, s: 0, f: 0, expected: "ok", note: "zero active players — vacuous ok" },
-    { r: 3, s: 0, f: 0, expected: "ok", note: "every player refreshed" },
-    { r: 3, s: 2, f: 0, expected: "partial", note: "some skipped, none failed" },
-    { r: 0, s: 2, f: 0, expected: "partial", note: "all skipped, none refreshed" },
-    { r: 0, s: 0, f: 2, expected: "failed", note: "all failed, none refreshed" },
-    { r: 3, s: 0, f: 2, expected: "partial", note: "some refreshed, some failed" },
-    { r: 0, s: 2, f: 2, expected: "failed", note: "none refreshed + failures (skips don't rescue)" },
-    { r: 3, s: 2, f: 2, expected: "partial", note: "refreshed + skipped + failed" },
+    { r: 0, s: 0, f: 0, cb: false, expected: "ok", note: "zero active players — vacuous ok" },
+    { r: 3, s: 0, f: 0, cb: false, expected: "ok", note: "every player refreshed" },
+    { r: 3, s: 2, f: 0, cb: false, expected: "partial", note: "some skipped, none failed" },
+    { r: 0, s: 2, f: 0, cb: false, expected: "partial", note: "all skipped, none refreshed" },
+    { r: 0, s: 0, f: 2, cb: false, expected: "failed", note: "all failed, none refreshed" },
+    { r: 3, s: 0, f: 2, cb: false, expected: "partial", note: "some refreshed, some failed" },
+    { r: 0, s: 2, f: 2, cb: false, expected: "failed", note: "none refreshed + failures (skips don't rescue)" },
+    { r: 3, s: 2, f: 2, cb: false, expected: "partial", note: "refreshed + skipped + failed" },
+    // P1: a blocking calendar failure downgrades ok → partial, never forces failed.
+    { r: 3, s: 0, f: 0, cb: true, expected: "partial", note: "clean run BUT a watched calendar blocks fresh → downgrade to partial" },
+    { r: 0, s: 0, f: 0, cb: true, expected: "partial", note: "no players but a watched calendar blocks fresh → partial" },
+    { r: 0, s: 0, f: 2, cb: true, expected: "failed", note: "blocked run: calendarBlocksFresh does NOT override failed" },
+    { r: 3, s: 2, f: 0, cb: true, expected: "partial", note: "already partial by skips, calendar-block keeps it partial" },
   ] as const;
   for (const c of cases) {
-    it(`R=${c.r} S=${c.s} F=${c.f} → ${c.expected} (${c.note})`, () => {
-      expect(deriveRefreshStatus({ refreshed: c.r, skipped: c.s, failed: c.f })).toBe(c.expected);
+    it(`R=${c.r} S=${c.s} F=${c.f} cb=${c.cb} → ${c.expected} (${c.note})`, () => {
+      expect(
+        deriveRefreshStatus({ refreshed: c.r, skipped: c.s, failed: c.f, calendarBlocksFresh: c.cb }),
+      ).toBe(c.expected);
     });
   }
 });
@@ -934,7 +943,7 @@ describe("runRefresh — continue after failures (#23)", () => {
     expect(summary.status).toBe("ok");
     expect(summary.playersRefreshed).toBe(1);
     expect(summary.calendarFailures).toEqual([
-      { sportId: 1, reason: expect.stringContaining("season 1 down") },
+      { sportId: 1, reason: expect.stringContaining("season 1 down"), hadCachedRow: true },
     ]);
 
     // sportId 1's cached row is byte-for-byte untouched by the failed re-fetch.
@@ -970,6 +979,80 @@ describe("runRefresh — continue after failures (#23)", () => {
       expect(summary.playersRefreshed, `sportId ${failSportId}`).toBe(1);
       expect(summary.calendarFailures.map((f) => f.sportId), `sportId ${failSportId}`).toContain(failSportId);
     }
+  });
+
+  // P1: a calendar failure must not settle `ok` when it would leave the digest
+  // silently incomplete (isInSeason returns false with no calendar row, so idle
+  // players at that level are omitted with no freshness warning).
+  const failGetSeason = (sportId: number, message: string): MlbClient =>
+    new MlbClient({
+      fetchImpl: (url: string) => {
+        const u = new URL(url);
+        return u.pathname.endsWith("/seasons") && u.searchParams.get("sportId") === String(sportId)
+          ? Promise.reject(new Error(message))
+          : api.fetch(url);
+      },
+      delayMs: 0,
+    });
+
+  it("downgrades ok→`partial` when a WATCHED sport's calendar fails with NO cached fallback (P1)", async () => {
+    // Default player is Triple-A → sportId 11, a WATCHED sport. No calendar is
+    // seeded, so failing sportId 11's getSeason leaves no cached row → the digest
+    // would drop idle Triple-A players silently, so the run must settle `partial`.
+    await insertPlayer(opened.db, { externalId: 691185 });
+
+    const summary = await runRefresh({ ...deps(), client: failGetSeason(11, "season 11 down") });
+    expect(summary.playersRefreshed).toBe(1);
+    expect(summary.playersFailed).toBe(0);
+    expect(summary.status).toBe("partial"); // NOT ok — the digest would be silently incomplete
+    expect(summary.calendarFailures).toEqual([
+      { sportId: 11, reason: expect.stringContaining("season 11 down"), hadCachedRow: false },
+    ]);
+    const runs = await opened.db.select().from(refreshRuns);
+    expect(runs[0]?.status).toBe("partial");
+  });
+
+  it("stays `ok` when a WATCHED sport's calendar fails BUT a cached row exists (P1 fallback)", async () => {
+    await insertPlayer(opened.db, { externalId: 691185 }); // Triple-A → sportId 11
+    // A cached sportId 11 calendar the digest can still fall back on.
+    await insertCalendar(opened.db, {
+      sportId: 11,
+      season: "2026",
+      regularSeasonStart: "2026-03-27",
+      regularSeasonEnd: "2026-09-20",
+      postSeasonStart: null,
+      postSeasonEnd: null,
+      springStart: null,
+      springEnd: null,
+      fetchedAt: "2020-01-01T00:00:00.000Z",
+    });
+
+    const summary = await runRefresh({ ...deps(), client: failGetSeason(11, "season 11 down") });
+    expect(summary.playersRefreshed).toBe(1);
+    expect(summary.status).toBe("ok"); // cached fallback keeps the digest correct
+    expect(summary.calendarFailures).toEqual([
+      { sportId: 11, reason: expect.stringContaining("season 11 down"), hadCachedRow: true },
+    ]);
+    // The cached sportId 11 row is byte-for-byte untouched by the failed re-fetch.
+    const cal11 = (await opened.db.select().from(seasonCalendar).where(eq(seasonCalendar.sportId, 11)))[0];
+    expect(cal11?.fetchedAt).toBe("2020-01-01T00:00:00.000Z");
+    // The failure is still RECORDED even on the ok run (MF2 interaction).
+    const runs = await opened.db.select().from(refreshRuns);
+    expect(runs[0]?.status).toBe("ok");
+    expect(runs[0]?.errorMessage).toContain("calendar fetch(es) failed");
+  });
+
+  it("stays `ok` when an UNWATCHED sport's calendar fails with no cached row (P1)", async () => {
+    // Player is Triple-A (sportId 11). sportId 1 (MLB) is NOT watched, so its
+    // missing calendar cannot drop any watched idle player → no downgrade.
+    await insertPlayer(opened.db, { externalId: 691185 });
+
+    const summary = await runRefresh({ ...deps(), client: failGetSeason(1, "season 1 down") });
+    expect(summary.playersRefreshed).toBe(1);
+    expect(summary.status).toBe("ok");
+    expect(summary.calendarFailures).toEqual([
+      { sportId: 1, reason: expect.stringContaining("season 1 down"), hadCachedRow: false },
+    ]);
   });
 
   it("heals a failed player on the next run: partial → retry → ok, no dup rows, created_at preserved (SC3)", async () => {
@@ -1098,7 +1181,7 @@ describe("runRefresh — continue after failures (#23)", () => {
     expect(result.inserted).toBeGreaterThan(0);
     // ...but the calendar failure is SURFACED, not dropped.
     expect(result.calendarFailures).toEqual([
-      { sportId: 1, reason: expect.stringContaining("season 1 down") },
+      { sportId: 1, reason: expect.stringContaining("season 1 down"), hadCachedRow: false },
     ]);
   });
 });

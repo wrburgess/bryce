@@ -92,10 +92,18 @@ export async function main(): Promise<number> {
 }
 
 if (isMain(import.meta.url)) {
+  // Set process.exitCode and RETURN rather than calling process.exit(): the
+  // failure summary is written to stderr just before main() resolves, and
+  // process.exit() would tear the process down before a piped/backpressured
+  // stderr finishes draining, truncating that diagnostic. main() has already
+  // closed the db, so nothing keeps the event loop alive — Node drains stdio and
+  // then exits with process.exitCode on its own (P2).
   main()
-    .then((code) => process.exit(code))
+    .then((code) => {
+      process.exitCode = code;
+    })
     .catch((err: unknown) => {
+      process.exitCode = 1;
       process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
-      process.exit(1);
     });
 }
