@@ -1100,5 +1100,22 @@ describe("REST API", () => {
       const bad = await app().request("/api/stat-lines?list=ghost", { headers: AUTH });
       expect(bad.status).toBe(404);
     });
+
+    it("GET /stat-lines?list= for an EMPTY list selects zero rows, not all players", async () => {
+      await createList("Empty");
+      // Stat lines DO exist — but only for players who are NOT in the empty list.
+      const outsider = await insertPlayer(opened.db, { externalId: 703 });
+      await insertStatLine(opened.db, { playerId: outsider.id, gameId: 810003 });
+      const otherOutsider = await insertPlayer(opened.db, { externalId: 704 });
+      await insertStatLine(opened.db, { playerId: otherOutsider.id, gameId: 810004 });
+
+      const res = await app().request("/api/stat-lines?list=Empty", { headers: AUTH });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { statLines: Array<{ playerId: number }> };
+      // An empty list scopes to NOTHING. If the empty-list branch fell through to
+      // all players, both outsiders' lines would leak in — so [] proves scoping,
+      // not merely an absence of data.
+      expect(body.statLines).toEqual([]);
+    });
   });
 });

@@ -477,4 +477,28 @@ describe("named lists in the backup (v2, #70 / ADR 0046)", () => {
     expect(await opened.db.select().from(players)).toHaveLength(0);
     expect(await listLists(opened.db)).toEqual([]);
   });
+
+  it("restore reuses a pre-existing live list of the same name and merges memberships (idempotent, no rollback)", async () => {
+    // A live list "L" already holds its own member (a DIFFERENT player).
+    const existing = await insertPlayer(opened.db, { externalId: 100, fullName: "Existing Member" });
+    await createList(opened.db, "L", NOW);
+    await addToList(opened.db, "L", [existing.externalId!], NOW);
+
+    // The v2 backup carries a list ALSO named "L" and a backed-up member (player 200).
+    const rows = parse([makeBackupEntry({ externalId: 200, fullName: "Backup Member" })]);
+    const summary = restorePlayerListBackup(opened.db, rows, NOW, {
+      lists: [{ name: "L" }],
+      members: [{ list: "L", externalId: 200, ncaaPlayerSeq: null }],
+    });
+
+    // If list recreation still INSERTed, the name would collide on the partial
+    // unique index and roll the WHOLE restore back — the player would be lost.
+    // Instead the player restore commits and the list is reused.
+    expect(summary).toEqual({ inserted: 1, updated: 0, total: 1 });
+    const lists = await listLists(opened.db);
+    expect(lists.map((l) => l.name)).toEqual(["L"]); // reused, not duplicated
+    // Both the original and the backed-up member are present (memberships merged).
+    const members = await listMembersOf(opened.db, "L");
+    expect(members.map((m) => m.externalId).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([100, 200]);
+  });
 });

@@ -672,13 +672,26 @@ export function restorePlayerListBackup(
     }
 
     // Phase 3 — recreate named lists and memberships (v2 backup, ADR 0046),
-    // INSIDE this same all-or-nothing transaction. A list name that collides with
-    // a live list hits the partial unique index and aborts the import; a member
-    // whose player natural id (or list name) does not resolve throws and aborts —
-    // consistent with the restore's existing strictness.
+    // INSIDE this same all-or-nothing transaction. List recreation is
+    // find-or-create by name (idempotent, mirroring the player upsert): a name
+    // that already names a LIVE list REUSES that list rather than colliding on
+    // the partial unique index and rolling the whole restore back; memberships
+    // are then merged idempotently (a duplicate list_id/player_id is a no-op).
+    // A member whose player natural id (or list name) does not resolve throws and
+    // aborts — consistent with the restore's existing strictness.
     const listIdByName = new Map<string, number>();
     for (const list of extras.lists ?? []) {
       const name = list.name.trim();
+      const live = tx
+        .select()
+        .from(playerLists)
+        .where(and(eq(playerLists.name, name), isNull(playerLists.deletedAt)))
+        .all()[0];
+      if (live !== undefined) {
+        // Reuse an existing live list of the same name (do not insert, do not error).
+        listIdByName.set(name, live.id);
+        continue;
+      }
       tx.insert(playerLists)
         .values({
           name,
