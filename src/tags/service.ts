@@ -1,4 +1,4 @@
-import { and, eq, exists, sql } from "drizzle-orm";
+import { and, eq, exists, notExists, sql } from "drizzle-orm";
 import { ZodError } from "zod";
 import type { Db } from "../db/client.js";
 import type { PlayerTagRow } from "../db/schema.js";
@@ -151,20 +151,26 @@ export function syncAllDerivedTags(db: TagDb, now: Date): number {
  * tagged. Returns the number of players swept.
  */
 export function syncUntaggedDerivedTags(db: TagDb, now: Date): number {
-  const tagged = new Set(
-    db
-      .select({ playerId: playerTags.playerId })
-      .from(playerTags)
-      .where(eq(playerTags.source, "derived"))
-      .all()
-      .map((r) => r.playerId),
-  );
+  // Anti-join, NOT two whole-table scans: ask the DB for ONLY the player ids that
+  // have no `source='derived'` row (a correlated NOT EXISTS). On a healthy startup
+  // this returns the empty set, so nothing is materialized beyond that result and
+  // no writes happen — startup cost stays flat with the table sizes instead of
+  // loading every player and every derived tag into memory (rules/backend.md).
   const ids = db
     .select({ id: players.id })
     .from(players)
+    .where(
+      notExists(
+        db
+          .select({ one: sql`1` })
+          .from(playerTags)
+          .where(
+            and(eq(playerTags.playerId, players.id), eq(playerTags.source, "derived")),
+          ),
+      ),
+    )
     .all()
-    .map((r) => r.id)
-    .filter((id) => !tagged.has(id));
+    .map((r) => r.id);
   for (const id of ids) {
     syncDerivedTags(db, id, now);
   }
