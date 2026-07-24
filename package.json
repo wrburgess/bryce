@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:live": "vitest run --config vitest.live.config.ts",
     "audit": "audit-ci --config audit-ci.jsonc",
     "refresh": "tsx src/cli/refresh.ts",
     "digest": "tsx src/cli/digest.ts",
