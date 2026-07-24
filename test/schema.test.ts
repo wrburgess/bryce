@@ -13,6 +13,7 @@ import {
   insertList,
   insertListMember,
   insertPlayer,
+  insertPlayerTag,
   insertStatLine,
   testDb,
   testFileDb,
@@ -145,6 +146,60 @@ describe("stat_lines schema invariants (ADR 0029)", () => {
     expect((row?.stats as Record<string, unknown>).hits).toBe(2);
     expect(row?.createdAt).toBe("2026-07-01T00:00:00.000Z");
     expect(row?.updatedAt).toBe("2026-07-02T00:00:00.000Z");
+  });
+});
+
+describe("player_tags schema invariants (Phase A of #29)", () => {
+  let opened: OpenedDb;
+
+  beforeEach(() => {
+    opened = testDb();
+  });
+
+  afterEach(() => {
+    opened.close();
+  });
+
+  it("rejects a duplicate (player_id, namespace, value) at the DATABASE level", async () => {
+    const player = await insertPlayer(opened.db);
+    await insertPlayerTag(opened.db, { playerId: player.id, namespace: "status", value: "rostered" });
+    await expect(
+      insertPlayerTag(opened.db, { playerId: player.id, namespace: "status", value: "rostered" }),
+    ).rejects.toThrow(/UNIQUE constraint failed/);
+  });
+
+  it("rejects a foreign key to a non-existent player", async () => {
+    await expect(
+      insertPlayerTag(opened.db, { playerId: 999999, namespace: "status", value: "rostered" }),
+    ).rejects.toThrow(/FOREIGN KEY constraint failed/);
+  });
+
+  it("enforces ONE level: tag per player via the partial unique index", async () => {
+    const player = await insertPlayer(opened.db);
+    await insertPlayerTag(opened.db, { playerId: player.id, namespace: "level", value: "rookie", source: "derived" });
+    // A SECOND level value for the same player hits the partial unique index...
+    await expect(
+      insertPlayerTag(opened.db, { playerId: player.id, namespace: "level", value: "dsl", source: "derived" }),
+    ).rejects.toThrow(/UNIQUE constraint failed/);
+    // ...but a level tag for a DIFFERENT player is fine (the predicate is per-player).
+    const other = await insertPlayer(opened.db, { externalId: 424243 });
+    await expect(
+      insertPlayerTag(opened.db, { playerId: other.id, namespace: "level", value: "aaa", source: "derived" }),
+    ).resolves.toBeDefined();
+  });
+
+  it("rejects a bad source, a blank namespace, and a blank value via CHECKs", async () => {
+    const player = await insertPlayer(opened.db);
+    const insert = (namespace: string, value: string, source: string): void => {
+      opened.sqlite
+        .prepare(
+          "INSERT INTO player_tags (player_id, namespace, value, source, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(player.id, namespace, value, source, "2026-07-19T17:00:00.000Z");
+    };
+    expect(() => insert("status", "rostered", "bogus")).toThrow(/CHECK constraint failed/);
+    expect(() => insert("", "rostered", "manual")).toThrow(/CHECK constraint failed/);
+    expect(() => insert("status", "", "manual")).toThrow(/CHECK constraint failed/);
   });
 });
 
@@ -493,6 +548,77 @@ describe("digest_deliveries claim columns and lock behaviour (ADR 0034)", () => 
           )
           .run(),
       ).toThrow(/CHECK constraint failed/);
+
+      expect(sqlite.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+    } finally {
+      sqlite.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("adds player_tags (Phase A of #29) without disturbing existing data, and its constraints enforce", () => {
+    // 0006 is one additive CREATE TABLE + three indexes. A DB migrated through
+    // 0005 with a live player must survive, and the new table's invariants (the
+    // partial single-level unique index + the CHECKs) must be live afterward.
+    const dir = mkdtempSync(join(tmpdir(), "bryce-migrate-"));
+    const sqlite = new Database(join(dir, "bryce.db"));
+    try {
+      for (const f of [
+        "0000_gray_brood.sql",
+        "0001_overconfident_sally_floyd.sql",
+        "0002_ambiguous_vapor.sql",
+        "0003_reconciled_at.sql",
+        "0004_steep_justin_hammer.sql",
+        "0005_yummy_tony_stark.sql",
+      ]) {
+        applyMigration(sqlite, f);
+      }
+      sqlite
+        .prepare(
+          `INSERT INTO players (id, full_name, level, active, created_at, updated_at)
+           VALUES (1, 'Maximo Acosta', 'milb', 1, '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z')`,
+        )
+        .run();
+
+      applyMigration(sqlite, "0006_misty_flatman.sql");
+
+      // The pre-existing player is untouched by the additive migration.
+      const player = sqlite.prepare("SELECT * FROM players WHERE id = 1").get() as Record<string, unknown>;
+      expect(player).toMatchObject({ full_name: "Maximo Acosta", level: "milb" });
+
+      // player_tags exists and accepts a derived level tag.
+      sqlite
+        .prepare(
+          `INSERT INTO player_tags (player_id, namespace, value, source, created_at)
+           VALUES (1, 'level', 'rookie', 'derived', '2026-07-19T17:00:00.000Z')`,
+        )
+        .run();
+
+      // The partial single-level unique index enforces: a second level value is rejected.
+      expect(() =>
+        sqlite
+          .prepare(
+            `INSERT INTO player_tags (player_id, namespace, value, source, created_at)
+             VALUES (1, 'level', 'aaa', 'derived', '2026-07-19T17:00:00.000Z')`,
+          )
+          .run(),
+      ).toThrow(/UNIQUE constraint failed/);
+
+      // The source CHECK enforces.
+      expect(() =>
+        sqlite
+          .prepare(
+            `INSERT INTO player_tags (player_id, namespace, value, source, created_at)
+             VALUES (1, 'status', 'rostered', 'bogus', '2026-07-19T17:00:00.000Z')`,
+          )
+          .run(),
+      ).toThrow(/CHECK constraint failed/);
+
+      const indexes = (
+        sqlite.prepare("PRAGMA index_list(player_tags)").all() as Array<Record<string, unknown>>
+      ).map((i) => i.name);
+      expect(indexes).toContain("player_tags_player_ns_value_uq");
+      expect(indexes).toContain("player_tags_level_single_uq");
 
       expect(sqlite.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
     } finally {

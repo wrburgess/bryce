@@ -12,6 +12,18 @@ import { StatLineFilterShape, StatLineQuerySchema, refineFromTo } from "../queri
 export const PersonIdSchema = z.coerce.number().int().positive();
 export const NcaaPlayerSeqSchema = z.coerce.number().int().positive();
 
+/**
+ * STRICT, non-coercing numeric IDs for the typed-JSON MCP boundary. Over MCP,
+ * personId/ncaaPlayerSeq arrive as REAL JSON, so the coercing validators above
+ * (right for a REST path/query STRING) would turn `personId: [691185]` -> 691185,
+ * `true` -> 1, or `"5"` -> 5 and mutate/tag the WRONG player instead of rejecting
+ * the call. Non-coercing rejects those outright — the same class of bug, and the
+ * same fix, as PR #84's batch-add identities and rules/security.md ("never reuse
+ * a coercing validator at a typed-JSON boundary").
+ */
+export const StrictPersonIdSchema = z.number().int().positive();
+export const StrictNcaaPlayerSeqSchema = z.number().int().positive();
+
 export const AddPlayerInputSchema = z.object({
   personId: PersonIdSchema.describe(
     "MLB Stats API personId of the MLB/MiLB player to add. A newly added player's full current season is backfilled immediately; re-adding an existing player is a no-op update (action 'updated', refresh null) with no backfill — use run_refresh to re-pull his season.",
@@ -243,6 +255,21 @@ export const ListMembersBodySchema = z
   })
   .strict();
 
+/** Shared "exactly one of personId/ncaaPlayerSeq" refinement (deactivate + tag tools). */
+function refineExactlyOnePlayerRef(
+  input: { personId?: number; ncaaPlayerSeq?: number },
+  ctx: z.RefinementCtx,
+): void {
+  const count = (input.personId !== undefined ? 1 : 0) + (input.ncaaPlayerSeq !== undefined ? 1 : 0);
+  if (count !== 1) {
+    ctx.addIssue({
+      code: "custom",
+      path: ["personId"],
+      message: "provide exactly one of personId or ncaaPlayerSeq",
+    });
+  }
+}
+
 /** Deactivate addressing: exactly one of personId or ncaaPlayerSeq (ADR 0032). */
 export const DeactivateInputShape = {
   personId: PersonIdSchema.optional().describe(
@@ -253,16 +280,29 @@ export const DeactivateInputShape = {
   ),
 };
 
-export const DeactivateInputSchema = z.object(DeactivateInputShape).superRefine((input, ctx) => {
-  const count = (input.personId !== undefined ? 1 : 0) + (input.ncaaPlayerSeq !== undefined ? 1 : 0);
-  if (count !== 1) {
-    ctx.addIssue({
-      code: "custom",
-      path: ["personId"],
-      message: "provide exactly one of personId or ncaaPlayerSeq",
-    });
-  }
-});
+export const DeactivateInputSchema = z
+  .object(DeactivateInputShape)
+  .superRefine(refineExactlyOnePlayerRef);
+
+/**
+ * STRICT (non-coercing) exactly-one addressing for the typed-JSON MCP tag tools —
+ * used verbatim as player_tags_list's inputSchema, and spread into the tag-write
+ * shape below. Mirrors DeactivateInputShape but with the strict IDs, so a
+ * malformed `personId` over MCP (`[123]`, `true`, `"123"`) is rejected instead of
+ * coerced onto the wrong player. REST tag routes keep the coercing path.
+ */
+export const StrictPlayerRefShape = {
+  personId: StrictPersonIdSchema.optional().describe(
+    "MLB Stats API personId (MLB/MiLB). Provide exactly one of personId or ncaaPlayerSeq.",
+  ),
+  ncaaPlayerSeq: StrictNcaaPlayerSeqSchema.optional().describe(
+    "stats.ncaa.org stats_player_seq (NCAA). Provide exactly one of personId or ncaaPlayerSeq.",
+  ),
+};
+
+export const StrictPlayerRefSchema = z
+  .object(StrictPlayerRefShape)
+  .superRefine(refineExactlyOnePlayerRef);
 
 export const PlayersListInputSchema = z.object({
   active: z
@@ -271,7 +311,48 @@ export const PlayersListInputSchema = z.object({
     .describe(
       "Watch-list filter: 'true' (default) for active players only, 'false' for deactivated, 'all' for both.",
     ),
+  tags: z
+    .string()
+    .trim()
+    .min(1)
+    .optional()
+    .describe(
+      "Optional tag selector: comma-separated tags are AND (e.g. 'level:aaa,status:rostered' = AAA players on the roster). A bare namespace (e.g. 'prospect') matches any value in it. Only players matching every token are returned.",
+    ),
 });
+
+/**
+ * A manual-tag write body — SYNTAX only (namespace/value are non-empty strings).
+ * The tag SERVICE owns the semantics (a manual write to a derived namespace, or
+ * an unknown value, is a typed error there), so the two errors stay reachable on
+ * every surface. Used verbatim as the REST POST body.
+ */
+export const TagWriteBodyShape = {
+  namespace: z
+    .string()
+    .trim()
+    .min(1)
+    .describe("Tag namespace, e.g. 'status'. Manual writes are allowed only to non-derived namespaces."),
+  value: z.string().trim().min(1).describe("Tag value within the namespace, e.g. 'rostered' or 'scouted'."),
+};
+
+export const TagWriteBodySchema = z.object(TagWriteBodyShape);
+
+/**
+ * The MCP tag-write shape: the write body PLUS external player addressing —
+ * exactly one of personId/ncaaPlayerSeq. STRICT (non-coercing) IDs, because this
+ * is a typed-JSON tool boundary: a malformed `personId` (`[123]`, `true`, `"123"`)
+ * must be rejected, never coerced onto the wrong player. REST tag routes address
+ * by path string and keep the coercing PersonIdSchema.
+ */
+export const TagWriteInputShape = {
+  ...StrictPlayerRefShape,
+  ...TagWriteBodyShape,
+};
+
+export const TagWriteInputSchema = z
+  .object(TagWriteInputShape)
+  .superRefine(refineExactlyOnePlayerRef);
 
 export const PlayerSearchInputSchema = z.object({
   q: z

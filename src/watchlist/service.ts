@@ -3,7 +3,7 @@ import type { BatchAddEntry } from "../api/schemas.js";
 import { BatchAddInputSchema } from "../api/schemas.js";
 import type { Db } from "../db/client.js";
 import type { PlayerRow } from "../db/schema.js";
-import { listMembers, playerLists, players } from "../db/schema.js";
+import { listMembers, playerLists, playerTags, players } from "../db/schema.js";
 import type {
   PlayerBackupEntry,
   PlayerBackupList,
@@ -20,6 +20,12 @@ import type { Person } from "../mlb/schemas.js";
 import type { NcaaClient } from "../ncaa/client.js";
 import { NcaaApiError, UnsupportedNcaaSeasonError } from "../ncaa/client.js";
 import { parseGameLogPage } from "../ncaa/parse.js";
+import {
+  isManualTag,
+  parseTagSelector,
+  playerIdsMatchingTags,
+  syncDerivedTags,
+} from "../tags/service.js";
 
 /**
  * Watch-list service: the one home for add/deactivate/list/search semantics,
@@ -174,14 +180,35 @@ export async function addPlayer(deps: WatchlistDeps, personId: number): Promise<
   const { action, player } = await upsertMlbPlayer(deps, personId, nowIso, new Map());
 
   if (action === "updated") {
+    // Heal on re-add: a player left untagged by an earlier failed first-add (its
+    // Refresh threw before deriving) gets his derived tags now, from the
+    // committed identity columns. Idempotent for an already-tagged player; the
+    // update path never touched a tag-relevant column, so this only ADDS.
+    syncDerivedTags(db, player.id, now());
     return { action, player, refresh: null };
   }
 
   // Adding a Player IS his first Refresh (ADR 0030) — unless the pipeline sleeps.
-  const refresh = await runRefreshForPlayer(
-    { db, client, ncaaClient: deps.ncaaClient, now, tz: deps.tz },
-    player.id,
-  );
+  let refresh: FirstRefreshSummary;
+  try {
+    refresh = await runRefreshForPlayer(
+      { db, client, ncaaClient: deps.ncaaClient, now, tz: deps.tz },
+      player.id,
+    );
+  } catch (err) {
+    // The player row is already committed, but a mid-Refresh throw means
+    // refreshPlayer's own syncDerivedTags never ran — derive from the committed
+    // identity columns (best-effort) so a failed first-add is never left
+    // untagged, then rethrow so the caller still sees the failure.
+    syncDerivedTags(db, player.id, now());
+    throw err;
+  }
+  // SC1: a completed Refresh already synced tags via refreshPlayer; only derive
+  // here when the first Refresh was SKIPPED (Offseason Sleep), so tags still
+  // land from the inserted identity columns and we avoid double-derivation.
+  if (refresh.skipped) {
+    syncDerivedTags(db, player.id, now());
+  }
   return { action: "added", player, refresh };
 }
 
@@ -203,10 +230,26 @@ export async function addNcaaPlayer(
   const { action, player } = await upsertNcaaPlayer(deps, playerSeq, nowIso);
 
   if (action === "updated") {
+    // Heal on re-add (mirrors addPlayer): a previously-untagged NCAA player gets
+    // his derived tags now from the committed identity columns. Idempotent.
+    syncDerivedTags(db, player.id, now());
     return { action, player, refresh: null };
   }
 
-  const refresh = await runRefreshForPlayer({ db, client, ncaaClient, now, tz }, player.id);
+  let refresh: FirstRefreshSummary;
+  try {
+    refresh = await runRefreshForPlayer({ db, client, ncaaClient, now, tz }, player.id);
+  } catch (err) {
+    // Best-effort derive from the committed columns before rethrowing, so a
+    // first-add whose Refresh threw is never left untagged (mirrors addPlayer).
+    syncDerivedTags(db, player.id, now());
+    throw err;
+  }
+  // SC1: mirror addPlayer — only derive here when the first Refresh was SKIPPED
+  // (Offseason Sleep); a completed Refresh already synced via refreshNcaaPlayer.
+  if (refresh.skipped) {
+    syncDerivedTags(db, player.id, now());
+  }
   return { action: "added", player, refresh };
 }
 
@@ -441,6 +484,21 @@ export async function batchAddPlayers(
     }
   }
 
+  // Batch-add STAGES identity with NO inline Refresh, so — unlike addPlayer,
+  // whose completed first Refresh derives tags — a newly staged player has no
+  // derived tags yet. Derive them now from the identity columns just written
+  // (reusing the single captured clock; idempotent, manual tags untouched), so a
+  // batch-added player is not left untagged until the next Refresh. Both `added`
+  // AND `updated` are synced: an `added` needs its first derivation, and an
+  // `updated` re-add heals a player an earlier failed add left untagged
+  // (idempotent when he is already tagged).
+  const derivedAt = new Date(nowIso);
+  for (const result of entries) {
+    if (result.status === "added" || result.status === "updated") {
+      syncDerivedTags(deps.db, result.player.id, derivedAt);
+    }
+  }
+
   // Add every successfully staged player to the target list, idempotently. A
   // membership write is DB-local (no network) and never fails an already-staged
   // entry, so it happens after the best-effort loop.
@@ -492,16 +550,28 @@ export async function deactivatePlayer(
   return updated;
 }
 
-/** Watch-list rows ordered by id; active-only by default. */
-export async function listPlayers(db: Db, filter: PlayerListFilter = "active"): Promise<PlayerRow[]> {
-  if (filter === "all") {
-    return db.select().from(players).orderBy(players.id);
-  }
-  return db
-    .select()
-    .from(players)
-    .where(eq(players.active, filter === "active"))
-    .orderBy(players.id);
+/**
+ * Watch-list rows ordered by id; active-only by default. An optional
+ * `tagSelector` (comma = AND) intersects the result with the players matching
+ * every token — one aggregate tag query, never a query per player. A malformed
+ * selector throws a ZodError (400 / exit 1 on every surface).
+ */
+export async function listPlayers(
+  db: Db,
+  filter: PlayerListFilter = "active",
+  tagSelector?: string,
+): Promise<PlayerRow[]> {
+  const rows =
+    filter === "all"
+      ? await db.select().from(players).orderBy(players.id)
+      : await db
+          .select()
+          .from(players)
+          .where(eq(players.active, filter === "active"))
+          .orderBy(players.id);
+  if (tagSelector === undefined) return rows;
+  const matching = new Set(playerIdsMatchingTags(db, parseTagSelector(tagSelector)));
+  return rows.filter((r) => matching.has(r.id));
 }
 
 /**
@@ -628,6 +698,7 @@ export function restorePlayerListBackup(
           ? null
           : canonicalizeName(row.schoolName);
 
+      let playerId: number;
       if (existing !== undefined) {
         // Coalesce natural ids so a backup can ADD an id without erasing one the
         // existing row already holds (the promotion case keeps ncaa_player_seq).
@@ -648,9 +719,10 @@ export function restorePlayerListBackup(
           })
           .where(eq(players.id, existing.id))
           .run();
+        playerId = existing.id;
         updated += 1;
       } else {
-        tx
+        const insertedRow = tx
           .insert(players)
           .values({
             externalId: row.externalId ?? null,
@@ -666,8 +738,52 @@ export function restorePlayerListBackup(
             createdAt: row.createdAt ?? nowIso,
             updatedAt: nowIso,
           })
-          .run();
+          .returning()
+          .get();
+        playerId = insertedRow.id;
         inserted += 1;
+      }
+
+      // Derive INSIDE the transaction (MF4): derived tags are rebuildable state,
+      // recomputed per upserted row from the identity columns just written — so
+      // the import stays all-or-nothing with no post-commit failure gap.
+      syncDerivedTags(tx, playerId, now);
+
+      // Reconcile the player's MANUAL tags to the backup's authoritative set.
+      // The undefined-vs-present distinction is load-bearing: an ABSENT `tags`
+      // field (only a legacy v1 backup omits it) means "leave manual tags
+      // untouched" (back-compat); a PRESENT field (including `[]`) is
+      // authoritative, so we reconcile to exactly it. Any non-manual entry (a
+      // hand-edited derived-namespace or unknown tag) is skipped, never written.
+      if (row.tags !== undefined) {
+        const desired = row.tags.filter((t) => isManualTag(t.namespace, t.value));
+        // Delimiter is a colon: isManualTag pins the namespace to `status` (no
+        // colon) and the value to a fixed word, so the key is unambiguous. Never
+        // a raw NUL byte.
+        const desiredKeys = new Set(desired.map((t) => `${t.namespace}:${t.value}`));
+        const existingManual = tx
+          .select()
+          .from(playerTags)
+          .where(and(eq(playerTags.playerId, playerId), eq(playerTags.source, "manual")))
+          .all();
+        for (const ex of existingManual) {
+          if (!desiredKeys.has(`${ex.namespace}:${ex.value}`)) {
+            tx.delete(playerTags).where(eq(playerTags.id, ex.id)).run();
+          }
+        }
+        for (const tag of desired) {
+          tx
+            .insert(playerTags)
+            .values({
+              playerId,
+              namespace: tag.namespace,
+              value: tag.value,
+              source: "manual",
+              createdAt: nowIso,
+            })
+            .onConflictDoNothing()
+            .run();
+        }
       }
     }
 

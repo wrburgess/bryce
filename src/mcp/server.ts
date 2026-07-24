@@ -20,6 +20,13 @@ import { NcaaApiError, UnsupportedNcaaSeasonError } from "../ncaa/client.js";
 import { queryStatLines } from "../queries/statLines.js";
 import type { ServiceDeps } from "../server/deps.js";
 import { healthSnapshot } from "../server/health.js";
+import {
+  ManualWriteToDerivedNamespaceError,
+  UnknownTagError,
+  addManualTag,
+  listTags,
+  removeManualTag,
+} from "../tags/service.js";
 import type { PlayerRef } from "../watchlist/service.js";
 import {
   PlayerNotFoundError,
@@ -69,6 +76,10 @@ import {
   SqlQueryFormatShape,
   StatLinesFormatSchema,
   StatLinesFormatShape,
+  StrictPlayerRefSchema,
+  StrictPlayerRefShape,
+  TagWriteInputSchema,
+  TagWriteInputShape,
 } from "../api/schemas.js";
 
 /** Project a validated member reference into the service's PlayerRef union. */
@@ -77,7 +88,7 @@ function toPlayerRef(ref: { personId?: number; ncaaPlayerSeq?: number }): Player
 }
 
 /**
- * The MCP server — Bryce's primary interface (ADR 0027). Nineteen tools over the
+ * The MCP server — Bryce's primary interface (ADR 0027). Twenty-two tools over the
  * same service layer and Zod schemas the REST routes use; every result is
  * JSON, returned both as structuredContent and as a text part for clients
  * that read only text. Mounted at /mcp behind the bearer middleware.
@@ -114,6 +125,8 @@ function errorResult(err: unknown): CallToolResult {
           err instanceof UnknownListError ||
           err instanceof DuplicateListNameError ||
           err instanceof BlankListNameError ||
+          err instanceof ManualWriteToDerivedNamespaceError ||
+          err instanceof UnknownTagError ||
           err instanceof ReadonlyQueryError ||
           err instanceof MlbApiError ||
           err instanceof NcaaApiError ||
@@ -135,11 +148,26 @@ async function guarded(run: () => Promise<CallToolResult>): Promise<CallToolResu
 export function buildMcpServer(deps: ServiceDeps): McpServer {
   const server = new McpServer({ name: "bryce", version: APP_VERSION });
 
+  /** Resolve an external ref (personId or ncaaPlayerSeq) to a row, or throw. */
+  async function resolvePlayerRow(ref: PlayerRef) {
+    const where =
+      typeof ref === "number"
+        ? eq(players.externalId, ref)
+        : eq(players.ncaaPlayerSeq, ref.ncaaPlayerSeq);
+    const row = (await deps.db.select().from(players).where(where))[0];
+    if (row === undefined) throw new PlayerNotFoundError(ref);
+    return row;
+  }
+
+  /** exactly-one addressing → a PlayerRef (the deactivate pattern). */
+  const refOf = (input: { personId?: number; ncaaPlayerSeq?: number }): PlayerRef =>
+    input.ncaaPlayerSeq !== undefined ? { ncaaPlayerSeq: input.ncaaPlayerSeq } : input.personId!;
+
   server.registerTool(
     "watchlist_list",
     {
       description:
-        "List watch-list players. active: 'true' (default) for active only, 'false' for deactivated, 'all' for everything.",
+        "List watch-list players. active: 'true' (default) for active only, 'false' for deactivated, 'all' for everything. Optional tags: a comma-separated AND selector (e.g. 'level:aaa,status:rostered'); a bare namespace (e.g. 'prospect') matches any value.",
       inputSchema: PlayersListInputSchema.shape,
     },
     (args) =>
@@ -147,7 +175,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
         const query = PlayersListInputSchema.parse(args);
         const filter =
           query.active === "all" ? "all" : query.active === "true" ? "active" : "inactive";
-        return jsonResult({ players: await listPlayers(deps.db, filter) });
+        return jsonResult({ players: await listPlayers(deps.db, filter, query.tags) });
       }),
   );
 
@@ -337,10 +365,59 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
   );
 
   server.registerTool(
+    "player_tag_add",
+    {
+      description:
+        "Add a MANUAL tag to a watch-list player, addressed by personId (MLB/MiLB) or ncaaPlayerSeq (NCAA) — exactly one. Manual tags live in the 'status' namespace (value 'rostered' or 'scouted'); a write to a derived namespace (level/pos/prospect) or an unknown namespace/value is rejected. Idempotent: re-adding the same tag is a no-op.",
+      inputSchema: TagWriteInputShape,
+    },
+    (args) =>
+      guarded(async () => {
+        const input = TagWriteInputSchema.parse(args);
+        const player = await resolvePlayerRow(refOf(input));
+        const tag = addManualTag(deps.db, player.id, input.namespace, input.value, deps.now());
+        return jsonResult({ tag });
+      }),
+  );
+
+  server.registerTool(
+    "player_tag_remove",
+    {
+      description:
+        "Remove a MANUAL tag from a watch-list player, addressed by personId (MLB/MiLB) or ncaaPlayerSeq (NCAA) — exactly one. A derived namespace (level/pos/prospect) is rejected; removing an absent manual tag is a no-op.",
+      inputSchema: TagWriteInputShape,
+    },
+    (args) =>
+      guarded(async () => {
+        const input = TagWriteInputSchema.parse(args);
+        const player = await resolvePlayerRow(refOf(input));
+        removeManualTag(deps.db, player.id, input.namespace, input.value);
+        return jsonResult({ removed: true });
+      }),
+  );
+
+  server.registerTool(
+    "player_tags_list",
+    {
+      description:
+        "List every tag (derived AND manual) for a watch-list player, addressed by personId (MLB/MiLB) or ncaaPlayerSeq (NCAA) — exactly one. Ordered by namespace, value, source.",
+      // Strict, non-coercing IDs: a typed-JSON boundary, so `personId: [123]`/`true`/`"123"`
+      // is rejected (isError), never coerced onto the wrong player.
+      inputSchema: StrictPlayerRefShape,
+    },
+    (args) =>
+      guarded(async () => {
+        const input = StrictPlayerRefSchema.parse(args);
+        const player = await resolvePlayerRow(refOf(input));
+        return jsonResult({ tags: listTags(deps.db, player.id) });
+      }),
+  );
+
+  server.registerTool(
     "sql_query",
     {
       description:
-        "Run a single read-only SQL query (SELECT/WITH/EXPLAIN) against the Bryce SQLite database for ad-hoc analysis. Tables: players, stat_lines, digest_deliveries, refresh_runs, season_calendar. Writes are rejected and the connection itself is read-only. Rows are capped at 200. format (default 'json') is 'json' or 'csv'; 'csv' returns columns/rows as a CSV table, and a truncated result adds a second text part warning that the cap was hit.",
+        "Run a single read-only SQL query (SELECT/WITH/EXPLAIN) against the Bryce SQLite database for ad-hoc analysis. Tables: players, stat_lines, player_tags, digest_deliveries, refresh_runs, season_calendar. Writes are rejected and the connection itself is read-only. Rows are capped at 200. format (default 'json') is 'json' or 'csv'; 'csv' returns columns/rows as a CSV table, and a truncated result adds a second text part warning that the cap was hit.",
       inputSchema: SqlQueryFormatShape,
     },
     (args) =>

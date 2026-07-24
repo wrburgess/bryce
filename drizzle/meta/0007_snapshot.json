@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "ab0667da-7a45-425a-b3a6-b5bb5064e3cf",
-  "prevId": "5cb8d6dc-b8d7-4266-9e1d-3b1cdbcb4dc5",
+  "id": "734ea500-6252-4b2a-8f3f-4d55cd89dc1c",
+  "prevId": "ab0667da-7a45-425a-b3a6-b5bb5064e3cf",
   "tables": {
     "digest_deliveries": {
       "name": "digest_deliveries",
@@ -116,6 +116,139 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
+    },
+    "list_members": {
+      "name": "list_members",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "list_id": {
+          "name": "list_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "player_id": {
+          "name": "player_id",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "list_members_list_player_uq": {
+          "name": "list_members_list_player_uq",
+          "columns": [
+            "list_id",
+            "player_id"
+          ],
+          "isUnique": true
+        }
+      },
+      "foreignKeys": {
+        "list_members_list_id_player_lists_id_fk": {
+          "name": "list_members_list_id_player_lists_id_fk",
+          "tableFrom": "list_members",
+          "tableTo": "player_lists",
+          "columnsFrom": [
+            "list_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        },
+        "list_members_player_id_players_id_fk": {
+          "name": "list_members_player_id_players_id_fk",
+          "tableFrom": "list_members",
+          "tableTo": "players",
+          "columnsFrom": [
+            "player_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "player_lists": {
+      "name": "player_lists",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "player_lists_name_live_uq": {
+          "name": "player_lists_name_live_uq",
+          "columns": [
+            "name"
+          ],
+          "isUnique": true,
+          "where": "\"player_lists\".\"deleted_at\" is null"
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {
+        "player_lists_name_nonblank_ck": {
+          "name": "player_lists_name_nonblank_ck",
+          "value": "length(trim(\"player_lists\".\"name\")) > 0"
+        }
+      }
     },
     "player_tags": {
       "name": "player_tags",

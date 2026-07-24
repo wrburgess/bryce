@@ -266,4 +266,100 @@ describe("seed CLI", () => {
       expect(line).toMatch(/^[\x20-\x7E]*$/);
     }
   });
+
+  describe("tag commands", () => {
+    it("add/list/remove a manual status tag round-trips", async () => {
+      await runSeed(["add", "--person-id", "691185"], deps());
+      output = [];
+
+      expect(await runSeed(["tag", "add", "--person-id", "691185", "--tag", "status:rostered"], deps())).toBe(0);
+      expect(output.some((l) => /^tag added .*namespace=status value=rostered source=manual$/.test(l))).toBe(true);
+
+      output = [];
+      expect(await runSeed(["tag", "list", "--person-id", "691185"], deps())).toBe(0);
+      expect(output.some((l) => l.includes("namespace=status value=rostered source=manual"))).toBe(true);
+      // Derived tags are listed too (the added player is a Triple-A shortstop).
+      expect(output.some((l) => l.includes("namespace=level value=aaa source=derived"))).toBe(true);
+
+      output = [];
+      expect(await runSeed(["tag", "remove", "--person-id", "691185", "--tag", "status:rostered"], deps())).toBe(0);
+      output = [];
+      await runSeed(["tag", "list", "--person-id", "691185"], deps());
+      expect(output.some((l) => l.includes("value=rostered"))).toBe(false);
+    });
+
+    it("list --tags filters the roster by an AND selector", async () => {
+      await runSeed(["add", "--person-id", "691185"], deps());
+      await runSeed(["tag", "add", "--person-id", "691185", "--tag", "status:rostered"], deps());
+      output = [];
+
+      expect(await runSeed(["list", "--tags", "level:aaa,status:rostered"], deps())).toBe(0);
+      expect(output.some((l) => l.startsWith("player ") && l.includes("personId=691185"))).toBe(true);
+      expect(output).toContain("total=1");
+
+      output = [];
+      // A zero-match selector lists nobody.
+      await runSeed(["list", "--tags", "status:scouted"], deps());
+      expect(output).toContain("total=0");
+    });
+
+    it("rebuild re-derives tags for every player", async () => {
+      await runSeed(["add", "--person-id", "691185"], deps());
+      output = [];
+      expect(await runSeed(["tag", "rebuild"], deps())).toBe(0);
+      expect(output.some((l) => /^rebuilt derived tags players=\d+$/.test(l))).toBe(true);
+    });
+
+    it("rejects a manual write to a derived namespace, exit 1", async () => {
+      await runSeed(["add", "--person-id", "691185"], deps());
+      output = [];
+      expect(await runSeed(["tag", "add", "--person-id", "691185", "--tag", "level:aaa"], deps())).toBe(1);
+      expect(output.some((l) => l.startsWith("error:"))).toBe(true);
+    });
+
+    it("rejects an unknown status value, exit 1", async () => {
+      await runSeed(["add", "--person-id", "691185"], deps());
+      output = [];
+      expect(await runSeed(["tag", "add", "--person-id", "691185", "--tag", "status:bogus"], deps())).toBe(1);
+      expect(output.some((l) => l.startsWith("error:"))).toBe(true);
+    });
+
+    it("errors on an unknown player, exit 1", async () => {
+      expect(await runSeed(["tag", "list", "--person-id", "424242"], deps())).toBe(1);
+      expect(output.some((l) => l.startsWith("error:"))).toBe(true);
+    });
+
+    it("errors on a malformed --tag, exit 1", async () => {
+      await runSeed(["add", "--person-id", "691185"], deps());
+      output = [];
+      expect(await runSeed(["tag", "add", "--person-id", "691185", "--tag", "notacolon"], deps())).toBe(1);
+      expect(output.some((l) => l.startsWith("error:"))).toBe(true);
+    });
+
+    it("list --tags with a malformed selector exits 1", async () => {
+      await runSeed(["add", "--person-id", "691185"], deps());
+      output = [];
+      expect(await runSeed(["list", "--tags", ":foo"], deps())).toBe(1);
+      expect(output.some((l) => l.startsWith("error:"))).toBe(true);
+    });
+
+    it("list --tags with a separators-only selector exits 1 (not a silently-unfiltered roster)", async () => {
+      await runSeed(["add", "--person-id", "691185"], deps());
+      output = [];
+      // `,,,` is present-but-empty after normalization: it must error, not list all.
+      expect(await runSeed(["list", "--tags", ",,,"], deps())).toBe(1);
+      expect(output.some((l) => l.startsWith("error:"))).toBe(true);
+      expect(output.some((l) => l.startsWith("player ") || l.startsWith("total="))).toBe(false);
+    });
+
+    it("list --tags with NO value exits 1 (not a silently-unfiltered roster)", async () => {
+      await runSeed(["add", "--person-id", "691185"], deps());
+      output = [];
+      // `--tags` with no following value: present-but-empty must error, not list all.
+      expect(await runSeed(["list", "--tags"], deps())).toBe(1);
+      expect(output.some((l) => l.startsWith("error:"))).toBe(true);
+      // It must NOT have printed the roster / a total line.
+      expect(output.some((l) => l.startsWith("player ") || l.startsWith("total="))).toBe(false);
+    });
+  });
 });

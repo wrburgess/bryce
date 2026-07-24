@@ -24,6 +24,13 @@ The set of *active* Players — the digest's audience of one's chosen few. Deact
 removes him from the digest but keeps his history.
 _Avoid_: "roster" (a real baseball concept; using it here invites confusion)
 
+**Tag**:
+A user-queryable label on a Player as `namespace:value`. **Derived** tags (`level:`, `pos:`,
+`prospect`) are recomputed automatically from the Player's own data; **manual** tags
+(`status:rostered`, `status:scouted`) are set by hand and survive derivation. See the
+[tag model reference](tags.md).
+_Avoid_: hand-writing a derived tag (it is rejected); "label"/"category" (say *tag* and its *namespace*)
+
 **External ID**:
 A Player's source-native identity: the MLB Stats API `personId`, which is stable across MLB and
 every MiLB level. NCAA Players have their own source-native identity — the stats.ncaa.org

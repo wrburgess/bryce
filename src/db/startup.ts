@@ -6,6 +6,7 @@ import type { DbLock } from "./lock.js";
 import { acquireOpenLock } from "./lock.js";
 import { hasExistingSchema, hasPendingMigrations } from "./pending.js";
 import { createSnapshot, pruneSnapshots } from "../backup/snapshot.js";
+import { syncUntaggedDerivedTags } from "../tags/service.js";
 
 /**
  * The async startup seam (ADR 0042). `openDb` stays synchronous; entrypoints
@@ -89,6 +90,19 @@ export async function startupDb(
     }
 
     migrate(opened.db, { migrationsFolder });
+
+    // Self-healing backfill of derived tags (Phase A of #29). Applying the 0006
+    // migration only CREATES an empty player_tags table; a later Refresh repairs
+    // only ACTIVE, in-season players, so existing inactive players — and everyone
+    // during Offseason Sleep — would stay untagged indefinitely, leaving the tag
+    // list/selector surfaces incomplete. Rather than gate on the WHOLE table being
+    // empty (which permanently skips the rest if a prior backfill crashed after
+    // some players committed, or a first-add's Refresh threw before deriving),
+    // derive tags for every player that currently lacks a source='derived' row.
+    // This resumes a partial run and repairs any straggler; every valid player
+    // derives at least one derived tag, so it is a genuine NO-OP once all are
+    // tagged (and on a fresh/empty DB).
+    syncUntaggedDerivedTags(opened.db, now());
 
     return {
       db: opened.db,

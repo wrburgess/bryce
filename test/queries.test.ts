@@ -4,6 +4,7 @@ import type { OpenedDb } from "../src/db/client.js";
 import {
   STAT_LINES_DEFAULT_LIMIT,
   STAT_LINES_MAX_LIMIT,
+  getLatestStatLine,
   getPlayer,
   queryStatLines,
 } from "../src/queries/statLines.js";
@@ -132,5 +133,40 @@ describe("getPlayer", () => {
     expect((await getPlayer(opened.db, player.id))?.fullName).toBe("Maximo Acosta");
     expect(await getPlayer(opened.db, 9999)).toBeNull();
     opened.close();
+  });
+});
+
+describe("getLatestStatLine", () => {
+  let opened: OpenedDb;
+
+  beforeEach(() => {
+    opened = testDb();
+  });
+
+  afterEach(() => {
+    opened.close();
+  });
+
+  it("returns null before a player has any stat line", async () => {
+    const player = await insertPlayer(opened.db);
+    expect(await getLatestStatLine(opened.db, player.id)).toBeNull();
+  });
+
+  it("returns the most recent line by (gameDate desc, gameNumber desc, id desc)", async () => {
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id, gameId: 1, gameDate: "2026-07-01", gameNumber: 1 });
+    await insertStatLine(opened.db, { playerId: player.id, gameId: 2, gameDate: "2026-07-05", gameNumber: 1 });
+    // A doubleheader on the latest date: game 2 (higher gameNumber) is newest.
+    await insertStatLine(opened.db, { playerId: player.id, gameId: 3, gameDate: "2026-07-05", gameNumber: 2 });
+    const latest = await getLatestStatLine(opened.db, player.id);
+    expect(latest?.gameId).toBe(3);
+  });
+
+  it("scopes to the given player", async () => {
+    const a = await insertPlayer(opened.db);
+    const b = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: a.id, gameDate: "2026-07-10" });
+    await insertStatLine(opened.db, { playerId: b.id, gameDate: "2026-07-20" });
+    expect((await getLatestStatLine(opened.db, a.id))?.playerId).toBe(a.id);
   });
 });

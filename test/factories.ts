@@ -9,6 +9,7 @@ import type {
   ListMemberRow,
   PlayerListRow,
   PlayerRow,
+  PlayerTagRow,
   RefreshRunRow,
   StatLineRow,
 } from "../src/db/schema.js";
@@ -16,6 +17,7 @@ import {
   digestDeliveries,
   listMembers,
   playerLists,
+  playerTags,
   players,
   refreshRuns,
   seasonCalendar,
@@ -180,6 +182,26 @@ export async function insertStatLine(
     .returning();
   const row = rows[0];
   if (row === undefined) throw new Error("insertStatLine failed");
+  return row;
+}
+
+/** A player_tags row (Phase A of #29). Defaults to a manual `status:rostered` tag. */
+export async function insertPlayerTag(
+  db: Db,
+  overrides: Partial<typeof playerTags.$inferInsert> & { playerId: number },
+): Promise<PlayerTagRow> {
+  const rows = await db
+    .insert(playerTags)
+    .values({
+      namespace: "status",
+      value: "rostered",
+      source: "manual",
+      createdAt: ISO_NOW,
+      ...overrides,
+    })
+    .returning();
+  const row = rows[0];
+  if (row === undefined) throw new Error("insertPlayerTag failed");
   return row;
 }
 

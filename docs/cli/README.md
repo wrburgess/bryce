@@ -90,9 +90,14 @@ npm run seed -- add --search "smith" --pick 2    # choose from that list (1-base
 npm run seed -- deactivate --person-id 691185
 npm run seed -- deactivate --ncaa-seq 2649785
 npm run seed -- list
+npm run seed -- list --tags status:rostered,level:aaa   # tag-filtered roster (comma = AND)
+npm run seed -- tag add --person-id 691185 --tag status:rostered
+npm run seed -- tag remove --person-id 691185 --tag status:rostered
+npm run seed -- tag list --person-id 691185
+npm run seed -- tag rebuild                              # re-derive every player's derived tags
 ```
 
-One required subcommand (`add` | `deactivate` | `list`), then flags:
+One required subcommand (`add` | `deactivate` | `list` | `tag`), then flags:
 
 | Subcommand | Flags | Notes |
 |---|---|---|
@@ -100,7 +105,14 @@ One required subcommand (`add` | `deactivate` | `list`), then flags:
 | `add` | `--ncaa-seq N` | Add an NCAA Player by stats.ncaa.org `stats_player_seq`. |
 | `add` | `--search "NAME" [--pick I]` | Name search; `--pick I` is **one-based** and **search-only**. With one match and no `--pick`, it adds that Player; with several and no `--pick`, it prints a numbered list and exits `1`. |
 | `deactivate` | `--person-id N` \| `--ncaa-seq N` | Remove a Player from the Watch List; his row and full history are kept. |
-| `list` | — | Print every Player row (active and inactive) plus a `total=` line. |
+| `list` | `[--tags EXPR]` | Print every Player row (active and inactive) plus a `total=` line. `--tags` is a comma-separated **AND** selector (a bare namespace like `prospect` matches any value); only matching rows print. |
+| `tag add` | `--person-id N` \| `--ncaa-seq N`, `--tag ns:value` | Add a **manual** tag (`status:rostered` \| `status:scouted`). A write to a derived namespace (`level`/`pos`/`prospect`) or an unknown value exits `1`. |
+| `tag remove` | `--person-id N` \| `--ncaa-seq N`, `--tag ns:value` | Remove a manual tag (no-op if absent). |
+| `tag list` | `--person-id N` \| `--ncaa-seq N` | Print every tag (derived + manual) for the Player plus a `total=` line. |
+| `tag rebuild` | — | Re-derive the `level`/`pos`/`prospect` tags for **every** Player (the one-shot backfill). |
+
+See the [Player tag model reference](../domain/tags.md) for the full namespace vocabulary, the derived
+values, and the selector grammar shared by `list --tags` and the REST/MCP surfaces.
 
 Adding a **new** Player runs his **first Refresh** immediately — his whole current season is
 backfilled — unless the pipeline is in Offseason Sleep, in which case the add succeeds and the

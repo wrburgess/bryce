@@ -1,9 +1,14 @@
 import { and, desc, eq, exists, gte, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Db } from "../db/client.js";
-import type { PlayerRow } from "../db/schema.js";
+import type { PlayerRow, StatLineRow } from "../db/schema.js";
 import { listMembers, players, statLines } from "../db/schema.js";
-import { resolveListByName } from "../lists/service.js";
+// `resolveListByName` is imported lazily inside queryStatLines (below) rather than
+// at module top. A static import would make this module depend on `lists/service`
+// at init time, closing an import cycle (statLines -> lists/service -> watchlist ->
+// api/schemas -> statLines) that leaves `StatLineFilterShape` in the temporal dead
+// zone when `api/schemas` composes it. The lazy import keeps this module a leaf so
+// its exported shapes initialize before any consumer reads them.
 
 /**
  * Read-side Stat Line queries for the API/MCP surfaces. Zod-validated bounds
@@ -117,6 +122,7 @@ export async function queryStatLines(db: Db, input: unknown): Promise<StatLineVi
     // Constant-size (no per-member bind param, so no SQLite ~999-param ceiling),
     // and an empty list selects nothing naturally — EXISTS is false with no
     // member rows, so no `1 = 0` special-case is needed.
+    const { resolveListByName } = await import("../lists/service.js");
     const list = await resolveListByName(db, q.list);
     // A named-list scope selects the list's ACTIVE members — `players.active`
     // stays the master gate under membership (ADR 0046 decision 2), so a member
@@ -167,5 +173,37 @@ export async function queryStatLines(db: Db, input: unknown): Promise<StatLineVi
 /** One Player row by internal id, or null. */
 export async function getPlayer(db: Db, playerId: number): Promise<PlayerRow | null> {
   const row = (await db.select().from(players).where(eq(players.id, playerId)))[0];
+  return row ?? null;
+}
+
+/**
+ * The single source of truth for "most-recent Stat Line" ordering:
+ * `game_date desc, game_number desc, id desc`; the trailing `id` is a
+ * deterministic tiebreaker so a doubleheader (same date) never flip-flops.
+ * Shared by the async {@link getLatestStatLine} and the tag service's
+ * synchronous `.get()` (`src/tags/service.ts`), so the ordering lives in ONE
+ * place. No new index (this file's standing single-user decision): the existing
+ * player_id-prefixed unique key serves the `WHERE player_id = ?` filter and a
+ * single player's line count is small — a bounded sort, not an unbounded scan.
+ */
+export const latestStatLineOrder = [
+  desc(statLines.gameDate),
+  desc(statLines.gameNumber),
+  desc(statLines.id),
+];
+
+/**
+ * The Player's most-recent Stat Line, or null before his first Refresh — the
+ * input to the DSL derivation rule (`src/tags/derive.ts`).
+ */
+export async function getLatestStatLine(db: Db, playerId: number): Promise<StatLineRow | null> {
+  const row = (
+    await db
+      .select()
+      .from(statLines)
+      .where(eq(statLines.playerId, playerId))
+      .orderBy(...latestStatLineOrder)
+      .limit(1)
+  )[0];
   return row ?? null;
 }

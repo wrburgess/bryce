@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ZodError } from "zod";
 import type { OpenedDb } from "../src/db/client.js";
-import { players, refreshRuns, statLines } from "../src/db/schema.js";
+import { playerTags, players, refreshRuns, statLines } from "../src/db/schema.js";
 import type { FetchLike } from "../src/mlb/client.js";
 import { MlbClient } from "../src/mlb/client.js";
 import { runRefresh } from "../src/jobs/refresh.js";
@@ -102,6 +102,31 @@ describe("batchAddPlayers", () => {
       const rows = await opened.db.select().from(players);
       expect(rows).toHaveLength(1);
       expect(rows[0]).toMatchObject({ externalId: 691185, active: true, fullName: "Maximo Acosta" });
+    });
+
+    it("derives tags on the `updated` path, healing a re-added untagged player", async () => {
+      // An existing row with NO tags (a prior failed add). A batch re-add takes the
+      // `updated` path, which must now also derive his tags (idempotent).
+      const existing = await insertPlayer(opened.db, {
+        externalId: 691185,
+        milbLevel: "Triple-A",
+        position: "SS",
+        active: false,
+      });
+      expect(
+        await opened.db.select().from(playerTags).where(eq(playerTags.playerId, existing.id)),
+      ).toHaveLength(0);
+
+      const result = await batchAddPlayers(deps(), { entries: [{ personId: 691185 }] });
+      expect(result.entries[0]?.status).toBe("updated");
+      const keys = new Set(
+        (await opened.db.select().from(playerTags).where(eq(playerTags.playerId, existing.id))).map(
+          (t) => `${t.namespace}:${t.value}`,
+        ),
+      );
+      expect(keys.has("level:aaa")).toBe(true);
+      expect(keys.has("pos:ss")).toBe(true);
+      expect(keys.has("prospect:prospect")).toBe(true);
     });
 
     it("echoes the NORMALIZED (trimmed) name in the outcome entry", async () => {

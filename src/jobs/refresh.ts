@@ -13,6 +13,7 @@ import { normalizeGameLog } from "../ncaa/normalize.js";
 import { parseGameLogPage } from "../ncaa/parse.js";
 import type { NcaaStatCategory } from "../ncaa/seasons.js";
 import { ncaaSeasonFor } from "../ncaa/seasons.js";
+import { syncDerivedTags } from "../tags/service.js";
 import { claimRefreshRun, renewRefreshRun, settleRefreshRun } from "./refresh-run.js";
 
 export interface RefreshDeps {
@@ -390,6 +391,9 @@ export async function refreshNcaaPlayer(
     }
   }
   await upsertStatLines(db, rows);
+  // Identity and this NCAA player's Stat Lines are now current — re-derive his
+  // tags from the single entry point (idempotent; manual tags untouched).
+  syncDerivedTags(db, player.id, now());
   return { inserted, updated };
 }
 
@@ -475,6 +479,10 @@ export async function refreshPlayer(
   }
 
   await upsertStatLines(db, rows);
+  // Identity/location and this player's Stat Lines are now current — re-derive
+  // his tags from the single entry point (covers the nightly sweep AND a first
+  // Refresh; idempotent, manual tags untouched).
+  syncDerivedTags(db, player.id, now());
   return { inserted, updated };
 }
 

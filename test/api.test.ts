@@ -1154,4 +1154,121 @@ describe("REST API", () => {
       expect(body.statLines).toEqual([]);
     });
   });
+
+  describe("player tag routes (Phase A of #29)", () => {
+    /** Add player 691185 (a Triple-A shortstop) — his first Refresh derives tags. */
+    async function seedPlayer(): Promise<void> {
+      await app().request("/api/players", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ personId: 691185 }),
+      });
+    }
+
+    it("GET/POST/DELETE /players/:id/tags round-trips a manual tag alongside derived ones", async () => {
+      await seedPlayer();
+
+      const initial = (await (await app().request("/api/players/691185/tags", { headers: AUTH })).json()) as {
+        tags: Array<{ namespace: string; value: string; source: string }>;
+      };
+      expect(initial.tags.some((t) => t.namespace === "level" && t.value === "aaa")).toBe(true);
+
+      const added = await app().request("/api/players/691185/tags", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ namespace: "status", value: "rostered" }),
+      });
+      expect(added.status).toBe(201);
+      expect((await added.json()) as { tag: Record<string, unknown> }).toMatchObject({
+        tag: { namespace: "status", value: "rostered", source: "manual" },
+      });
+
+      const del = await app().request("/api/players/691185/tags/status/rostered", {
+        method: "DELETE",
+        headers: AUTH,
+      });
+      expect(del.status).toBe(200);
+      expect(await del.json()).toMatchObject({ removed: true });
+
+      const after = (await (await app().request("/api/players/691185/tags", { headers: AUTH })).json()) as {
+        tags: Array<{ value: string }>;
+      };
+      expect(after.tags.some((t) => t.value === "rostered")).toBe(false);
+    });
+
+    it("GET /players?tags= filters the roster by an AND selector", async () => {
+      await seedPlayer();
+      await app().request("/api/players/691185/tags", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ namespace: "status", value: "rostered" }),
+      });
+
+      const matched = (await (
+        await app().request("/api/players?tags=level:aaa,status:rostered", { headers: AUTH })
+      ).json()) as { players: Array<{ externalId: number }> };
+      expect(matched.players.map((p) => p.externalId)).toEqual([691185]);
+
+      const none = (await (
+        await app().request("/api/players?tags=status:scouted", { headers: AUTH })
+      ).json()) as { players: unknown[] };
+      expect(none.players).toHaveLength(0);
+    });
+
+    it("400s a separators-only tags selector rather than listing the whole roster", async () => {
+      await seedPlayer();
+      // `,,,` normalizes to zero tokens: a malformed selector, NOT an absent one —
+      // it must 400, not silently return the full roster.
+      const res = await app().request("/api/players?tags=,,,", { headers: AUTH });
+      expect(res.status).toBe(400);
+    });
+
+    it("400s a manual write to a derived namespace and an unknown status value", async () => {
+      await seedPlayer();
+      const derived = await app().request("/api/players/691185/tags", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ namespace: "level", value: "aaa" }),
+      });
+      expect(derived.status).toBe(400);
+
+      const unknown = await app().request("/api/players/691185/tags", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ namespace: "status", value: "bogus" }),
+      });
+      expect(unknown.status).toBe(400);
+    });
+
+    it("404s a tag op on an unknown player", async () => {
+      const res = await app().request("/api/players/424242/tags", { headers: AUTH });
+      expect(res.status).toBe(404);
+    });
+
+    it("serves the NCAA variant under /players/ncaa/:seq/tags", async () => {
+      await app().request("/api/players/ncaa", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ ncaaPlayerSeq: 2649785 }),
+      });
+
+      const tags = (await (
+        await app().request("/api/players/ncaa/2649785/tags", { headers: AUTH })
+      ).json()) as { tags: Array<{ namespace: string; value: string }> };
+      expect(tags.tags.some((t) => t.namespace === "level" && t.value === "ncaa")).toBe(true);
+
+      const added = await app().request("/api/players/ncaa/2649785/tags", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ namespace: "status", value: "scouted" }),
+      });
+      expect(added.status).toBe(201);
+
+      const del = await app().request("/api/players/ncaa/2649785/tags/status/scouted", {
+        method: "DELETE",
+        headers: AUTH,
+      });
+      expect(del.status).toBe(200);
+    });
+  });
 });
