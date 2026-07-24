@@ -372,6 +372,19 @@ describe("a custom DNS lookup on an allowed name is REFUSED — fail closed by c
     expect(takeAttempts()).toEqual([{ surface: "socket", host: "api.example.com", port: 443 }]);
   });
 
+  it("R5-P1: BLOCKS + records a custom lookup on a BRACKETED loopback host `[::1]` (a NAME to Node, not a literal)", () => {
+    // `net.isIP("[::1]") === 0`, so Node does NOT short-circuit DNS for `[::1]` — it routes the
+    // bracketed NAME through the custom resolver, which could return a public IP dialed WITHOUT a
+    // NetworkBlockedError or a recorded attempt. The literal EXEMPTION must classify against the RAW
+    // host as Node does (no bracket-stripping), so a bracketed literal carrying a custom lookup is
+    // NOT exempt: it is blocked and recorded by the bracketed NAME (R5-P1). The plain no-lookup
+    // `[::1]` connect stays allowed — see "normalizes a bracketed IPv6 loopback host to loopback".
+    expect(() =>
+      net.connect({ host: "[::1]", port: 443, lookup: fixedLookup("8.8.8.8") }),
+    ).toThrow(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "[::1]", port: 443 }]);
+  });
+
   // --- Positive controls: the IP-LITERAL exemption and plain (no-custom-lookup) loopback connects
   // still SUCCEED against an in-process server and record nothing. ---
 
@@ -401,6 +414,44 @@ describe("a custom DNS lookup on an allowed name is REFUSED — fail closed by c
     } finally {
       await server.close();
     }
+  });
+
+  it("R5-P2: does NOT block tls.connect reusing an EXISTING socket, even with a stray `lookup`", async () => {
+    // `tls.connect({ socket })` wraps an ALREADY-connected socket: Node opens no new connection and
+    // IGNORES `lookup`. The guard must not treat the missing host as a name and block — there is no
+    // egress or DNS to verify (the underlying socket was already guarded when it first connected).
+    // Formerly this threw + recorded a phantom `localhost:?`, rejecting valid TLS-over-socket tests.
+    const tcpServer = net.createServer((sock) => sock.on("error", () => undefined));
+    await new Promise<void>((resolve, reject) => {
+      tcpServer.once("error", reject);
+      tcpServer.listen(0, "127.0.0.1", resolve);
+    });
+    const { port } = tcpServer.address() as AddressInfo;
+    const socket = net.connect({ host: "127.0.0.1", port });
+    socket.on("error", () => undefined); // once tls wraps it, errors surface on the TLSSocket
+    await new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("error", reject);
+    });
+    // The loopback connect above is allowed and records nothing; drain any before the real assertion.
+    expect(takeAttempts()).toEqual([]);
+
+    let tlsSocket: tls.TLSSocket | undefined;
+    let threw: unknown;
+    try {
+      // The guard runs SYNCHRONOUSLY inside the wrapped tls.connect; a `socket` present must short
+      // -circuit to allow BEFORE the name/custom-lookup block, so no NetworkBlockedError is thrown.
+      tlsSocket = tls.connect({ socket, lookup: (() => {}) as unknown as net.LookupFunction });
+      tlsSocket.on("error", () => undefined); // the plain (non-TLS) peer fails the handshake async
+    } catch (err) {
+      threw = err;
+    } finally {
+      tlsSocket?.destroy();
+      socket.destroy();
+      await new Promise<void>((resolve) => tcpServer.close(() => resolve()));
+    }
+    expect(threw).not.toBeInstanceOf(NetworkBlockedError); // the guard did not block the reuse
+    expect(takeAttempts()).toEqual([]); // no new connection, nothing recorded
   });
 });
 

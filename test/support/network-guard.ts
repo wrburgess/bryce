@@ -254,6 +254,12 @@ function connectTarget(args: unknown[]): { host: string | undefined; port: numbe
 function guardSocketArgs(args: unknown[]): void {
   const { host, port, path } = connectTarget(args);
   if (path !== undefined) return; // unix socket / pipe — no host, allowed
+  // An EXISTING socket is being reused (`tls.connect({ socket })`, or a Unix-socket TLS wrap): Node
+  // opens NO new connection and IGNORES any `lookup`, so there is no egress or DNS to verify — the
+  // underlying socket was already subject to the guard when it first connected. Allow it BEFORE the
+  // name/custom-lookup block, or a valid TLS-over-existing-socket call with a stray `lookup` would be
+  // wrongly blocked and recorded as a phantom `localhost:?` attempt (R5-P2).
+  if (hasExistingSocket(args)) return;
   // A TCP connect that OMITS the host (undefined/empty but carries a port) defaults to
   // `localhost` in Node. Resolve the omission to the loopback NAME `localhost` up front so the
   // custom-lookup refusal below covers the implicit-localhost case too (Delta-1); otherwise a
@@ -271,10 +277,14 @@ function guardSocketArgs(args: unknown[]): void {
   // anything. This blocks an allowed name (e.g. `localhost`) it previously waved through, which
   // is the intended fail-closed inversion.
   if (hasCustomLookup(args) && !isLoopbackIpLiteral(effectiveHost)) {
-    const normHost = normalizeHost((effectiveHost ?? "localhost") as string);
-    record({ surface: "socket", host: normHost, port });
+    // Record the NAME the caller supplied — the name Node would route through DNS — lowercased but
+    // with any brackets KEPT (R5-P1). A bracketed host like `[::1]` is a NAME to Node, not the
+    // literal `::1`, so recording it verbatim faithfully names what was blocked rather than
+    // bracket-stripping it into the loopback literal it is not.
+    const blockedHost = (effectiveHost ?? "localhost").toLowerCase();
+    record({ surface: "socket", host: blockedHost, port });
     throw new NetworkBlockedError(
-      `Blocked socket egress: refusing an unverifiable custom lookup on ${normHost}:${port ?? "?"}`,
+      `Blocked socket egress: refusing an unverifiable custom lookup on ${blockedHost}:${port ?? "?"}`,
     );
   }
   if (isLoopback(effectiveHost)) {
@@ -298,16 +308,31 @@ function hasCustomLookup(args: unknown[]): boolean {
 }
 
 /**
- * True only for a genuine loopback IP LITERAL (`127/8`, `::1`, `::ffff:127.x`, bracketed or
- * not). Node short-circuits DNS for an IP literal, so a custom `lookup` on one is dead code and
- * stays allowed; every NAME (including `localhost` and the omitted→localhost case) is treated as
- * re-resolvable and refused when it carries a custom lookup.
+ * True when `args[0]` is an options object supplying an EXISTING `socket` to wrap — the
+ * `tls.connect({ socket })` reuse form, where Node opens no new connection and ignores `lookup`.
+ * A plain, prototype-honoring read (matching how Node reads options), never a write.
+ */
+function hasExistingSocket(args: unknown[]): boolean {
+  const first = args[0];
+  if (typeof first !== "object" || first === null) return false;
+  const opts = first as { socket?: unknown };
+  return opts.socket !== undefined && opts.socket !== null;
+}
+
+/**
+ * True only for a genuine loopback IP LITERAL that Node itself recognizes as one — classified
+ * against the RAW host, with NO bracket-stripping, EXACTLY as Node does (R5-P1). Node short-circuits
+ * DNS only for a real literal, so a custom `lookup` on one is dead code and stays allowed. A
+ * bracketed host is a NAME to Node, not a literal (`net.isIP("[::1]") === 0`): Node routes it through
+ * the custom resolver, so it must NOT be exempt here — stripping brackets first would wrongly wave
+ * `[::1]` (or any bracketed IP) through and let a custom lookup dial a public address unrecorded.
+ * Every NAME (including `localhost`, the omitted→localhost case, and any bracketed literal) is
+ * therefore re-resolvable and refused when it carries a custom lookup. `isLoopback` still normalizes
+ * internally for the loopback comparison; only `net.isIP` must see the raw host to match Node.
  */
 function isLoopbackIpLiteral(host: string | undefined): boolean {
   if (host === undefined) return false;
-  let h = host.toLowerCase();
-  if (h.startsWith("[") && h.endsWith("]")) h = h.slice(1, -1);
-  return netModule.isIP(h) !== 0 && isLoopback(h);
+  return netModule.isIP(host) !== 0 && isLoopback(host);
 }
 
 function makeGuardedConnect<F>(original: F): F {
