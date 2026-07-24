@@ -309,6 +309,62 @@ describe("a custom DNS lookup cannot smuggle egress past an allowed name (P2)", 
       await server.close();
     }
   });
+
+  // --- Delta-1: an OMITTED host still defaults to `localhost` and must be hardened -------
+  // `net.connect({ port, lookup })` omits the host; Node dials `localhost` and runs the
+  // custom lookup against it. The hardening must apply to that implicit name, or a custom
+  // lookup could resolve it to a public IP that Node dials without a throw or a record.
+
+  it("Delta-1: blocks an OMITTED-host connect whose custom lookup returns a public IP (scalar shape)", async () => {
+    const scalarLookup: net.LookupFunction = (_hostname, _options, cb) => cb(null, "8.8.8.8", 4);
+    const settled = await settle({ port: 443, lookup: scalarLookup });
+    expect(settled).toBeInstanceOf(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "8.8.8.8", port: 443 }]);
+  });
+
+  it("Delta-1: blocks an OMITTED-host connect whose custom lookup returns a public IP ({all:true} array shape)", async () => {
+    const arrayLookup: net.LookupFunction = (_hostname, _options, cb) =>
+      cb(null, [{ address: "8.8.8.8", family: 4 }]);
+    const settled = await settle({ port: 443, lookup: arrayLookup });
+    expect(settled).toBeInstanceOf(NetworkBlockedError);
+    expect(takeAttempts()).toEqual([{ surface: "socket", host: "8.8.8.8", port: 443 }]);
+  });
+
+  it("Delta-1: still allows an OMITTED-host connect whose custom lookup resolves to loopback (unrecorded)", async () => {
+    // Positive control: host omitted, lookup resolves the implicit localhost to 127.0.0.1 —
+    // must connect to the in-process server and record nothing.
+    const server = await startLoopbackServer((_req, res) => res.end("ok"));
+    const port = Number(new URL(server.url).port);
+    try {
+      const settled = await settle({ port, lookup: fixedLookup("127.0.0.1") });
+      expect(settled).toBeNull();
+      expect(takeAttempts()).toEqual([]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  // --- Delta-2: the hardening must never mutate the caller's (possibly frozen) options ---
+
+  it("Delta-2: accepts a FROZEN options object and leaves the caller's lookup untouched", async () => {
+    // Native `net.connect` accepts a frozen options object; the hardening must copy it,
+    // never assign `options.lookup = wrapped` in place (which would throw a TypeError and
+    // break this valid loopback connect before its resolver ran).
+    const server = await startLoopbackServer((_req, res) => res.end("ok"));
+    const port = Number(new URL(server.url).port);
+    const callerLookup = fixedLookup("127.0.0.1");
+    const frozenOptions = Object.freeze({ host: "localhost", port, lookup: callerLookup });
+    try {
+      const settled = await settle(frozenOptions);
+      expect(settled).toBeNull(); // connected — no TypeError from a frozen-options assignment
+      expect(takeAttempts()).toEqual([]); // loopback resolution, nothing recorded
+      // The caller's object is untouched: its lookup is still the caller's own function,
+      // not the guard's wrapper.
+      expect(frozenOptions.lookup).toBe(callerLookup);
+    } finally {
+      await server.close();
+    }
+  });
 });
 
 describe("redirect canary — proves the socket patch catches undici's real connections", () => {

@@ -233,15 +233,24 @@ function connectTarget(args: unknown[]): { host: string | undefined; port: numbe
 function guardSocketArgs(args: unknown[]): void {
   const { host, port, path } = connectTarget(args);
   if (path !== undefined) return; // unix socket / pipe — no host, allowed
-  if (isLoopback(host)) {
+  // A TCP connect that OMITS the host (undefined/empty but carries a port) defaults to
+  // `localhost` in Node — and Node still runs any custom `lookup` against that implicit
+  // name. Resolve the omission to the loopback NAME `localhost` *before* the lookup check
+  // so the hardening below applies; otherwise a custom lookup on an omitted-host connect
+  // could resolve the implicit localhost to a public IP that Node dials unrecorded (Delta-1).
+  let effectiveHost = host;
+  if ((host === undefined || host === "") && port !== null) {
+    effectiveHost = "localhost";
+  }
+  if (isLoopback(effectiveHost)) {
     // Allowed because the host is loopback/absent. But an allowed *name* (not an IP
     // literal) still goes through DNS: a caller-supplied `options.lookup` could resolve
     // it to a non-loopback address that Node then dials directly, never re-entering this
     // wrapper. Harden any such lookup so every resolved address is re-validated.
-    hardenCustomLookup(args, host, port);
+    hardenCustomLookup(args, effectiveHost, port);
     return;
   }
-  const normHost = normalizeHost(host as string);
+  const normHost = normalizeHost(effectiveHost as string);
   record({ surface: "socket", host: normHost, port });
   throw new NetworkBlockedError(`Blocked socket egress to ${normHost}:${port ?? "?"}`);
 }
@@ -255,8 +264,9 @@ const guardedLookups = new WeakSet<object>();
 /**
  * Close the "resolve-an-allowed-name-to-a-public-IP" bypass (issue #25). When a connect
  * is allowed only because the host is an allowed NAME (not an IP literal) and the caller
- * supplied a custom DNS `lookup`, replace that lookup in place with a wrapper that
- * re-validates EVERY resolved address through `isLoopback`. A non-loopback result is
+ * supplied a custom DNS `lookup`, hand the original connect a shallow COPY of the options
+ * whose `lookup` is a wrapper that re-validates EVERY resolved address through `isLoopback`
+ * (never mutating the caller's own object — it may be frozen). A non-loopback result is
  * recorded as a redacted `socket` attempt (the resolved IP — never the name, MF7) and the
  * connection is failed closed, instead of Node silently dialing the smuggled address.
  * IP literals never trigger DNS, and a connect without a custom lookup is left untouched.
@@ -297,7 +307,12 @@ function hardenCustomLookup(args: unknown[], host: string | undefined, port: num
     });
   };
   guardedLookups.add(guardedLookup);
-  opts.lookup = guardedLookup;
+  // Never mutate the caller's options object: native `net.connect` accepts a FROZEN
+  // options object, and an in-place `opts.lookup = …` would throw a synchronous TypeError
+  // on it, breaking a valid loopback connect before its resolver ever runs (Delta-2).
+  // `args[0]` is our own wrapper-local array element, so swapping in a shallow copy that
+  // carries the guarded lookup leaves every caller field intact and the caller object untouched.
+  args[0] = { ...opts, lookup: guardedLookup };
 }
 
 function makeGuardedConnect<F>(original: F): F {
