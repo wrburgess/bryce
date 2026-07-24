@@ -33,7 +33,8 @@ HOOK="$SCRIPT_DIR/enforce-branch-creation.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "tests require jq"; exit 1; }
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" || TMP=""
+[ -n "$TMP" ] && [ -d "$TMP" ] || { echo "tests require a writable temp dir (mktemp -d failed)"; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 
 # --- build fixture repos ----------------------------------------------------
