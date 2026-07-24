@@ -372,6 +372,30 @@ describe("parsePlayerListBackup: strict validation", () => {
     ).toThrow(PlayerBackupParseError);
   });
 
+  it("rejects a v2 list name containing a control character (mirrors the live surfaces)", () => {
+    // A crafted backup could otherwise restore a list name with a newline/tab,
+    // reintroducing the forge-extra-lines issue the live path forbids.
+    expect(() =>
+      parsePlayerListBackup(
+        JSON.stringify({
+          ...makeBackupEnvelope([makeBackupEntry()], { version: 2 }),
+          lists: [{ name: "a\nb" }],
+        }),
+      ),
+    ).toThrow(PlayerBackupParseError);
+  });
+
+  it("rejects a v2 member list field containing a control character", () => {
+    expect(() =>
+      parsePlayerListBackup(
+        JSON.stringify({
+          ...makeBackupEnvelope([makeBackupEntry()], { version: 2 }),
+          members: [{ list: "a\tb", externalId: 691185, ncaaPlayerSeq: null }],
+        }),
+      ),
+    ).toThrow(PlayerBackupParseError);
+  });
+
   it("rejects duplicate natural ids within the payload", () => {
     expect(() =>
       parse([makeBackupEntry({ externalId: 42 }), makeBackupEntry({ externalId: 42 })]),

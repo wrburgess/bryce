@@ -120,6 +120,12 @@ const backupListSchema = z
   .superRefine((row, ctx) => {
     if (row.name.trim().length === 0) {
       ctx.addIssue({ code: "custom", path: ["name"], message: "list name is blank" });
+    } else if (/\p{Cc}/u.test(row.name)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["name"],
+        message: "list name must not contain a control character",
+      });
     }
   });
 
@@ -145,6 +151,12 @@ const backupMemberSchema = z
     }
     if (row.list.trim().length === 0) {
       ctx.addIssue({ code: "custom", path: ["list"], message: "list name is blank" });
+    } else if (/\p{Cc}/u.test(row.list)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["list"],
+        message: "member list name must not contain a control character",
+      });
     }
   });
 
