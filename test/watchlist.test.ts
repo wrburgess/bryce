@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { playerTags, players, statLines } from "../src/db/schema.js";
 import { MlbApiError, MlbClient } from "../src/mlb/client.js";
-import { NcaaApiError, UnsupportedNcaaSeasonError } from "../src/ncaa/client.js";
+import {
+  NcaaAccessDeniedError,
+  NcaaApiError,
+  UnsupportedNcaaSeasonError,
+} from "../src/ncaa/client.js";
 import type { WatchlistDeps } from "../src/watchlist/service.js";
 import {
   PlayerNotFoundError,
@@ -307,6 +311,15 @@ describe("watch-list service", () => {
       ncaaApi.options.status = 500;
       const promise = addNcaaPlayer(deps(), 2649785);
       await expect(promise).rejects.toBeInstanceOf(NcaaApiError);
+      await expect(promise).rejects.not.toBeInstanceOf(UnknownNcaaPlayerError);
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+
+    it("propagates an NCAA access-denied page — NOT UnknownNcaaPlayerError", async () => {
+      clock.set("2026-03-15T17:00:00Z");
+      ncaaApi.options.body = "<html><title>Access Denied</title></html>";
+      const promise = addNcaaPlayer(deps(), 9702101);
+      await expect(promise).rejects.toBeInstanceOf(NcaaAccessDeniedError);
       await expect(promise).rejects.not.toBeInstanceOf(UnknownNcaaPlayerError);
       expect(await opened.db.select().from(players)).toHaveLength(0);
     });

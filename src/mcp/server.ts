@@ -16,7 +16,11 @@ import { sqlResultToCsv, statLinesToCsv } from "../export/tabular.js";
 import { runDigest } from "../jobs/digest.js";
 import { runRefresh, runRefreshForPlayer } from "../jobs/refresh.js";
 import { MlbApiError } from "../mlb/client.js";
-import { NcaaApiError, UnsupportedNcaaSeasonError } from "../ncaa/client.js";
+import {
+  NcaaAccessDeniedError,
+  NcaaApiError,
+  UnsupportedNcaaSeasonError,
+} from "../ncaa/client.js";
 import { queryStatLines } from "../queries/statLines.js";
 import type { ServiceDeps } from "../server/deps.js";
 import { healthSnapshot } from "../server/health.js";
@@ -130,6 +134,7 @@ function errorResult(err: unknown): CallToolResult {
           err instanceof ReadonlyQueryError ||
           err instanceof MlbApiError ||
           err instanceof NcaaApiError ||
+          err instanceof NcaaAccessDeniedError ||
           err instanceof UnsupportedNcaaSeasonError
         ? err.message
         : null;

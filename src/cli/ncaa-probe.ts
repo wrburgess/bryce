@@ -1,6 +1,11 @@
 import { loadConfig } from "../config.js";
 import { loadDotEnv } from "../env.js";
-import { NcaaApiError, NcaaClient, UnsupportedNcaaSeasonError } from "../ncaa/client.js";
+import {
+  NcaaAccessDeniedError,
+  NcaaApiError,
+  NcaaClient,
+  UnsupportedNcaaSeasonError,
+} from "../ncaa/client.js";
 import { parseGameLogPage } from "../ncaa/parse.js";
 import type { NcaaStatCategory } from "../ncaa/seasons.js";
 import { isMain } from "./main.js";
@@ -38,6 +43,10 @@ export async function runProbe(argv: string[], deps: ProbeDeps): Promise<number>
   try {
     html = await deps.client.getGameLogPage(seq, season, type);
   } catch (err) {
+    if (err instanceof NcaaAccessDeniedError) {
+      deps.write(`probe seq=${seq} season=${season} type=${type} result=access_denied`);
+      return 1;
+    }
     if (err instanceof NcaaApiError) {
       deps.write(`probe seq=${seq} season=${season} type=${type} http=${err.status} result=error`);
       return 1;
