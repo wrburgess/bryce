@@ -251,10 +251,16 @@ async function runDeactivate(flags: Map<string, string>, deps: SeedDeps): Promis
 
 async function runList(flags: Map<string, string>, deps: SeedDeps): Promise<number> {
   const tagsFlag = flags.get("tags");
-  const tagSelector = tagsFlag !== undefined && tagsFlag.length > 0 ? tagsFlag : undefined;
+  // A PRESENT-but-empty `--tags` (the flag given with no value) must not silently
+  // list the whole roster as if it were absent — that is a falsely unfiltered
+  // result. Only an ABSENT flag (undefined) means "no filter".
+  if (tagsFlag !== undefined && tagsFlag.length === 0) {
+    deps.write("error: --tags requires a selector expression");
+    return 1;
+  }
   let rows;
   try {
-    rows = await listPlayers(deps.db, "all", tagSelector);
+    rows = await listPlayers(deps.db, "all", tagsFlag);
   } catch (err) {
     if (err instanceof ZodError) {
       deps.write(`error: ${err.issues[0]?.message ?? "invalid --tags selector"}`);

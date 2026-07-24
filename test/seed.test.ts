@@ -342,5 +342,15 @@ describe("seed CLI", () => {
       expect(await runSeed(["list", "--tags", ":foo"], deps())).toBe(1);
       expect(output.some((l) => l.startsWith("error:"))).toBe(true);
     });
+
+    it("list --tags with NO value exits 1 (not a silently-unfiltered roster)", async () => {
+      await runSeed(["add", "--person-id", "691185"], deps());
+      output = [];
+      // `--tags` with no following value: present-but-empty must error, not list all.
+      expect(await runSeed(["list", "--tags"], deps())).toBe(1);
+      expect(output.some((l) => l.startsWith("error:"))).toBe(true);
+      // It must NOT have printed the roster / a total line.
+      expect(output.some((l) => l.startsWith("player ") || l.startsWith("total="))).toBe(false);
+    });
   });
 });

@@ -178,7 +178,14 @@ export async function createPlayerListBackup(
     version: PLAYER_BACKUP_VERSION,
     exportedAt: now().toISOString(),
     players: rows.map((r) => {
-      const base = {
+      // ALWAYS emit `tags` (an empty array when the player has no manual tags),
+      // so the format is self-describing: an authoritative empty set is distinct
+      // from a legacy v1 backup that omits the field entirely. Restore reconciles
+      // the player's manual tags to exactly this set (an absent field is the only
+      // "leave untouched" signal, which only a pre-#30 backup carries).
+      const tags = tagsByPlayer.get(r.id) ?? [];
+      tags.sort((a, b) => a.namespace.localeCompare(b.namespace) || a.value.localeCompare(b.value));
+      return {
         id: r.id,
         externalId: r.externalId,
         ncaaPlayerSeq: r.ncaaPlayerSeq,
@@ -192,13 +199,8 @@ export async function createPlayerListBackup(
         notes: r.notes,
         createdAt: r.createdAt,
         updatedAt: r.updatedAt,
+        tags,
       };
-      const tags = tagsByPlayer.get(r.id);
-      // Omit the key entirely when there are no manual tags, so a tagless roster
-      // serializes byte-identically to a pre-#30 backup (back-compat).
-      if (tags === undefined) return base;
-      tags.sort((a, b) => a.namespace.localeCompare(b.namespace) || a.value.localeCompare(b.value));
-      return { ...base, tags };
     }),
   };
 }

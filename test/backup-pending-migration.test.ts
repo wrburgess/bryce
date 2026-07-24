@@ -1,6 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
+import { eq } from "drizzle-orm";
 import { readMigrationFiles } from "drizzle-orm/migrator";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDb } from "../src/db/client.js";
@@ -11,7 +12,7 @@ import {
   pendingMigrations,
   readAppliedMigrations,
 } from "../src/db/pending.js";
-import { players } from "../src/db/schema.js";
+import { playerTags, players } from "../src/db/schema.js";
 import { listSnapshots } from "../src/backup/snapshot.js";
 import type { TempDir, TempMigrations } from "./backup-helpers.js";
 import {
@@ -21,7 +22,7 @@ import {
   makeMigrationsDir,
   makeTempDir,
 } from "./backup-helpers.js";
-import { fakeClock } from "./factories.js";
+import { fakeClock, insertPlayer, insertPlayerTag, insertStatLine } from "./factories.js";
 
 const CLOCK = fakeClock("2026-07-22T12:00:00Z").now;
 
@@ -318,6 +319,120 @@ describe("ordered-prefix migration model", () => {
       expect(migrationHistoryCompatibility(unknown, buildABC.dir).compatible).toBe(false);
     } finally {
       buildABC.cleanup();
+    }
+  });
+});
+
+describe("startupDb derived-tag backfill (Phase A of #29)", () => {
+  let live: TempDir;
+  let migrations: TempMigrations;
+  let dbPath: string;
+
+  beforeEach(() => {
+    live = makeTempDir();
+    migrations = copyProdMigrations();
+    dbPath = join(live.path, "bryce.db");
+  });
+
+  afterEach(() => {
+    live.cleanup();
+    migrations.cleanup();
+  });
+
+  it("backfills derived tags for pre-existing players (incl a DSL case) after a 0006 upgrade, no manual rebuild", async () => {
+    // Bring the file to head (through 0006), then insert players carrying NO
+    // tags — exactly the state a real DB is in the instant the migration created
+    // the empty player_tags table (the first startup's backfill saw zero players
+    // and no-oped).
+    const first = await startupDb(dbPath, { migrationsFolder: migrations.dir, now: CLOCK });
+    const aaa = await insertPlayer(first.db, {
+      externalId: 691185,
+      level: "milb",
+      milbLevel: "Triple-A",
+      position: "SS",
+    });
+    const inactive = await insertPlayer(first.db, {
+      externalId: 700000,
+      level: "milb",
+      milbLevel: "Double-A",
+      position: "1B",
+      active: false,
+    });
+    const dsl = await insertPlayer(first.db, {
+      externalId: 700001,
+      level: "milb",
+      milbLevel: "Rookie",
+      position: null,
+    });
+    await insertStatLine(first.db, {
+      playerId: dsl.id,
+      sportId: 16,
+      leagueName: "Dominican Summer League",
+      gameDate: "2026-07-01",
+    });
+    expect(first.db.select().from(playerTags).all()).toHaveLength(0);
+    first.close();
+
+    // Re-open: migrate() is a no-op, but the one-time self-healing backfill runs.
+    const started = await startupDb(dbPath, { migrationsFolder: migrations.dir, now: CLOCK });
+    try {
+      const tagsFor = (id: number): Set<string> =>
+        new Set(
+          started.db
+            .select()
+            .from(playerTags)
+            .where(eq(playerTags.playerId, id))
+            .all()
+            .map((t) => `${t.namespace}:${t.value}`),
+        );
+      expect(tagsFor(aaa.id).has("level:aaa")).toBe(true);
+      // Inactive players are backfilled too — a Refresh would never reach them.
+      expect(tagsFor(inactive.id).has("level:aa")).toBe(true);
+      // The DSL case derives level:dsl from the latest stat line, not level:rookie.
+      const dslTags = tagsFor(dsl.id);
+      expect(dslTags.has("level:dsl")).toBe(true);
+      expect(dslTags.has("level:rookie")).toBe(false);
+    } finally {
+      started.close();
+    }
+  });
+
+  it("is a NO-OP on a fresh/empty DB and does not re-fire once tags exist", async () => {
+    // Fresh/empty DB: schema created, no players → backfill no-op, zero tags.
+    const first = await startupDb(dbPath, { migrationsFolder: migrations.dir, now: CLOCK });
+    expect(first.db.select().from(playerTags).all()).toHaveLength(0);
+    const player = await insertPlayer(first.db, {
+      externalId: 691185,
+      level: "milb",
+      milbLevel: "Triple-A",
+      position: "SS",
+    });
+    first.close();
+
+    // Second startup backfills once (players present, tags empty).
+    const second = await startupDb(dbPath, { migrationsFolder: migrations.dir, now: CLOCK });
+    expect(second.db.select().from(playerTags).all().length).toBeGreaterThan(0);
+    // A manual tag added AFTER the backfill must survive a later startup — the
+    // guard (tags already present) keeps the backfill from re-firing/clobbering.
+    await insertPlayerTag(second.db, {
+      playerId: player.id,
+      namespace: "status",
+      value: "rostered",
+      source: "manual",
+    });
+    second.close();
+
+    const third = await startupDb(dbPath, { migrationsFolder: migrations.dir, now: CLOCK });
+    try {
+      const manual = third.db
+        .select()
+        .from(playerTags)
+        .where(eq(playerTags.source, "manual"))
+        .all()
+        .map((t) => `${t.namespace}:${t.value}`);
+      expect(manual).toEqual(["status:rostered"]);
+    } finally {
+      third.close();
     }
   });
 });

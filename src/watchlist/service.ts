@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { PlayerRow } from "../db/schema.js";
 import { playerTags, players } from "../db/schema.js";
@@ -454,25 +454,42 @@ export function restorePlayerListBackup(
       // recomputed per upserted row from the identity columns just written — so
       // the import stays all-or-nothing with no post-commit failure gap.
       syncDerivedTags(tx, playerId, now);
-      // Re-apply the entry's MANUAL tags by the restored id. A direct insert
-      // preserves exact fidelity (the backup is authoritative for manual tags);
-      // onConflictDoNothing keeps a re-import idempotent. A v1 backup with no
-      // `tags` field leaves this a no-op (back-compat). SKIP any tag that is not
-      // a valid manual tag — a hand-edited backup carrying a derived-namespace or
-      // unknown tag must never write a bogus manual row derivation can't undo.
-      for (const tag of row.tags ?? []) {
-        if (!isManualTag(tag.namespace, tag.value)) continue;
-        tx
-          .insert(playerTags)
-          .values({
-            playerId,
-            namespace: tag.namespace,
-            value: tag.value,
-            source: "manual",
-            createdAt: nowIso,
-          })
-          .onConflictDoNothing()
-          .run();
+
+      // Reconcile the player's MANUAL tags to the backup's authoritative set.
+      // The undefined-vs-present distinction is load-bearing: an ABSENT `tags`
+      // field (only a legacy v1 backup omits it) means "leave manual tags
+      // untouched" (back-compat); a PRESENT field (including `[]`) is
+      // authoritative, so we reconcile to exactly it. Any non-manual entry (a
+      // hand-edited derived-namespace or unknown tag) is skipped, never written.
+      if (row.tags !== undefined) {
+        const desired = row.tags.filter((t) => isManualTag(t.namespace, t.value));
+        // Delimiter is a colon: isManualTag pins the namespace to `status` (no
+        // colon) and the value to a fixed word, so the key is unambiguous. Never
+        // a raw NUL byte.
+        const desiredKeys = new Set(desired.map((t) => `${t.namespace}:${t.value}`));
+        const existingManual = tx
+          .select()
+          .from(playerTags)
+          .where(and(eq(playerTags.playerId, playerId), eq(playerTags.source, "manual")))
+          .all();
+        for (const ex of existingManual) {
+          if (!desiredKeys.has(`${ex.namespace}:${ex.value}`)) {
+            tx.delete(playerTags).where(eq(playerTags.id, ex.id)).run();
+          }
+        }
+        for (const tag of desired) {
+          tx
+            .insert(playerTags)
+            .values({
+              playerId,
+              namespace: tag.namespace,
+              value: tag.value,
+              source: "manual",
+              createdAt: nowIso,
+            })
+            .onConflictDoNothing()
+            .run();
+        }
       }
     }
 

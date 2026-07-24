@@ -401,11 +401,11 @@ describe("manual-tag backup round-trip (Phase A of #29)", () => {
     expect(backup.players[0]?.tags).toEqual([{ namespace: "status", value: "rostered" }]);
   });
 
-  it("a tagless roster omits the tags key entirely (v1 back-compat)", async () => {
+  it("ALWAYS emits tags (an empty array for a tagless player), self-describing", async () => {
     await insertPlayer(opened.db, { externalId: 691185 });
     const backup = await createPlayerListBackup(opened.db, () => NOW);
-    expect("tags" in (backup.players[0] ?? {})).toBe(false);
-    // The pre-#30 strict parser still round-trips the serialized envelope.
+    // An authoritative empty set — distinct from a legacy v1 backup that omits it.
+    expect(backup.players[0]?.tags).toEqual([]);
     expect(() => parsePlayerListBackup(JSON.stringify(backup))).not.toThrow();
   });
 
@@ -443,6 +443,63 @@ describe("manual-tag backup round-trip (Phase A of #29)", () => {
       .all();
     expect(tags.every((t) => t.source === "derived")).toBe(true);
     expect(tags.some((t) => t.namespace === "level" && t.value === "aaa")).toBe(true);
+  });
+
+  /** Manual tags on the pre-existing row before a restore matches it. */
+  const manualOf = (playerId: number): string[] =>
+    opened.db
+      .select()
+      .from(playerTags)
+      .where(eq(playerTags.playerId, playerId))
+      .all()
+      .filter((t) => t.source === "manual")
+      .map((t) => `${t.namespace}:${t.value}`);
+
+  it("reconciles manual tags to the backup's authoritative set (rostered replaces scouted)", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    await insertPlayerTag(opened.db, { playerId: player.id, namespace: "status", value: "scouted", source: "manual" });
+
+    const row = {
+      ...makeBackupEntry({ externalId: 691185, level: "milb", milbLevel: "Triple-A", position: "SS" }),
+      tags: [{ namespace: "status", value: "rostered" }],
+    };
+    restorePlayerListBackup(opened.db, parse([row]), NOW);
+
+    // The current scouted tag is gone; ONLY the authoritative rostered remains.
+    expect(manualOf(player.id)).toEqual(["status:rostered"]);
+  });
+
+  it("an authoritative empty tags array clears the player's manual tags (derived untouched)", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    await insertPlayerTag(opened.db, { playerId: player.id, namespace: "status", value: "rostered", source: "manual" });
+
+    const row = {
+      ...makeBackupEntry({ externalId: 691185, level: "milb", milbLevel: "Triple-A", position: "SS" }),
+      tags: [] as Array<{ namespace: string; value: string }>,
+    };
+    restorePlayerListBackup(opened.db, parse([row]), NOW);
+
+    expect(manualOf(player.id)).toEqual([]);
+    // Reconcile is manual-only: derived tags are still (re)built.
+    const derived = opened.db
+      .select()
+      .from(playerTags)
+      .where(eq(playerTags.playerId, player.id))
+      .all()
+      .filter((t) => t.source === "derived");
+    expect(derived.some((t) => t.namespace === "level" && t.value === "aaa")).toBe(true);
+  });
+
+  it("a legacy v1 entry (no tags field) leaves existing manual tags untouched", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    await insertPlayerTag(opened.db, { playerId: player.id, namespace: "status", value: "scouted", source: "manual" });
+
+    // makeBackupEntry omits `tags` entirely — a pre-#30 payload.
+    const row = makeBackupEntry({ externalId: 691185, level: "milb", milbLevel: "Triple-A", position: "SS" });
+    restorePlayerListBackup(opened.db, parse([row]), NOW);
+
+    // Absent tags means "leave manual tags untouched" — scouted survives.
+    expect(manualOf(player.id)).toEqual(["status:scouted"]);
   });
 
   it("skips a hand-edited derived-namespace (or unknown) tag rather than writing a bogus manual row", () => {
