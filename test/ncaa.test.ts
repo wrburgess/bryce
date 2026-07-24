@@ -318,6 +318,15 @@ describe("NCAA client", () => {
     expect(url).not.toContain("stats_player_seq=");
   });
 
+  it("builds Gavin Kelly's exact current 2026 player URL", () => {
+    const season = ncaaSeasonFor("2026");
+    expect(season).not.toBeNull();
+    const url = buildGameLogUrl({ seq: 9702101, season: season!, category: "batting" });
+    expect(url).toBe("https://stats.ncaa.org/players/9702101?year_stat_category_id=15867");
+    expect(url).not.toContain("game_sport_year_ctl_id");
+    expect(url).not.toContain("stats_player_seq=");
+  });
+
   it("builds the fielding game-log URL with the bundled fielding category id", () => {
     const season = ncaaSeasonFor("2025");
     expect(season).not.toBeNull();
