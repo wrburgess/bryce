@@ -637,7 +637,7 @@ describe("assembleDigest — window selection", () => {
     expect(a.batters).toEqual([]);
   });
 
-  it("sorts rows by level ladder then player name", async () => {
+  it("sorts rows by level ladder, surname, then first initial", async () => {
     const seed = async (fullName: string, sportId: number, level: "mlb" | "milb") => {
       const player = await insertPlayer(opened.db, {
         fullName,
@@ -649,13 +649,13 @@ describe("assembleDigest — window selection", () => {
     await seed("Zeta Single", 14, "milb");
     await seed("Alpha Triple", 11, "milb");
     await seed("Yankee Major", 1, "mlb");
-    await seed("Alpha Single", 14, "milb");
+    await seed("Bravo Single", 14, "milb");
 
     const a = await assemble("7d");
     expect(a.batters.map((r) => `${r.lvl} ${r.player.fullName}`)).toEqual([
       "MLB Yankee Major",
       "AAA Alpha Triple",
-      "A Alpha Single",
+      "A Bravo Single",
       "A Zeta Single",
     ]);
     const ranks = a.batters.map((r) => r.lvlRank);

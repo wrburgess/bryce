@@ -150,14 +150,14 @@ describe("renderDigest — tables", () => {
         batters: [row("Bryce Harper", "batting", [{ atBats: 4, plateAppearances: 4 }])],
       }),
     );
-    const dataLine = mail.text.split("\n").find((l) => l.includes("B Harper"));
-    expect(dataLine).toMatch(/^B Harper\s+MLB\s+4\b/);
+    const dataLine = mail.text.split("\n").find((l) => l.includes("Harper, B"));
+    expect(dataLine).toMatch(/^Harper, B\s+MLB\s+4\b/);
   });
 
   it("renders a zero row as .000/.000/.000 rather than a dash", () => {
     const mail = renderDigest(assemblyWith({ spec: "7d", batters: [idleRow] }));
     expect(mail.text).toContain(".000/.000/.000");
-    const dataLine = mail.text.split("\n").find((l) => l.includes("I Player"));
+    const dataLine = mail.text.split("\n").find((l) => l.includes("Player, I"));
     expect(dataLine).toContain(" 0 ");
   });
 
@@ -179,10 +179,10 @@ describe("renderDigest — tables", () => {
     const lines = mail.text.split("\n");
     const header = lines.find((l) => l.startsWith("Player"))!;
     expect(header.trimEnd()).toMatch(/QS\s+S\s+BS\s+HLD\s+RW\s+RL$/);
-    const dataLine = lines.find((l) => l.includes("Z Wheeler"))!;
+    const dataLine = lines.find((l) => l.includes("Wheeler, Z"))!;
     expect(dataLine.trimEnd().endsWith("0")).toBe(true); // RL, not the QS count
     expect(dataLine.trim().split(/\s+/)).toEqual([
-      "Z", "Wheeler", "MLB", "2", "13.0", "4", "16", "11.08", "3", "9", "0", "2.77", "0.92",
+      "Wheeler,", "Z", "MLB", "2", "13.0", "4", "16", "11.08", "3", "9", "0", "2.77", "0.92",
       "2", "0", "0", "0", "0", "0",
     ]);
   });
@@ -191,26 +191,26 @@ describe("renderDigest — tables", () => {
     const mail = renderDigest(assemblyWith({ spec: "7d", pitchers: [reliever7d] }));
     const header = mail.text.split("\n").find((l) => l.startsWith("Player"))!;
     expect(header.trimEnd()).toMatch(/WHIP\s+QS\s+S\s+BS\s+HLD\s+RW\s+RL$/);
-    const cells = (mail.text.split("\n").find((l) => l.includes("R Guy")) ?? "").trim().split(/\s+/);
+    const cells = (mail.text.split("\n").find((l) => l.includes("Guy, R")) ?? "").trim().split(/\s+/);
     // Player Lvl GP IP ER K K/9 BB HA HRA ERA WHIP QS S BS HLD RW RL
     expect(cells).toEqual([
-      "R", "Guy", "MLB", "2", "2.0", "1", "0", "0.00", "0", "0", "0", "4.50", "0.00",
+      "Guy,", "R", "MLB", "2", "2.0", "1", "0", "0.00", "0", "0", "0", "4.50", "0.00",
       "0", "2", "1", "3", "1", "0",
     ]);
     // The same three counters reach the HTML cells too.
-    expect(mail.html).toContain("R Guy");
+    expect(mail.html).toContain("Guy, R");
   });
 
   it("sums innings through outs and renders baseball notation", () => {
     // 6.1 + 6.2 is 13.0, not 12.3.
     const mail = renderDigest(assemblyWith({ spec: "7d", pitchers: [wheeler7d] }));
-    const dataLine = mail.text.split("\n").find((l) => l.includes("Z Wheeler"));
+    const dataLine = mail.text.split("\n").find((l) => l.includes("Wheeler, Z"));
     expect(dataLine).toContain("13.0");
   });
 
   it("derives ERA, WHIP and K/9 from the summed outs", () => {
     const mail = renderDigest(assemblyWith({ spec: "7d", pitchers: [wheeler7d] }));
-    const dataLine = mail.text.split("\n").find((l) => l.includes("Z Wheeler"));
+    const dataLine = mail.text.split("\n").find((l) => l.includes("Wheeler, Z"));
     // 4 ER over 39 outs => 2.77; (3 BB + 9 H) over 13 IP => 0.92; 16 K => 11.08.
     expect(dataLine).toContain("2.77");
     expect(dataLine).toContain("0.92");
@@ -251,14 +251,14 @@ describe("renderDigest — tables", () => {
     expect(mail.html).toContain("&lt;b&gt;");
   });
 
-  it("abbreviates the first name and leaves a single-word name alone", () => {
+  it("renders surname first with a first initial and leaves a single-word name alone", () => {
     const mail = renderDigest(
       assemblyWith({
         spec: "7d",
         batters: [row("Bryce Harper", "batting", []), row("Ichiro", "batting", [])],
       }),
     );
-    expect(mail.text).toContain("B Harper");
+    expect(mail.text).toContain("Harper, B");
     expect(mail.text).toContain("Ichiro");
     expect(mail.text).not.toContain("Bryce Harper");
   });
@@ -273,7 +273,7 @@ describe("renderDigest — tables", () => {
     const lines = mail.text.split("\n");
     const header = lines.find((l) => l.startsWith("Player"))!;
     const paIndex = header.indexOf("PA");
-    for (const name of ["B Harper", "A Verylongsurname"]) {
+    for (const name of ["Harper, B", "Verylongsurname, A"]) {
       const dataLine = lines.find((l) => l.startsWith(name))!;
       // Right-aligned numerics end where their header ends.
       expect(dataLine.length).toBeGreaterThan(paIndex);
@@ -307,7 +307,7 @@ describe("renderDigest — tables", () => {
     const header = long.text.split("\n").find((l) => l.startsWith("Player"))!;
     expect(header).toMatch(/PA\s+BB%\s+K%\s+H\b/);
     // Derived from SUMMED counters: 1 BB / 9 PA = 11.1%, 2 K / 9 PA = 22.2%.
-    const dataLine = long.text.split("\n").find((l) => l.includes("B Harper"))!;
+    const dataLine = long.text.split("\n").find((l) => l.includes("Harper, B"))!;
     expect(dataLine).toContain("11.1");
     expect(dataLine).toContain("22.2");
     expect(long.html).toContain("BB%");
@@ -328,9 +328,9 @@ describe("renderDigest — tables", () => {
 
     const lines = mail.text.split("\n");
     const ruleIdx = lines.findIndex((l) => /^-{3,}$/.test(l));
-    const harperIdx = lines.findIndex((l) => l.includes("B Harper"));
-    const schwarberIdx = lines.findIndex((l) => l.includes("K Schwarber"));
-    const farmIdx = lines.findIndex((l) => l.includes("F Hand"));
+    const harperIdx = lines.findIndex((l) => l.includes("Harper, B"));
+    const schwarberIdx = lines.findIndex((l) => l.includes("Schwarber, K"));
+    const farmIdx = lines.findIndex((l) => l.includes("Hand, F"));
     expect(harperIdx).toBeLessThan(ruleIdx);
     expect(schwarberIdx).toBeLessThan(ruleIdx); // after BOTH MLB rows
     expect(ruleIdx).toBeLessThan(farmIdx); // before the non-MLB row
@@ -479,7 +479,7 @@ describe("digestTableRows", () => {
     );
     expect(headers.slice(0, 4)).toEqual(["Player", "Lvl", "GP", "Batting"]);
     expect(rows).toHaveLength(1);
-    expect(rows[0]?.[0]).toBe("B Harper");
+    expect(rows[0]?.[0]).toBe("Harper, B");
     expect(rows[0]?.every((c) => typeof c === "string")).toBe(true);
   });
 
@@ -531,11 +531,11 @@ describe("renderDigest — non-ASCII name fidelity (#65 / ADR 0039)", () => {
     ]);
     const mail = renderDigest(assemblyWith({ spec: "7d", batters: [acuna, oreilly] }));
 
-    const acunaRendered = "R Acuña Jr.".normalize("NFC");
+    const acunaRendered = "Acuña Jr., R".normalize("NFC");
     expect(mail.text).toContain(acunaRendered);
     expect(mail.html).toContain(acunaRendered);
-    expect(mail.text).toContain("S O'Reilly");
-    expect(mail.html).toContain("S O'Reilly");
+    expect(mail.text).toContain("O'Reilly, S");
+    expect(mail.html).toContain("O'Reilly, S");
     // The apostrophe is safe in an HTML text node — NOT entity-escaped.
     expect(mail.html).not.toContain("O&#39;Reilly");
     expect(mail.html).not.toContain("O&apos;Reilly");
@@ -544,7 +544,7 @@ describe("renderDigest — non-ASCII name fidelity (#65 / ADR 0039)", () => {
     // escapeMarkdownCell touches `|`/newlines/link syntax, never letters.
     const md = renderDigestMarkdown(assemblyWith({ spec: "7d", batters: [acuna, oreilly] }));
     expect(md).toContain(acunaRendered);
-    expect(md).toContain("S O'Reilly");
+    expect(md).toContain("O'Reilly, S");
   });
 
   it("renders a wide-character name intact without throwing (alignment out of scope)", () => {
@@ -553,7 +553,7 @@ describe("renderDigest — non-ASCII name fidelity (#65 / ADR 0039)", () => {
     ]);
     const mail = renderDigest(assemblyWith({ spec: "7d", batters: [suzuki] }));
     // Survives intact; we assert PRESENCE, never monospace column alignment.
-    expect(mail.text).toContain("I 鈴木");
-    expect(mail.html).toContain("I 鈴木");
+    expect(mail.text).toContain("鈴木, I");
+    expect(mail.html).toContain("鈴木, I");
   });
 });
