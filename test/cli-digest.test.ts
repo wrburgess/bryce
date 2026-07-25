@@ -157,7 +157,7 @@ describe("digest CLI", () => {
       // Nothing was claimed either: it failed closed before touching anything.
       expect(output).toEqual([]);
       expect(errors).toEqual([
-        "error: unsupported --window value; supported: 1d, 7d, 14d, 21d, 28d, 35d, 60d, ytd",
+        "error: invalid value '30d' for '--window'; expected 1d, 7d, 14d, 21d, 28d, 35d, 60d, ytd",
       ]);
     });
 

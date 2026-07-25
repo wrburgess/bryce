@@ -84,7 +84,7 @@ export function parseList(argv: string[]): string | null | undefined {
 
 export async function runDigestCli(argv: string[], deps: DigestCliDeps): Promise<number> {
   const writeError = deps.writeError ?? deps.write;
-  const syntaxFailure = preflightDirect(["digest"], argv, [], false);
+  const syntaxFailure = preflightDirect(["digest"], argv);
   if (syntaxFailure !== null) {
     writeError(`error: ${syntaxFailure}`);
     return 1;
