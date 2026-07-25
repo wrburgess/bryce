@@ -57,7 +57,7 @@ state, so re-running a Window always sends the same content.
   not exist yet, or over a failed/expired slot, sends and **records a delivery row normally**. It
   never jumps an in-flight claim held by another run. The full semantics — and the three
   consequences worth knowing — are in
-  [Running Bryce → Forcing a test send](../guides/running-sk.md#forcing-a-test-send) and
+  [Running Bryce → Forcing a test send](../guides/running-bryce.md#forcing-a-test-send) and
   [ADR 0034](../adr/0034-digest-delivery-claim-at-least-once.md).
 - The `1d` window is the scheduled daily artifact; any wider window (`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`) is an
   on-demand report that takes no slot and answers even during Offseason Sleep
@@ -159,7 +159,7 @@ retention keepLast=10 kept=10 deleted=1
 A **Snapshot** is the local, testable rollback point — complementary to, not a replacement for, the
 off-box Litestream **Replica** ([ADR 0042](../adr/0042-snapshot-and-player-backup-complement-litestream.md)).
 Snapshot files are owner-only (`0600`). Schedule it nightly with launchd — see
-[Running Bryce → Backup and restore](../guides/running-sk.md#backup-and-restore).
+[Running Bryce → Backup and restore](../guides/running-bryce.md#backup-and-restore).
 
 ## `db:restore` — swap a Snapshot into place
 
@@ -178,7 +178,7 @@ sidecars.
 
 **Stop the app first.** Restore **refuses** (`error: database is in use by pid …`) while any Bryce
 process (server, launchd jobs) is running, via a cooperative interlock. It never opens or migrates the
-live database itself — see the [Restore runbook](../guides/running-sk.md#restore-runbook) for the
+live database itself — see the [Restore runbook](../guides/running-bryce.md#restore-runbook) for the
 full stop-everything-then-restore procedure, including the mandatory **fix/revert the offending
 migration before restart** step.
 
@@ -263,7 +263,7 @@ under `/api`, and the [MCP server](../mcp/README.md) at `/mcp` — both behind t
 ([ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)). It **fails closed**: with no `API_TOKEN`
 configured it refuses to start and serves nothing (including `/health`). The port is `SERVER_PORT`
 (default `3000`). Takes no arguments; all configuration is environment-only (see
-[Getting Started](../guides/getting-started.md) and [Running Bryce](../guides/running-sk.md)).
+[Getting Started](../guides/getting-started.md) and [Running Bryce](../guides/running-bryce.md)).
 
 ## See also
 
