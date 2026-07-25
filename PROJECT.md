@@ -101,10 +101,11 @@ definitions.
   and `.github/copilot-instructions.md` is a discovery marker. Set to `render` (a byte-for-byte
   `parity:render` block in `.github/copilot-instructions.md`) only if the host drives work through a
   legacy in-editor Copilot IDE; the parity check enforces the render matches `AGENTS.md`.
-- **Reviewer (second-model review of plans and PRs):** the **primary** Reviewer is **Codex**
-  (harness) running **GPT-5.6** (model — set in Codex settings; per ADR 0024 the harness and model
-  are named separately, matching the Attribution table above). The AC summons it — not the HC —
-  through the **local Codex CLI**, wrapped by [`scripts/summon-reviewer.ts`](scripts/summon-reviewer.ts).
+- **Reviewer (second-model review of plans and PRs):** the AC exhausts the available independent
+  harnesses before involving the HC. The first rung is **Codex**, using an explicitly selected model
+  distinct from the acting model (the shipped alternate is `gpt-5.6-terra`). If the AC is Codex,
+  that is a different-model review, not self-review. The AC summons it — not the HC — through the
+  **local Codex CLI**, wrapped by [`scripts/summon-reviewer.ts`](scripts/summon-reviewer.ts).
   These are the **complete, runnable** invocations — every required flag is present, and the summon
   self-test executes these exact lines out of this file, so a command documented here that does not
   run turns the gate red rather than silently failing in a lifecycle run:
@@ -112,18 +113,19 @@ definitions.
 ```sh
 # Plans (Stage 2) - the plan text is piped to the CLI's `exec` subcommand under an
 # adversarial plan-critique prompt.
-npx tsx scripts/summon-reviewer.ts --mode plan --input PLAN_FILE --out OUT_FILE --ac AC_NAME
+npx tsx scripts/summon-reviewer.ts --mode plan --input PLAN_FILE --out OUT_FILE --ac AC_NAME --ac-model AC_MODEL --reviewer-model REVIEWER_MODEL
 
 # PRs / work (Stage 4) - the CLI's `review` subcommand reviews the branch's diff against its base.
-npx tsx scripts/summon-reviewer.ts --mode work --base BRANCH --out OUT_FILE --ac AC_NAME
+npx tsx scripts/summon-reviewer.ts --mode work --base BRANCH --out OUT_FILE --ac AC_NAME --ac-model AC_MODEL --reviewer-model REVIEWER_MODEL
 ```
 
   - `PLAN_FILE` — the plan text to critique (plan mode only). `OUT_FILE` — where the review body is
     written; **required in both modes**, and the summon exits 1 with a usage error without it.
     `BRANCH` — the base to review against (default `main`).
-  - `AC_NAME` — the **acting agent** (`claude`, `codex`, …). **Always pass it.** It is the only thing
-    that makes the `self_review` refusal reachable: the default is `claude`, so a run where Codex is
-    the AC would otherwise stage Codex reviewing its own work — the one case the guard exists for.
+  - `AC_NAME` / `AC_MODEL` — the **acting harness and runtime-actual model** (for example,
+    `codex` / `gpt-5.6`). `REVIEWER_MODEL` is the model the Codex CLI must use (normally
+    `gpt-5.6-terra`). **Always pass all three.** The script refuses only when a Codex AC names the
+    same model as its reviewer; same harness plus a distinct model is an independent review.
   - `--min-bytes N` (default 200) sets the substance floor below which stdout is not a review;
     `--timeout SECONDS` (default 900) caps the wall clock. Neither is normally passed.
 
@@ -132,23 +134,25 @@ npx tsx scripts/summon-reviewer.ts --mode work --base BRANCH --out OUT_FILE --ac
   no lifecycle-host call** — it writes the review body to a file and classifies the outcome; the AC
   posts it. That keeps token handling out of the bundled script and makes every failure mode
   testable offline (`bash scripts/summon_reviewer.test.sh`).
-- **Reviewer failure ladder.** The summon classifies its outcome as `ok` or one of eight failures —
+  - **Reviewer failure ladder.** The summon classifies its outcome as `ok` or one of eight failures —
   `not_found` (no Codex CLI on PATH), `not_authenticated` (`login status` did not confirm a
   session), `exit_nonzero` (the CLI failed), `empty_output` (exit 0 but no review text),
   `insufficient_output` (exit 0 with a body below the substance floor — a banner or a one-line bail,
   not a review), `drain_timeout` (the CLI finished but its output could not be read to EOF, so the
   review was lost rather than absent), `timeout` (no review inside the wall-clock cap),
-  `self_review` (the acting agent *is* Codex, so it would not be a second model).
+  `self_review` (the acting Codex model matches the requested Codex reviewer model).
 
-  **The fallback trigger is the EXIT STATUS, not the classification list: on ANY non-zero exit the
-  AC requests a Copilot review as the fallback.** Some failures are not classifications at all — a
-  usage error (a malformed or incomplete command) and an unwritable `--out` print to stderr and exit
-  1 without a classification line, and those are among the likeliest failures in practice. A ladder
-  keyed to the named classifications alone would leave them unhandled, so the rule is the exit
-  status: `0` = review in hand, anything else = fall back. The fallback is a requested-reviewer POST
-  on the PR naming `Copilot` (the same mechanism the HC used by hand on PR #38, which recorded the
-  timeline event `review_requested by wrburgess -> Copilot`). Copilot's declared model is
-  `model varies (GPT / Claude / Gemini)`.
+  **The fallback trigger is the EXIT STATUS, not the classification list: `0` = review in hand;
+  anything else = try the next independent Reviewer.** Some failures are not classifications at all
+  — a usage error (a malformed or incomplete command) and an unwritable `--out` print to stderr and
+  exit 1 without a classification line, and those are among the likeliest failures in practice.
+  The AC must make these attempts in order, skipping only a runner that is unavailable in the current
+  environment: (1) Codex with a model distinct from the AC; (2) Claude Code with a model distinct
+  from the AC; (3) Copilot with a distinct selected model; (4) Antigravity/Gemini with a distinct
+  selected model. For a plan, each runner must return a critique directly (a requested PR reviewer is
+  not a valid plan fallback); for work, it may post or return a review. Record every failed rung and
+  the harness/model that answered. Only after all available rungs fail does the degradation floor
+  apply. Copilot's declared model remains `model varies (GPT / Claude / Gemini)`.
 - **Reviewer degradation floor:** `stop-and-ask` — what happens when the whole Reviewer chain is
   exhausted. **This value is not configurable**: `stop-and-ask` is its only allowed value and the
   parity check hard-fails any other, on the same footing as the merge gate. A run that cannot obtain

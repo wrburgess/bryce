@@ -235,6 +235,22 @@ report "work mode -> body file is the CLI's bytes, byte-for-byte" $?
 grep -qF -- "review --base main" "$FAKE_LOG"
 report "work mode -> CLI invoked as 'review --base <branch>'" $?
 
+make_fake_codex ok
+OUT="$TMP/codex-alt-model.md"
+expect_status "Codex AC -> distinct reviewer model succeeds" 0 "summon_reviewer: OK - work review" \
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --codex-bin "$FAKE_BIN" \
+  --ac codex --ac-model gpt-5.6 --reviewer-model gpt-5.6-terra
+grep -qF -- "--model gpt-5.6-terra review --base main" "$FAKE_LOG"
+report "Codex AC -> reviewer model is forwarded before the review subcommand" $?
+
+make_fake_codex ok
+expect_status "Codex AC -> same reviewer model is refused" 1 "FAILED (self_review)" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/codex-same-model.md" --codex-bin "$FAKE_BIN" \
+  --ac codex --ac-model gpt-5.6 --reviewer-model gpt-5.6
+
+expect_status "Codex AC -> missing acting model is a usage error" 1 "--ac codex requires --ac-model MODEL" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/codex-missing-acting-model.md" --codex-bin "$FAKE_BIN" --ac codex
+
 make_fake_codex echo_stdin
 PLAN="$TMP/plan.md"
 OUT="$TMP/plan-body.md"

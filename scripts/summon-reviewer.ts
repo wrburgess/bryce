@@ -20,7 +20,10 @@
 //     --out FILE          where to write the reviewer's body, raw bytes (required)
 //     --codex-bin PATH    the Codex CLI to summon (default: codex, resolved on PATH)
 //     --timeout SECONDS   wall-clock cap on the review (default: 900)
-//     --ac NAME           the acting agent, so a self-review can be refused (default: claude)
+//     --ac NAME           the acting harness, so a same-model review can be refused (default: claude)
+//     --ac-model MODEL    the acting model (required when --ac codex)
+//     --reviewer-model MODEL
+//                         Codex model to use for this review (required when --ac codex)
 //     --min-bytes N       substance floor on the review body (default: 200; 0 disables)
 //
 // Output (stdout, ASCII only — rules/scripting.md / ADR 0011), exactly two shapes:
@@ -54,7 +57,7 @@ const DEFAULT_AC = "claude";
 const DEFAULT_TIMEOUT = 900;
 
 const PREFLIGHT_TIMEOUT = 30;
-const SELF_REVIEW_AC = "codex";
+const CODEX_AC = "codex";
 const POLL_INTERVAL = 0.025;
 const TERM_GRACE = 2.0;
 const DRAIN_TIMEOUT = 5.0;
@@ -153,6 +156,8 @@ interface Options {
   codexBin: string;
   timeout: number;
   ac: string;
+  acModel: string | null;
+  reviewerModel: string | null;
   minBytes: number;
 }
 
@@ -169,7 +174,7 @@ class SummonReviewer {
 
     if (this.selfReview()) {
       return this.failed("self_review", [
-        `acting agent is \`${ascii(this.opts.ac)}\` - the Reviewer must be a different model`,
+        `acting model \`${ascii(this.opts.acModel as string)}\` matches Codex reviewer model - the Reviewer must be a different model`,
       ]);
     }
 
@@ -243,6 +248,14 @@ class SummonReviewer {
     if (o.out === null || o.out === "") return "missing required --out FILE";
     if (!(o.timeout > 0)) return "--timeout must be greater than zero";
     if (o.minBytes < 0) return "--min-bytes must be zero or greater";
+    if (String(o.ac).trim().toLowerCase() === CODEX_AC &&
+      (o.acModel === null || o.acModel.trim() === "")) {
+      return "--ac codex requires --ac-model MODEL";
+    }
+    if (String(o.ac).trim().toLowerCase() === CODEX_AC &&
+      (o.reviewerModel === null || o.reviewerModel.trim() === "")) {
+      return "--ac codex requires --reviewer-model MODEL";
+    }
 
     if (o.mode === "plan") {
       if (o.input === null || o.input === "") return "--mode plan requires --input FILE (the plan text to critique)";
@@ -253,7 +266,9 @@ class SummonReviewer {
   }
 
   private selfReview(): boolean {
-    return String(this.opts.ac).trim().toLowerCase() === SELF_REVIEW_AC;
+    return String(this.opts.ac).trim().toLowerCase() === CODEX_AC &&
+      this.opts.acModel !== null && this.opts.reviewerModel !== null &&
+      this.opts.acModel.trim().toLowerCase() === this.opts.reviewerModel.trim().toLowerCase();
   }
 
   private outPathProblem(): string | null {
@@ -268,9 +283,10 @@ class SummonReviewer {
   // --- invocation -----------------------------------------------------------
 
   private commandFor(bin: string): string[] {
+    const modelArgs = this.opts.reviewerModel === null ? [] : ["--model", this.opts.reviewerModel];
     return this.opts.mode === "work"
-      ? [bin, "review", "--base", this.opts.base]
-      : [bin, "exec"];
+      ? [bin, ...modelArgs, "review", "--base", this.opts.base]
+      : [bin, ...modelArgs, "exec"];
   }
 
   // Assembled in BINARY: prompt + "\n" + raw plan bytes + "\n----- END PLAN -----\n".
@@ -494,11 +510,13 @@ function parseArgs(args: string[]): Options {
     codexBin: DEFAULT_CODEX_BIN,
     timeout: DEFAULT_TIMEOUT,
     ac: DEFAULT_AC,
+    acModel: null,
+    reviewerModel: null,
     minBytes: DEFAULT_MIN_BYTES,
   };
 
   const takesValue = new Set([
-    "--mode", "--input", "--base", "--out", "--codex-bin", "--timeout", "--ac", "--min-bytes",
+    "--mode", "--input", "--base", "--out", "--codex-bin", "--timeout", "--ac", "--ac-model", "--reviewer-model", "--min-bytes",
   ]);
 
   for (let i = 0; i < args.length; i++) {
@@ -526,6 +544,8 @@ function parseArgs(args: string[]): Options {
       case "--out": opts.out = value; break;
       case "--codex-bin": opts.codexBin = value; break;
       case "--ac": opts.ac = value; break;
+      case "--ac-model": opts.acModel = value; break;
+      case "--reviewer-model": opts.reviewerModel = value; break;
       case "--timeout": opts.timeout = parseStrictFloat(flag, value); break;
       case "--min-bytes": opts.minBytes = parseStrictInt(flag, value); break;
     }
