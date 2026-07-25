@@ -156,6 +156,30 @@ export interface RefreshCounts {
   statLinesUpdated: number;
 }
 
+/**
+ * Persist the completed portion of a running sweep. Like terminal settlement,
+ * this is fenced by the run's immutable id plus its still-running state: a
+ * successor reaps this row and creates a different id, so an old worker can
+ * never update the successor's progress.
+ *
+ * Returns false only when the conditional update matched no owned running row.
+ * Database failures deliberately propagate to runRefresh's outer failure
+ * boundary rather than being mistaken for lost ownership.
+ */
+export function updateRefreshRunProgress(db: Db, runId: number, counts: RefreshCounts): boolean {
+  const result = db
+    .update(refreshRuns)
+    .set({
+      playersRefreshed: counts.playersRefreshed,
+      playersTotal: counts.playersTotal,
+      statLinesInserted: counts.statLinesInserted,
+      statLinesUpdated: counts.statLinesUpdated,
+    })
+    .where(and(eq(refreshRuns.id, runId), eq(refreshRuns.status, "running")))
+    .run();
+  return result.changes > 0;
+}
+
 export interface SettleRefreshArgs {
   runId: number;
   now: Date;
@@ -261,6 +285,8 @@ export interface RefreshHealth {
   lastSuccessAt: string | null;
   playersRefreshed: number;
   playersTotal: number;
+  statLinesInserted: number;
+  statLinesUpdated: number;
 }
 
 /**
@@ -326,6 +352,8 @@ export function refreshHealth(db: Db, now: Date, tz: string): RefreshHealth | nu
     lastSuccessAt: lastSuccess?.finishedAt ?? null,
     playersRefreshed: latest.playersRefreshed,
     playersTotal: latest.playersTotal,
+    statLinesInserted: latest.statLinesInserted,
+    statLinesUpdated: latest.statLinesUpdated,
   };
 }
 

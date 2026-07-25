@@ -10,6 +10,7 @@ import {
   refreshHealth,
   renewRefreshRun,
   settleRefreshRun,
+  updateRefreshRunProgress,
 } from "../src/jobs/refresh-run.js";
 import { TEST_TZ, insertRefreshRun, testDb, testFileDb } from "./factories.js";
 
@@ -129,6 +130,21 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0043)", () => {
     expect(renewRefreshRun(opened.db, owner.runId, at(PAST_RENEWED_LEASE))).toBe(false);
     // And a renew of a wholly unknown id is likewise false (nothing to own).
     expect(renewRefreshRun(opened.db, 999_999, at(PAST_RENEWED_LEASE))).toBe(false);
+  });
+
+  it("persists live progress only while the run still owns its running row", () => {
+    const claim = claimRefreshRun(opened.db, { now: at(T0), playersTotal: 3 });
+    if (!claim.claimed) throw new Error("expected claim");
+    const counts = { playersRefreshed: 1, playersTotal: 3, statLinesInserted: 4, statLinesUpdated: 2 };
+
+    expect(updateRefreshRunProgress(opened.db, claim.runId, counts)).toBe(true);
+    expect(opened.db.select().from(refreshRuns).all()[0]).toMatchObject(counts);
+
+    settleRefreshRun(opened.db, { runId: claim.runId, now: at(WITHIN_LEASE), status: "partial", counts });
+    expect(updateRefreshRunProgress(opened.db, claim.runId, {
+      playersRefreshed: 3, playersTotal: 3, statLinesInserted: 9, statLinesUpdated: 9,
+    })).toBe(false);
+    expect(opened.db.select().from(refreshRuns).all()[0]).toMatchObject(counts);
   });
 
   it("a live and an expired running row coexist: the LIVE one wins admission", async () => {

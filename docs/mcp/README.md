@@ -220,8 +220,9 @@ Run a single read-only SQL query for ad-hoc analysis.
 Health snapshot, the same shape as `GET /health`.
 
 - **Inputs:** none.
-- **Success:** `{ ok, players, statLines, lastDelivery }` — active Player count, stored Stat Line
-  count, and the last digest/heartbeat delivery (including an in-flight `sending` status).
+- **Success:** `{ ok, players, statLines, lastDelivery, refresh }` — active Player count, stored Stat Line
+  count, the last digest/heartbeat delivery (including an in-flight `sending` status), and Refresh
+  freshness/progress when a whole-watch-list Refresh has run.
 - **Side effects:** none.
 
 ### Named player lists (`#70`)

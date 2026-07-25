@@ -15,7 +15,7 @@ import type { NcaaStatCategory } from "../ncaa/seasons.js";
 import { ncaaSeasonFor } from "../ncaa/seasons.js";
 import { syncDerivedTags } from "../tags/service.js";
 import type { RefreshTerminalStatus } from "./refresh-run.js";
-import { claimRefreshRun, renewRefreshRun, settleRefreshRun } from "./refresh-run.js";
+import { claimRefreshRun, renewRefreshRun, settleRefreshRun, updateRefreshRunProgress } from "./refresh-run.js";
 
 export interface RefreshDeps {
   db: Db;
@@ -240,16 +240,42 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
         const result = await refreshOnePlayer(deps, player, season);
         if (result === null) {
           playersSkipped += 1;
-          continue;
+        } else {
+          playersRefreshed += 1;
+          inserted += result.inserted;
+          updated += result.updated;
         }
-        playersRefreshed += 1;
-        inserted += result.inserted;
-        updated += result.updated;
       } catch (err) {
         playerFailures.push({
           playerId: player.id,
           reason: err instanceof Error ? err.message : String(err),
         });
+      }
+
+      // Persist only completed work, after the player's atomic write or its
+      // collected skip/failure. A crash in this narrow window can under-report
+      // only an abandoned running row; it can never overstate committed data.
+      // A successor reaps this row before creating its own, so a false result
+      // means this worker lost ownership and must not start another player.
+      if (!updateRefreshRunProgress(db, runId, {
+        playersRefreshed,
+        playersTotal: activePlayers.length,
+        statLinesInserted: inserted,
+        statLinesUpdated: updated,
+      })) {
+        return {
+          skipped: true,
+          reason: "superseded",
+          status: null,
+          playersRefreshed,
+          statLinesInserted: inserted,
+          statLinesUpdated: updated,
+          playersSkipped,
+          playersFailed: playerFailures.length,
+          calendarFailures,
+          playerFailures,
+          runId,
+        };
       }
     }
 
