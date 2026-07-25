@@ -178,7 +178,7 @@ Snapshot files are owner-only (`0600`). Schedule it nightly with launchd — see
 ## `db:restore` — swap a Snapshot into place
 
 ```sh
-npm run db:restore -- --from backups/bryce-20260722T030000Z-000.db
+bryce db restore --from backups/bryce-20260722T030000Z-000.db
 ```
 
 **Restore** is the destructive recovery op: it validates the candidate Snapshot (integrity check,
@@ -199,7 +199,7 @@ migration before restart** step.
 ## `players:backup` — write a Player List Backup
 
 ```sh
-npm run players:backup -- --out backups/players.json
+bryce players backup --out backups/players.json
 ```
 
 Writes a **Player List Backup** — a portable, versioned JSON serialization of *every* Player row
@@ -217,7 +217,7 @@ restore point ([Domain glossary](../domain/CONTEXT.md)).
 ## `players:restore` — re-import a Player List Backup
 
 ```sh
-npm run players:restore -- --in backups/players.json
+bryce players restore --in backups/players.json
 ```
 
 Re-imports a Player List Backup **network-free and all-or-nothing**, upserting on each Player's natural
@@ -232,15 +232,15 @@ invalid payload or a split-identity conflict fails the whole import with a non-z
 ## `players:batch-add` — stage many Players in one call
 
 ```sh
-npm run players:batch-add -- --person-ids 691185,700001 --ncaa-seqs 2649785
-npm run players:batch-add -- --names "Bobby Witt Jr." --names "Gunnar Henderson"
-npm run players:batch-add -- --file roster.txt
+bryce players batch-add --person-ids 691185,700001 --ncaa-seqs 2649785
+bryce players batch-add --names "Bobby Witt Jr." --names "Gunnar Henderson"
+bryce players batch-add --file roster.txt
 ```
 
 Stages up to **25** Players onto the Watch List in one call ([#68](https://github.com/wrburgess/bryce/issues/68),
 [ADR 0045](../adr/0045-batch-add-stages-by-identity-best-effort-defers-backfill.md)). Each Player's
 **identity** is resolved and his row is staged **now**, but — unlike `seed add` — **no first Refresh
-runs inline**: his Stat Lines appear at the next `npm run refresh`. Prints one greppable
+runs inline**: his Stat Lines appear at the next `bryce refresh`. Prints one greppable
 `outcome status=... ` line per entry, then a `summary added=… updated=… unresolved=… failed=… total=…`
 line. All flags and the file merge into one batch.
 

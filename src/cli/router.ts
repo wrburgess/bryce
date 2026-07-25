@@ -1,3 +1,5 @@
+import { NCAA_SEASONS } from "../ncaa/seasons.js";
+
 /**
  * The safe command boundary for the locally activated `bryce` executable.
  *
@@ -17,13 +19,14 @@ export type Command = {
   required?: readonly string[];
   oneOf?: readonly (readonly string[])[];
   exactlyOneOf?: readonly (readonly string[])[];
+  requires?: readonly (readonly [string, string])[];
   /** Long-lived adapters keep the router process alive after startup. */
   longRunning?: boolean;
 };
 
 const leaf = (
   path: readonly string[], purpose: string, usage: string, example: string,
-  load: Command["load"], options: readonly Option[] = [], requirements: Pick<Command, "required" | "oneOf" | "exactlyOneOf"> = {},
+  load: Command["load"], options: readonly Option[] = [], requirements: Pick<Command, "required" | "oneOf" | "exactlyOneOf" | "requires"> = {},
 ): Command => ({ path, purpose, usage, example, load, options, ...requirements });
 
 const nonBlank = (value: string): string | null => value.trim().length > 0 ? null : "a non-blank value";
@@ -35,8 +38,11 @@ const value = (name: string, description: string, values?: readonly string[], al
 const inlineValue = (name: string, description: string, values?: readonly string[], aliases?: string[], validate?: Option["validate"]): Option =>
   ({ name, description, values, aliases, validate: withNonBlank(validate), inline: true });
 const flag = (name: string, description: string): Option => ({ name, description, value: false });
-const positiveInteger = (value: string): string | null => /^\d+$/.test(value) && Number(value) > 0 ? null : "a positive integer";
-const year = (value: string): string | null => /^\d{4}$/.test(value) ? null : "a four-digit year";
+const positiveInteger = (value: string): string | null => /^\d+$/.test(value) && String(Number(value)) === value && Number.isSafeInteger(Number(value)) && Number(value) > 0 ? null : "a canonical positive integer";
+const supportedSeasons = NCAA_SEASONS.map((season) => season.year);
+const year = (value: string): string | null => /^\d{4}$/.test(value)
+  ? (supportedSeasons.includes(value) ? null : `a supported NCAA season (${supportedSeasons.join(", ")})`)
+  : "a four-digit year";
 const positiveIntegerList = (value: string): string | null => value.split(",").every((part) => positiveInteger(part.trim()) === null) ? null : "a comma-separated list of positive integers";
 const manualTag = (candidate: string): string | null => {
   const match = /^([^:]+):([^:]+)$/.exec(candidate);
@@ -74,9 +80,9 @@ export const COMMANDS: readonly Command[] = [
   leaf(["db", "migrate"], "Apply pending database migrations.", "bryce db migrate", "bryce db migrate", () => import("./migrate.js")),
   leaf(["db", "backup"], "Create a database snapshot.", "bryce db backup", "bryce db backup", () => import("./backup.js")),
   leaf(["db", "restore"], "Restore a database snapshot.", "bryce db restore --from FILE", "bryce db restore --from backups/bryce-YYYYMMDDTHHMMSSZ-000.db", () => import("./restore.js"), [value("from", "Snapshot file.")], { required: ["from"] }),
-  leaf(["ncaa", "probe"], "Probe the NCAA scraper.", "bryce ncaa probe --seq N [--season YYYY] [--type TYPE]", "bryce ncaa probe --seq 2649785", () => import("./ncaa-probe.js"), [value("seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("season", "Season year.", undefined, undefined, year), value("type", "Stat type.", ["batting", "pitching", "fielding"])], { required: ["seq"] }),
+  leaf(["ncaa", "probe"], "Probe the NCAA scraper.", "bryce ncaa probe --seq N [--season YYYY] [--type TYPE]", "bryce ncaa probe --seq 2649785", () => import("./ncaa-probe.js"), [value("seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("season", "Season year.", supportedSeasons, undefined, year), value("type", "Stat type.", ["batting", "pitching", "fielding"])], { required: ["seq"] }),
   leaf(["connector", "smoke"], "Smoke-test a running MCP connector.", "bryce connector smoke [--mutate]", "bryce connector smoke", () => import("./connector-smoke.js"), [flag("mutate", "Also run the configured mutation probe.")]),
-  leaf(["seed", "add"], "Add a watch-list player.", "bryce seed add (--person-id N|--ncaa-seq N|--search NAME) [--pick I]", "bryce seed add --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("search", "Player name."), value("pick", "One-based search result.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "ncaa-seq", "search"]] }),
+  leaf(["seed", "add"], "Add a watch-list player.", "bryce seed add (--person-id N|--ncaa-seq N|--search NAME) [--pick I]", "bryce seed add --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("search", "Player name."), value("pick", "One-based search result.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "ncaa-seq", "search"]], requires: [["pick", "search"]] }),
   leaf(["seed", "deactivate"], "Deactivate a watch-list player.", "bryce seed deactivate (--person-id N|--ncaa-seq N)", "bryce seed deactivate --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "ncaa-seq"]] }),
   leaf(["seed", "list"], "List watch-list players.", "bryce seed list [--tags EXPR]", "bryce seed list --tags status:rostered", () => import("./seed.js"), [value("tags", "Tag selector.", undefined, undefined, tagSelector)]),
   leaf(["seed", "tag", "add"], "Add a manual player tag.", "bryce seed tag add (--person-id N|--ncaa-seq N) --tag TAG", "bryce seed tag add --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("tag", "Manual tag.", undefined, undefined, manualTag)], { required: ["tag"], exactlyOneOf: [["person-id", "ncaa-seq"]] }),
@@ -103,7 +109,11 @@ export function renderHelp(path: readonly string[] = [], commands: readonly Comm
   const entries = [...new Set(commands.filter((c) => c.path.length > path.length && path.every((p, i) => c.path[i] === p)).map((c) => c.path[path.length]!))].sort().map((child) => {
     const childCommand = commands.find((c) => c.path.length === path.length + 1 && c.path[path.length] === child && path.every((p, i) => c.path[i] === p))
       ?? commands.find((c) => c.path.length > path.length && c.path[path.length] === child && path.every((p, i) => c.path[i] === p));
-    return childCommand === undefined ? `  ${child}` : `  ${child}  ${childCommand.purpose}`;
+    if (childCommand === undefined) return `  ${child}`;
+    const details = childCommand.path.length === path.length + 1
+      ? `\n    Purpose: ${childCommand.purpose}\n    Usage: ${childCommand.usage}\n    Options: ${(childCommand.options ?? []).map((option) => `--${option.name}`).join(", ") || "none"}\n    Example: ${childCommand.example}`
+      : `  ${childCommand.purpose}`;
+    return `  ${child}${details}`;
   });
   return [`Usage: ${label} <command>`, "", "Commands:", ...entries, "", `Run '${label} help <command>' for command help.`].join("\n");
 }
@@ -121,7 +131,7 @@ export function resolve(argv: readonly string[], commands: readonly Command[] = 
     const path = argv.slice(0, index);
     const exact = commands.find((command) => command.path.length === index && command.path.every((segment, segmentIndex) => segment === path[segmentIndex]));
     const hasChild = commands.some((command) => command.path.length > index && path.every((segment, segmentIndex) => command.path[segmentIndex] === segment));
-    if (hasChild && ["help", "--help", "-h"].includes(argv[index] ?? "")) return { help: path };
+    if (hasChild && ["help", "--help", "-h"].includes(argv[index] ?? "")) return { help: [...path, ...argv.slice(index + 1)] };
     if (exact !== undefined && (!hasChild || argv[index] === undefined || argv[index]!.startsWith("-"))) {
       return { command: exact, argv: argv.slice(index) };
     }
@@ -152,9 +162,9 @@ export function preflight(command: Command, argv: readonly string[]): string | n
     }
     const candidate = inline ?? argv[++index];
     if (candidate === undefined || candidate.startsWith("-")) return `option '${name}' requires a value`;
-    if (option.values !== undefined && !option.values.includes(candidate)) return `invalid value '${candidate}' for '${name}'; expected ${option.values.join(", ")}`;
     const validation = option.validate?.(candidate);
     if (validation !== undefined && validation !== null) return `invalid value '${candidate}' for '${name}'; expected ${validation}`;
+    if (option.values !== undefined && !option.values.includes(candidate)) return `invalid value '${candidate}' for '${name}'; expected ${option.values.join(", ")}`;
     seen.add(option.name);
   }
   for (const name of command.required ?? []) {
@@ -166,6 +176,11 @@ export function preflight(command: Command, argv: readonly string[]): string | n
   for (const group of command.exactlyOneOf ?? []) {
     const selected = group.filter((name) => seen.has(name));
     if (selected.length !== 1) return `exactly one of ${group.map((name) => `--${name}`).join(", ")} is required`;
+  }
+  for (const [dependent, prerequisite] of command.requires ?? []) {
+    if (seen.has(dependent) && !seen.has(prerequisite)) {
+      return `option '--${dependent}' requires '--${prerequisite}'`;
+    }
   }
   return null;
 }

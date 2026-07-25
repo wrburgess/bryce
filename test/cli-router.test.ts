@@ -61,6 +61,8 @@ describe("CLI router metadata", () => {
     expect(nested.argv).toEqual(["--name", "Prospects"]);
     const digest = resolve(["digest", "-w", "7d", "--list", "Prospects"]);
     expect(digest.argv).toEqual(["-w", "7d", "--list", "Prospects"]);
+    expect(resolve(["players", "lists", "help", "create"]).help).toEqual(["players", "lists", "create"]);
+    expect(renderHelp(["players", "lists"])).toContain("Usage: bryce players lists create");
   });
 
   it("rejects malformed numeric leaf arguments before a loader can run", () => {
@@ -72,7 +74,33 @@ describe("CLI router metadata", () => {
     const probe = COMMANDS.find((command) => command.path.join(" ") === "ncaa probe")!;
     expect(preflight(probe, ["--seq", "not-a-number"])).toContain("positive integer");
     expect(preflight(probe, ["--season", "twenty"])).toContain("four-digit year");
+    expect(preflight(probe, ["--season", "2099"])).toContain("supported NCAA season");
+    expect(preflight(probe, ["--seq", "01"])).toContain("canonical positive integer");
+    const add = COMMANDS.find((command) => command.path.join(" ") === "seed add")!;
+    expect(preflight(add, ["--person-id", "1", "--pick", "2"])).toContain("requires '--search'");
+    expect(preflight(add, ["--search", "Acosta", "--pick", "01"])).toContain("canonical positive integer");
   });
+
+  it("runs valid real adapters and propagates their statuses", async () => {
+    const work = mkdtempSync(join(tmpdir(), "bryce-router-adapters-"));
+    const previous = { cwd: process.cwd(), database: process.env.DATABASE_PATH, backup: process.env.BACKUP_DIR, mailer: process.env.MAILER_PROVIDER, token: process.env.API_TOKEN };
+    try {
+      process.chdir(work);
+      process.env.DATABASE_PATH = join(work, "bryce.db");
+      process.env.BACKUP_DIR = join(work, "backups");
+      process.env.MAILER_PROVIDER = "console";
+      process.env.API_TOKEN = "test-token";
+      expect(await runRouter(["db", "migrate"], vi.fn())).toBe(0);
+      expect(await runRouter(["players", "lists", "show"], vi.fn())).toBe(0);
+      expect(await runRouter(["digest", "--window", "7d"], vi.fn())).toBe(0);
+    } finally {
+      process.chdir(previous.cwd);
+      for (const [key, value] of Object.entries({ DATABASE_PATH: previous.database, BACKUP_DIR: previous.backup, MAILER_PROVIDER: previous.mailer, API_TOKEN: previous.token })) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      rmSync(work, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it("rejects table-driven semantic invalid invocations before loader initialization", async () => {
     const loader = vi.fn(async () => ({ main: vi.fn(async () => 0) }));
