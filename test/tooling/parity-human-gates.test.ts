@@ -54,6 +54,13 @@ const LINK_CHECKED = [
 ];
 
 const MARKDOWN_LINK = /\[[^\]]*\]\(([^)]+)\)/g;
+const CLAUDE_WORKTREES = join(REPO_ROOT, ".claude", "worktrees");
+
+// Worktree directories are agent runtime state, not part of the shipped bundle. Rejecting their
+// root prevents cpSync from descending into arbitrary generated worktree names.
+function isParityFixtureSource(source: string): boolean {
+  return source !== CLAUDE_WORKTREES;
+}
 
 // Make the COPY green so the happy path can assert exit 0. A bundle mid-PR legitimately links to a
 // doc a later commit adds (this PR's prose half authors ADR 0044), and a link that has not landed
@@ -86,7 +93,7 @@ function withBundleCopy(fn: (root: string) => void): void {
     for (const entry of BUNDLE_ENTRIES) {
       cpSync(join(REPO_ROOT, entry), join(root, entry), {
         recursive: true,
-        filter: (source) => source !== join(REPO_ROOT, ".claude", "worktrees", "runtime"),
+        filter: isParityFixtureSource,
       });
     }
     healDeadLinks(root);
@@ -95,6 +102,21 @@ function withBundleCopy(fn: (root: string) => void): void {
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+it("does not copy arbitrary agent worktree runtime state", () => {
+  mkdirSync(CLAUDE_WORKTREES, { recursive: true });
+  const source = mkdtempSync(join(CLAUDE_WORKTREES, "parity-fixture-"));
+  const marker = join(source, "marker.txt");
+  writeFileSync(marker, "must not enter the fixture\n");
+
+  try {
+    withBundleCopy((root) => {
+      expect(existsSync(join(root, ".claude", "worktrees", source.split("/").at(-1) as string, "marker.txt"))).toBe(false);
+    });
+  } finally {
+    rmSync(source, { recursive: true, force: true });
+  }
+});
 
 interface ParityRun {
   status: number;
