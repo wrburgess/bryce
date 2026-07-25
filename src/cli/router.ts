@@ -105,6 +105,13 @@ const batchShape = (values: ReadonlyMap<string, readonly string[]>): string | nu
   if (fileEntries.some((entry) => /^\d+$/.test(entry) && positiveInteger(entry) !== null)) return "batch file contains an invalid person ID";
   return total > 25 ? "batch contains at most 25 entries" : null;
 };
+const seedAddShape = (values: ReadonlyMap<string, readonly string[]>): string | null => {
+  const ncaa = values.has("ncaa");
+  const name = values.has("name");
+  if (ncaa !== name) return "NCAA name search requires both '--ncaa' and '--name'";
+  const selectors = ["person-id", "highlightly-player-id", "search"].filter((option) => values.has(option)).length + (ncaa ? 1 : 0);
+  return selectors === 1 ? null : "requires exactly one player selector";
+};
 const manualTag = (candidate: string): string | null => {
   const match = /^([^:]+):([^:]+)$/.exec(candidate);
   if (match === null || match[1] !== "status" || !["rostered", "scouted"].includes(match[2]!)) {
@@ -142,7 +149,7 @@ export const COMMANDS: readonly Command[] = [
   leaf(["db", "backup"], "Create a database snapshot.", "sk db backup", "sk db backup", () => import("./backup.js")),
   leaf(["db", "restore"], "Restore a database snapshot.", "sk db restore --from FILE", "sk db restore --from backups/sk-YYYYMMDDTHHMMSSZ-000.db", () => import("./restore.js"), [value("from", "Snapshot file.")], { required: ["from"] }),
   leaf(["connector", "smoke"], "Smoke-test a running MCP connector.", "sk connector smoke [--mutate]", "sk connector smoke", () => import("./connector-smoke.js"), [flag("mutate", "Also run the configured mutation probe.")]),
-  leaf(["seed", "add"], "Add a watch-list player.", "sk seed add (--person-id N|--highlightly-player-id N|--search NAME) [--pick I]", "sk seed add --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger), value("canonical-name", "Canonical Highlightly name."), value("team-id", "Highlightly team id.", undefined, undefined, positiveInteger), value("search", "Player name."), value("pick", "One-based search result.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "highlightly-player-id", "search"]], requires: [["pick", "search"], ["canonical-name", "highlightly-player-id"], ["team-id", "highlightly-player-id"]] }),
+  leaf(["seed", "add"], "Add a watch-list player.", "sk seed add (--person-id N|--highlightly-player-id N|--search NAME|--ncaa --name NAME) [--pick I]", "sk seed add --ncaa --name 'Roch Cholowsky'", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger), value("canonical-name", "Canonical Highlightly name."), value("team-id", "Highlightly team id.", undefined, undefined, positiveInteger), value("search", "MLB/MiLB player name."), flag("ncaa", "Search NCAA players by Highlightly name."), value("name", "NCAA player name."), value("pick", "One-based MLB search result.", undefined, undefined, positiveInteger)], { requires: [["pick", "search"], ["canonical-name", "highlightly-player-id"], ["team-id", "highlightly-player-id"]], semantic: seedAddShape }),
   leaf(["seed", "deactivate"], "Deactivate a watch-list player.", "sk seed deactivate (--person-id N|--highlightly-player-id N)", "sk seed deactivate --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "highlightly-player-id"]] }),
   leaf(["seed", "list"], "List watch-list players.", "sk seed list [--tags EXPR]", "sk seed list --tags status:rostered", () => import("./seed.js"), [value("tags", "Tag selector.", undefined, undefined, tagSelector)]),
   leaf(["seed", "tag", "add"], "Add a manual player tag.", "sk seed tag add (--person-id N|--highlightly-player-id N) --tag TAG", "sk seed tag add --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger), value("tag", "Manual tag.", undefined, undefined, manualTag)], { required: ["tag"], exactlyOneOf: [["person-id", "highlightly-player-id"]] }),
@@ -236,6 +243,7 @@ export function preflight(command: Command, argv: readonly string[], validateVal
     if (option.value === false) {
       if (inline !== undefined) return `option '${name}' does not take a value`;
       seen.add(option.name);
+      values.set(option.name, []);
       continue;
     }
     const candidate = inline ?? argv[++index];

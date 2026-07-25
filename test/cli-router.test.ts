@@ -74,6 +74,9 @@ describe("CLI router metadata", () => {
     const add = COMMANDS.find((command) => command.path.join(" ") === "seed add")!;
     expect(preflight(add, ["--person-id", "1", "--pick", "2"])).toContain("requires '--search'");
     expect(preflight(add, ["--search", "Acosta", "--pick", "01"])).toContain("canonical positive integer");
+    expect(preflight(add, ["--ncaa", "--name", "Roch Cholowsky"])).toBeNull();
+    expect(preflight(add, ["--ncaa"])).toContain("requires both '--ncaa' and '--name'");
+    expect(preflight(add, ["--name", "Roch Cholowsky"])).toContain("requires both '--ncaa' and '--name'");
   });
 
   it("runs valid real adapters and propagates their statuses", async () => {

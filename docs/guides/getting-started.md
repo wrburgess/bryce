@@ -140,11 +140,14 @@ Adding a player immediately fetches his **entire current-season game log** (his 
 so expect it to take a few seconds and print what it ingested. If you already know a player's MLB
 Stats API personId you can use `add --person-id 702616` instead.
 
-**NCAA players** are added by an explicit Highlightly player ID, canonical name, and team ID:
+**NCAA players** can be found directly by name:
 
 ```bash
-sk seed add --highlightly-player-id 501 --canonical-name "C Guy" --team-id 10
+sk seed add --ncaa --name "Roch Cholowsky"
 ```
+
+If several players match, Bryce prints the Highlightly identity needed to retry. You can also supply
+that identity directly with `--highlightly-player-id`, `--canonical-name`, and `--team-id`.
 
 Note: NCAA's season is roughly February–June, so an NCAA player added in the offseason has no new
 stats until spring — that's normal.

@@ -74,6 +74,23 @@ describe("Highlightly client", () => {
     await expect(client.getFinalTeamMatches(7, 2026)).resolves.toMatchObject({ remaining: null });
   });
 
+  it("searches provider names and retains only NCAA players with a team", async () => {
+    const urls: string[] = [];
+    const client = new HighlightlyClient({
+      apiKey: "key",
+      fetchImpl: async (url) => {
+        urls.push(url);
+        if (url.includes("/players?")) return response({ data: [{ id: 501, fullName: "Roch Cholowsky" }, { id: 502, fullName: "Pro Guy" }], pagination: { totalCount: 2, offset: 0, limit: 10 } });
+        if (url.endsWith("/players/501")) return response({ id: 501, fullName: "Roch Cholowsky", team: { id: 10, name: "Bruins", league: "NCAA" } });
+        return response({ id: 502, fullName: "Pro Guy", team: { id: 20, name: "Pros", league: "MLB" } });
+      },
+    });
+    await expect(client.searchNcaaPlayers("Roch Cholowsky")).resolves.toMatchObject({
+      value: [{ playerId: 501, canonicalName: "Roch Cholowsky", teamId: 10 }],
+    });
+    expect(urls[0]).toContain("name=Roch+Cholowsky");
+  });
+
   it("rejects pagination that cannot make durable progress", async () => {
     const client = new HighlightlyClient({
       apiKey: "key",

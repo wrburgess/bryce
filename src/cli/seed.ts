@@ -40,6 +40,7 @@ import { preflightDirect } from "./router.js";
  * Subcommands:
  *   add --person-id N          add by MLB Stats API personId
  *   add --highlightly-player-id N --canonical-name NAME --team-id N
+ *   add --ncaa --name "name"   search NCAA players by Highlightly name
  *   add --search "name" [--pick i]   search by name; --pick chooses (1-based)
  *   deactivate --person-id N   remove from the Watch List (history kept)
  *   deactivate --highlightly-player-id N    remove an NCAA player from the Watch List
@@ -93,6 +94,39 @@ function parseFlags(args: string[]): Map<string, string> {
 }
 
 async function runAdd(flags: Map<string, string>, deps: SeedDeps): Promise<number> {
+  const ncaaName = flags.get("name");
+  if (flags.has("ncaa") || ncaaName !== undefined) {
+    if (!flags.has("ncaa") || ncaaName === undefined || ncaaName.trim().length === 0) {
+      deps.write("error: NCAA name search requires --ncaa --name NAME");
+      return 1;
+    }
+    if (flags.has("person-id") || flags.has("highlightly-player-id") || flags.has("search") || flags.has("pick")) {
+      deps.write("error: --ncaa --name cannot be combined with another player selector");
+      return 1;
+    }
+    if (deps.highlightlyClient === undefined) {
+      deps.write("error: highlightly_not_configured: HIGHLIGHTLY_API_KEY is required for NCAA refresh");
+      return 78;
+    }
+    try {
+      const results = await deps.highlightlyClient.searchNcaaPlayers(ncaaName.trim());
+      if (results.value.length === 0) {
+        deps.write(`error: no NCAA matches for name=${ncaaName.trim()}`);
+        return 1;
+      }
+      if (results.value.length > 1) {
+        deps.write(`multiple NCAA matches for name=${ncaaName.trim()}; re-run with an explicit Highlightly identity`);
+        results.value.forEach((player, index) => {
+          deps.write(`[${index + 1}] highlightlyPlayerId=${player.playerId} name=${player.canonicalName} teamId=${player.teamId}`);
+        });
+        return 1;
+      }
+      const player = results.value[0]!;
+      return addHighlightlyPlayer(player.playerId, player.canonicalName, player.teamId, deps);
+    } catch (err) {
+      return writeHighlightlyError(err, deps);
+    }
+  }
   const highlightlyId = flags.get("highlightly-player-id");
   if (highlightlyId !== undefined) {
     const name = flags.get("canonical-name");
@@ -103,19 +137,7 @@ async function runAdd(flags: Map<string, string>, deps: SeedDeps): Promise<numbe
       deps.write("error: Highlightly add requires --highlightly-player-id N --canonical-name NAME --team-id N");
       return 1;
     }
-    try {
-      const result = await addHighlightlyNcaaPlayer(
-        { ...deps }, { playerId, canonicalName: name, teamId },
-      );
-      deps.write(`${result.action} player id=${result.player.id} highlightlyPlayerId=${playerId} name=${result.player.fullName}`);
-      return 0;
-    } catch (err) {
-      if (err instanceof HighlightlyError) {
-        deps.write(`error: ${err.code}: ${err.message}`);
-        return err.code === "highlightly_not_configured" ? 78 : err.code === "highlightly_quota_exhausted" || err.code === "highlightly_coverage_incomplete" ? 75 : err.code === "highlightly_player_not_found" || err.code === "highlightly_identity_mismatch" ? 65 : 69;
-      }
-      throw err;
-    }
+    return addHighlightlyPlayer(playerId, name, teamId, deps);
   }
   const ncaaSeqFlag = flags.get("ncaa-seq");
   if (ncaaSeqFlag !== undefined) {
@@ -169,6 +191,24 @@ async function runAdd(flags: Map<string, string>, deps: SeedDeps): Promise<numbe
     deps.write(`refresh done inserted=${refresh.inserted} updated=${refresh.updated}`);
   }
   return 0;
+}
+
+async function addHighlightlyPlayer(playerId: number, canonicalName: string, teamId: number, deps: SeedDeps): Promise<number> {
+  try {
+    const result = await addHighlightlyNcaaPlayer({ ...deps }, { playerId, canonicalName, teamId });
+    deps.write(`${result.action} player id=${result.player.id} highlightlyPlayerId=${playerId} name=${result.player.fullName}`);
+    return 0;
+  } catch (err) {
+    return writeHighlightlyError(err, deps);
+  }
+}
+
+function writeHighlightlyError(err: unknown, deps: SeedDeps): number {
+  if (err instanceof HighlightlyError) {
+    deps.write(`error: ${err.code}: ${err.message}`);
+    return err.code === "highlightly_not_configured" ? 78 : err.code === "highlightly_quota_exhausted" || err.code === "highlightly_coverage_incomplete" ? 75 : err.code === "highlightly_player_not_found" || err.code === "highlightly_identity_mismatch" ? 65 : 69;
+  }
+  throw err;
 }
 
 async function pickFromSearch(
