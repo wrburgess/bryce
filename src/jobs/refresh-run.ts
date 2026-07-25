@@ -74,8 +74,8 @@ export const SUPERSEDED_MESSAGE = "superseded: lease expired, taken over by a ne
 export function claimRefreshRun(db: Db, args: ClaimRefreshArgs): ClaimRefreshResult {
   const leaseMs = args.leaseMs ?? REFRESH_LEASE_MS;
   const nowIso = args.now.toISOString();
-  // The lease cutoff as an ISO-8601 UTC string: `claimed_at >= cutoff` is a live
-  // lease, `< cutoff` (or null) is expired. ISO-8601 UTC strings compare
+  // The lease cutoff as an ISO-8601 UTC string: `claimed_at > cutoff` is a live
+  // lease; `<= cutoff` (or null) is expired. ISO-8601 UTC strings compare
   // lexicographically, so this is an indexed range scan, not a JS full-table sweep.
   const cutoffIso = new Date(args.now.getTime() - leaseMs).toISOString();
 
