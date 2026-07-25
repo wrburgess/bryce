@@ -8,6 +8,8 @@ import { readFileSync, statSync } from "node:fs";
  * help, and option preflight are pure; a leaf is imported only after that work succeeds.
  */
 export type CliAdapter = (argv: string[]) => Promise<number>;
+const CLI_NAME = "sk";
+const cli = (text: string): string => text.replaceAll("bryce", CLI_NAME);
 
 export type Option = { name: string; value?: boolean; aliases?: string[]; values?: readonly string[]; description: string; validate?: (value: string) => string | null; inline?: boolean; repeatable?: boolean };
 export type Command = {
@@ -163,7 +165,7 @@ const write = (line: string, error = false): void => {
 export function renderHelp(path: readonly string[] = [], commands: readonly Command[] = COMMANDS): string {
   const group = GROUPS.find((entry) => entry.path.join("\0") === path.join("\0"));
   if (group !== undefined) {
-    return [group.purpose, "", `Usage: ${group.usage}`, `Options: ${group.options.join(", ") || "none"}`, "", `Example: ${group.example}`, "", ...renderGroupChildren(path, commands), `Run 'bryce ${path.join(" ")} help <command>' for command help.`].join("\n");
+    return [group.purpose, "", `Usage: ${cli(group.usage)}`, `Options: ${group.options.join(", ") || "none"}`, "", `Example: ${cli(group.example)}`, "", ...renderGroupChildren(path, commands), `Run '${CLI_NAME} ${path.join(" ")} help <command>' for command help.`].join("\n");
   }
   const exact = commands.find((command) => command.path.join("\0") === path.join("\0"));
   if (exact !== undefined) {
@@ -172,9 +174,9 @@ export function renderHelp(path: readonly string[] = [], commands: readonly Comm
       const accepted = option.values === undefined ? "" : ` (values: ${option.values.join(" | ")})`;
       return `  ${names}${option.value === false ? "" : " <value>"}  ${option.description}${accepted}`;
     });
-    return [exact.purpose, "", `Usage: ${exact.usage}`, ...(optionLines.length ? ["", "Options:", ...optionLines] : []), "", `Example: ${exact.example}`].join("\n");
+    return [exact.purpose, "", `Usage: ${cli(exact.usage)}`, ...(optionLines.length ? ["", "Options:", ...optionLines] : []), "", `Example: ${cli(exact.example)}`].join("\n");
   }
-  const label = path.length === 0 ? "bryce" : `bryce ${path.join(" ")}`;
+  const label = path.length === 0 ? CLI_NAME : `${CLI_NAME} ${path.join(" ")}`;
   const entries = renderGroupChildren(path, commands);
   return [`Usage: ${label} <command>`, "", "Commands:", ...entries, "", `Run '${label} help <command>' for command help.`].join("\n");
 }
@@ -183,13 +185,13 @@ function renderGroupChildren(path: readonly string[], commands: readonly Command
   return [...new Set(commands.filter((c) => c.path.length > path.length && path.every((p, i) => c.path[i] === p)).map((c) => c.path[path.length]!))].sort().map((child) => {
     const group = GROUPS.find((entry) => entry.path.length === path.length + 1 && entry.path[path.length] === child && path.every((p, i) => entry.path[i] === p));
     if (group !== undefined) {
-      return `  ${child}\n    Purpose: ${group.purpose}\n    Usage: ${group.usage}\n    Options: ${group.options.join(", ") || "none"}\n    Example: ${group.example}`;
+      return `  ${child}\n    Purpose: ${group.purpose}\n    Usage: ${cli(group.usage)}\n    Options: ${group.options.join(", ") || "none"}\n    Example: ${cli(group.example)}`;
     }
     const childCommand = commands.find((c) => c.path.length === path.length + 1 && c.path[path.length] === child && path.every((p, i) => c.path[i] === p))
       ?? commands.find((c) => c.path.length > path.length && c.path[path.length] === child && path.every((p, i) => c.path[i] === p));
     if (childCommand === undefined) return `  ${child}`;
     const details = childCommand.path.length === path.length + 1
-      ? `\n    Purpose: ${childCommand.purpose}\n    Usage: ${childCommand.usage}\n    Options: ${(childCommand.options ?? []).map((option) => `--${option.name}`).join(", ") || "none"}\n    Example: ${childCommand.example}`
+      ? `\n    Purpose: ${childCommand.purpose}\n    Usage: ${cli(childCommand.usage)}\n    Options: ${(childCommand.options ?? []).map((option) => `--${option.name}`).join(", ") || "none"}\n    Example: ${cli(childCommand.example)}`
       : `  ${childCommand.purpose}`;
     return `  ${child}${details}`;
   });
