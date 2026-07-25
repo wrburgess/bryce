@@ -4,6 +4,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, write
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runParityCheck } from "../../scripts/parity-check.js";
 
 // Self-test for the Human Gates parity check (scripts/parity-check.ts -> checkHumanGates), driven the
 // way docs/guides/authoring-the-bundle.md requires: a fixture bundle behind `--root`, one GENUINELY
@@ -11,9 +12,8 @@ import { fileURLToPath } from "node:url";
 // specific error string. The happy path asserts exit 0 and the success line rather than "no error
 // string appeared", which would pass vacuously if the check never ran at all.
 //
-// These specs spawn a subprocess. A sandbox that blocks process spawning fails them with a
-// permission error rather than an assertion failure; that is an environment limitation, not a
-// regression. CI runs them for real.
+// Fixture semantics run in-process. Two narrow CLI-contract examples below retain coverage of the
+// executable's output and status without paying a tsx startup cost for every mutation.
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const SPAWN_TIMEOUT_MS = 60_000;
@@ -54,6 +54,13 @@ const LINK_CHECKED = [
 ];
 
 const MARKDOWN_LINK = /\[[^\]]*\]\(([^)]+)\)/g;
+const CLAUDE_WORKTREES = join(REPO_ROOT, ".claude", "worktrees");
+
+// Worktree directories are agent runtime state, not part of the shipped bundle. Rejecting their
+// root prevents cpSync from descending into arbitrary generated worktree names.
+function isParityFixtureSource(source: string): boolean {
+  return source !== CLAUDE_WORKTREES;
+}
 
 // Make the COPY green so the happy path can assert exit 0. A bundle mid-PR legitimately links to a
 // doc a later commit adds (this PR's prose half authors ADR 0044), and a link that has not landed
@@ -84,7 +91,10 @@ function withBundleCopy(fn: (root: string) => void): void {
   const root = mkdtempSync(join(tmpdir(), "parity-bundle-"));
   try {
     for (const entry of BUNDLE_ENTRIES) {
-      cpSync(join(REPO_ROOT, entry), join(root, entry), { recursive: true });
+      cpSync(join(REPO_ROOT, entry), join(root, entry), {
+        recursive: true,
+        filter: isParityFixtureSource,
+      });
     }
     healDeadLinks(root);
     fn(root);
@@ -93,13 +103,28 @@ function withBundleCopy(fn: (root: string) => void): void {
   }
 }
 
+it("does not copy arbitrary agent worktree runtime state", () => {
+  mkdirSync(CLAUDE_WORKTREES, { recursive: true });
+  const source = mkdtempSync(join(CLAUDE_WORKTREES, "parity-fixture-"));
+  const marker = join(source, "marker.txt");
+  writeFileSync(marker, "must not enter the fixture\n");
+
+  try {
+    withBundleCopy((root) => {
+      expect(existsSync(join(root, ".claude", "worktrees", source.split("/").at(-1) as string, "marker.txt"))).toBe(false);
+    });
+  } finally {
+    rmSync(source, { recursive: true, force: true });
+  }
+});
+
 interface ParityRun {
   status: number;
   stdout: string;
   stderr: string;
 }
 
-function runParity(root: string): ParityRun {
+function runParityCli(root: string): ParityRun {
   const res = spawnSync("npx", ["tsx", "scripts/parity-check.ts", "--root", root], {
     cwd: REPO_ROOT,
     encoding: "utf-8",
@@ -194,22 +219,50 @@ function appendDuplicateHumanGates(root: string): void {
   writeProject(root, lines);
 }
 
-/** Assert a red run: non-zero exit, the aggregate report, and the exact message we expect. */
-function expectFailure(run: ParityRun, message: string): void {
-  expect(run.stdout).toContain(message);
-  expect(run.stdout).toMatch(/^parity_check: FAILED \(\d+ problem/m);
-  expect(run.status).not.toBe(0);
+/** Assert a semantic failure without coupling fixture cases to CLI formatting. */
+function expectFailure(result: ReturnType<typeof runParityCheck>, message: string): void {
+  expect(result.status).toBe(1);
+  expect(result.errors.join("\n")).toContain(message);
 }
 
 describe("parity check - Human Gates fixture bundles", () => {
   it(
-    "exits 0 with the success line on an unmodified bundle",
+    "keeps the CLI green contract exact",
     () => {
       withBundleCopy((root) => {
-        const run = runParity(root);
-        expect(run.stdout).toMatch(/^parity_check: OK - /m);
-        expect(run.stdout).not.toContain("Human Gates");
-        expect(run.status).toBe(0);
+        expect(runParityCli(root)).toEqual({
+          status: 0,
+          stdout: "parity_check: OK - Canonical Source, 3 Adapters, Project Config, 9 Skills, and links all resolve.\n",
+          stderr: "",
+        });
+      });
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "keeps the CLI red contract exact",
+    () => {
+      withBundleCopy((root) => {
+        setGateSetting(root, "Merge", "`auto`");
+        expect(runParityCli(root)).toEqual({
+          status: 1,
+          stdout:
+            "parity_check: FAILED (1 problem)\n" +
+            "  - Human Gates: `Merge` is declared `auto` in PROJECT.md but `required` is its only allowed value - " +
+            "no Host App may express self-merge; a human always merges the delivered PR\n",
+          stderr: "",
+        });
+      });
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+
+  it(
+    "keeps an unmodified bundle green in-process",
+    () => {
+      withBundleCopy((root) => {
+        expect(runParityCheck(root)).toMatchObject({ status: 0, errors: [] });
       });
     },
     SPAWN_TIMEOUT_MS,
@@ -221,7 +274,7 @@ describe("parity check - Human Gates fixture bundles", () => {
       withBundleCopy((root) => {
         setGateSetting(root, "Merge", "`auto`");
         expectFailure(
-          runParity(root),
+          runParityCheck(root),
           "Human Gates: `Merge` is declared `auto` in PROJECT.md but `required` is its only allowed " +
             "value - no Host App may express self-merge; a human always merges the delivered PR",
         );
@@ -236,7 +289,7 @@ describe("parity check - Human Gates fixture bundles", () => {
       withBundleCopy((root) => {
         setFloor(root, "`flag-in-SOW`");
         expectFailure(
-          runParity(root),
+          runParityCheck(root),
           "Human Gates: `Reviewer degradation floor` is declared `flag-in-SOW` in PROJECT.md but " +
             "`stop-and-ask` is its only allowed value - a run that cannot obtain an independent " +
             "review may not certify itself",
@@ -252,7 +305,7 @@ describe("parity check - Human Gates fixture bundles", () => {
       withBundleCopy((root) => {
         setGateSetting(root, "Plan approval", "`sometimes`");
         expectFailure(
-          runParity(root),
+          runParityCheck(root),
           "Human Gates declaration `Plan approval` in PROJECT.md has value `sometimes`, which is " +
             "not allowed - allowed values: `required` | `auto`",
         );
@@ -267,7 +320,7 @@ describe("parity check - Human Gates fixture bundles", () => {
       withBundleCopy((root) => {
         setDisposition(root, "`fold-everything`");
         expectFailure(
-          runParity(root),
+          runParityCheck(root),
           "Human Gates declaration `Rule-suggestion disposition` in PROJECT.md has value " +
             "`fold-everything`, which is not allowed - allowed values: `autonomous-fold` | `present-to-hc`",
         );
@@ -282,7 +335,7 @@ describe("parity check - Human Gates fixture bundles", () => {
       withBundleCopy((root) => {
         dropSection(root, "### Rule-suggestion disposition");
         expectFailure(
-          runParity(root),
+          runParityCheck(root),
           "Human Gates declaration `Rule-suggestion disposition` in PROJECT.md: absent",
         );
       });
@@ -295,10 +348,10 @@ describe("parity check - Human Gates fixture bundles", () => {
     () => {
       withBundleCopy((root) => {
         dropSection(root, "## Human Gates");
-        const run = runParity(root);
-        expectFailure(run, "Project Config PROJECT.md missing required section: `## Human Gates`");
-        expect(run.stdout).toContain("Human Gates declaration `Plan approval` in PROJECT.md: absent");
-        expect(run.stdout).toContain("Human Gates declaration `Merge` in PROJECT.md: absent");
+        const result = runParityCheck(root);
+        expectFailure(result, "Project Config PROJECT.md missing required section: `## Human Gates`");
+        expect(result.errors.join("\n")).toContain("Human Gates declaration `Plan approval` in PROJECT.md: absent");
+        expect(result.errors.join("\n")).toContain("Human Gates declaration `Merge` in PROJECT.md: absent");
       });
     },
     SPAWN_TIMEOUT_MS,
@@ -311,10 +364,9 @@ describe("parity check - Human Gates fixture bundles", () => {
     () => {
       withBundleCopy((root) => {
         setGateSetting(root, "Merge", "auto");
-        const run = runParity(root);
-        expectFailure(run, "Human Gates declaration `Merge` in PROJECT.md: unparseable");
-        expect(run.stdout).toContain("the fail-closed default `required` applies until it is fixed");
-        expect(run.stdout).not.toContain("Human Gates declaration `Merge` in PROJECT.md: absent");
+        const result = runParityCheck(root);
+        expectFailure(result, "Human Gates declaration `Merge` in PROJECT.md: unparseable (expected exactly one declaration carrying a backticked value, one of `required`) - the fail-closed default `required` applies until it is fixed");
+        expect(result.errors.join("\n")).not.toContain("Human Gates declaration `Merge` in PROJECT.md: absent");
       });
     },
     SPAWN_TIMEOUT_MS,
@@ -325,9 +377,9 @@ describe("parity check - Human Gates fixture bundles", () => {
     () => {
       withBundleCopy((root) => {
         duplicateGateRow(root, "Merge");
-        const run = runParity(root);
-        expectFailure(run, "Human Gates declaration `Merge` in PROJECT.md: duplicate");
-        expect(run.stdout).not.toContain("Human Gates declaration `Plan approval` in PROJECT.md:");
+        const result = runParityCheck(root);
+        expectFailure(result, "Human Gates declaration `Merge` in PROJECT.md: duplicate (expected exactly one declaration carrying a backticked value, one of `required`) - the fail-closed default `required` applies until it is fixed");
+        expect(result.errors.join("\n")).not.toContain("Human Gates declaration `Plan approval` in PROJECT.md:");
       });
     },
     SPAWN_TIMEOUT_MS,
@@ -340,8 +392,8 @@ describe("parity check - Human Gates fixture bundles", () => {
     () => {
       withBundleCopy((root) => {
         appendDuplicateHumanGates(root);
-        const run = runParity(root);
-        expectFailure(run, "Human Gates declaration `Merge` in PROJECT.md: duplicate");
+        const result = runParityCheck(root);
+        expectFailure(result, "Human Gates declaration `Merge` in PROJECT.md: duplicate (expected exactly one declaration carrying a backticked value, one of `required`) - the fail-closed default `required` applies until it is fixed");
       });
     },
     SPAWN_TIMEOUT_MS,
@@ -354,11 +406,10 @@ describe("parity check - Human Gates fixture bundles", () => {
     () => {
       withBundleCopy((root) => {
         rmSync(join(root, PROJECT));
-        const run = runParity(root);
-        expectFailure(run, "Project Config missing: PROJECT.md not found");
-        expect(run.stdout).toContain("Guardrails present but PROJECT.md is missing");
-        expect(run.stdout).not.toContain("Human Gates declaration");
-        expect(run.stderr).not.toMatch(/ENOENT|Error:|at Object\./);
+        const result = runParityCheck(root);
+        expectFailure(result, "Project Config missing: PROJECT.md not found");
+        expect(result.errors.join("\n")).toContain("Guardrails present but PROJECT.md is missing (cannot verify the protected-branch list)");
+        expect(result.errors.join("\n")).not.toContain("Human Gates declaration");
       });
     },
     SPAWN_TIMEOUT_MS,
