@@ -143,14 +143,19 @@ describe("CLI router metadata", () => {
     const work = mkdtempSync(join(tmpdir(), "bryce-batch-preflight-"));
     const blank = join(work, "blank.txt");
     const malformed = join(work, "malformed.txt");
+    const exact = join(work, "exact.txt");
     writeFileSync(blank, "# comment\n\n");
-    writeFileSync(malformed, `name:${"x".repeat(121)}\nname:${"x ".repeat(61)}\nname:ok\nname:OK\n`);
+    writeFileSync(exact, `name:${"a ".repeat(59)}aa\n`);
+    writeFileSync(malformed, `name:${"x".repeat(121)}\n`);
     const loader = vi.fn(async () => ({ main: vi.fn(async () => 0) }));
     const commands = COMMANDS.map((command) => ({ ...command, load: loader }));
     expect(await runRouter(["players", "batch-add", "--file", blank], vi.fn(), commands)).toBe(1);
     expect(loader).not.toHaveBeenCalled();
     loader.mockClear();
     expect(await runRouter(["players", "batch-add", "--file", blank, "--person-ids", "1"], vi.fn(), commands)).toBe(0);
+    loader.mockClear();
+    expect(await runRouter(["players", "batch-add", "--file", exact], vi.fn(), commands)).toBe(0);
+    expect(loader).toHaveBeenCalledTimes(1);
     loader.mockClear();
     expect(await runRouter(["players", "batch-add", "--file", malformed], vi.fn(), commands)).toBe(1);
     expect(loader).not.toHaveBeenCalled();
@@ -219,29 +224,34 @@ describe("CLI router metadata", () => {
 
   it("runs a generated real-adapter matrix for every routed leaf", async () => {
     const work = mkdtempSync(join(tmpdir(), "bryce-router-matrix-"));
-    const previous = { cwd: process.cwd(), database: process.env.DATABASE_PATH, backup: process.env.BACKUP_DIR, mailer: process.env.MAILER_PROVIDER, token: process.env.API_TOKEN };
+    const previous = { cwd: process.cwd(), database: process.env.DATABASE_PATH, backup: process.env.BACKUP_DIR, mailer: process.env.MAILER_PROVIDER, token: process.env.API_TOKEN, mcp: process.env.MCP_URL };
     try {
       process.chdir(work);
       process.env.DATABASE_PATH = join(work, "bryce.db");
       process.env.BACKUP_DIR = join(work, "backups");
       process.env.MAILER_PROVIDER = "console";
       process.env.API_TOKEN = "test-token";
-      vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } })));
+      process.env.MCP_URL = "not-a-url"; // connector adapter returns its config status without network
+      vi.stubGlobal("fetch", vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.includes("statsapi")) {
+          const body = url.includes("/people") ? { people: [] } : url.includes("/stats") ? { stats: [] } : { seasons: [] };
+          return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (url.includes("stats.ncaa.org")) return new Response("<html><body></body></html>", { status: 200, headers: { "content-type": "text/html" } });
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), { status: 200, headers: { "content-type": "application/json" } });
+      }));
       for (const command of COMMANDS) {
         if (command.path[0] === "server") continue; // starting the long-lived listener is covered separately
         const args = validArgs[command.path.join(" ")] ?? [];
-        let result: number;
-        try {
-          result = await runRouter([...command.path, ...args], vi.fn());
-        } catch {
-          result = 1;
-        }
-        expect(typeof result, command.path.join(" ")).toBe("number");
+        const result = await runRouter([...command.path, ...args], vi.fn());
+        expect(result, command.path.join(" ")).toBeGreaterThanOrEqual(0);
+        expect(result, command.path.join(" ")).toBeLessThanOrEqual(2);
       }
     } finally {
       vi.unstubAllGlobals();
       process.chdir(previous.cwd);
-      for (const [key, value] of Object.entries({ DATABASE_PATH: previous.database, BACKUP_DIR: previous.backup, MAILER_PROVIDER: previous.mailer, API_TOKEN: previous.token })) {
+      for (const [key, value] of Object.entries({ DATABASE_PATH: previous.database, BACKUP_DIR: previous.backup, MAILER_PROVIDER: previous.mailer, API_TOKEN: previous.token, MCP_URL: previous.mcp })) {
         if (value === undefined) delete process.env[key]; else process.env[key] = value;
       }
       rmSync(work, { recursive: true, force: true });
