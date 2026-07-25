@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { HighlightlyIdentityMismatchError } from "../src/highlightly/client.js";
+import { claimRefreshRun } from "../src/jobs/refresh-run.js";
 import { addHighlightlyNcaaPlayer, deactivatePlayer } from "../src/watchlist/service.js";
 import { MID_SEASON, TEST_TZ, fakeClock, fakeHighlightlyClient, testDb } from "./factories.js";
 
@@ -31,6 +32,18 @@ describe("watchlist NCAA identity", () => {
       }, { playerId: 501, canonicalName: "C Guy", teamId: 10 });
       const player = await deactivatePlayer({ db: opened.db, now: fakeClock(MID_SEASON).now }, { kind: "highlightly", playerId: 501 });
       expect(player.active).toBe(false);
+    } finally { opened.close(); }
+  });
+
+  it("returns the deferred first-refresh reason while a whole sweep is live", async () => {
+    const opened = testDb();
+    const clock = fakeClock(MID_SEASON);
+    try {
+      expect(claimRefreshRun(opened.db, { now: clock.now(), playersTotal: 1 }).claimed).toBe(true);
+      const result = await addHighlightlyNcaaPlayer({
+        db: opened.db, client: {} as never, highlightlyClient: fakeHighlightlyClient(), now: clock.now, tz: TEST_TZ,
+      }, { playerId: 501, canonicalName: "C Guy", teamId: 10 });
+      expect(result.refresh).toMatchObject({ skipped: true, reason: "whole-refresh-running", inserted: 0, updated: 0 });
     } finally { opened.close(); }
   });
 });
