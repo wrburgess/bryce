@@ -781,12 +781,12 @@ describe("refresh fencing across a real child process (ADR 0048)", () => {
       const match = { id: 930001, date: "2026-05-18T19:00:00Z", league: "NCAA", season: 2026, homeTeam: { id: 10, name: "Old Tigers" }, awayTeam: { id: 11, name: "Old Owls" } };
       const providerPlayer = { id: 501, fullName: "Gavin Kelly", statistics: [{ group: "Batting", name: "H", value: 1 }] };
       const highlightlyClient = {
-        getFinalTeamMatches: async () => {
+        getFinalTeamMatches: async () => ({ value: [match], remaining: 99 }),
+        getBoxScore: async () => {
           process.stdout.write("buffered-highlightly\\n");
           await new Promise((resolve) => process.stdin.once("data", resolve));
-          return { value: [match], remaining: 99 };
+          return { value: [{ teamId: 10, players: [providerPlayer] }], remaining: 98 };
         },
-        getBoxScore: async () => ({ value: [{ teamId: 10, players: [providerPlayer] }], remaining: 98 }),
       };
       const result = await runRefresh(
         { db: opened.db, client: { getSeason: async () => null }, highlightlyClient, now: () => new Date(process.env.NOW), tz: "America/Chicago" },
@@ -814,6 +814,20 @@ describe("refresh fencing across a real child process (ADR 0048)", () => {
         child.once("error", reject);
       });
       expect(lines[0]).toBe("buffered-highlightly");
+      // The stale whole-refresh actor has crossed the first Highlightly write:
+      // its match cache is durable, but its box payload and atomic player
+      // cutover are still buffered behind getBoxScore.
+      expect(file.opened.db.select().from(highlightlyMatchCache).all()).toEqual([
+        expect.objectContaining({
+          matchId: 930001,
+          rateRemaining: 99,
+          payload: expect.objectContaining({ homeTeam: { id: 10, name: "Old Tigers" } }),
+        }),
+      ]);
+      expect(file.opened.db.select().from(highlightlyBoxScoreCache).all()).toHaveLength(0);
+      expect(file.opened.db.select().from(highlightlyPlayerCursors).all()).toHaveLength(0);
+      expect(file.opened.db.select().from(players).where(eq(players.id, player.id)).get()?.ncaaSourceState)
+        .toBe("highlightly_pending");
 
       const freshMatch = {
         id: 930001,
