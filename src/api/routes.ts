@@ -29,7 +29,11 @@ import {
   resolveListByName,
 } from "../lists/service.js";
 import { MlbApiError } from "../mlb/client.js";
-import { NcaaApiError, UnsupportedNcaaSeasonError } from "../ncaa/client.js";
+import {
+  NcaaAccessDeniedError,
+  NcaaApiError,
+  UnsupportedNcaaSeasonError,
+} from "../ncaa/client.js";
 import { queryStatLines } from "../queries/statLines.js";
 import type { ServiceDeps } from "../server/deps.js";
 import {
@@ -120,7 +124,7 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
       // unknown namespace/value) — the tag service owns the semantics.
       return c.json({ error: err.message }, 400);
     }
-    if (err instanceof MlbApiError || err instanceof NcaaApiError) {
+    if (err instanceof MlbApiError || err instanceof NcaaApiError || err instanceof NcaaAccessDeniedError) {
       // Upstream (MLB Stats API / stats.ncaa.org) failure: a bad gateway.
       return c.json({ error: err.message }, 502);
     }

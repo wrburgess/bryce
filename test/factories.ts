@@ -602,6 +602,8 @@ export interface FakeNcaaOptions {
   pages?: Record<string, string>;
   /** Force a non-200 status (with empty body) on every request. */
   status?: number;
+  /** Force a successful response body on every request (e.g. Akamai denial HTML). */
+  body?: string;
 }
 
 export class FakeNcaaApi {
@@ -624,7 +626,7 @@ export class FakeNcaaApi {
           text: () => Promise.resolve(""),
         });
       }
-      const body = this.route(url);
+      const body = this.options.body ?? this.route(url);
       return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(body) });
     };
   }
@@ -635,7 +637,7 @@ export class FakeNcaaApi {
 
   private route(url: string): string {
     const u = new URL(url);
-    const seq = u.searchParams.get("stats_player_seq");
+    const seq = u.pathname.match(/^\/players\/(\d+)$/)?.[1];
     const catId = Number(u.searchParams.get("year_stat_category_id"));
     const category = categoryForId(catId);
     const key = `${seq}:${category}`;

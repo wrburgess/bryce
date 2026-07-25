@@ -164,7 +164,7 @@ describe("batchAddPlayers", () => {
 
       // The NCAA entry cost EXACTLY one identity fetch (batting only), never the
       // three-category batting+pitching+fielding sweep a Refresh performs.
-      expect(ncaaApi.callsMatching(/stats_player_seq=2649785/)).toHaveLength(1);
+      expect(ncaaApi.callsMatching(/\/players\/2649785\?/)).toHaveLength(1);
       expect(ncaaApi.callsMatching(/year_stat_category_id=/)).toHaveLength(1);
       // The MLB entry cost only identity (person + team), never a game-log sweep.
       expect(api.callsMatching(/stats=gameLog/)).toHaveLength(0);
@@ -231,6 +231,14 @@ describe("batchAddPlayers", () => {
   });
 
   describe("capture-and-continue (best-effort, non-transactional)", () => {
+    it("an NCAA access-denied page fails only that entry as upstream_error", async () => {
+      ncaaApi.options.body = "<html><title>Access Denied</title></html>";
+      const result = await batchAddPlayers(deps(), { entries: [{ ncaaPlayerSeq: 9702101 }] });
+      expect(result.entries[0]).toMatchObject({ status: "failed", reason: "upstream_error" });
+      expect(result.summary).toMatchObject({ failed: 1, unresolved: 0 });
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+
     it("one entry's MlbApiError fails that entry only; the others still add and persist", async () => {
       const failingId = 999999;
       const baseFetch = api.fetch;

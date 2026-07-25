@@ -68,6 +68,30 @@ export class NcaaApiError extends Error {
   }
 }
 
+/**
+ * stats.ncaa.org's Akamai edge can return an access-denied HTML document with
+ * an HTTP 200. That is an upstream availability failure, never evidence that
+ * the requested player does not exist.
+ */
+export class NcaaAccessDeniedError extends Error {
+  readonly url: string;
+
+  constructor(url: string) {
+    super(`stats.ncaa.org denied access to this request: ${url}`);
+    this.name = "NcaaAccessDeniedError";
+    this.url = url;
+  }
+}
+
+function isAkamaiBlockedPage(body: string): boolean {
+  return (
+    /access\s+denied/i.test(body) ||
+    /akamai_validation\.html/i.test(body) ||
+    /(?:[?&])bm-verify=/i.test(body) ||
+    /request_quota_reached\.html/i.test(body)
+  );
+}
+
 /** The bundled season table has no entry for the requested year. */
 export class UnsupportedNcaaSeasonError extends Error {
   readonly year: string;
@@ -81,27 +105,22 @@ export class UnsupportedNcaaSeasonError extends Error {
 
 /**
  * Build the game-log page URL. This is the ONE place the source URL form is
- * constructed (ADR 0032). The legacy `game_by_game` form is used — the form
- * both reference implementations (baseballr, collegebaseball) drive. `org_id`
- * (the school id) is omitted when unknown: the page is keyed by
- * `stats_player_seq`, so the player's log resolves without it, and we never
- * store an NCAA school id.
+ * constructed (ADR 0032). The current player page is keyed directly by the
+ * player sequence; the season lookup remains necessary solely to select the
+ * category id. The former `/player/game_by_game` route is no longer used by
+ * the NCAA site.
  */
 export function buildGameLogUrl(params: {
   baseUrl?: string;
   seq: number;
   season: NcaaSeason;
   category: NcaaStatCategory;
-  orgId?: number;
 }): string {
-  const { baseUrl = BASE_URL, seq, season, category, orgId } = params;
+  const { baseUrl = BASE_URL, seq, season, category } = params;
   const query = new URLSearchParams({
-    game_sport_year_ctl_id: String(season.seasonId),
-    stats_player_seq: String(seq),
     year_stat_category_id: String(categoryId(season, category)),
   });
-  if (orgId !== undefined) query.set("org_id", String(orgId));
-  return `${baseUrl}/player/game_by_game?${query.toString()}`;
+  return `${baseUrl}/players/${seq}?${query.toString()}`;
 }
 
 export class NcaaClient {
@@ -128,19 +147,19 @@ export class NcaaClient {
   /**
    * Fetch one player's raw game-log HTML for one season and one stat category.
    * Throws UnsupportedNcaaSeasonError when the year is not bundled and
-   * NcaaApiError on any non-200 response.
+   * NcaaApiError on any non-200 response and NcaaAccessDeniedError when the
+   * edge serves an access-denied HTML document with HTTP 200.
    */
   async getGameLogPage(
     seq: number,
     seasonYear: string,
     category: NcaaStatCategory,
-    orgId?: number,
   ): Promise<string> {
     const season = ncaaSeasonFor(seasonYear);
     if (season === null) {
       throw new UnsupportedNcaaSeasonError(seasonYear);
     }
-    const url = buildGameLogUrl({ baseUrl: this.baseUrl, seq, season, category, orgId });
+    const url = buildGameLogUrl({ baseUrl: this.baseUrl, seq, season, category });
     return this.request(url);
   }
 
@@ -154,6 +173,14 @@ export class NcaaClient {
     if (!res.ok) {
       throw new NcaaApiError(res.status, url);
     }
-    return res.text();
+    const body = await res.text();
+    // Akamai's denial page is often delivered with 200, so status alone cannot
+    // distinguish it from a real game-log page. Keep this boundary explicit:
+    // downstream identity resolution must never turn source blocking into
+    // "no such player".
+    if (isAkamaiBlockedPage(body)) {
+      throw new NcaaAccessDeniedError(url);
+    }
+    return body;
   }
 }

@@ -263,6 +263,20 @@ describe("REST API", () => {
       expect(await opened.db.select().from(players)).toHaveLength(0);
     });
 
+    it("502s an NCAA access-denied page — not 404 — writing no row", async () => {
+      ncaaApi.options.body = "<html><title>Access Denied</title></html>";
+      const res = await app().request("/api/players/ncaa", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ ncaaPlayerSeq: 9702101 }),
+      });
+      expect(res.status).toBe(502);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toContain("denied access");
+      expect(body.error).not.toContain("no NCAA player");
+      expect(await opened.db.select().from(players)).toHaveLength(0);
+    });
+
     it("503s an unbundled NCAA season (our data gap, not upstream), writing no row", async () => {
       clock.set("2030-03-15T17:00:00Z"); // no bundled stats.ncaa.org entry for 2030
       const res = await app().request("/api/players/ncaa", {

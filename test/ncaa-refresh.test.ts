@@ -229,7 +229,7 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
     const mlbLine = (await opened.db.select().from(statLines)).find((l) => l.gameId === 900001);
     expect(mlbLine?.sportId).toBe(11);
     // NCAA calls hit only the NCAA client; MLB game logs hit only the Stats API.
-    expect(ncaaApi.callsMatching(/game_by_game/).length).toBeGreaterThan(0);
+    expect(ncaaApi.callsMatching(/\/players\//).length).toBeGreaterThan(0);
     expect(api.callsMatching(/stats=gameLog/).length).toBeGreaterThan(0);
   });
 
@@ -386,7 +386,7 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
     // untouched — proving both ingest paths share the per-player boundary (#23).
     const failingNcaa = new NcaaClient({
       fetchImpl: (url: string, headers: Record<string, string>) =>
-        url.includes("stats_player_seq=2649785")
+        url.includes("/players/2649785?")
           ? Promise.reject(new Error("ncaa page down"))
           : ncaaApi.fetch(url, headers),
       delayMs: 0,
@@ -421,7 +421,7 @@ describe("runRefresh — NCAA ingest path (ADR 0032)", () => {
 
     const failingMiddle = new NcaaClient({
       fetchImpl: (url: string, headers: Record<string, string>) =>
-        url.includes("stats_player_seq=2650000")
+        url.includes("/players/2650000?")
           ? Promise.reject(new Error("middle ncaa down"))
           : ncaaApi.fetch(url, headers),
       delayMs: 0,
