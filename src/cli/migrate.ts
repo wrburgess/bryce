@@ -2,10 +2,12 @@ import { loadConfig } from "../config.js";
 import { loadDotEnv } from "../env.js";
 import { startupDb } from "../db/startup.js";
 import { exitAfterDrain, isMain } from "./main.js";
+import { preflightDirect } from "./router.js";
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
-  if (argv.length > 0) {
-    process.stderr.write(`error: db:migrate takes no arguments; got ${argv.join(" ")}\n`);
+  const failure = preflightDirect(["db", "migrate"], argv);
+  if (failure !== null) {
+    process.stderr.write(`error: ${failure}\n`);
     return 1;
   }
   loadDotEnv();

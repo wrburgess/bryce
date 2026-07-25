@@ -10,6 +10,7 @@ import {
   writePlayerListBackupFile,
 } from "../backup/player-list.js";
 import { exitAfterDrain, isMain } from "./main.js";
+import { preflightDirect } from "./router.js";
 
 /**
  * `players:backup --out FILE` — write a portable Player List Backup (every Player
@@ -94,6 +95,11 @@ export async function runPlayersBackup(argv: string[], deps: PlayersBackupRunDep
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
+  const failure = preflightDirect(["players", "backup"], argv);
+  if (failure !== null) {
+    process.stderr.write(`error: ${failure}\n`);
+    return 1;
+  }
   loadDotEnv();
   const config = loadConfig();
   const started = await startupDb(config.databasePath, {

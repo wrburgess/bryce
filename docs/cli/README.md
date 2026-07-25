@@ -17,7 +17,10 @@ Built-in help is the canonical source for command syntax and supported options: 
 Existing `npm run …` scripts remain migration-compatible; arguments after one must follow `--`. The
 activated `bryce` executable may run from any directory; `.env` and relative configured paths are
 resolved from the current working directory, so run it from the directory whose data/configuration
-you intend to use.
+you intend to use. Options are strict: unknown flags, positional arguments, missing values, and
+repeated non-repeatable options exit `1` before configuration or service initialization. `--` and
+clustered short options are not supported. Only `players batch-add` accepts repeated input options;
+digest alone retains `--window=SPEC` and `--list=NAME` compatibility forms.
 
 ## `refresh` — re-ingest the current season
 
@@ -37,6 +40,7 @@ bryce digest                         # default 1d window
 bryce digest -w 7d                   # short alias
 bryce digest --window=14d            # equals form
 bryce digest --force                 # daily-slot test replay
+bryce digest -f                      # short force alias
 ```
 
 Builds the Digest for a **Window** and sends it through the configured mailer. Writes no stat-line
@@ -46,7 +50,7 @@ state, so re-running a Window always sends the same content.
 |---|---|---|
 | `--window <spec>` / `--window=<spec>` | `1d` | `1d`, `7d`, `14d`, `21d`, `28d`, `35d`, `60d`, `ytd` |
 | `--list <name>` / `--list=<name>` | off (all active) | any existing list name (#70) |
-| `--force` | off (boolean) | present or absent |
+| `--force` / `-f` | off (boolean) | present or absent |
 
 - Both `--window 7d` and `--window=7d` are accepted. An unsupported window (e.g. `30d`) **fails
   closed**: the command exits `1`, writes an `error: unsupported --window value; supported: …` line

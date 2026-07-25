@@ -9,6 +9,7 @@ import { runDigest } from "../jobs/digest.js";
 import { UnknownListError, resolveListByName } from "../lists/service.js";
 import { createMailer } from "../mailer/index.js";
 import { exitAfterDrain, isMain } from "./main.js";
+import { preflightDirect } from "./router.js";
 
 /**
  * The digest CLI: `npm run digest [-- --window 7d] [-- --force]`. A thin
@@ -37,7 +38,7 @@ export interface DigestCliDeps {
  * What force does and does not override lives in src/jobs/delivery-claim.ts.
  */
 export function parseForce(argv: string[]): boolean {
-  return argv.includes("--force");
+  return argv.includes("--force") || argv.includes("-f");
 }
 
 /**
@@ -82,8 +83,13 @@ export function parseList(argv: string[]): string | null | undefined {
 }
 
 export async function runDigestCli(argv: string[], deps: DigestCliDeps): Promise<number> {
-  const spec = parseWindow(argv);
   const writeError = deps.writeError ?? deps.write;
+  const syntaxFailure = preflightDirect(["digest"], argv, [], false);
+  if (syntaxFailure !== null) {
+    writeError(`error: ${syntaxFailure}`);
+    return 1;
+  }
+  const spec = parseWindow(argv);
   if (spec === null) {
     // Fail closed, BEFORE the mailer is touched: nothing is sent.
     writeError(`error: unsupported --window value; supported: ${WINDOW_SPECS.join(", ")}`);
@@ -132,6 +138,11 @@ export async function runDigestCli(argv: string[], deps: DigestCliDeps): Promise
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
+  const failure = preflightDirect(["digest"], argv);
+  if (failure !== null) {
+    process.stderr.write(`error: ${failure}\n`);
+    return 1;
+  }
   loadDotEnv();
   const config = loadConfig();
   const { db, close } = await startupDb(config.databasePath, {

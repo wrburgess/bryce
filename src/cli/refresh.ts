@@ -6,6 +6,7 @@ import { runRefresh } from "../jobs/refresh.js";
 import { MlbClient } from "../mlb/client.js";
 import { NcaaClient } from "../ncaa/client.js";
 import { exitAfterDrain, isMain } from "./main.js";
+import { preflightDirect } from "./router.js";
 
 /**
  * The refresh CLI: `npm run refresh`. A thin presenter over `runRefresh`,
@@ -70,8 +71,9 @@ export async function runRefreshCli(deps: RefreshCliDeps): Promise<number> {
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
-  if (argv.length > 0) {
-    process.stderr.write(`error: refresh takes no arguments; got ${argv.join(" ")}\n`);
+  const failure = preflightDirect(["refresh"], argv);
+  if (failure !== null) {
+    process.stderr.write(`error: ${failure}\n`);
     return 1;
   }
   loadDotEnv();

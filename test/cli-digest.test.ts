@@ -26,6 +26,7 @@ describe("digest CLI", () => {
   describe("parseForce", () => {
     it("is true only when the flag is present", () => {
       expect(parseForce(["--force"])).toBe(true);
+      expect(parseForce(["-f"])).toBe(true);
       expect(parseForce([])).toBe(false);
     });
 
@@ -157,6 +158,19 @@ describe("digest CLI", () => {
       expect(output).toEqual([]);
       expect(errors).toEqual([
         "error: unsupported --window value; supported: 1d, 7d, 14d, 21d, 28d, 35d, 60d, ytd",
+      ]);
+    });
+
+    it("rejects malformed and duplicate options before list lookup or mailer work", async () => {
+      expect(await runDigestCli(["--force", "-f"], deps())).toBe(1);
+      expect(await runDigestCli(["--list", "ghost", "--list", "other"], deps())).toBe(1);
+      expect(await runDigestCli(["--force-send"], deps())).toBe(1);
+      expect(mailer.sent).toHaveLength(0);
+      expect(output).toEqual([]);
+      expect(errors).toEqual([
+        "error: option '--force' may not be repeated",
+        "error: option '--list' may not be repeated",
+        "error: unknown option '--force-send'",
       ]);
     });
 

@@ -11,6 +11,7 @@ import { NcaaClient as NcaaClientImpl } from "../ncaa/client.js";
 import type { BatchAddEntryResult } from "../watchlist/service.js";
 import { batchAddPlayers } from "../watchlist/service.js";
 import { exitAfterDrain, isMain } from "./main.js";
+import { preflightDirect } from "./router.js";
 
 /**
  * `players:batch-add` — stage up to 25 players onto the Watch List in one call
@@ -244,6 +245,11 @@ export async function runBatchAdd(argv: string[], deps: BatchAddRunDeps): Promis
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
+  const failure = preflightDirect(["players", "batch-add"], argv);
+  if (failure !== null) {
+    process.stderr.write(`error: ${failure}\n`);
+    return 1;
+  }
   loadDotEnv();
   const config = loadConfig();
   const { db, close } = await startupDb(config.databasePath, {

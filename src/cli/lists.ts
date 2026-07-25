@@ -18,6 +18,7 @@ import {
   resolveListByName,
 } from "../lists/service.js";
 import { exitAfterDrain, isMain } from "./main.js";
+import { preflightDirect } from "./router.js";
 
 /**
  * Named-list CLI (issue #70 / ADR 0046): a thin presenter over the list service
@@ -199,6 +200,14 @@ async function runShow(flags: Map<string, string>, deps: ListsDeps): Promise<num
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
+  const command = argv[0];
+  const failure = command === undefined
+    ? "unknown or incomplete command ''"
+    : preflightDirect(["players", "lists", command], argv, [command]);
+  if (failure !== null) {
+    process.stderr.write(`error: ${failure}\n`);
+    return 1;
+  }
   loadDotEnv();
   const config = loadConfig();
   const { db, close } = await startupDb(config.databasePath, {

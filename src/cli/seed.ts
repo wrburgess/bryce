@@ -28,6 +28,7 @@ import {
   listPlayers,
 } from "../watchlist/service.js";
 import { exitAfterDrain, isMain } from "./main.js";
+import { preflightDirect } from "./router.js";
 
 /**
  * Watch-list seeding CLI: a thin presenter over the watch-list service
@@ -403,6 +404,13 @@ function runTagRebuild(deps: SeedDeps): number {
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
+  const path = argv[0] === "tag" ? ["seed", "tag", argv[1] ?? ""] : ["seed", argv[0] ?? ""];
+  const prefix = argv[0] === "tag" ? ["tag", argv[1] ?? ""] : [argv[0] ?? ""];
+  const failure = preflightDirect(path, argv, prefix);
+  if (failure !== null) {
+    process.stderr.write(`error: ${failure}\n`);
+    return 1;
+  }
   loadDotEnv();
   const config = loadConfig();
   const { db, close } = await startupDb(config.databasePath, {

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { COMMANDS, type Command, preflight, renderHelp, resolve, runRouter } from "../src/cli/router.js";
+import { COMMANDS, type Command, preflight, preflightDirect, renderHelp, resolve, runRouter } from "../src/cli/router.js";
 
 const validArgs: Record<string, string[]> = {
   "players lists create": ["--name", "Prospects"],
@@ -202,6 +202,24 @@ describe("CLI router metadata", () => {
     const digest = COMMANDS.find((command) => command.path.join(" ") === "digest")!;
     expect(preflight(digest, ["--window", "7d", "--list", "Prospects"])).toBeNull();
     expect(preflight(digest, ["--window=7d", "--list=Prospects"])).toBeNull();
+  });
+
+  it("rejects duplicate non-repeatable options while retaining ordered batch repetition", () => {
+    const digest = COMMANDS.find((command) => command.path.join(" ") === "digest")!;
+    const batch = COMMANDS.find((command) => command.path.join(" ") === "players batch-add")!;
+    expect(preflight(digest, ["-f", "--force"])).toContain("may not be repeated");
+    expect(preflight(digest, ["-w", "7d", "--window", "14d"])).toContain("may not be repeated");
+    expect(preflight(digest, ["--list", "A", "--list=B"])).toContain("may not be repeated");
+    expect(preflight(batch, ["--names", "First", "--names", "Second"])).toBeNull();
+    expect(preflight(batch, ["--person-ids", "1", "--person-ids", "2"])).toBeNull();
+  });
+
+  it("uses the router schema before direct compatibility entry-point initialization", () => {
+    expect(preflightDirect(["digest"], ["-f", "--force"])).toContain("may not be repeated");
+    expect(preflightDirect(["digest"], ["--window=7d"])).toBeNull();
+    expect(preflightDirect(["players", "lists", "create"], ["create", "--name", "Prospects"], ["create"])).toBeNull();
+    expect(preflightDirect(["seed", "tag", "add"], ["tag", "add", "--person-id", "1", "--tag", "status:rostered"], ["tag", "add"])).toBeNull();
+    expect(preflightDirect(["ncaa", "probe"], ["--seq=1"])).toContain("does not support '=' syntax");
   });
 
   it("injects loaders to prove argv forwarding and status propagation for every leaf", async () => {
