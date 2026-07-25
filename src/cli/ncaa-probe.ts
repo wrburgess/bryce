@@ -9,6 +9,7 @@ import {
 import { parseGameLogPage } from "../ncaa/parse.js";
 import type { NcaaStatCategory } from "../ncaa/seasons.js";
 import { exitAfterDrain, isMain } from "./main.js";
+import { preflightDirect } from "./router.js";
 
 /**
  * Live probe for the stats.ncaa.org scrape adapter (ADR 0032) — the on-host
@@ -91,6 +92,11 @@ function parseFlags(args: string[]): Map<string, string> {
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
+  const failure = preflightDirect(["ncaa", "probe"], argv);
+  if (failure !== null) {
+    process.stderr.write(`error: ${failure}\n`);
+    return 1;
+  }
   loadDotEnv();
   const config = loadConfig();
   const client = new NcaaClient({ delayMs: config.ncaaScrapeDelayMs });

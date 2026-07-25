@@ -12,6 +12,7 @@ import {
   restorePlayerListBackup,
 } from "../watchlist/service.js";
 import { exitAfterDrain, isMain } from "./main.js";
+import { preflightDirect } from "./router.js";
 
 /**
  * `players:restore --in FILE` — re-import a Player List Backup, network-free and
@@ -114,6 +115,11 @@ export async function runPlayersRestore(
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
+  const failure = preflightDirect(["players", "restore"], argv);
+  if (failure !== null) {
+    process.stderr.write(`error: ${failure}\n`);
+    return 1;
+  }
   loadDotEnv();
   const config = loadConfig();
   const started = await startupDb(config.databasePath, {

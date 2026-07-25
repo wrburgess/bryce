@@ -15,6 +15,7 @@ import type { ServiceDeps } from "./server/deps.js";
 import { healthSnapshot } from "./server/health.js";
 import { isMain } from "./cli/main.js";
 import { exitAfterDrain } from "./cli/main.js";
+import { preflightDirect } from "./cli/router.js";
 
 /**
  * Phase 2 HTTP server (ADR 0027): the MCP server at /mcp is the primary
@@ -86,8 +87,9 @@ export function createShutdown(
 
 /** Start the service through the same explicit argv/status adapter as every CLI. */
 export async function main(argv = process.argv.slice(2)): Promise<number> {
-  if (argv.length > 0) {
-    process.stderr.write(`error: server takes no arguments; got ${argv.join(" ")}\n`);
+  const failure = preflightDirect(["server"], argv);
+  if (failure !== null) {
+    process.stderr.write(`error: ${failure}\n`);
     return 1;
   }
   loadDotEnv();

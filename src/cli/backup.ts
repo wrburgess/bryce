@@ -5,6 +5,7 @@ import { MIGRATIONS_FOLDER } from "../db/client.js";
 import { startupDb } from "../db/startup.js";
 import { createSnapshot, pruneSnapshots } from "../backup/snapshot.js";
 import { exitAfterDrain, isMain } from "./main.js";
+import { preflightDirect } from "./router.js";
 
 /**
  * `db:backup` — take a Snapshot of the live database and prune to keep-last-N.
@@ -38,6 +39,11 @@ export async function runBackup(argv: string[], deps: BackupRunDeps): Promise<nu
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
+  const failure = preflightDirect(["db", "backup"], argv);
+  if (failure !== null) {
+    process.stderr.write(`error: ${failure}\n`);
+    return 1;
+  }
   loadDotEnv();
   const config = loadConfig();
   const started = await startupDb(config.databasePath, {
