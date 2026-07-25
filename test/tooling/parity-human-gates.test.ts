@@ -221,6 +221,7 @@ function appendDuplicateHumanGates(root: string): void {
 
 /** Assert a semantic failure without coupling fixture cases to CLI formatting. */
 function expectFailure(result: ReturnType<typeof runParityCheck>, message: string): void {
+  expect(result.status).toBe(1);
   expect(result.errors.join("\n")).toContain(message);
 }
 
@@ -261,7 +262,7 @@ describe("parity check - Human Gates fixture bundles", () => {
     "keeps an unmodified bundle green in-process",
     () => {
       withBundleCopy((root) => {
-        expect(runParityCheck(root).errors).toEqual([]);
+        expect(runParityCheck(root)).toMatchObject({ status: 0, errors: [] });
       });
     },
     SPAWN_TIMEOUT_MS,

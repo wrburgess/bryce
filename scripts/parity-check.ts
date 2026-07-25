@@ -123,6 +123,7 @@ function inspectArray(arr: string[]): string {
 }
 
 export interface ParityResult {
+  readonly status: 0 | 1;
   readonly errors: readonly string[];
   readonly skillCount: number;
 }
@@ -149,6 +150,7 @@ class ParityCheck {
     this.checkAdrNumbers();
     this.checkLinks();
     return {
+      status: this.errors.length === 0 ? 0 : 1,
       errors: this.errors.slice(),
       skillCount: this.dirExists(SKILLS_DIR) ? this.presentSkills().length : 0,
     };
@@ -554,7 +556,7 @@ export function main(args: string[]): number {
   }
   const result = runParityCheck(root);
   process.stdout.write(formatParityResult(result));
-  return result.errors.length === 0 ? 0 : 1;
+  return result.status;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolvePath(process.argv[1])) {
