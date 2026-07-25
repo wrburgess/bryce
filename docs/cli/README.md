@@ -14,7 +14,10 @@ UTF-8 — a deliberate policy scoping the ASCII-safe-stdout rule to machine outp
 
 Built-in help is the canonical source for command syntax and supported options: use `bryce help`,
 `bryce help players lists`, or `bryce digest --help`. This page is the deeper operational reference.
-Existing `npm run …` scripts remain migration-compatible; arguments after one must follow `--`.
+Existing `npm run …` scripts remain migration-compatible; arguments after one must follow `--`. The
+activated `bryce` executable may run from any directory; `.env` and relative configured paths are
+resolved from the current working directory, so run it from the directory whose data/configuration
+you intend to use.
 
 ## `refresh` — re-ingest the current season
 
@@ -67,13 +70,13 @@ state, so re-running a Window always sends the same content.
 ## `players:lists` — manage named player lists (`#70`)
 
 ```sh
-npm run players:lists -- create --name Prospects
-npm run players:lists -- rename --name Prospects --to "Top 30"
-npm run players:lists -- add    --name "Top 30" --person-ids 691185,700001 --ncaa-seqs 2649785
-npm run players:lists -- remove --name "Top 30" --person-ids 700001
-npm run players:lists -- show                       # every live list + member counts
-npm run players:lists -- show   --name "Top 30"     # a list's active members
-npm run players:lists -- delete --name "Top 30"     # soft-delete; the name frees for reuse
+bryce players lists create --name Prospects
+bryce players lists rename --name Prospects --to "Top 30"
+bryce players lists add    --name "Top 30" --person-ids 691185,700001 --ncaa-seqs 2649785
+bryce players lists remove --name "Top 30" --person-ids 700001
+bryce players lists show                       # every live list + member counts
+bryce players lists show   --name "Top 30"     # a list's active members
+bryce players lists delete --name "Top 30"     # soft-delete; the name frees for reuse
 ```
 
 A thin presenter over the named-list service ([ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)):
@@ -87,18 +90,18 @@ fails closed. (Distinct from `seed list`, which prints players.)
 ## `seed` — manage the Watch List
 
 ```sh
-npm run seed -- add --person-id 691185
-npm run seed -- add --ncaa-seq 2649785
-npm run seed -- add --search "acosta"            # prints a numbered list if several match
-npm run seed -- add --search "smith" --pick 2    # choose from that list (1-based)
-npm run seed -- deactivate --person-id 691185
-npm run seed -- deactivate --ncaa-seq 2649785
-npm run seed -- list
-npm run seed -- list --tags status:rostered,level:aaa   # tag-filtered roster (comma = AND)
-npm run seed -- tag add --person-id 691185 --tag status:rostered
-npm run seed -- tag remove --person-id 691185 --tag status:rostered
-npm run seed -- tag list --person-id 691185
-npm run seed -- tag rebuild                              # re-derive every player's derived tags
+bryce seed add --person-id 691185
+bryce seed add --ncaa-seq 2649785
+bryce seed add --search "acosta"            # prints a numbered list if several match
+bryce seed add --search "smith" --pick 2    # choose from that list (1-based)
+bryce seed deactivate --person-id 691185
+bryce seed deactivate --ncaa-seq 2649785
+bryce seed list
+bryce seed list --tags status:rostered,level:aaa   # tag-filtered roster (comma = AND)
+bryce seed tag add --person-id 691185 --tag status:rostered
+bryce seed tag remove --person-id 691185 --tag status:rostered
+bryce seed tag list --person-id 691185
+bryce seed tag rebuild                              # re-derive every player's derived tags
 ```
 
 One required subcommand (`add` | `deactivate` | `list` | `tag`), then flags:
@@ -126,7 +129,7 @@ use `refresh` to re-pull his season.
 ## `ncaa:probe` — validate the NCAA scrape on this host
 
 ```sh
-npm run ncaa:probe -- --seq 2649785 --season 2025 --type batting
+bryce ncaa probe --seq 2649785 --season 2025 --type batting
 ```
 
 Fetches **one** live stats.ncaa.org game-log page and reports the HTTP status plus what the parser
@@ -266,7 +269,7 @@ an unknown flag, a non-integer id token, an unreadable file, a file over the **6
 ## `server` — start the HTTP server
 
 ```sh
-npm run server
+bryce server
 ```
 
 Starts the long-lived HTTP server that hosts `GET /health` (public), the [REST API](../api/README.md)

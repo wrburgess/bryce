@@ -17,6 +17,8 @@ export type Command = {
   required?: readonly string[];
   oneOf?: readonly (readonly string[])[];
   exactlyOneOf?: readonly (readonly string[])[];
+  /** Long-lived adapters keep the router process alive after startup. */
+  longRunning?: boolean;
 };
 
 const leaf = (
@@ -25,8 +27,9 @@ const leaf = (
 ): Command => ({ path, purpose, usage, example, load, options, ...requirements });
 
 const nonBlank = (value: string): string | null => value.trim().length > 0 ? null : "a non-blank value";
+const controlFree = (value: string): string | null => /\p{Cc}/u.test(value) ? "a value without control characters" : null;
 const withNonBlank = (validate?: Option["validate"]): Option["validate"] => (candidate) =>
-  nonBlank(candidate) ?? validate?.(candidate) ?? null;
+  nonBlank(candidate) ?? controlFree(candidate) ?? validate?.(candidate) ?? null;
 const value = (name: string, description: string, values?: readonly string[], aliases?: string[], validate?: Option["validate"]): Option =>
   ({ name, description, values, aliases, validate: withNonBlank(validate) });
 const inlineValue = (name: string, description: string, values?: readonly string[], aliases?: string[], validate?: Option["validate"]): Option =>
@@ -35,6 +38,25 @@ const flag = (name: string, description: string): Option => ({ name, description
 const positiveInteger = (value: string): string | null => /^\d+$/.test(value) && Number(value) > 0 ? null : "a positive integer";
 const year = (value: string): string | null => /^\d{4}$/.test(value) ? null : "a four-digit year";
 const positiveIntegerList = (value: string): string | null => value.split(",").every((part) => positiveInteger(part.trim()) === null) ? null : "a comma-separated list of positive integers";
+const manualTag = (candidate: string): string | null => {
+  const match = /^([^:]+):([^:]+)$/.exec(candidate);
+  if (match === null || match[1] !== "status" || !["rostered", "scouted"].includes(match[2]!)) {
+    return "a manual tag status:rostered or status:scouted";
+  }
+  return null;
+};
+const tagSelector = (candidate: string): string | null => {
+  const segments = candidate.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+  if (segments.length === 0) return "a non-empty comma-separated tag selector";
+  const seen = new Set<string>();
+  for (const segment of segments) {
+    if ((segment.match(/:/g) ?? []).length > 1) return "well-formed tag tokens (namespace or namespace:value)";
+    const [namespace, tagValue] = segment.split(":");
+    if (!namespace || (tagValue !== undefined && !tagValue)) return "well-formed tag tokens (namespace or namespace:value)";
+    seen.add(`${namespace}\0${tagValue ?? ""}`);
+  }
+  return seen.size > 16 ? "at most 16 distinct tag tokens" : null;
+};
 
 /** Canonical built-in syntax/help metadata. Operational detail belongs in docs/cli. */
 export const COMMANDS: readonly Command[] = [
@@ -56,12 +78,12 @@ export const COMMANDS: readonly Command[] = [
   leaf(["connector", "smoke"], "Smoke-test a running MCP connector.", "bryce connector smoke [--mutate]", "bryce connector smoke", () => import("./connector-smoke.js"), [flag("mutate", "Also run the configured mutation probe.")]),
   leaf(["seed", "add"], "Add a watch-list player.", "bryce seed add (--person-id N|--ncaa-seq N|--search NAME) [--pick I]", "bryce seed add --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("search", "Player name."), value("pick", "One-based search result.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "ncaa-seq", "search"]] }),
   leaf(["seed", "deactivate"], "Deactivate a watch-list player.", "bryce seed deactivate (--person-id N|--ncaa-seq N)", "bryce seed deactivate --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "ncaa-seq"]] }),
-  leaf(["seed", "list"], "List watch-list players.", "bryce seed list [--tags EXPR]", "bryce seed list --tags status:rostered", () => import("./seed.js"), [value("tags", "Tag selector.")]),
-  leaf(["seed", "tag", "add"], "Add a manual player tag.", "bryce seed tag add (--person-id N|--ncaa-seq N) --tag TAG", "bryce seed tag add --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("tag", "Manual tag.")], { required: ["tag"], exactlyOneOf: [["person-id", "ncaa-seq"]] }),
-  leaf(["seed", "tag", "remove"], "Remove a manual player tag.", "bryce seed tag remove (--person-id N|--ncaa-seq N) --tag TAG", "bryce seed tag remove --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("tag", "Manual tag.")], { required: ["tag"], exactlyOneOf: [["person-id", "ncaa-seq"]] }),
+  leaf(["seed", "list"], "List watch-list players.", "bryce seed list [--tags EXPR]", "bryce seed list --tags status:rostered", () => import("./seed.js"), [value("tags", "Tag selector.", undefined, undefined, tagSelector)]),
+  leaf(["seed", "tag", "add"], "Add a manual player tag.", "bryce seed tag add (--person-id N|--ncaa-seq N) --tag TAG", "bryce seed tag add --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("tag", "Manual tag.", undefined, undefined, manualTag)], { required: ["tag"], exactlyOneOf: [["person-id", "ncaa-seq"]] }),
+  leaf(["seed", "tag", "remove"], "Remove a manual player tag.", "bryce seed tag remove (--person-id N|--ncaa-seq N) --tag TAG", "bryce seed tag remove --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("tag", "Manual tag.", undefined, undefined, manualTag)], { required: ["tag"], exactlyOneOf: [["person-id", "ncaa-seq"]] }),
   leaf(["seed", "tag", "list"], "List player tags.", "bryce seed tag list (--person-id N|--ncaa-seq N)", "bryce seed tag list --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "ncaa-seq"]] }),
   leaf(["seed", "tag", "rebuild"], "Rebuild derived tags.", "bryce seed tag rebuild", "bryce seed tag rebuild", () => import("./seed.js")),
-  leaf(["server"], "Run the REST and MCP server.", "bryce server", "bryce server", () => import("../server.js")),
+  { ...leaf(["server"], "Run the REST and MCP server.", "bryce server", "bryce server", () => import("../server.js")), longRunning: true },
 ];
 
 const write = (line: string, error = false): void => {
@@ -72,12 +94,17 @@ export function renderHelp(path: readonly string[] = [], commands: readonly Comm
   if (exact !== undefined) {
     const optionLines = (exact.options ?? []).map((option) => {
       const names = [`--${option.name}`, ...(option.aliases ?? []).map((alias) => `-${alias}`)].join(", ");
-      return `  ${names}${option.value === false ? "" : " <value>"}  ${option.description}`;
+      const accepted = option.values === undefined ? "" : ` (values: ${option.values.join(" | ")})`;
+      return `  ${names}${option.value === false ? "" : " <value>"}  ${option.description}${accepted}`;
     });
     return [exact.purpose, "", `Usage: ${exact.usage}`, ...(optionLines.length ? ["", "Options:", ...optionLines] : []), "", `Example: ${exact.example}`].join("\n");
   }
   const label = path.length === 0 ? "bryce" : `bryce ${path.join(" ")}`;
-  const entries = [...new Set(commands.filter((c) => c.path.length > path.length && path.every((p, i) => c.path[i] === p)).map((c) => c.path[path.length]!))].sort().map((child) => `  ${child}`);
+  const entries = [...new Set(commands.filter((c) => c.path.length > path.length && path.every((p, i) => c.path[i] === p)).map((c) => c.path[path.length]!))].sort().map((child) => {
+    const childCommand = commands.find((c) => c.path.length === path.length + 1 && c.path[path.length] === child && path.every((p, i) => c.path[i] === p))
+      ?? commands.find((c) => c.path.length > path.length && c.path[path.length] === child && path.every((p, i) => c.path[i] === p));
+    return childCommand === undefined ? `  ${child}` : `  ${child}  ${childCommand.purpose}`;
+  });
   return [`Usage: ${label} <command>`, "", "Commands:", ...entries, "", `Run '${label} help <command>' for command help.`].join("\n");
 }
 
@@ -179,7 +206,17 @@ export async function runRouter(argv = process.argv.slice(2), output: (line: str
 
 import { exitAfterDrain, isMain } from "./main.js";
 if (isMain(import.meta.url)) {
-  runRouter().then(exitAfterDrain).catch((error: unknown) => {
+  const processArgv = process.argv.slice(2);
+  runRouter(processArgv).then((code) => {
+    // A server listener owns the process lifetime and installs its own signal
+    // shutdown/drain path. Do not call process.exit after startup, or the
+    // routed `bryce server` command would die immediately after `serve()`.
+    if (resolve(processArgv).command?.longRunning === true) {
+      process.exitCode = code;
+      return;
+    }
+    return exitAfterDrain(code);
+  }).catch((error: unknown) => {
     process.stderr.write(`error: ${error instanceof Error ? error.message : String(error)}\n`);
     return exitAfterDrain(1);
   });

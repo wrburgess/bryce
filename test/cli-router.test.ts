@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -90,10 +90,51 @@ describe("CLI router metadata", () => {
       ["players", "backup", "--out", ""],
       ["digest", "--list", ""],
       ["seed", "add", "--search", "   "],
+      ["seed", "list", "--tags", ",, ,"],
+      ["seed", "list", "--tags", "pos:ss:extra"],
+      ["seed", "tag", "add", "--person-id", "1", "--tag", "level:aaa"],
+      ["seed", "tag", "add", "--person-id", "1", "--tag", "status:unknown"],
+      ["players", "lists", "create", "--name", "line\nforged"],
     ];
     for (const args of invalidCases) expect(await runRouter(args, vi.fn(), commands)).toBe(1);
     expect(loader).not.toHaveBeenCalled();
   });
+
+  it("keeps a routed server alive until it receives a termination signal", async () => {
+    const work = mkdtempSync(join(tmpdir(), "bryce-server-"));
+    const port = 34000 + Math.floor(Math.random() * 1000);
+    const child = spawn(join(process.cwd(), "bin", "bryce"), ["server"], {
+      cwd: work,
+      env: {
+        ...process.env,
+        API_TOKEN: "test-token",
+        MAILER_PROVIDER: "console",
+        DATABASE_PATH: join(work, "bryce.db"),
+        BACKUP_DIR: join(work, "backups"),
+        SERVER_PORT: String(port),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`server did not start: ${output}`)), 15_000);
+      const poll = setInterval(() => {
+        if (output.includes(`server listening port=${port}`)) {
+          clearTimeout(timer);
+          clearInterval(poll);
+          resolve();
+        }
+      }, 25);
+      child.once("error", reject);
+    });
+    expect(child.exitCode).toBeNull();
+    child.kill("SIGTERM");
+    const status = await new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
+    expect(status).toBe(0);
+    rmSync(work, { recursive: true, force: true });
+  }, 30_000);
 
   it("accepts canonical space and supported digest inline forms", () => {
     const digest = COMMANDS.find((command) => command.path.join(" ") === "digest")!;

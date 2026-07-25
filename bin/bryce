@@ -10,4 +10,11 @@ const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 const child = spawn(process.execPath, ["--import", require.resolve("tsx/esm"), resolve(here, "../src/cli/router.ts"), ...process.argv.slice(2)], { stdio: "inherit" });
 child.on("error", (error) => { process.stderr.write(`error: ${error.message}\n`); process.exitCode = 1; });
-child.on("exit", (code, signal) => { process.exitCode = code ?? (signal === null ? 0 : 1); });
+const forwardSignal = (signal) => { child.kill(signal); };
+process.once("SIGINT", () => forwardSignal("SIGINT"));
+process.once("SIGTERM", () => forwardSignal("SIGTERM"));
+child.on("exit", (code, signal) => {
+  process.removeListener("SIGINT", forwardSignal);
+  process.removeListener("SIGTERM", forwardSignal);
+  process.exitCode = code ?? (signal === null ? 0 : 1);
+});
