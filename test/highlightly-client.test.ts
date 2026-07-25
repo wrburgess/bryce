@@ -91,6 +91,49 @@ describe("Highlightly client", () => {
     expect(urls[0]).toContain("name=Roch+Cholowsky");
   });
 
+  it("prefers an exact NCAA name over fuzzy provider search results", async () => {
+    const urls: string[] = [];
+    const client = new HighlightlyClient({
+      apiKey: "key",
+      fetchImpl: async (url) => {
+        urls.push(url);
+        if (url.includes("/players?")) {
+          return response({
+            data: [{ id: 1, fullName: "Gavin Kelly" }, { id: 2, fullName: "Gavin King" }],
+            pagination: { totalCount: 2, offset: 0, limit: 10 },
+          });
+        }
+        if (url.endsWith("/players/1")) return response({ id: 1, fullName: "Gavin Kelly", team: { id: 10, name: "Mountaineers", league: "NCAA" } });
+        return response({ id: 2, fullName: "Gavin King", team: { id: 20, name: "Tigers", league: "NCAA" } });
+      },
+    });
+
+    await expect(client.searchNcaaPlayers("gavin kelly")).resolves.toMatchObject({
+      value: [{ playerId: 1, canonicalName: "Gavin Kelly", teamId: 10 }],
+    });
+    expect(urls).toEqual(expect.arrayContaining([expect.stringMatching(/\/players\/1$/)]));
+    expect(urls.some((url) => url.endsWith("/players/2"))).toBe(false);
+  });
+
+  it("normalizes the player-detail array and profile team returned by the live provider", async () => {
+    const client = new HighlightlyClient({
+      apiKey: "key",
+      fetchImpl: async () => response([{
+        id: 1358972,
+        fullName: "Gavin Kelly",
+        profile: { team: { id: 10291546, name: "Mountaineers", displayName: "West Virginia", league: "NCAA" } },
+      }]),
+    });
+
+    await expect(client.getPlayer(1358972)).resolves.toMatchObject({
+      value: {
+        id: 1358972,
+        fullName: "Gavin Kelly",
+        team: { id: 10291546, name: "Mountaineers", displayName: "West Virginia", league: "NCAA" },
+      },
+    });
+  });
+
   it("rejects pagination that cannot make durable progress", async () => {
     const client = new HighlightlyClient({
       apiKey: "key",
