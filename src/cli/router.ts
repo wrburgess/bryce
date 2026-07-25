@@ -90,7 +90,6 @@ const batchShape = (values: ReadonlyMap<string, readonly string[]>): string | nu
       return `batch file '${file}' is unreadable`;
     }
   }
-  if ((values.get("file")?.length ?? 0) > 0 && fileEntries.length === 0) return "batch file must contain at least one entry";
   const filePersonIds = fileEntries.filter((entry) => /^\d+$/.test(entry));
   const fileNcaaSeqs = fileEntries.filter((entry) => entry.startsWith("ncaa:")).map((entry) => entry.slice(5).trim());
   if (new Set([...personIds, ...filePersonIds]).size !== personIds.length + filePersonIds.length || new Set([...ncaaSeqs, ...fileNcaaSeqs]).size !== ncaaSeqs.length + fileNcaaSeqs.length) {
@@ -105,6 +104,7 @@ const batchShape = (values: ReadonlyMap<string, readonly string[]>): string | nu
     nameKeys.add(name);
   }
   const total = personIds.length + ncaaSeqs.length + names.length + fileEntries.length;
+  if (total === 0) return "batch must contain at least one entry";
   if (fileEntries.some((entry) => entry.startsWith("ncaa:") && positiveInteger(entry.slice(5).trim()) !== null)) return "batch file contains an invalid NCAA sequence";
   if (fileEntries.some((entry) => /^\d+$/.test(entry) && positiveInteger(entry) !== null)) return "batch file contains an invalid person ID";
   return total > 25 ? "batch contains at most 25 entries" : null;

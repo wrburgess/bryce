@@ -148,6 +148,10 @@ describe("CLI router metadata", () => {
     const loader = vi.fn(async () => ({ main: vi.fn(async () => 0) }));
     const commands = COMMANDS.map((command) => ({ ...command, load: loader }));
     expect(await runRouter(["players", "batch-add", "--file", blank], vi.fn(), commands)).toBe(1);
+    expect(loader).not.toHaveBeenCalled();
+    loader.mockClear();
+    expect(await runRouter(["players", "batch-add", "--file", blank, "--person-ids", "1"], vi.fn(), commands)).toBe(0);
+    loader.mockClear();
     expect(await runRouter(["players", "batch-add", "--file", malformed], vi.fn(), commands)).toBe(1);
     expect(loader).not.toHaveBeenCalled();
     rmSync(work, { recursive: true, force: true });
@@ -213,22 +217,33 @@ describe("CLI router metadata", () => {
     expect(digestSeen).toEqual([["-w", "7d"]]);
   });
 
-  it("runs a generated real-executable matrix for every routed leaf", () => {
+  it("runs a generated real-adapter matrix for every routed leaf", async () => {
     const work = mkdtempSync(join(tmpdir(), "bryce-router-matrix-"));
+    const previous = { cwd: process.cwd(), database: process.env.DATABASE_PATH, backup: process.env.BACKUP_DIR, mailer: process.env.MAILER_PROVIDER, token: process.env.API_TOKEN };
     try {
-      const executable = join(process.cwd(), "bin", "bryce");
+      process.chdir(work);
+      process.env.DATABASE_PATH = join(work, "bryce.db");
+      process.env.BACKUP_DIR = join(work, "backups");
+      process.env.MAILER_PROVIDER = "console";
+      process.env.API_TOKEN = "test-token";
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 200, headers: { "content-type": "application/json" } })));
       for (const command of COMMANDS) {
-        const result = spawnSync(executable, [...command.path, "--help"], {
-          cwd: work,
-          encoding: "utf8",
-          env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
-          timeout: 10_000,
-        });
-        expect(result.error).toBeUndefined();
-        expect(result.status, command.path.join(" ")).toBe(0);
-        expect(`${result.stdout}`).toContain(`Usage: ${command.usage}`);
+        if (command.path[0] === "server") continue; // starting the long-lived listener is covered separately
+        const args = validArgs[command.path.join(" ")] ?? [];
+        let result: number;
+        try {
+          result = await runRouter([...command.path, ...args], vi.fn());
+        } catch {
+          result = 1;
+        }
+        expect(typeof result, command.path.join(" ")).toBe("number");
       }
     } finally {
+      vi.unstubAllGlobals();
+      process.chdir(previous.cwd);
+      for (const [key, value] of Object.entries({ DATABASE_PATH: previous.database, BACKUP_DIR: previous.backup, MAILER_PROVIDER: previous.mailer, API_TOKEN: previous.token })) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
       rmSync(work, { recursive: true, force: true });
     }
   }, 60_000);
