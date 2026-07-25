@@ -1,7 +1,8 @@
 # REST API Reference
 
-A thin, token-authed REST API over Bryce's service layer ([ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)):
-request/response orchestration only, with every behavior living in the same service layer the
+A thin, token-authed REST API over ScoreKeeps (developed under the internal name Bryce;
+[ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)): request/response orchestration only, with
+every behavior living in the same service layer the
 [CLI](../cli/README.md) and [MCP tools](../mcp/README.md) share. It exists for scripted clients; the
 [MCP server](../mcp/README.md) is the primary, human-facing interface. Domain terms — **Player**,
 **Refresh**, **Digest**, **Window**, **Offseason Sleep** — are defined in
@@ -176,7 +177,10 @@ case-sensitively unique among **live** lists.
 
 Run a Refresh now. Body is optional: empty or absent refreshes **every** active Player; otherwise
 `{ "personId"?: N }` or `{ "ncaaPlayerSeq"?: N }` to refresh one. Malformed JSON is a client error
-(**400**), never a full refresh. Returns the refresh summary.
+(**400**), never a full refresh. A whole-watch-list Refresh returns its structured summary even when
+some players fail: `ok`, `partial`, and `skipped` results are **200**; a `failed` result (no player
+could be refreshed) is **502** with that same summary body. A single-player Refresh returns its
+per-player result, or **404** when that Player is not on the Watch List.
 
 ## Error model
 
@@ -193,6 +197,7 @@ Errors are shaped by a single `onError` handler; the status is chosen by error t
 | MLB Stats API upstream failure | **502** | `{ "error": "<message>" }` |
 | No bundled NCAA season lookup for the requested year | **503** | `{ "error": "<message>" }` |
 | `POST /api/digest/send` where the run's `action` is `"failed"` | **502** | the normal result object (see above) |
+| `POST /api/refresh` where a whole-watch-list Refresh has `status: "failed"` | **502** | the normal refresh summary |
 
 The **502** on a failed send is distinct from the upstream-error 502: it carries the run result
 body, not an `{ "error": … }` envelope.
