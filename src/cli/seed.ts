@@ -108,6 +108,13 @@ async function runAdd(flags: Map<string, string>, deps: SeedDeps): Promise<numbe
         { ...deps }, { playerId, canonicalName: name, teamId },
       );
       deps.write(`${result.action} player id=${result.player.id} highlightlyPlayerId=${playerId} name=${result.player.fullName}`);
+      if (result.action === "added") {
+        if (result.refresh === null || result.refresh.skipped) {
+          deps.write(`refresh skipped reason=${result.refresh?.reason ?? "offseason-sleep"}`);
+        } else {
+          deps.write(`refresh done inserted=${result.refresh.inserted} updated=${result.refresh.updated}`);
+        }
+      }
       return 0;
     } catch (err) {
       if (err instanceof HighlightlyError) {

@@ -38,4 +38,22 @@ describe("seed Highlightly NCAA commands", () => {
       expect(out).toContain("refresh skipped reason=whole-refresh-running");
     } finally { opened.close(); }
   });
+
+  it("prints whole-refresh-running for a Highlightly first refresh deferred by a live sweep", async () => {
+    const opened = testDb(); const out: string[] = []; const clock = fakeClock(MID_SEASON);
+    try {
+      expect(claimRefreshRun(opened.db, { now: clock.now(), playersTotal: 1 }).claimed).toBe(true);
+      expect(await runSeed([
+        "add", "--highlightly-player-id", "501", "--canonical-name", "C Guy", "--team-id", "10",
+      ], {
+        db: opened.db,
+        client: {} as never,
+        highlightlyClient: fakeHighlightlyClient(),
+        now: clock.now,
+        tz: TEST_TZ,
+        write: (line) => out.push(line),
+      })).toBe(0);
+      expect(out).toContain("refresh skipped reason=whole-refresh-running");
+    } finally { opened.close(); }
+  });
 });
