@@ -128,13 +128,13 @@ Bryce ships with an **empty watch list**; it only tracks players you add.
 **MLB / minor-league players** — search by name:
 
 ```bash
-bryce seed add --search "Jackson Holliday"
+sk seed add --search "Jackson Holliday"
 ```
 
 If several players match, it prints a numbered list; re-run with `--pick` to choose one:
 
 ```bash
-bryce seed add --search "Smith" --pick 2
+sk seed add --search "Smith" --pick 2
 ```
 
 Adding a player immediately fetches his **entire current-season game log** (his "first Refresh"),
@@ -146,7 +146,7 @@ stats.ncaa.org, open the player's page, and copy the `stats_player_seq` value fr
 [Running Bryce → NCAA players](running-bryce.md#ncaa-players) for an example:
 
 ```bash
-bryce seed add --ncaa-seq 2649785
+sk seed add --ncaa-seq 2649785
 ```
 
 Note: NCAA's season is roughly February–June, so an NCAA player added in the offseason has no new
@@ -155,15 +155,15 @@ stats until spring — that's normal.
 **Manage the list:**
 
 ```bash
-bryce seed list                          # who's being watched
-bryce seed deactivate --person-id 702616 # stop watching (all history is kept)
-bryce seed deactivate --ncaa-seq 2649785
+sk seed list                          # who's being watched
+sk seed deactivate --person-id 702616 # stop watching (all history is kept)
+sk seed deactivate --ncaa-seq 2649785
 ```
 
 ## 7. Run a Refresh and send your first Digest
 
 ```bash
-bryce refresh
+sk refresh
 ```
 
 Re-pulls every active player's full season game log and stores it. It's idempotent — running it
@@ -171,12 +171,12 @@ twice changes nothing the second time. Expect one polite, throttled API call per
 category.
 
 ```bash
-bryce digest
+sk digest
 ```
 
 Builds the default one-day digest for the last completed host date and "sends" it — with
 `MAILER_PROVIDER=console` it prints the email (subject, HTML, and plain text) straight to your
-terminal. You can request a different Digest window (for example, `bryce digest --window 7d`);
+terminal. You can request a different Digest window (for example, `sk digest --window 7d`);
 the complete supported-window list and syntax live in the [CLI Digest reference](../cli/README.md#digest--build-and-send-a-windowed-digest).
 
 ### Choose a Digest variation
@@ -188,18 +188,18 @@ time.
 
 | What you want | Command | What happens |
 |---|---|---|
-| Yesterday's whole watch list | `bryce digest` | The default `1d` daily Digest. It sends at most once per host date. |
-| The last week | `bryce digest --window 7d` | An on-demand report for the previous seven completed days. Safe to repeat. |
-| A longer recent period | `bryce digest --window 14d` | Use `14d`, `21d`, `28d`, `35d`, or `60d` for that many completed days. |
-| This season so far | `bryce digest --window ytd` | An on-demand year-to-date report from the relevant season start through yesterday. |
+| Yesterday's whole watch list | `sk digest` | The default `1d` daily Digest. It sends at most once per host date. |
+| The last week | `sk digest --window 7d` | An on-demand report for the previous seven completed days. Safe to repeat. |
+| A longer recent period | `sk digest --window 14d` | Use `14d`, `21d`, `28d`, `35d`, or `60d` for that many completed days. |
+| This season so far | `sk digest --window ytd` | An on-demand year-to-date report from the relevant season start through yesterday. |
 
 You can also focus a Digest on a named **list**: a curated subset of your active watch list. Create
 the list, add players to it, then pass its name with `--list`:
 
 ```bash
-bryce players lists create --name Prospects
-bryce players lists add --name Prospects --person-ids 691185,700001
-bryce digest --window 7d --list Prospects
+sk players lists create --name Prospects
+sk players lists add --name Prospects --person-ids 691185,700001
+sk digest --window 7d --list Prospects
 ```
 
 A named-list Digest is always on-demand, even with `--window 1d`, so it does not consume or replace
@@ -207,7 +207,7 @@ the whole-watch-list daily slot. A list contains only active players; deactivati
 them from every scoped Digest without deleting their history. List names must already exist — a typo
 fails without sending a wider, unintended report.
 
-Use `bryce players lists show` to see your lists and their member counts. The [CLI reference]
+Use `sk players lists show` to see your lists and their member counts. The [CLI reference]
 (../cli/README.md#playerslists--manage-named-player-lists-70) documents renaming, removing members,
 and deleting lists. The [Digest reference](../cli/README.md#digest--build-and-send-a-windowed-digest)
 has the full flag contract, including `--force` for a deliberate test replay of the scheduled daily
@@ -233,7 +233,7 @@ Two behaviors that surprise people, both by design:
 The NCAA page parser needs one live confirmation from your machine:
 
 ```bash
-bryce ncaa probe --seq 2649785 --season 2025 --type batting
+sk ncaa probe --seq 2649785 --season 2025 --type batting
 ```
 
 It fetches one real stats.ncaa.org game-log page and prints the HTTP status, the player name and
@@ -259,13 +259,13 @@ When the console digest looks right:
    DIGEST_FROM=the-verified-sender@example.com
    ```
 
-4. `bryce digest` now emails you. (Prefer SMTP? Set `MAILER_PROVIDER=smtp` and the four `SMTP_*`
+4. `sk digest` now emails you. (Prefer SMTP? Set `MAILER_PROVIDER=smtp` and the four `SMTP_*`
    variables instead — any provider works, e.g. Forward Email.)
 
 ## 10. Run the server and talk to it
 
 ```bash
-bryce server
+sk server
 ```
 
 Then, from another terminal:
@@ -297,7 +297,7 @@ set-and-forget daily email:
 ```bash
 git pull
 npm install     # picks up any new dependencies
-bryce digest  # database migrations apply automatically on the next run of anything
+sk digest  # database migrations apply automatically on the next run of anything
 ```
 
 ## Troubleshooting
@@ -306,7 +306,7 @@ bryce digest  # database migrations apply automatically on the next run of anyth
 |---|---|
 | `npm install` fails on `better-sqlite3` | Node too old — re-check `node --version` ≥ 22 |
 | Server exits immediately on start | `API_TOKEN` missing or blank in `.env` — it fails closed by design |
-| `bryce digest` shows no games | No watched player appeared in the selected window; the scheduled daily Digest still sends an empty report, while Offseason Sleep replaces it with a weekly heartbeat |
+| `sk digest` shows no games | No watched player appeared in the selected window; the scheduled daily Digest still sends an empty report, while Offseason Sleep replaces it with a weekly heartbeat |
 | Weekly "heartbeat" email instead of a daily digest | Offseason Sleep (World Series → earliest watched opening day) — expected |
 | Real email not arriving | `DIGEST_FROM` not a verified Postmark Sender Signature, or wrong server token |
 | NCAA add/probe fails with a 403 or parse error | stats.ncaa.org edge/selector drift — run the probe and see [Running Bryce → NCAA players](running-bryce.md#ncaa-players) |

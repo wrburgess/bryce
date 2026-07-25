@@ -28,8 +28,8 @@ describe("CLI router metadata", () => {
     for (const command of COMMANDS) {
       const help = renderHelp(command.path);
       expect(help).toContain(command.purpose);
-      expect(help).toContain(`Usage: ${command.usage}`);
-      expect(help).toContain(`Example: ${command.example}`);
+      expect(help).toContain(`Usage: ${command.usage.replaceAll("bryce", "sk")}`);
+      expect(help).toContain(`Example: ${command.example.replaceAll("bryce", "sk")}`);
     }
     const groups = new Map<string, string[]>();
     for (const command of COMMANDS) {
@@ -62,7 +62,7 @@ describe("CLI router metadata", () => {
     const digest = resolve(["digest", "-w", "7d", "--list", "Prospects"]);
     expect(digest.argv).toEqual(["-w", "7d", "--list", "Prospects"]);
     expect(resolve(["players", "lists", "help", "create"]).help).toEqual(["players", "lists", "create"]);
-    expect(renderHelp(["players", "lists"])).toContain("Usage: bryce players lists create");
+    expect(renderHelp(["players", "lists"])).toContain("Usage: sk players lists create");
   });
 
   it("rejects malformed numeric leaf arguments before a loader can run", () => {

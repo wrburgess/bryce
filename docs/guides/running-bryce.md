@@ -17,24 +17,24 @@ below (Player, Refresh, Digest, Offseason Sleep) is defined in
 nvm use              # Node 22 (.nvmrc)
 npm ci
 cp .env.example .env # then fill in values
-bryce db migrate   # optional: jobs also migrate themselves at startup
+sk db migrate   # optional: jobs also migrate themselves at startup
 ```
 
 Seed the watch list, then run the jobs by hand once:
 
 ```sh
-bryce seed add --search "acosta" --pick 1   # or: add --person-id 691185
-bryce seed add --ncaa-seq 2649785           # NCAA player by stats_player_seq (see NCAA below)
-bryce seed list
-bryce refresh
-bryce digest
-bryce digest --force      # test send: re-send today's digest even if it already went out
+sk seed add --search "acosta" --pick 1   # or: add --person-id 691185
+sk seed add --ncaa-seq 2649785           # NCAA player by stats_player_seq (see NCAA below)
+sk seed list
+sk refresh
+sk digest
+sk digest --force      # test send: re-send today's digest even if it already went out
 ```
 
 To stage **many** Players at once, use `players:batch-add` (see [CLI Reference](../cli/README.md)); it
 resolves each Player's identity and stages his row, but **defers the season backfill** — his Stat
-Lines appear at the next `bryce refresh`, not inline (unlike single-add), so a batch stays one quick
-call. Run `bryce refresh` afterward to backfill the newly staged Players early.
+Lines appear at the next `sk refresh`, not inline (unlike single-add), so a batch stays one quick
+call. Run `sk refresh` afterward to backfill the newly staged Players early.
 
 ### Forcing a test send
 
@@ -202,7 +202,7 @@ loss (it faithfully replicates a bad migration's corruption too). Keep both.
 Every entrypoint (server, refresh, digest, seed, migrate) now takes an **automatic Snapshot before any
 pending migration applies** — the known-good state to roll back to if the migration goes wrong. A
 schema-less first run has nothing to lose, so it is skipped; a failed pre-migration Snapshot **aborts**
-the migration. Take one on demand with `bryce db backup` (Snapshot + prune to `BACKUP_KEEP_LAST`).
+the migration. Take one on demand with `sk db backup` (Snapshot + prune to `BACKUP_KEEP_LAST`).
 
 Schedule a nightly Snapshot with launchd, same shape as the Refresh/Digest jobs above:
 
@@ -238,8 +238,8 @@ the off-box story).
 ### Player List Backups
 
 ```sh
-bryce players backup --out backups/players.json     # write every Player row (network-free)
-bryce players restore --in  backups/players.json     # re-import, all-or-nothing, network-free
+sk players backup --out backups/players.json     # write every Player row (network-free)
+sk players restore --in  backups/players.json     # re-import, all-or-nothing, network-free
 ```
 
 Restore upserts on each Player's natural identity (MLB `external_id` or NCAA `stats_player_seq`), so
@@ -275,7 +275,7 @@ hand first:
 4. **Restore:**
 
    ```sh
-   bryce db restore --from backups/bryce-20260722T030000Z-000.db
+   sk db restore --from backups/bryce-20260722T030000Z-000.db
    ```
 
    It validates the candidate (integrity check, foreign-key check, expected tables, migration
@@ -307,7 +307,7 @@ Restore with `litestream restore -o data/bryce.db s3://bryce-backup/bryce.db`.
 
 ## Remote access: Cloudflare Tunnel
 
-The server (`bryce server`, [`src/server.ts`](../../src/server.ts)) binds locally; expose it
+The server (`sk server`, [`src/server.ts`](../../src/server.ts)) binds locally; expose it
 without opening ports via a named tunnel:
 
 ```sh
@@ -384,7 +384,7 @@ Before touching Access at all, prove the server answers a real MCP client end to
 connector smoke diagnostic ([`src/cli/connector-smoke.ts`](../../src/cli/connector-smoke.ts)):
 
 ```sh
-API_TOKEN=... MCP_URL=https://your-host.example.com/mcp bryce connector smoke
+API_TOKEN=... MCP_URL=https://your-host.example.com/mcp sk connector smoke
 ```
 
 It drives the real MCP SDK client over Streamable HTTP: `initialize` → `tools/list` (asserts the
@@ -396,7 +396,7 @@ are redacted from all output). Set `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SEC
 neither) to also send the Cloudflare service-token headers while an Access policy is still in front.
 It exits non-zero on any failed assertion, so launchd or a shell can gate on it.
 
-An **opt-in** `bryce connector smoke --mutate` exercises the write path — but only against a
+An **opt-in** `sk connector smoke --mutate` exercises the write path — but only against a
 designated, **already-inactive** `SMOKE_PERSON_ID` sentinel (it refuses a blank, absent, or
 currently-active id), deactivating it as an idempotent no-op. It **writes to the target DB and is
 staging-only, never production**, and it never calls `send_digest`.
@@ -515,13 +515,13 @@ To force it out **now** rather than wait for the next scheduled run, reopen the 
 sqlite3 data/bryce.db \
   "UPDATE digest_deliveries SET status = 'failed'
      WHERE kind = 'digest' AND date_covered = '$(date +%F)';"
-bryce digest
+sk digest
 ```
 
 A specific past day has no direct re-send: `--window` always ends on yesterday, and there is no
 as-of flag on the CLI (recovery targets a past date only through the automatic pass above, keyed off
 its delivery row). To see a past day's games on demand, ask for a wider window that still covers it —
-`bryce digest --window 7d` (or `14d`, `21d`, `28d`, `35d`, `60d`, `ytd`). An on-demand window takes no slot and is
+`sk digest --window 7d` (or `14d`, `21d`, `28d`, `35d`, `60d`, `ytd`). An on-demand window takes no slot and is
 always safe to repeat.
 
 Do **not** delete a delivery row by hand: the recovery pass keys off it, and deleting a `sent` row
@@ -564,7 +564,7 @@ so they never drift:
   not yet confirmed to work there, so do not rely on it for the hosted apps. The decided Cloudflare
   Access topology and the manual proof that closes #37 are in
   [*Cloudflare Access in front of the tunnel*](#cloudflare-access-in-front-of-the-tunnel) above;
-  smoke-test any endpoint first with `bryce connector smoke`.
+  smoke-test any endpoint first with `sk connector smoke`.
 - **[REST API Reference](../api/README.md)** — all `/api` routes, the bearer scheme and 401
   behavior, and the full `onError` status map.
 - **[CLI Reference](../cli/README.md)** — the same operations from the command line.
@@ -582,7 +582,7 @@ NCAA baseball has no MLB Stats API `personId`, so an NCAA Player is identified b
 **Adding him** (his first Refresh runs immediately, unless the pipeline is in Offseason Sleep):
 
 ```sh
-bryce seed add --ncaa-seq 2649785
+sk seed add --ncaa-seq 2649785
 ```
 
 - **REST:** `POST /api/players/ncaa` with `{"ncaaPlayerSeq": 2649785}`.
@@ -593,7 +593,7 @@ bryce seed add --ncaa-seq 2649785
 live fetch and parse from the Mac before relying on it:
 
 ```sh
-bryce ncaa probe --seq 2649785 --season 2025 --type batting
+sk ncaa probe --seq 2649785 --season 2025 --type batting
 ```
 
 It prints the HTTP status and what the parser extracted (name, school, row count), exiting non-zero on
