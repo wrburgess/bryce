@@ -66,6 +66,7 @@ const year = (value: string): string | null => /^\d{4}$/.test(value)
 const positiveIntegerList = (value: string): string | null => value.split(",").every((part) => positiveInteger(part.trim()) === null) ? null : "a comma-separated list of positive integers";
 const uniqueBoundedIntegerList = (value: string): string | null => {
   const parts = value.split(",").map((part) => part.trim()).filter(Boolean);
+  if (parts.length === 0) return "at least one canonical positive integer";
   if (parts.some((part) => positiveInteger(part) !== null)) return "a comma-separated list of canonical positive integers";
   if (new Set(parts).size !== parts.length) return "a comma-separated list without duplicate IDs";
   return null;
@@ -98,7 +99,7 @@ const batchShape = (values: ReadonlyMap<string, readonly string[]>): string | nu
   const fileNames = fileEntries.filter((entry) => !/^\d+$/.test(entry) && !entry.startsWith("ncaa:")).map((entry) => entry.startsWith("name:") ? entry.slice(5).trim() : entry);
   if (fileNames.some((name) => name.length === 0)) return "batch file contains a blank name";
   if (fileNames.some((name) => /\p{Cc}/u.test(name))) return "batch file names must not contain control characters";
-  if (fileNames.some((name) => normalizedBatchName(name).length > 120)) return "batch names must be at most 120 characters";
+  if (fileNames.some((name) => name.trim().length > 120)) return "batch names must be at most 120 characters";
   for (const name of fileNames.map(normalizedBatchName)) {
     if (nameKeys.has(name)) return "batch names must be unique ignoring case and whitespace";
     nameKeys.add(name);

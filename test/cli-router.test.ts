@@ -124,6 +124,8 @@ describe("CLI router metadata", () => {
       ["seed", "add", "--search", "   "],
       ["digest", "--window=7d\nforged"],
       ["players", "batch-add", "--person-ids", "1,1"],
+      ["players", "batch-add", "--person-ids", ",,"],
+      ["players", "batch-add", "--ncaa-seqs", ""],
       ["players", "batch-add", "--person-ids", Array.from({ length: 26 }, (_, i) => String(i + 1)).join(",")],
       ["players", "batch-add", "--names", "Acosta", "--names", "acosta"],
       ["players", "batch-add", "--names", "x".repeat(121)],
@@ -142,7 +144,7 @@ describe("CLI router metadata", () => {
     const blank = join(work, "blank.txt");
     const malformed = join(work, "malformed.txt");
     writeFileSync(blank, "# comment\n\n");
-    writeFileSync(malformed, `name:${"x".repeat(121)}\nname:ok\nname:OK\n`);
+    writeFileSync(malformed, `name:${"x".repeat(121)}\nname:${"x ".repeat(61)}\nname:ok\nname:OK\n`);
     const loader = vi.fn(async () => ({ main: vi.fn(async () => 0) }));
     const commands = COMMANDS.map((command) => ({ ...command, load: loader }));
     expect(await runRouter(["players", "batch-add", "--file", blank], vi.fn(), commands)).toBe(1);
@@ -210,6 +212,26 @@ describe("CLI router metadata", () => {
     expect(await runRouter(["digest", "-w", "7d"], vi.fn(), digestOnly)).toBe(29);
     expect(digestSeen).toEqual([["-w", "7d"]]);
   });
+
+  it("runs a generated real-executable matrix for every routed leaf", () => {
+    const work = mkdtempSync(join(tmpdir(), "bryce-router-matrix-"));
+    try {
+      const executable = join(process.cwd(), "bin", "bryce");
+      for (const command of COMMANDS) {
+        const result = spawnSync(executable, [...command.path, "--help"], {
+          cwd: work,
+          encoding: "utf8",
+          env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
+          timeout: 10_000,
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.status, command.path.join(" ")).toBe(0);
+        expect(`${result.stdout}`).toContain(`Usage: ${command.usage}`);
+      }
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   it("keeps every direct compatibility entry point bounded and exit-draining on default argv", () => {
     const work = mkdtempSync(join(tmpdir(), "bryce-compat-"));
