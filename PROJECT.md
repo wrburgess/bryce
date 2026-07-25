@@ -142,8 +142,7 @@ npx tsx scripts/summon-reviewer.ts --mode work --base BRANCH --out OUT_FILE --ac
   review was lost rather than absent), `timeout` (no review inside the wall-clock cap),
   `self_review` (the acting Codex model matches the requested Codex reviewer model).
 
-  **The fallback trigger is the EXIT STATUS, not the classification list: `0` = review in hand;
-  anything else = try the next independent Reviewer.** Some failures are not classifications at all
+  **The fallback trigger is the EXIT STATUS, not the classification list: `0` = review in hand; any non-zero exit = try the next independent Reviewer.** Some failures are not classifications at all
   — a usage error (a malformed or incomplete command) and an unwritable `--out` print to stderr and
   exit 1 without a classification line, and those are among the likeliest failures in practice.
   The AC must make these attempts in order, skipping only a runner that is unavailable in the current

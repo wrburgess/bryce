@@ -403,11 +403,13 @@ echo "Failure ladder, continued:"
 make_fake_codex ok
 OUT="$TMP/self.md"
 expect_status "--ac codex -> FAILED (self_review)" 1 "FAILED (self_review)" \
-  "$TSX" "$SCRIPT" --mode work --out "$OUT" --ac codex --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --ac codex --ac-model gpt-5.6 \
+    --reviewer-model gpt-5.6 --codex-bin "$FAKE_BIN"
 [ ! -e "$FAKE_LOG" ]
 report "--ac codex -> the CLI is never spawned at all" $?
 expect_status "--ac CoDeX -> FAILED (self_review), case-insensitive" 1 "FAILED (self_review)" \
-  "$TSX" "$SCRIPT" --mode work --out "$OUT" --ac CoDeX --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --ac CoDeX --ac-model GPT-5.6 \
+    --reviewer-model gpt-5.6 --codex-bin "$FAKE_BIN"
 
 # ---------------------------------------------------------------------------
 echo "Encoding safety (ASCII-only stdout; body bytes untouched):"
