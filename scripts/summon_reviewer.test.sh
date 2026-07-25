@@ -52,7 +52,8 @@ ASSESS_MD="$REPO_ROOT/skills/assess/SKILL.md"
 [ -x "$TSX" ] || { echo "tests require tsx (run: npm ci)"; exit 1; }
 [ -f "$SCRIPT" ] || { echo "missing script under test: $SCRIPT"; exit 1; }
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" || TMP=""
+[ -n "$TMP" ] && [ -d "$TMP" ] || { echo "tests require a writable temp dir (mktemp -d failed)"; exit 1; }
 trap 'chmod -R u+rwx "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 
 PASS=0; FAIL=0
