@@ -4,7 +4,8 @@ import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { openDb } from "../src/db/client.js";
-import { refreshRuns } from "../src/db/schema.js";
+import { players, refreshRuns } from "../src/db/schema.js";
+import { runRefresh } from "../src/jobs/refresh.js";
 import {
   SUPERSEDED_MESSAGE,
   claimRefreshRun,
@@ -442,6 +443,26 @@ describe("refresh run claim across two file-db connections (ADR 0043)", () => {
 });
 
 describe("refresh fencing across a real child process (ADR 0048)", () => {
+  it("rejects a stale real targeted writer after a real whole refresh claims and settles", async () => {
+    const file = testFileDb();
+    const now = () => at(T0);
+    const player = file.opened.db.insert(players).values({ externalId: 7, ncaaPlayerSeq: null, highlightlyPlayerId: null, highlightlyTeamId: null, ncaaSourceState: null, fullName: "Initial", level: "mlb", milbLevel: null, teamName: null, position: null, schoolName: null, active: true, notes: null, createdAt: T0, updatedAt: T0 }).returning({ id: players.id }).get();
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
+      const { openDb } = await import(process.env.DB_CLIENT); const { runRefreshForPlayer } = await import(process.env.REFRESH);
+      const opened = openDb(process.env.DB_PATH); const client = { getSeason: async()=>null, getPerson: async()=>{ process.stdout.write('buffered\\n'); await new Promise(r=>process.stdin.once('data',r)); return { fullName:'OLD', primaryPosition:{abbreviation:'SS'}, currentTeam:{id:1} }; }, getTeam: async()=>({sport:{id:1},name:'Old'}), getGameLog: async()=>({stats:[]}) };
+      const result = await runRefreshForPlayer({db:opened.db,client,now:()=>new Date(process.env.NOW),tz:'America/Chicago'}, Number(process.env.PLAYER)); process.stdout.write(JSON.stringify(result)+'\\n'); opened.close(); process.exit(0);
+    `], { env: { ...process.env, DB_PATH:file.path, NOW:T0, PLAYER:String(player.id), DB_CLIENT:pathToFileURL(new URL("../src/db/client.ts",import.meta.url).pathname).href, REFRESH:pathToFileURL(new URL("../src/jobs/refresh.ts",import.meta.url).pathname).href }, stdio:["pipe","pipe","pipe"] });
+    const lines:string[]=[]; child.stdout.setEncoding("utf8"); child.stdout.on("data", (c:string)=>lines.push(...c.trim().split("\n").filter(Boolean)));
+    await new Promise<void>((resolve,reject)=>{ child.stdout.once("data",()=>resolve()); child.once("error",reject); });
+    const freshClient = { getSeason: async()=>null, getPerson: async()=>({fullName:"NEW",primaryPosition:{abbreviation:"SS"},currentTeam:{id:1}}), getTeam: async()=>({sport:{id:1},name:"New"}), getGameLog: async()=>({stats:[]}) };
+    const whole = await runRefresh({ db:file.opened.db, client:freshClient as never, now, tz:TEST_TZ });
+    expect(whole.status).toBe("ok"); child.stdin.write("release\n");
+    await new Promise<void>((resolve,reject)=>child.once("exit", c=>c===0?resolve():reject(new Error(`child ${c}`))));
+    expect(JSON.parse(lines[1] ?? "{}")).toMatchObject({skipped:true,reason:"whole-refresh-running"});
+    expect(file.opened.db.select().from(players).where(eq(players.id,player.id)).get()?.fullName).toBe("NEW");
+    expect(digestFreshnessFor(file.opened.db,"2026-07-18",TEST_TZ).state).toBe("fresh");
+    file.cleanup();
+  });
   it("refuses a targeted write buffered before a whole sweep claims", async () => {
     const file = testFileDb();
     const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
