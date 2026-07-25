@@ -7,8 +7,10 @@ import { readFileSync, statSync } from "node:fs";
  * help, and option preflight are pure; a leaf is imported only after that work succeeds.
  */
 export type CliAdapter = (argv: string[]) => Promise<number>;
+const CLI_NAME = "sk";
+const cli = (text: string): string => text.replaceAll("bryce", CLI_NAME);
 
-export type Option = { name: string; value?: boolean; aliases?: string[]; values?: readonly string[]; description: string; validate?: (value: string) => string | null; inline?: boolean };
+export type Option = { name: string; value?: boolean; aliases?: string[]; values?: readonly string[]; description: string; validate?: (value: string) => string | null; inline?: boolean; repeatable?: boolean };
 export type Command = {
   path: readonly string[];
   purpose: string;
@@ -51,11 +53,11 @@ const nonBlank = (value: string): string | null => value.trim().length > 0 ? nul
 const controlFree = (value: string): string | null => /\p{Cc}/u.test(value) ? "a value without control characters" : null;
 const withNonBlank = (validate?: Option["validate"]): Option["validate"] => (candidate) =>
   nonBlank(candidate) ?? controlFree(candidate) ?? validate?.(candidate) ?? null;
-const value = (name: string, description: string, values?: readonly string[], aliases?: string[], validate?: Option["validate"]): Option =>
-  ({ name, description, values, aliases, validate: withNonBlank(validate) });
+const value = (name: string, description: string, values?: readonly string[], aliases?: string[], validate?: Option["validate"], repeatable = false): Option =>
+  ({ name, description, values, aliases, validate: withNonBlank(validate), repeatable });
 const inlineValue = (name: string, description: string, values?: readonly string[], aliases?: string[], validate?: Option["validate"]): Option =>
   ({ name, description, values, aliases, validate: withNonBlank(validate), inline: true });
-const flag = (name: string, description: string): Option => ({ name, description, value: false });
+const flag = (name: string, description: string, aliases?: string[]): Option => ({ name, description, value: false, aliases });
 const positiveInteger = (value: string): string | null => /^\d+$/.test(value) && String(Number(value)) === value && Number.isSafeInteger(Number(value)) && Number(value) > 0 ? null : "a canonical positive integer";
 const positiveIntegerList = (value: string): string | null => value.split(",").every((part) => positiveInteger(part.trim()) === null) ? null : "a comma-separated list of positive integers";
 const uniqueBoundedIntegerList = (value: string): string | null => {
@@ -125,29 +127,29 @@ const tagSelector = (candidate: string): string | null => {
 
 /** Canonical built-in syntax/help metadata. Operational detail belongs in docs/cli. */
 export const COMMANDS: readonly Command[] = [
-  leaf(["digest"], "Build and send a digest.", "bryce digest [--window SPEC|-w SPEC] [--list NAME] [--force]", "bryce digest -w 7d", () => import("./digest.js"), [inlineValue("window", "Digest window.", ["1d", "7d", "14d", "21d", "28d", "35d", "60d", "ytd"], ["w"]), inlineValue("list", "Named player list."), flag("force", "Replay the daily slot when allowed.")]),
-  leaf(["refresh"], "Refresh the active watch list.", "bryce refresh", "bryce refresh", () => import("./refresh.js")),
-  leaf(["players", "lists", "create"], "Create a named player list.", "bryce players lists create --name NAME", "bryce players lists create --name Prospects", () => import("./lists.js"), [value("name", "List name.")], { required: ["name"] }),
-  leaf(["players", "lists", "rename"], "Rename a named player list.", "bryce players lists rename --name OLD --to NEW", "bryce players lists rename --name Prospects --to 'Top 30'", () => import("./lists.js"), [value("name", "Current list name."), value("to", "New list name.")], { required: ["name", "to"] }),
-  leaf(["players", "lists", "delete"], "Delete a named player list.", "bryce players lists delete --name NAME", "bryce players lists delete --name Prospects", () => import("./lists.js"), [value("name", "List name.")], { required: ["name"] }),
-  leaf(["players", "lists", "add"], "Add players to a named list.", "bryce players lists add --name NAME [--person-ids IDS] [--highlightly-player-ids IDS]", "bryce players lists add --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids.", undefined, undefined, positiveIntegerList), value("highlightly-player-ids", "Comma-separated Highlightly NCAA ids.", undefined, undefined, positiveIntegerList)], { required: ["name"], oneOf: [["person-ids", "highlightly-player-ids"]] }),
-  leaf(["players", "lists", "remove"], "Remove players from a named list.", "bryce players lists remove --name NAME [--person-ids IDS] [--highlightly-player-ids IDS]", "bryce players lists remove --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids.", undefined, undefined, positiveIntegerList), value("highlightly-player-ids", "Comma-separated Highlightly NCAA ids.", undefined, undefined, positiveIntegerList)], { required: ["name"], oneOf: [["person-ids", "highlightly-player-ids"]] }),
-  leaf(["players", "lists", "show"], "Show named lists or their members.", "bryce players lists show [--name NAME]", "bryce players lists show", () => import("./lists.js"), [value("name", "List name.")]),
-  leaf(["players", "backup"], "Write a player-list backup.", "bryce players backup --out FILE", "bryce players backup --out backups/players.json", () => import("./players-backup.js"), [value("out", "Output file.")], { required: ["out"] }),
-  leaf(["players", "restore"], "Restore a player-list backup.", "bryce players restore --in FILE", "bryce players restore --in backups/players.json", () => import("./players-restore.js"), [value("in", "Input file.")], { required: ["in"] }),
-  leaf(["players", "batch-add"], "Stage many players.", "bryce players batch-add [--person-ids IDS] [--highlightly-player-id ID --canonical-name NAME --team-id ID] [--names NAME] [--file FILE]", "bryce players batch-add --person-ids 691185", () => import("./batch-add.js"), [value("person-ids", "Comma-separated MLB ids.", undefined, undefined, uniqueBoundedIntegerList), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger), value("canonical-name", "Canonical Highlightly name."), value("team-id", "Highlightly team id.", undefined, undefined, positiveInteger), value("names", "Player name; repeatable.", undefined, undefined, batchName), value("file", "Input file.")], { oneOf: [["person-ids", "highlightly-player-id", "names", "file"]], semantic: batchShape }),
-  leaf(["db", "migrate"], "Apply pending database migrations.", "bryce db migrate", "bryce db migrate", () => import("./migrate.js")),
-  leaf(["db", "backup"], "Create a database snapshot.", "bryce db backup", "bryce db backup", () => import("./backup.js")),
-  leaf(["db", "restore"], "Restore a database snapshot.", "bryce db restore --from FILE", "bryce db restore --from backups/bryce-YYYYMMDDTHHMMSSZ-000.db", () => import("./restore.js"), [value("from", "Snapshot file.")], { required: ["from"] }),
-  leaf(["connector", "smoke"], "Smoke-test a running MCP connector.", "bryce connector smoke [--mutate]", "bryce connector smoke", () => import("./connector-smoke.js"), [flag("mutate", "Also run the configured mutation probe.")]),
-  leaf(["seed", "add"], "Add a watch-list player.", "bryce seed add (--person-id N|--highlightly-player-id N|--search NAME) [--pick I]", "bryce seed add --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger), value("canonical-name", "Canonical Highlightly name."), value("team-id", "Highlightly team id.", undefined, undefined, positiveInteger), value("search", "Player name."), value("pick", "One-based search result.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "highlightly-player-id", "search"]], requires: [["pick", "search"], ["canonical-name", "highlightly-player-id"], ["team-id", "highlightly-player-id"]] }),
-  leaf(["seed", "deactivate"], "Deactivate a watch-list player.", "bryce seed deactivate (--person-id N|--highlightly-player-id N)", "bryce seed deactivate --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "highlightly-player-id"]] }),
-  leaf(["seed", "list"], "List watch-list players.", "bryce seed list [--tags EXPR]", "bryce seed list --tags status:rostered", () => import("./seed.js"), [value("tags", "Tag selector.", undefined, undefined, tagSelector)]),
-  leaf(["seed", "tag", "add"], "Add a manual player tag.", "bryce seed tag add (--person-id N|--highlightly-player-id N) --tag TAG", "bryce seed tag add --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger), value("tag", "Manual tag.", undefined, undefined, manualTag)], { required: ["tag"], exactlyOneOf: [["person-id", "highlightly-player-id"]] }),
-  leaf(["seed", "tag", "remove"], "Remove a manual player tag.", "bryce seed tag remove (--person-id N|--highlightly-player-id N) --tag TAG", "bryce seed tag remove --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger), value("tag", "Manual tag.", undefined, undefined, manualTag)], { required: ["tag"], exactlyOneOf: [["person-id", "highlightly-player-id"]] }),
-  leaf(["seed", "tag", "list"], "List player tags.", "bryce seed tag list (--person-id N|--highlightly-player-id N)", "bryce seed tag list --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "highlightly-player-id"]] }),
-  leaf(["seed", "tag", "rebuild"], "Rebuild derived tags.", "bryce seed tag rebuild", "bryce seed tag rebuild", () => import("./seed.js")),
-  { ...leaf(["server"], "Run the REST and MCP server.", "bryce server", "bryce server", () => import("../server.js")), longRunning: true },
+  leaf(["digest"], "Build and send a digest.", "sk digest [--window SPEC|-w SPEC] [--list NAME] [--force|-f]", "sk digest -w 7d", () => import("./digest.js"), [inlineValue("window", "Digest window.", ["1d", "7d", "14d", "21d", "28d", "35d", "60d", "ytd"], ["w"]), inlineValue("list", "Named player list."), flag("force", "Replay the daily slot when allowed.", ["f"])]),
+  leaf(["refresh"], "Refresh the active watch list.", "sk refresh", "sk refresh", () => import("./refresh.js")),
+  leaf(["players", "lists", "create"], "Create a named player list.", "sk players lists create --name NAME", "sk players lists create --name Prospects", () => import("./lists.js"), [value("name", "List name.")], { required: ["name"] }),
+  leaf(["players", "lists", "rename"], "Rename a named player list.", "sk players lists rename --name OLD --to NEW", "sk players lists rename --name Prospects --to 'Top 30'", () => import("./lists.js"), [value("name", "Current list name."), value("to", "New list name.")], { required: ["name", "to"] }),
+  leaf(["players", "lists", "delete"], "Delete a named player list.", "sk players lists delete --name NAME", "sk players lists delete --name Prospects", () => import("./lists.js"), [value("name", "List name.")], { required: ["name"] }),
+  leaf(["players", "lists", "add"], "Add players to a named list.", "sk players lists add --name NAME [--person-ids IDS] [--highlightly-player-ids IDS]", "sk players lists add --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids.", undefined, undefined, positiveIntegerList), value("highlightly-player-ids", "Comma-separated Highlightly NCAA ids.", undefined, undefined, positiveIntegerList)], { required: ["name"], oneOf: [["person-ids", "highlightly-player-ids"]] }),
+  leaf(["players", "lists", "remove"], "Remove players from a named list.", "sk players lists remove --name NAME [--person-ids IDS] [--highlightly-player-ids IDS]", "sk players lists remove --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids.", undefined, undefined, positiveIntegerList), value("highlightly-player-ids", "Comma-separated Highlightly NCAA ids.", undefined, undefined, positiveIntegerList)], { required: ["name"], oneOf: [["person-ids", "highlightly-player-ids"]] }),
+  leaf(["players", "lists", "show"], "Show named lists or their members.", "sk players lists show [--name NAME]", "sk players lists show", () => import("./lists.js"), [value("name", "List name.")]),
+  leaf(["players", "backup"], "Write a player-list backup.", "sk players backup --out FILE", "sk players backup --out backups/players.json", () => import("./players-backup.js"), [value("out", "Output file.")], { required: ["out"] }),
+  leaf(["players", "restore"], "Restore a player-list backup.", "sk players restore --in FILE", "sk players restore --in backups/players.json", () => import("./players-restore.js"), [value("in", "Input file.")], { required: ["in"] }),
+  leaf(["players", "batch-add"], "Stage many players.", "sk players batch-add [--person-ids IDS] [--highlightly-player-id ID --canonical-name NAME --team-id ID] [--names NAME] [--file FILE]", "sk players batch-add --person-ids 691185", () => import("./batch-add.js"), [value("person-ids", "Comma-separated MLB ids.", undefined, undefined, uniqueBoundedIntegerList, true), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger, true), value("canonical-name", "Canonical Highlightly name.", undefined, undefined, undefined, true), value("team-id", "Highlightly team id.", undefined, undefined, positiveInteger, true), value("names", "Player name; repeatable.", undefined, undefined, batchName, true), value("file", "Input file.", undefined, undefined, undefined, true)], { oneOf: [["person-ids", "highlightly-player-id", "names", "file"]], semantic: batchShape }),
+  leaf(["db", "migrate"], "Apply pending database migrations.", "sk db migrate", "sk db migrate", () => import("./migrate.js")),
+  leaf(["db", "backup"], "Create a database snapshot.", "sk db backup", "sk db backup", () => import("./backup.js")),
+  leaf(["db", "restore"], "Restore a database snapshot.", "sk db restore --from FILE", "sk db restore --from backups/sk-YYYYMMDDTHHMMSSZ-000.db", () => import("./restore.js"), [value("from", "Snapshot file.")], { required: ["from"] }),
+  leaf(["connector", "smoke"], "Smoke-test a running MCP connector.", "sk connector smoke [--mutate]", "sk connector smoke", () => import("./connector-smoke.js"), [flag("mutate", "Also run the configured mutation probe.")]),
+  leaf(["seed", "add"], "Add a watch-list player.", "sk seed add (--person-id N|--highlightly-player-id N|--search NAME) [--pick I]", "sk seed add --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger), value("canonical-name", "Canonical Highlightly name."), value("team-id", "Highlightly team id.", undefined, undefined, positiveInteger), value("search", "Player name."), value("pick", "One-based search result.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "highlightly-player-id", "search"]], requires: [["pick", "search"], ["canonical-name", "highlightly-player-id"], ["team-id", "highlightly-player-id"]] }),
+  leaf(["seed", "deactivate"], "Deactivate a watch-list player.", "sk seed deactivate (--person-id N|--highlightly-player-id N)", "sk seed deactivate --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "highlightly-player-id"]] }),
+  leaf(["seed", "list"], "List watch-list players.", "sk seed list [--tags EXPR]", "sk seed list --tags status:rostered", () => import("./seed.js"), [value("tags", "Tag selector.", undefined, undefined, tagSelector)]),
+  leaf(["seed", "tag", "add"], "Add a manual player tag.", "sk seed tag add (--person-id N|--highlightly-player-id N) --tag TAG", "sk seed tag add --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger), value("tag", "Manual tag.", undefined, undefined, manualTag)], { required: ["tag"], exactlyOneOf: [["person-id", "highlightly-player-id"]] }),
+  leaf(["seed", "tag", "remove"], "Remove a manual player tag.", "sk seed tag remove (--person-id N|--highlightly-player-id N) --tag TAG", "sk seed tag remove --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger), value("tag", "Manual tag.", undefined, undefined, manualTag)], { required: ["tag"], exactlyOneOf: [["person-id", "highlightly-player-id"]] }),
+  leaf(["seed", "tag", "list"], "List player tags.", "sk seed tag list (--person-id N|--highlightly-player-id N)", "sk seed tag list --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "highlightly-player-id"]] }),
+  leaf(["seed", "tag", "rebuild"], "Rebuild derived tags.", "sk seed tag rebuild", "sk seed tag rebuild", () => import("./seed.js")),
+  { ...leaf(["server"], "Run the REST and MCP server.", "sk server", "sk server", () => import("../server.js")), longRunning: true },
 ];
 
 const write = (line: string, error = false): void => {
@@ -156,7 +158,7 @@ const write = (line: string, error = false): void => {
 export function renderHelp(path: readonly string[] = [], commands: readonly Command[] = COMMANDS): string {
   const group = GROUPS.find((entry) => entry.path.join("\0") === path.join("\0"));
   if (group !== undefined) {
-    return [group.purpose, "", `Usage: ${group.usage}`, `Options: ${group.options.join(", ") || "none"}`, "", `Example: ${group.example}`, "", ...renderGroupChildren(path, commands), `Run 'bryce ${path.join(" ")} help <command>' for command help.`].join("\n");
+    return [group.purpose, "", `Usage: ${cli(group.usage)}`, `Options: ${group.options.join(", ") || "none"}`, "", `Example: ${cli(group.example)}`, "", ...renderGroupChildren(path, commands), `Run '${CLI_NAME} ${path.join(" ")} help <command>' for command help.`].join("\n");
   }
   const exact = commands.find((command) => command.path.join("\0") === path.join("\0"));
   if (exact !== undefined) {
@@ -165,9 +167,9 @@ export function renderHelp(path: readonly string[] = [], commands: readonly Comm
       const accepted = option.values === undefined ? "" : ` (values: ${option.values.join(" | ")})`;
       return `  ${names}${option.value === false ? "" : " <value>"}  ${option.description}${accepted}`;
     });
-    return [exact.purpose, "", `Usage: ${exact.usage}`, ...(optionLines.length ? ["", "Options:", ...optionLines] : []), "", `Example: ${exact.example}`].join("\n");
+    return [exact.purpose, "", `Usage: ${cli(exact.usage)}`, ...(optionLines.length ? ["", "Options:", ...optionLines] : []), "", `Example: ${cli(exact.example)}`].join("\n");
   }
-  const label = path.length === 0 ? "bryce" : `bryce ${path.join(" ")}`;
+  const label = path.length === 0 ? CLI_NAME : `${CLI_NAME} ${path.join(" ")}`;
   const entries = renderGroupChildren(path, commands);
   return [`Usage: ${label} <command>`, "", "Commands:", ...entries, "", `Run '${label} help <command>' for command help.`].join("\n");
 }
@@ -176,13 +178,13 @@ function renderGroupChildren(path: readonly string[], commands: readonly Command
   return [...new Set(commands.filter((c) => c.path.length > path.length && path.every((p, i) => c.path[i] === p)).map((c) => c.path[path.length]!))].sort().map((child) => {
     const group = GROUPS.find((entry) => entry.path.length === path.length + 1 && entry.path[path.length] === child && path.every((p, i) => entry.path[i] === p));
     if (group !== undefined) {
-      return `  ${child}\n    Purpose: ${group.purpose}\n    Usage: ${group.usage}\n    Options: ${group.options.join(", ") || "none"}\n    Example: ${group.example}`;
+      return `  ${child}\n    Purpose: ${group.purpose}\n    Usage: ${cli(group.usage)}\n    Options: ${group.options.join(", ") || "none"}\n    Example: ${cli(group.example)}`;
     }
     const childCommand = commands.find((c) => c.path.length === path.length + 1 && c.path[path.length] === child && path.every((p, i) => c.path[i] === p))
       ?? commands.find((c) => c.path.length > path.length && c.path[path.length] === child && path.every((p, i) => c.path[i] === p));
     if (childCommand === undefined) return `  ${child}`;
     const details = childCommand.path.length === path.length + 1
-      ? `\n    Purpose: ${childCommand.purpose}\n    Usage: ${childCommand.usage}\n    Options: ${(childCommand.options ?? []).map((option) => `--${option.name}`).join(", ") || "none"}\n    Example: ${childCommand.example}`
+      ? `\n    Purpose: ${childCommand.purpose}\n    Usage: ${cli(childCommand.usage)}\n    Options: ${(childCommand.options ?? []).map((option) => `--${option.name}`).join(", ") || "none"}\n    Example: ${cli(childCommand.example)}`
       : `  ${childCommand.purpose}`;
     return `  ${child}${details}`;
   });
@@ -212,7 +214,7 @@ export function resolve(argv: readonly string[], commands: readonly Command[] = 
   return { error: `unknown or incomplete command '${attempted}'` };
 }
 
-export function preflight(command: Command, argv: readonly string[]): string | null {
+export function preflight(command: Command, argv: readonly string[], validateValues = true): string | null {
   const allowed = new Map<string, Option>();
   const seen = new Set<string>();
   const values = new Map<string, string[]>();
@@ -230,15 +232,19 @@ export function preflight(command: Command, argv: readonly string[]): string | n
     const option = allowed.get(name ?? "");
     if (option === undefined) return `unknown option '${name}'`;
     if (inline !== undefined && (option.inline !== true || !name?.startsWith("--"))) return `option '${name}' does not support '=' syntax`;
+    if (seen.has(option.name) && option.repeatable !== true) return `option '--${option.name}' may not be repeated`;
     if (option.value === false) {
       if (inline !== undefined) return `option '${name}' does not take a value`;
+      seen.add(option.name);
       continue;
     }
     const candidate = inline ?? argv[++index];
     if (candidate === undefined || candidate.startsWith("-")) return `option '${name}' requires a value`;
-    const validation = option.validate?.(candidate);
-    if (validation !== undefined && validation !== null) return `invalid value '${candidate}' for '${name}'; expected ${validation}`;
-    if (option.values !== undefined && !option.values.includes(candidate)) return `invalid value '${candidate}' for '${name}'; expected ${option.values.join(", ")}`;
+    if (validateValues) {
+      const validation = option.validate?.(candidate);
+      if (validation !== undefined && validation !== null) return `invalid value '${candidate}' for '${name}'; expected ${validation}`;
+      if (option.values !== undefined && !option.values.includes(candidate)) return `invalid value '${candidate}' for '${name}'; expected ${option.values.join(", ")}`;
+    }
     seen.add(option.name);
     const prior = values.get(option.name) ?? [];
     prior.push(candidate);
@@ -262,6 +268,21 @@ export function preflight(command: Command, argv: readonly string[]): string | n
   const semanticFailure = command.semantic?.(values);
   if (semanticFailure !== undefined && semanticFailure !== null) return semanticFailure;
   return null;
+}
+
+/**
+ * Validates a direct npm-compatible entry point against the router's canonical
+ * schema. Call this before dotenv/config/database initialization; `prefix`
+ * retains the public grouped verbs used by the lists and seed scripts.
+ */
+export function preflightDirect(path: readonly string[], argv: readonly string[], prefix: readonly string[] = [], validateValues = true): string | null {
+  const command = COMMANDS.find((candidate) => candidate.path.join("\0") === path.join("\0"));
+  if (command === undefined) return `unknown command '${path.join(" ")}'`;
+  if (prefix.length > 0) {
+    if (!prefix.every((part, index) => argv[index] === part)) return `unknown or incomplete command '${argv.join(" ")}'`;
+    return preflight(command, argv.slice(prefix.length), validateValues);
+  }
+  return preflight(command, argv, validateValues);
 }
 
 export async function runRouter(argv = process.argv.slice(2), output: (line: string, error?: boolean) => void = write, commands: readonly Command[] = COMMANDS): Promise<number> {
@@ -304,7 +325,7 @@ if (isMain(import.meta.url)) {
   runRouter(processArgv).then((code) => {
     // A server listener owns the process lifetime and installs its own signal
     // shutdown/drain path. Do not call process.exit after startup, or the
-    // routed `bryce server` command would die immediately after `serve()`.
+    // routed `sk server` command would die immediately after `serve()`.
     if (resolve(processArgv).command?.longRunning === true) {
       process.exitCode = code;
       return;

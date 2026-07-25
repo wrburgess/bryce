@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-describe("locally linked bryce executable", () => {
+describe("locally linked sk executable", () => {
   it("uses the package-local runtime from an unrelated prefix", () => {
     const prefix = mkdtempSync(join(tmpdir(), "bryce-link-"));
     try {
@@ -13,9 +13,9 @@ describe("locally linked bryce executable", () => {
       mkdirSync(join(prefix, "lib", "node_modules"), { recursive: true });
       const npm = process.platform === "win32" ? "npm.cmd" : "npm";
       execFileSync(npm, ["link", process.cwd(), "--prefix", prefix, "--ignore-scripts"], { stdio: "pipe" });
-      const executable = join(prefix, "bin", "bryce");
+      const executable = join(prefix, "bin", "sk");
       expect(existsSync(executable)).toBe(true);
-      expect(execFileSync(executable, ["help"], { encoding: "utf8" })).toContain("Usage: bryce");
+      expect(execFileSync(executable, ["help"], { encoding: "utf8" })).toContain("Usage: sk");
       const invalid = spawnSync(executable, ["not-a-command"], { encoding: "utf8", cwd: tmpdir() });
       expect(invalid.status).toBe(1);
       expect(invalid.stderr).toContain("unknown command");

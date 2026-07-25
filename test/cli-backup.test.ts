@@ -272,7 +272,7 @@ describe("CLI real subprocess", () => {
     const result = runCli("restore.ts", []);
     expect(result.status).not.toBe(0);
     const combined = `${result.stdout}${result.stderr}`;
-    expect(combined).toContain("requires --from");
+    expect(combined).toContain("missing required option '--from'");
     expect(combined).not.toMatch(/\n\s+at /);
   }, 30_000);
 

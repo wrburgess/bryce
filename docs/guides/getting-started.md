@@ -2,7 +2,7 @@
 
 From nothing to your first digest email, step by step. No prior knowledge of this codebase is
 assumed — if you can use GitHub, you can run ScoreKeeps Baseball Tracker (the development project is named Bryce). Production operations (scheduling, remote
-access, backup) live in [Running Bryce](running-bryce.md); this guide gets you testing locally.
+access, backup) live in [Running Bryce](running-sk.md); this guide gets you testing locally.
 
 **What Bryce is, in one paragraph:** you keep a personal watch list of baseball players (MLB,
 minor league, NCAA). A nightly *Refresh* pulls each player's full season game log; a daily *Digest*
@@ -42,12 +42,12 @@ No Docker. No database server. Storage is a single SQLite file the app creates i
 ## 2. Get the code
 
 ```bash
-git clone https://github.com/wrburgess/bryce.git
-cd bryce
+git clone https://github.com/wrburgess/sk.git
+cd sk
 ```
 
-(Or `gh repo clone wrburgess/bryce`, or clone your fork — anything that leaves you inside a
-`bryce/` directory works.)
+(Or `gh repo clone wrburgess/sk`, or clone your fork — anything that leaves you inside a
+`sk/` directory works.)
 
 ## 3. Install the packages
 
@@ -99,7 +99,7 @@ Every other line can stay at its default. For reference, what they mean:
 
 | Variable | What it is | Default |
 |---|---|---|
-| `DATABASE_PATH` | Where the SQLite file lives; created + migrated automatically | `data/bryce.db` |
+| `DATABASE_PATH` | Where the SQLite file lives; created + migrated automatically | `data/sk.db` |
 | `BRYCE_TZ` | Your timezone — defines "today" for digests and season boundaries | `America/Chicago` |
 | `MAILER_PROVIDER` | `console` (print), `postmark`, or `smtp` | `postmark` |
 | `POSTMARK_SERVER_TOKEN` | Only when provider is `postmark` (see step 9) | empty |
@@ -118,7 +118,7 @@ npm test
 Expected: a Vitest run ending in `Tests  225 passed` (a few seconds). Optionally also
 `npx tsx scripts/parity-check.ts`, which should print `parity_check: OK`. Green here means your
 machine is fully set up. There is no "create the database" step — the first real command below
-creates and migrates `data/bryce.db` on its own.
+creates and migrates `data/sk.db` on its own.
 
 ## 6. Add players to your watch list
 
@@ -127,13 +127,13 @@ Bryce ships with an **empty watch list**; it only tracks players you add.
 **MLB / minor-league players** — search by name:
 
 ```bash
-bryce seed add --search "Jackson Holliday"
+sk seed add --search "Jackson Holliday"
 ```
 
 If several players match, it prints a numbered list; re-run with `--pick` to choose one:
 
 ```bash
-bryce seed add --search "Smith" --pick 2
+sk seed add --search "Smith" --pick 2
 ```
 
 Adding a player immediately fetches his **entire current-season game log** (his "first Refresh"),
@@ -143,7 +143,7 @@ Stats API personId you can use `add --person-id 702616` instead.
 **NCAA players** are added by an explicit Highlightly player ID, canonical name, and team ID:
 
 ```bash
-bryce seed add --highlightly-player-id 501 --canonical-name "C Guy" --team-id 10
+sk seed add --highlightly-player-id 501 --canonical-name "C Guy" --team-id 10
 ```
 
 Note: NCAA's season is roughly February–June, so an NCAA player added in the offseason has no new
@@ -152,15 +152,15 @@ stats until spring — that's normal.
 **Manage the list:**
 
 ```bash
-bryce seed list                          # who's being watched
-bryce seed deactivate --person-id 702616 # stop watching (all history is kept)
-bryce seed deactivate --highlightly-player-id 501
+sk seed list                          # who's being watched
+sk seed deactivate --person-id 702616 # stop watching (all history is kept)
+sk seed deactivate --highlightly-player-id 501
 ```
 
 ## 7. Run a Refresh and send your first Digest
 
 ```bash
-bryce refresh
+sk refresh
 ```
 
 Re-pulls every active player's full season game log and stores it. It's idempotent — running it
@@ -168,12 +168,12 @@ twice changes nothing the second time. Expect one polite, throttled API call per
 category.
 
 ```bash
-bryce digest
+sk digest
 ```
 
 Builds the default one-day digest for the last completed host date and "sends" it — with
 `MAILER_PROVIDER=console` it prints the email (subject, HTML, and plain text) straight to your
-terminal. You can request a different Digest window (for example, `bryce digest --window 7d`);
+terminal. You can request a different Digest window (for example, `sk digest --window 7d`);
 the complete supported-window list and syntax live in the [CLI Digest reference](../cli/README.md#digest--build-and-send-a-windowed-digest).
 
 ### Choose a Digest variation
@@ -185,18 +185,18 @@ time.
 
 | What you want | Command | What happens |
 |---|---|---|
-| Yesterday's whole watch list | `bryce digest` | The default `1d` daily Digest. It sends at most once per host date. |
-| The last week | `bryce digest --window 7d` | An on-demand report for the previous seven completed days. Safe to repeat. |
-| A longer recent period | `bryce digest --window 14d` | Use `14d`, `21d`, `28d`, `35d`, or `60d` for that many completed days. |
-| This season so far | `bryce digest --window ytd` | An on-demand year-to-date report from the relevant season start through yesterday. |
+| Yesterday's whole watch list | `sk digest` | The default `1d` daily Digest. It sends at most once per host date. |
+| The last week | `sk digest --window 7d` | An on-demand report for the previous seven completed days. Safe to repeat. |
+| A longer recent period | `sk digest --window 14d` | Use `14d`, `21d`, `28d`, `35d`, or `60d` for that many completed days. |
+| This season so far | `sk digest --window ytd` | An on-demand year-to-date report from the relevant season start through yesterday. |
 
 You can also focus a Digest on a named **list**: a curated subset of your active watch list. Create
 the list, add players to it, then pass its name with `--list`:
 
 ```bash
-bryce players lists create --name Prospects
-bryce players lists add --name Prospects --person-ids 691185,700001
-bryce digest --window 7d --list Prospects
+sk players lists create --name Prospects
+sk players lists add --name Prospects --person-ids 691185,700001
+sk digest --window 7d --list Prospects
 ```
 
 A named-list Digest is always on-demand, even with `--window 1d`, so it does not consume or replace
@@ -204,7 +204,7 @@ the whole-watch-list daily slot. A list contains only active players; deactivati
 them from every scoped Digest without deleting their history. List names must already exist — a typo
 fails without sending a wider, unintended report.
 
-Use `bryce players lists show` to see your lists and their member counts. The [CLI reference]
+Use `sk players lists show` to see your lists and their member counts. The [CLI reference]
 (../cli/README.md#playerslists--manage-named-player-lists-70) documents renaming, removing members,
 and deleting lists. The [Digest reference](../cli/README.md#digest--build-and-send-a-windowed-digest)
 has the full flag contract, including `--force` for a deliberate test replay of the scheduled daily
@@ -248,13 +248,13 @@ When the console digest looks right:
    DIGEST_FROM=the-verified-sender@example.com
    ```
 
-4. `bryce digest` now emails you. (Prefer SMTP? Set `MAILER_PROVIDER=smtp` and the four `SMTP_*`
+4. `sk digest` now emails you. (Prefer SMTP? Set `MAILER_PROVIDER=smtp` and the four `SMTP_*`
    variables instead — any provider works, e.g. Forward Email.)
 
 ## 10. Run the server and talk to it
 
 ```bash
-bryce server
+sk server
 ```
 
 Then, from another terminal:
@@ -271,13 +271,13 @@ using the CLI. Tool list, REST routes, and remote setup: the [MCP](../mcp/README
 
 ## 11. Make it permanent (production)
 
-Everything so far ran by hand. [Running Bryce](running-bryce.md) covers turning it into the
+Everything so far ran by hand. [Running Bryce](running-sk.md) covers turning it into the
 set-and-forget daily email:
 
-1. [Scheduling with launchd](running-bryce.md#scheduling-with-launchd) — nightly refresh + morning
+1. [Scheduling with launchd](running-sk.md#scheduling-with-launchd) — nightly refresh + morning
    digest that self-heal if the laptop was asleep.
-2. [Litestream backup to Cloudflare R2](running-bryce.md#backup-litestream-to-cloudflare-r2).
-3. [Cloudflare Tunnel](running-bryce.md#remote-access-cloudflare-tunnel) +
+2. [Litestream backup to Cloudflare R2](running-sk.md#backup-litestream-to-cloudflare-r2).
+3. [Cloudflare Tunnel](running-sk.md#remote-access-cloudflare-tunnel) +
    [connecting a Claude client to the remote MCP endpoint](../mcp/README.md)
    — manage the watch list from your phone, from anywhere.
 
@@ -286,7 +286,7 @@ set-and-forget daily email:
 ```bash
 git pull
 npm install     # picks up any new dependencies
-bryce digest  # database migrations apply automatically on the next run of anything
+sk digest  # database migrations apply automatically on the next run of anything
 ```
 
 ## Troubleshooting
@@ -295,7 +295,7 @@ bryce digest  # database migrations apply automatically on the next run of anyth
 |---|---|
 | `npm install` fails on `better-sqlite3` | Node too old — re-check `node --version` ≥ 22 |
 | Server exits immediately on start | `API_TOKEN` missing or blank in `.env` — it fails closed by design |
-| `bryce digest` shows no games | No watched player appeared in the selected window; the scheduled daily Digest still sends an empty report, while Offseason Sleep replaces it with a weekly heartbeat |
+| `sk digest` shows no games | No watched player appeared in the selected window; the scheduled daily Digest still sends an empty report, while Offseason Sleep replaces it with a weekly heartbeat |
 | Weekly "heartbeat" email instead of a daily digest | Offseason Sleep (World Series → earliest watched opening day) — expected |
 | Real email not arriving | `DIGEST_FROM` not a verified Postmark Sender Signature, or wrong server token |
 | NCAA add fails | Verify `HIGHLIGHTLY_API_KEY` and the explicit Highlightly player identity. |

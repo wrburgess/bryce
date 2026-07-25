@@ -1,9 +1,9 @@
 # Running Bryce (MLB/MiLB/NCAA pipeline + MCP/REST server)
 
-For interactive administration, activate the local command once with `npm link` and use `bryce …`.
+For interactive administration, activate the local command once with `npm link` and use `sk …`.
 Keep the existing `npm run …` form in launchd plists: launchd has a deliberately minimal PATH.
 Where a direct executable is needed, use its absolute project path (for example
-`/Users/YOU/code/bryce/bin/bryce`).
+`/Users/YOU/code/sk/bin/sk`).
 
 How to run the daily pipeline on its intended host: a Mac (laptop or mini) with Node 22, launchd
 for scheduling, and optional Litestream replication + Cloudflare Tunnel exposure
@@ -17,24 +17,24 @@ below (Player, Refresh, Digest, Offseason Sleep) is defined in
 nvm use              # Node 22 (.nvmrc)
 npm ci
 cp .env.example .env # then fill in values
-bryce db migrate   # optional: jobs also migrate themselves at startup
+sk db migrate   # optional: jobs also migrate themselves at startup
 ```
 
 Seed the watch list, then run the jobs by hand once:
 
 ```sh
-bryce seed add --search "acosta" --pick 1   # or: add --person-id 691185
-bryce seed add --highlightly-player-id 501 --canonical-name "C Guy" --team-id 10
-bryce seed list
-bryce refresh
-bryce digest
-bryce digest --force      # test send: re-send today's digest even if it already went out
+sk seed add --search "acosta" --pick 1   # or: add --person-id 691185
+sk seed add --highlightly-player-id 501 --canonical-name "C Guy" --team-id 10
+sk seed list
+sk refresh
+sk digest
+sk digest --force      # test send: re-send today's digest even if it already went out
 ```
 
 To stage **many** Players at once, use `players:batch-add` (see [CLI Reference](../cli/README.md)); it
 resolves each Player's identity and stages his row, but **defers the season backfill** — his Stat
-Lines appear at the next `bryce refresh`, not inline (unlike single-add), so a batch stays one quick
-call. Run `bryce refresh` afterward to backfill the newly staged Players early.
+Lines appear at the next `sk refresh`, not inline (unlike single-add), so a batch stays one quick
+call. Run `sk refresh` afterward to backfill the newly staged Players early.
 
 ### Forcing a test send
 
@@ -67,7 +67,7 @@ they set `WorkingDirectory` to the repo. `loadConfig` (see
 [`src/config.ts`](../../src/config.ts)) then validates on startup and fails closed on anything
 missing.
 
-The interactive `bryce` command follows the same rule: invoke it from the directory whose `.env`,
+The interactive `sk` command follows the same rule: invoke it from the directory whose `.env`,
 database, backup directory, and other relative paths you intend to use. The executable itself is
 project-local and can be called from elsewhere, but changing the current working directory changes
 where relative runtime files are resolved. Scheduled jobs retain the `npm run …` form and an explicit
@@ -75,7 +75,7 @@ working directory for predictable operation.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `DATABASE_PATH` | no | `data/bryce.db` | SQLite file; created and migrated automatically |
+| `DATABASE_PATH` | no | `data/sk.db` | SQLite file; created and migrated automatically |
 | `BRYCE_TZ` | no | `America/Chicago` | Host timezone for "today" (digest windows, season math) |
 | `BACKUP_DIR` | no | `backups` | Directory for local Snapshots and Player List Backups (gitignored) |
 | `BACKUP_KEEP_LAST` | no | `10` | Newest Snapshots retention keeps (positive integer; `<1`/non-integer fails closed) |
@@ -108,7 +108,7 @@ out again — Digest is **at-least-once** across that one window, a deliberate c
 missing digest. See *Stuck deliveries and duplicate emails* below for what that looks like and what
 to do about it.
 
-`~/Library/LaunchAgents/com.bryce.refresh.plist`:
+`~/Library/LaunchAgents/com.sk.refresh.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -116,8 +116,8 @@ to do about it.
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.bryce.refresh</string>
-  <key>WorkingDirectory</key><string>/Users/YOU/code/bryce</string>
+  <key>Label</key><string>com.sk.refresh</string>
+  <key>WorkingDirectory</key><string>/Users/YOU/code/sk</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string><string>-lc</string>
@@ -129,7 +129,7 @@ to do about it.
 </plist>
 ```
 
-`~/Library/LaunchAgents/com.bryce.digest.plist` — identical shape, label `com.bryce.digest`,
+`~/Library/LaunchAgents/com.sk.digest.plist` — identical shape, label `com.sk.digest`,
 command `npm run digest >> logs/digest.log 2>&1`, and:
 
 ```xml
@@ -140,8 +140,8 @@ command `npm run digest >> logs/digest.log 2>&1`, and:
 Load both:
 
 ```sh
-launchctl load ~/Library/LaunchAgents/com.bryce.refresh.plist
-launchctl load ~/Library/LaunchAgents/com.bryce.digest.plist
+launchctl load ~/Library/LaunchAgents/com.sk.refresh.plist
+launchctl load ~/Library/LaunchAgents/com.sk.digest.plist
 ```
 
 During Offseason Sleep ([ADR 0031](../adr/0031-offseason-sleep-world-series-to-opening-day.md))
@@ -201,11 +201,11 @@ loss (it faithfully replicates a bad migration's corruption too). Keep both.
 Every entrypoint (server, refresh, digest, seed, migrate) now takes an **automatic Snapshot before any
 pending migration applies** — the known-good state to roll back to if the migration goes wrong. A
 schema-less first run has nothing to lose, so it is skipped; a failed pre-migration Snapshot **aborts**
-the migration. Take one on demand with `bryce db backup` (Snapshot + prune to `BACKUP_KEEP_LAST`).
+the migration. Take one on demand with `sk db backup` (Snapshot + prune to `BACKUP_KEEP_LAST`).
 
 Schedule a nightly Snapshot with launchd, same shape as the Refresh/Digest jobs above:
 
-`~/Library/LaunchAgents/com.bryce.backup.plist`:
+`~/Library/LaunchAgents/com.sk.backup.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -213,8 +213,8 @@ Schedule a nightly Snapshot with launchd, same shape as the Refresh/Digest jobs 
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.bryce.backup</string>
-  <key>WorkingDirectory</key><string>/Users/YOU/code/bryce</string>
+  <key>Label</key><string>com.sk.backup</string>
+  <key>WorkingDirectory</key><string>/Users/YOU/code/sk</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string><string>-lc</string>
@@ -227,18 +227,18 @@ Schedule a nightly Snapshot with launchd, same shape as the Refresh/Digest jobs 
 ```
 
 ```sh
-launchctl load ~/Library/LaunchAgents/com.bryce.backup.plist
+launchctl load ~/Library/LaunchAgents/com.sk.backup.plist
 ```
 
-Snapshots are owner-only (`0600`) and named `bryce-YYYYMMDDTHHMMSSZ-NNN.db` (UTC). Retention keeps the
+Snapshots are owner-only (`0600`) and named `sk-YYYYMMDDTHHMMSSZ-NNN.db` (UTC). Retention keeps the
 newest `BACKUP_KEEP_LAST`; an off-box home for Snapshots is deliberately deferred (the Replica remains
 the off-box story).
 
 ### Player List Backups
 
 ```sh
-bryce players backup --out backups/players.json     # write every Player row (network-free)
-bryce players restore --in  backups/players.json     # re-import, all-or-nothing, network-free
+sk players backup --out backups/players.json     # write every Player row (network-free)
+sk players restore --in  backups/players.json     # re-import, all-or-nothing, network-free
 ```
 
 Restore upserts on each Player's natural identity (MLB `external_id` or NCAA `stats_player_seq`), so
@@ -257,9 +257,9 @@ hand first:
    Litestream so nothing is writing the file:
 
    ```sh
-   launchctl unload ~/Library/LaunchAgents/com.bryce.refresh.plist
-   launchctl unload ~/Library/LaunchAgents/com.bryce.digest.plist
-   launchctl unload ~/Library/LaunchAgents/com.bryce.backup.plist
+   launchctl unload ~/Library/LaunchAgents/com.sk.refresh.plist
+   launchctl unload ~/Library/LaunchAgents/com.sk.digest.plist
+   launchctl unload ~/Library/LaunchAgents/com.sk.backup.plist
    # stop the server process (Ctrl-C or its launchd/label), and:
    brew services stop litestream   # or stop the litestream replicate job
    ```
@@ -274,7 +274,7 @@ hand first:
 4. **Restore:**
 
    ```sh
-   bryce db restore --from backups/bryce-20260722T030000Z-000.db
+   sk db restore --from backups/sk-20260722T030000Z-000.db
    ```
 
    It validates the candidate (integrity check, foreign-key check, expected tables, migration
@@ -292,27 +292,27 @@ Continuous SQLite replication (the database is the only state worth protecting):
 ```yml
 # /usr/local/etc/litestream.yml
 dbs:
-  - path: /Users/YOU/code/bryce/data/bryce.db
+  - path: /Users/YOU/code/sk/data/sk.db
     replicas:
       - type: s3
-        bucket: bryce-backup
-        path: bryce.db
+        bucket: sk-backup
+        path: sk.db
         endpoint: https://ACCOUNT_ID.r2.cloudflarestorage.com
         # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from the R2 API token, via env
 ```
 
 Run `litestream replicate` under its own launchd job (or `brew services start litestream`).
-Restore with `litestream restore -o data/bryce.db s3://bryce-backup/bryce.db`.
+Restore with `litestream restore -o data/sk.db s3://sk-backup/sk.db`.
 
 ## Remote access: Cloudflare Tunnel
 
-The server (`bryce server`, [`src/server.ts`](../../src/server.ts)) binds locally; expose it
+The server (`sk server`, [`src/server.ts`](../../src/server.ts)) binds locally; expose it
 without opening ports via a named tunnel:
 
 ```sh
-cloudflared tunnel create bryce
-cloudflared tunnel route dns bryce bryce.example.com
-cloudflared tunnel run --url http://localhost:3000 bryce
+cloudflared tunnel create sk
+cloudflared tunnel route dns sk sk.example.com
+cloudflared tunnel run --url http://localhost:3000 sk
 ```
 
 `GET /health` returns `{ ok, players, statLines, lastDelivery }` — a glanceable check that the
@@ -383,7 +383,7 @@ Before touching Access at all, prove the server answers a real MCP client end to
 connector smoke diagnostic ([`src/cli/connector-smoke.ts`](../../src/cli/connector-smoke.ts)):
 
 ```sh
-API_TOKEN=... MCP_URL=https://your-host.example.com/mcp bryce connector smoke
+API_TOKEN=... MCP_URL=https://your-host.example.com/mcp sk connector smoke
 ```
 
 It drives the real MCP SDK client over Streamable HTTP: `initialize` → `tools/list` (asserts the
@@ -395,12 +395,12 @@ are redacted from all output). Set `CF_ACCESS_CLIENT_ID` / `CF_ACCESS_CLIENT_SEC
 neither) to also send the Cloudflare service-token headers while an Access policy is still in front.
 It exits non-zero on any failed assertion, so launchd or a shell can gate on it.
 
-An **opt-in** `bryce connector smoke --mutate` exercises the write path — but only against a
+An **opt-in** `sk connector smoke --mutate` exercises the write path — but only against a
 designated, **already-inactive** `SMOKE_PERSON_ID` sentinel (it refuses a blank, absent, or
 currently-active id), deactivating it as an idempotent no-op. It **writes to the target DB and is
 staging-only, never production**, and it never calls `send_digest`.
 
-### Manual Verification Stage (the gate that closes [#37](https://github.com/wrburgess/bryce/issues/37))
+### Manual Verification Stage (the gate that closes [#37](https://github.com/wrburgess/sk/issues/37))
 
 The hosted claude.ai web + iPhone connector path **cannot** be proven by the CI test suite — it needs
 a real browser, a real Cloudflare account, and the live tunnel. Until the HC runs the checklist below
@@ -431,7 +431,7 @@ runbook the HC executes by hand, then fills in.
 5. **Close out.** Replace every placeholder in this section (`your-host.example.com`, the recorded
    statuses) with the real values, update the proven/unsupported status line in
    [`docs/mcp/README.md`](../mcp/README.md) → *claude.ai / Claude mobile*, then close
-   [#37](https://github.com/wrburgess/bryce/issues/37).
+   [#37](https://github.com/wrburgess/sk/issues/37).
 
 ## Stuck deliveries and duplicate emails
 
@@ -473,7 +473,7 @@ verbatim, including `sending`:
   how many times that slot was claimed:
 
   ```sh
-  sqlite3 data/bryce.db \
+  sqlite3 data/sk.db \
     "SELECT kind, date_covered, status, attempt_count, claimed_at, sent_at, provider_message_id,
             reconciled_at
        FROM digest_deliveries ORDER BY id DESC LIMIT 5;"
@@ -511,16 +511,16 @@ To force it out **now** rather than wait for the next scheduled run, reopen the 
 `failed` row is re-claimable; an already-`sent` slot can be reopened by setting it `failed`:
 
 ```sh
-sqlite3 data/bryce.db \
+sqlite3 data/sk.db \
   "UPDATE digest_deliveries SET status = 'failed'
      WHERE kind = 'digest' AND date_covered = '$(date +%F)';"
-bryce digest
+sk digest
 ```
 
 A specific past day has no direct re-send: `--window` always ends on yesterday, and there is no
 as-of flag on the CLI (recovery targets a past date only through the automatic pass above, keyed off
 its delivery row). To see a past day's games on demand, ask for a wider window that still covers it —
-`bryce digest --window 7d` (or `14d`, `21d`, `28d`, `35d`, `60d`, `ytd`). An on-demand window takes no slot and is
+`sk digest --window 7d` (or `14d`, `21d`, `28d`, `35d`, `60d`, `ytd`). An on-demand window takes no slot and is
 always safe to repeat.
 
 Do **not** delete a delivery row by hand: the recovery pass keys off it, and deleting a `sent` row
@@ -531,7 +531,7 @@ longer applies.
 ## The MCP server and REST API
 
 The primary interface ([ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)) is the **MCP
-server** at `POST https://bryce.example.com/mcp` (Streamable HTTP), with a thin **REST API** under
+server** at `POST https://sk.example.com/mcp` (Streamable HTTP), with a thin **REST API** under
 `/api` for scripted clients. Both share one service layer and one Zod validation per input shape,
 and both sit behind the same bearer token. During Offseason Sleep
 ([ADR 0031](../adr/0031-offseason-sleep-world-series-to-opening-day.md)) they stay live — history
@@ -559,11 +559,11 @@ so they never drift:
 - **[MCP Reference](../mcp/README.md)** — all twenty-two tools, their inputs and result shapes, and how
   to connect a Claude client. **Claude Code** connects today with a static bearer header; the hosted
   **claude.ai / Claude mobile** custom-connector flow is **pending verification**
-  ([#37](https://github.com/wrburgess/bryce/issues/37)) — a static `Authorization: Bearer` header is
+  ([#37](https://github.com/wrburgess/sk/issues/37)) — a static `Authorization: Bearer` header is
   not yet confirmed to work there, so do not rely on it for the hosted apps. The decided Cloudflare
   Access topology and the manual proof that closes #37 are in
   [*Cloudflare Access in front of the tunnel*](#cloudflare-access-in-front-of-the-tunnel) above;
-  smoke-test any endpoint first with `bryce connector smoke`.
+  smoke-test any endpoint first with `sk connector smoke`.
 - **[REST API Reference](../api/README.md)** — all `/api` routes, the bearer scheme and 401
   behavior, and the full `onError` status map.
 - **[CLI Reference](../cli/README.md)** — the same operations from the command line.
@@ -574,7 +574,7 @@ NCAA players use an explicit Highlightly player ID. Supply its canonical name an
 validate the selected provider identity before the first JSON refresh:
 
 ```sh
-bryce seed add --highlightly-player-id 501 --canonical-name "C Guy" --team-id 10
+sk seed add --highlightly-player-id 501 --canonical-name "C Guy" --team-id 10
 ```
 
 - **REST:** `POST /api/players/ncaa` with `{"playerId":501,"canonicalName":"C Guy","teamId":10}`.

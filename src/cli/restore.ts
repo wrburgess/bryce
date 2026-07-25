@@ -4,6 +4,7 @@ import { MIGRATIONS_FOLDER } from "../db/client.js";
 import { DatabaseBusyError } from "../db/lock.js";
 import { isKnownRestoreError, restoreSnapshot } from "../backup/restore.js";
 import { exitAfterDrain, isMain } from "./main.js";
+import { preflightDirect } from "./router.js";
 
 /**
  * `db:restore --from FILE` — swap a validated Snapshot into place.
@@ -85,6 +86,11 @@ export async function runRestore(argv: string[], deps: RestoreRunDeps): Promise<
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<number> {
+  const failure = preflightDirect(["db", "restore"], argv);
+  if (failure !== null) {
+    process.stderr.write(`error: ${failure}\n`);
+    return 1;
+  }
   loadDotEnv();
   const config = loadConfig();
   // Deliberately never opens config.databasePath here — the restore service owns
