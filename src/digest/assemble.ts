@@ -176,8 +176,15 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
   // recent league is the honest answer, so look it up outside the window.
   const leagueByPlayer = await lastKnownLeagues(db, idlePlayers);
 
-  const batting = mergeFieldingIntoBatting(splits).map(withPlateAppearances);
-  const pitching = splits.filter((s) => s.line.statType === "pitching");
+  // A player's declared position owns his digest table. Do not surface a
+  // pitcher's batting appearance (or a position player's pitching appearance)
+  // in the opposite table: the watch-list role is the digest's classification.
+  const batting = mergeFieldingIntoBatting(splits)
+    .filter((split) => isBatter(split.player))
+    .map(withPlateAppearances);
+  const pitching = splits.filter(
+    (split) => split.line.statType === "pitching" && !isBatter(split.player),
+  );
 
   const batters = buildRows(batting, window, "batting", idlePlayers.filter(isBatter), leagueByPlayer);
   const pitchers = buildRows(
@@ -271,9 +278,9 @@ async function lastKnownLeagues(
  * watched players are pitchers. An unknown position falls to batting, which is
  * the larger population and the harmless default.
  *
- * There is deliberately no two-way handling: a two-way player who actually
- * played appears in both tables from his real splits, and this path fires only
- * when he has no games at all.
+ * This same position rule governs players with games in the window: a player
+ * belongs to exactly one digest table, even if a game log has the other
+ * stat-type.
  */
 function isBatter(player: PlayerRow): boolean {
   return player.position !== "P";

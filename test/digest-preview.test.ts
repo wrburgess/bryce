@@ -342,8 +342,26 @@ describe("assembleDigest — window selection", () => {
     expect(a.batters.map((r) => r.player.fullName)).not.toContain("Riley O'Brien");
   });
 
+  it("uses a player's position to keep batting and pitching rows in separate tables", async () => {
+    const hitter = await insertPlayer(opened.db, { fullName: "Position Hitter", position: "SS" });
+    const pitcher = await insertPlayer(opened.db, { fullName: "Position Pitcher", position: "P" });
+    for (const player of [hitter, pitcher]) {
+      await insertStatLine(opened.db, { playerId: player.id, statType: "batting", gameDate: "2026-07-15" });
+      await insertStatLine(opened.db, {
+        playerId: player.id,
+        statType: "pitching",
+        gameDate: "2026-07-15",
+        stats: { inningsPitched: "1.0" },
+      });
+    }
+
+    const a = await assemble("7d");
+    expect(a.batters.map((row) => row.player.fullName)).toEqual(["Position Hitter"]);
+    expect(a.pitchers.map((row) => row.player.fullName)).toEqual(["Position Pitcher"]);
+  });
+
   it("counts quality starts across the window", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Zack Wheeler" });
+    const player = await insertPlayer(opened.db, { fullName: "Zack Wheeler", position: "P" });
     for (const gameDate of ["2026-07-14", "2026-07-19"]) {
       await insertStatLine(opened.db, {
         playerId: player.id,
@@ -361,7 +379,7 @@ describe("assembleDigest — window selection", () => {
   });
 
   it("counts only the games that meet the quality-start threshold", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Zack Wheeler" });
+    const player = await insertPlayer(opened.db, { fullName: "Zack Wheeler", position: "P" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       statType: "pitching",
