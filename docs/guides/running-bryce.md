@@ -176,7 +176,7 @@ deterministic ([ADR 0043](../adr/0043-persist-refresh-freshness-and-gate-digest.
   report, not the daily proof-of-life.
 - **Observing freshness.** `GET /health` and the MCP `status` tool carry a `refresh` block —
   `state` (`fresh` / `stale` / `running` / `partial` / `failed`), last start/finish, last success,
-  and player counts — or `null` before any refresh has run. A **crashed** run (expired lease) reports
+  player counts, and Stat Line inserted/updated counts — or `null` before any refresh has run. A **crashed** run (expired lease) reports
   its last terminal outcome, never a phantom `running`.
 - **Offseason caveat.** During Sleep, Refresh is a **pure no-op** and records nothing, so freshness
   reads `stale` — expected: the weekly heartbeat, not a freshness row, is the offseason liveness

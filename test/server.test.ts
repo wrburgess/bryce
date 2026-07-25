@@ -258,8 +258,19 @@ describe("GET /health refresh freshness (ADR 0043)", () => {
       startedAt: "2026-07-19T16:59:00.000Z",
       claimedAt: "2026-07-19T16:59:00.000Z", // one minute before the app clock
       finishedAt: null,
+      playersRefreshed: 2,
+      playersTotal: 5,
+      statLinesInserted: 7,
+      statLinesUpdated: 3,
     });
-    expect(await health()).toMatchObject({ state: "running", lastFinishedAt: null });
+    expect(await health()).toMatchObject({
+      state: "running",
+      lastFinishedAt: null,
+      playersRefreshed: 2,
+      playersTotal: 5,
+      statLinesInserted: 7,
+      statLinesUpdated: 3,
+    });
   });
 
   it("reports `partial` when the latest terminal run left players unrefreshed", async () => {

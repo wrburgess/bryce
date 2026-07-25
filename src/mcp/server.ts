@@ -451,7 +451,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "status",
     {
       description:
-        "Health snapshot: active player count, stored stat-line count, the last digest/heartbeat delivery, and ingestion freshness (refresh: fresh/stale/running/partial/failed, with last start/finish/success and player counts; null before any refresh). Same shape as GET /health.",
+        "Health snapshot: active player count, stored stat-line count, the last digest/heartbeat delivery, and ingestion freshness (refresh: fresh/stale/running/partial/failed, with last start/finish/success, player counts, and Stat Line inserted/updated counts; null before any refresh). Same shape as GET /health.",
       inputSchema: {},
     },
     () =>
