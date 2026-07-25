@@ -1,9 +1,11 @@
 # MCP Reference
 
-The MCP server is Bryce's **primary interface** ([ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)):
-twenty-two tools over the same service layer and Zod schemas the [REST API](../api/README.md) and
-[CLI](../cli/README.md) use (whose activated `sk` command is the preferred operator entry point), so a Claude client (web, mobile, or CLI) is the front end and there is
-no web UI. It is mounted at `/mcp` over Streamable HTTP, behind the bearer token. Domain terms —
+The ScoreKeeps MCP server (the application is developed under the internal name Bryce) is the
+**primary interface** ([ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)): twenty-two tools
+over the same service layer and Zod schemas the [REST API](../api/README.md) and
+[CLI](../cli/README.md) use. Its activated `sk` command is the preferred operator entry point; a
+Claude client (web, mobile, or CLI) is the front end, and there is no web UI. It is mounted at
+`/mcp` over Streamable HTTP, behind the bearer token. Domain terms —
 **Player**, **Refresh**, **Digest**, **Window**, **Offseason Sleep** — are defined in
 [`docs/domain/CONTEXT.md`](../domain/CONTEXT.md).
 
@@ -165,9 +167,12 @@ Re-ingest the current season now.
 
 - **Inputs:** `personId` (MLB/MiLB) or `ncaaPlayerSeq` (NCAA) to refresh one Player; omit both to
   refresh **every** active Player.
-- **Success:** the refresh summary, e.g. `{ skipped, inserted, updated }` for one Player or
-  `{ skipped, playersRefreshed, statLinesInserted, statLinesUpdated }` for all.
-- **Side effects:** upserts Stat Lines. No-op during Offseason Sleep (`skipped: true`).
+- **Success:** a per-player result such as `{ skipped, inserted, updated }` when a Player is
+  specified; otherwise a whole-watch-list result with `status` (`ok`, `partial`, or `failed`),
+  `playersRefreshed`, `statLinesInserted`, `statLinesUpdated`, and any per-player failures. A
+  concurrent sweep or Offseason Sleep returns a skipped result instead of doing work.
+- **Side effects:** upserts Stat Lines. Only a whole-watch-list Refresh records the freshness run
+  surfaced by `status` and `GET /health`; a single-player Refresh does not.
 
 ### `player_tag_add`
 

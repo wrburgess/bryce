@@ -1,9 +1,10 @@
 # CLI Reference
 
-The command-line entry points to Bryce's pipeline. Activate the project-local executable once with
-`npm link`, then run `sk …` from any directory. The executable resolves its own project-local
-TypeScript runtime; it does not require a global `tsx`. Each is a thin presenter over the same service layer the [REST API](../api/README.md) and
-[MCP tools](../mcp/README.md) use. Each job's **summary** is a deterministic `key=value` line and
+The command-line entry point to Bryce's pipeline is **`sk`** (ScoreKeeps). Activate the project-local
+executable once with `npm link`, then run `sk …` from any directory. The executable resolves its own
+project-local TypeScript runtime; it does not require a global `tsx`. Each is a thin presenter over
+the same service layer the [REST API](../api/README.md) and [MCP tools](../mcp/README.md) use. Each
+job's **summary** is a deterministic `key=value` line and
 every command exits non-zero on failure — but the output is not purely ASCII `key=value`: `digest`
 with `MAILER_PROVIDER=console` prints the full rendered email above its summary, and `seed`/`list`
 echo the canonical (NFC) player identity, which may contain non-ASCII characters (e.g. `José`), in
@@ -63,7 +64,7 @@ state, so re-running a Window always sends the same content.
   on-demand report that takes no slot and answers even during Offseason Sleep
   ([ADR 0035](../adr/0035-window-selected-digest.md)).
 - `--list NAME` scopes the send to a named list's active members
-  ([#70](https://github.com/wrburgess/sk/issues/70) / [ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)).
+  ([#70](https://github.com/wrburgess/bryce/issues/70) / [ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)).
   A named-list send is **on-demand only** (it takes no daily slot); an unknown list **fails closed**
   (exit `1`, `error: no list named "…"`, nothing sent).
 
@@ -223,7 +224,7 @@ sk players batch-add --names "Bobby Witt Jr." --names "Gunnar Henderson"
 sk players batch-add --file roster.txt
 ```
 
-Stages up to **25** Players onto the Watch List in one call ([#68](https://github.com/wrburgess/sk/issues/68),
+Stages up to **25** Players onto the Watch List in one call ([#68](https://github.com/wrburgess/bryce/issues/68),
 [ADR 0045](../adr/0045-batch-add-stages-by-identity-best-effort-defers-backfill.md)). Each Player's
 **identity** is resolved and his row is staged **now**, but — unlike `seed add` — **no first Refresh
 runs inline**: his Stat Lines appear at the next `sk refresh`. Prints one greppable

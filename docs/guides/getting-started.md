@@ -42,12 +42,12 @@ No Docker. No database server. Storage is a single SQLite file the app creates i
 ## 2. Get the code
 
 ```bash
-git clone https://github.com/wrburgess/sk.git
-cd sk
+git clone https://github.com/wrburgess/bryce.git
+cd bryce
 ```
 
-(Or `gh repo clone wrburgess/sk`, or clone your fork — anything that leaves you inside a
-`sk/` directory works.)
+(Or `gh repo clone wrburgess/bryce`, or clone your fork — anything that leaves you inside a
+`bryce/` directory works.)
 
 ## 3. Install the packages
 
@@ -55,7 +55,7 @@ cd sk
 npm install
 ```
 
-Activate the project-local command for interactive use:
+Activate the project-local `sk` command for interactive use:
 
 ```bash
 npm link
@@ -115,9 +115,9 @@ Every other line can stay at its default. For reference, what they mean:
 npm test
 ```
 
-Expected: a Vitest run ending in `Tests  225 passed` (a few seconds). Optionally also
-`npx tsx scripts/parity-check.ts`, which should print `parity_check: OK`. Green here means your
-machine is fully set up. There is no "create the database" step — the first real command below
+Expected: a passing Vitest run (the exact test count changes as the application evolves). Optionally
+also run `npx tsx scripts/parity-check.ts`, which should print `parity_check: OK`. Green here means
+your machine is fully set up. There is no "create the database" step — the first real command below
 creates and migrates `data/sk.db` on its own.
 
 ## 6. Add players to your watch list

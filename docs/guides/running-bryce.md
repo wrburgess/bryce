@@ -400,7 +400,7 @@ designated, **already-inactive** `SMOKE_PERSON_ID` sentinel (it refuses a blank,
 currently-active id), deactivating it as an idempotent no-op. It **writes to the target DB and is
 staging-only, never production**, and it never calls `send_digest`.
 
-### Manual Verification Stage (the gate that closes [#37](https://github.com/wrburgess/sk/issues/37))
+### Manual Verification Stage (the gate that closes [#37](https://github.com/wrburgess/bryce/issues/37))
 
 The hosted claude.ai web + iPhone connector path **cannot** be proven by the CI test suite — it needs
 a real browser, a real Cloudflare account, and the live tunnel. Until the HC runs the checklist below
@@ -431,7 +431,7 @@ runbook the HC executes by hand, then fills in.
 5. **Close out.** Replace every placeholder in this section (`your-host.example.com`, the recorded
    statuses) with the real values, update the proven/unsupported status line in
    [`docs/mcp/README.md`](../mcp/README.md) → *claude.ai / Claude mobile*, then close
-   [#37](https://github.com/wrburgess/sk/issues/37).
+   [#37](https://github.com/wrburgess/bryce/issues/37).
 
 ## Stuck deliveries and duplicate emails
 
@@ -559,7 +559,7 @@ so they never drift:
 - **[MCP Reference](../mcp/README.md)** — all twenty-two tools, their inputs and result shapes, and how
   to connect a Claude client. **Claude Code** connects today with a static bearer header; the hosted
   **claude.ai / Claude mobile** custom-connector flow is **pending verification**
-  ([#37](https://github.com/wrburgess/sk/issues/37)) — a static `Authorization: Bearer` header is
+  ([#37](https://github.com/wrburgess/bryce/issues/37)) — a static `Authorization: Bearer` header is
   not yet confirmed to work there, so do not rely on it for the hosted apps. The decided Cloudflare
   Access topology and the manual proof that closes #37 are in
   [*Cloudflare Access in front of the tunnel*](#cloudflare-access-in-front-of-the-tunnel) above;
