@@ -8,7 +8,7 @@ import {
 } from "../ncaa/client.js";
 import { parseGameLogPage } from "../ncaa/parse.js";
 import type { NcaaStatCategory } from "../ncaa/seasons.js";
-import { isMain } from "./main.js";
+import { exitAfterDrain, isMain } from "./main.js";
 
 /**
  * Live probe for the stats.ncaa.org scrape adapter (ADR 0032) — the on-host
@@ -90,11 +90,11 @@ function parseFlags(args: string[]): Map<string, string> {
   return flags;
 }
 
-export async function main(): Promise<number> {
+export async function main(argv = process.argv.slice(2)): Promise<number> {
   loadDotEnv();
   const config = loadConfig();
   const client = new NcaaClient({ delayMs: config.ncaaScrapeDelayMs });
-  return runProbe(process.argv.slice(2), {
+  return runProbe(argv, {
     client,
     write: (line) => process.stdout.write(`${line}\n`),
   });
@@ -102,9 +102,9 @@ export async function main(): Promise<number> {
 
 if (isMain(import.meta.url)) {
   main()
-    .then((code) => process.exit(code))
+    .then(exitAfterDrain)
     .catch((err: unknown) => {
       process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
-      process.exit(1);
+      return exitAfterDrain(1);
     });
 }

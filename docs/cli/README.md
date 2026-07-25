@@ -1,7 +1,8 @@
 # CLI Reference
 
-The command-line entry points to Bryce's pipeline, run as npm scripts on the host (a Mac with Node
-22). Each is a thin presenter over the same service layer the [REST API](../api/README.md) and
+The command-line entry points to Bryce's pipeline. Activate the project-local executable once with
+`npm link`, then run `bryce …` from any directory. The executable resolves its own project-local
+TypeScript runtime; it does not require a global `tsx`. Each is a thin presenter over the same service layer the [REST API](../api/README.md) and
 [MCP tools](../mcp/README.md) use. Each job's **summary** is a deterministic `key=value` line and
 every command exits non-zero on failure — but the output is not purely ASCII `key=value`: `digest`
 with `MAILER_PROVIDER=console` prints the full rendered email above its summary, and `seed`/`list`
@@ -11,13 +12,17 @@ UTF-8 — a deliberate policy scoping the ASCII-safe-stdout rule to machine outp
 **Player**, **Refresh**, **Digest**, **Window**, **Offseason Sleep** — are defined in
 [`docs/domain/CONTEXT.md`](../domain/CONTEXT.md).
 
-There is no `--help` handler: this page is the reference. Arguments after `npm run <script>` must
-follow a `--` separator so npm forwards them to the script rather than consuming them itself.
+Built-in help is the canonical source for command syntax and supported options: use `bryce help`,
+`bryce help players lists`, or `bryce digest --help`. This page is the deeper operational reference.
+Existing `npm run …` scripts remain migration-compatible; arguments after one must follow `--`. The
+activated `bryce` executable may run from any directory; `.env` and relative configured paths are
+resolved from the current working directory, so run it from the directory whose data/configuration
+you intend to use.
 
 ## `refresh` — re-ingest the current season
 
 ```sh
-npm run refresh
+bryce refresh
 ```
 
 Re-ingests the **full current season** game log for every active Player and upserts it idempotently
@@ -28,10 +33,10 @@ time. Takes **no arguments**. During **Offseason Sleep** it exits without any AP
 ## `digest` — build and send a windowed Digest
 
 ```sh
-npm run digest                       # default 1d window
-npm run digest -- --window 7d        # space form
-npm run digest -- --window=14d       # equals form
-npm run digest -- --force            # daily-slot test replay
+bryce digest                         # default 1d window
+bryce digest -w 7d                   # short alias
+bryce digest --window=14d            # equals form
+bryce digest --force                 # daily-slot test replay
 ```
 
 Builds the Digest for a **Window** and sends it through the configured mailer. Writes no stat-line
@@ -65,13 +70,13 @@ state, so re-running a Window always sends the same content.
 ## `players:lists` — manage named player lists (`#70`)
 
 ```sh
-npm run players:lists -- create --name Prospects
-npm run players:lists -- rename --name Prospects --to "Top 30"
-npm run players:lists -- add    --name "Top 30" --person-ids 691185,700001 --ncaa-seqs 2649785
-npm run players:lists -- remove --name "Top 30" --person-ids 700001
-npm run players:lists -- show                       # every live list + member counts
-npm run players:lists -- show   --name "Top 30"     # a list's active members
-npm run players:lists -- delete --name "Top 30"     # soft-delete; the name frees for reuse
+bryce players lists create --name Prospects
+bryce players lists rename --name Prospects --to "Top 30"
+bryce players lists add    --name "Top 30" --person-ids 691185,700001 --ncaa-seqs 2649785
+bryce players lists remove --name "Top 30" --person-ids 700001
+bryce players lists show                       # every live list + member counts
+bryce players lists show   --name "Top 30"     # a list's active members
+bryce players lists delete --name "Top 30"     # soft-delete; the name frees for reuse
 ```
 
 A thin presenter over the named-list service ([ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)):
@@ -85,18 +90,18 @@ fails closed. (Distinct from `seed list`, which prints players.)
 ## `seed` — manage the Watch List
 
 ```sh
-npm run seed -- add --person-id 691185
-npm run seed -- add --ncaa-seq 2649785
-npm run seed -- add --search "acosta"            # prints a numbered list if several match
-npm run seed -- add --search "smith" --pick 2    # choose from that list (1-based)
-npm run seed -- deactivate --person-id 691185
-npm run seed -- deactivate --ncaa-seq 2649785
-npm run seed -- list
-npm run seed -- list --tags status:rostered,level:aaa   # tag-filtered roster (comma = AND)
-npm run seed -- tag add --person-id 691185 --tag status:rostered
-npm run seed -- tag remove --person-id 691185 --tag status:rostered
-npm run seed -- tag list --person-id 691185
-npm run seed -- tag rebuild                              # re-derive every player's derived tags
+bryce seed add --person-id 691185
+bryce seed add --ncaa-seq 2649785
+bryce seed add --search "acosta"            # prints a numbered list if several match
+bryce seed add --search "smith" --pick 2    # choose from that list (1-based)
+bryce seed deactivate --person-id 691185
+bryce seed deactivate --ncaa-seq 2649785
+bryce seed list
+bryce seed list --tags status:rostered,level:aaa   # tag-filtered roster (comma = AND)
+bryce seed tag add --person-id 691185 --tag status:rostered
+bryce seed tag remove --person-id 691185 --tag status:rostered
+bryce seed tag list --person-id 691185
+bryce seed tag rebuild                              # re-derive every player's derived tags
 ```
 
 One required subcommand (`add` | `deactivate` | `list` | `tag`), then flags:
@@ -124,7 +129,7 @@ use `refresh` to re-pull his season.
 ## `ncaa:probe` — validate the NCAA scrape on this host
 
 ```sh
-npm run ncaa:probe -- --seq 2649785 --season 2025 --type batting
+bryce ncaa probe --seq 2649785 --season 2025 --type batting
 ```
 
 Fetches **one** live stats.ncaa.org game-log page and reports the HTTP status plus what the parser
@@ -141,7 +146,7 @@ non-zero on any fetch or parse failure.
 ## `db:migrate` — apply pending migrations
 
 ```sh
-npm run db:migrate
+bryce db migrate
 ```
 
 Opens (creating if needed) the SQLite database, which **applies any pending migrations as a side
@@ -153,7 +158,7 @@ takes an automatic **Snapshot before any pending migration applies** (see `db:ba
 ## `db:backup` — take a Snapshot and prune
 
 ```sh
-npm run db:backup
+bryce db backup
 ```
 
 Takes a **Snapshot** — a consistent, whole-database point-in-time copy — into `BACKUP_DIR` (default
@@ -173,7 +178,7 @@ Snapshot files are owner-only (`0600`). Schedule it nightly with launchd — see
 ## `db:restore` — swap a Snapshot into place
 
 ```sh
-npm run db:restore -- --from backups/bryce-20260722T030000Z-000.db
+bryce db restore --from backups/bryce-20260722T030000Z-000.db
 ```
 
 **Restore** is the destructive recovery op: it validates the candidate Snapshot (integrity check,
@@ -194,7 +199,7 @@ migration before restart** step.
 ## `players:backup` — write a Player List Backup
 
 ```sh
-npm run players:backup -- --out backups/players.json
+bryce players backup --out backups/players.json
 ```
 
 Writes a **Player List Backup** — a portable, versioned JSON serialization of *every* Player row
@@ -212,7 +217,7 @@ restore point ([Domain glossary](../domain/CONTEXT.md)).
 ## `players:restore` — re-import a Player List Backup
 
 ```sh
-npm run players:restore -- --in backups/players.json
+bryce players restore --in backups/players.json
 ```
 
 Re-imports a Player List Backup **network-free and all-or-nothing**, upserting on each Player's natural
@@ -227,15 +232,15 @@ invalid payload or a split-identity conflict fails the whole import with a non-z
 ## `players:batch-add` — stage many Players in one call
 
 ```sh
-npm run players:batch-add -- --person-ids 691185,700001 --ncaa-seqs 2649785
-npm run players:batch-add -- --names "Bobby Witt Jr." --names "Gunnar Henderson"
-npm run players:batch-add -- --file roster.txt
+bryce players batch-add --person-ids 691185,700001 --ncaa-seqs 2649785
+bryce players batch-add --names "Bobby Witt Jr." --names "Gunnar Henderson"
+bryce players batch-add --file roster.txt
 ```
 
 Stages up to **25** Players onto the Watch List in one call ([#68](https://github.com/wrburgess/bryce/issues/68),
 [ADR 0045](../adr/0045-batch-add-stages-by-identity-best-effort-defers-backfill.md)). Each Player's
 **identity** is resolved and his row is staged **now**, but — unlike `seed add` — **no first Refresh
-runs inline**: his Stat Lines appear at the next `npm run refresh`. Prints one greppable
+runs inline**: his Stat Lines appear at the next `bryce refresh`. Prints one greppable
 `outcome status=... ` line per entry, then a `summary added=… updated=… unresolved=… failed=… total=…`
 line. All flags and the file merge into one batch.
 
@@ -264,7 +269,7 @@ an unknown flag, a non-integer id token, an unreadable file, a file over the **6
 ## `server` — start the HTTP server
 
 ```sh
-npm run server
+bryce server
 ```
 
 Starts the long-lived HTTP server that hosts `GET /health` (public), the [REST API](../api/README.md)

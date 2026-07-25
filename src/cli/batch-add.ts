@@ -10,7 +10,7 @@ import type { NcaaClient } from "../ncaa/client.js";
 import { NcaaClient as NcaaClientImpl } from "../ncaa/client.js";
 import type { BatchAddEntryResult } from "../watchlist/service.js";
 import { batchAddPlayers } from "../watchlist/service.js";
-import { isMain } from "./main.js";
+import { exitAfterDrain, isMain } from "./main.js";
 
 /**
  * `players:batch-add` — stage up to 25 players onto the Watch List in one call
@@ -243,7 +243,7 @@ export async function runBatchAdd(argv: string[], deps: BatchAddRunDeps): Promis
   return 0;
 }
 
-export async function main(): Promise<number> {
+export async function main(argv = process.argv.slice(2)): Promise<number> {
   loadDotEnv();
   const config = loadConfig();
   const { db, close } = await startupDb(config.databasePath, {
@@ -253,7 +253,7 @@ export async function main(): Promise<number> {
   try {
     const client = new MlbClientImpl({ delayMs: config.mlbApiDelayMs });
     const ncaaClient = new NcaaClientImpl({ delayMs: config.ncaaScrapeDelayMs });
-    return await runBatchAdd(process.argv.slice(2), {
+    return await runBatchAdd(argv, {
       db,
       client,
       ncaaClient,
@@ -268,11 +268,9 @@ export async function main(): Promise<number> {
 
 if (isMain(import.meta.url)) {
   main()
-    .then((code) => {
-      process.exitCode = code;
-    })
+    .then(exitAfterDrain)
     .catch((err: unknown) => {
       process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
-      process.exitCode = 1;
+      return exitAfterDrain(1);
     });
 }

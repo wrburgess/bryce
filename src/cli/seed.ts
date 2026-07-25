@@ -27,7 +27,7 @@ import {
   deactivatePlayer,
   listPlayers,
 } from "../watchlist/service.js";
-import { isMain } from "./main.js";
+import { exitAfterDrain, isMain } from "./main.js";
 
 /**
  * Watch-list seeding CLI: a thin presenter over the watch-list service
@@ -402,7 +402,7 @@ function runTagRebuild(deps: SeedDeps): number {
   return 0;
 }
 
-export async function main(): Promise<number> {
+export async function main(argv = process.argv.slice(2)): Promise<number> {
   loadDotEnv();
   const config = loadConfig();
   const { db, close } = await startupDb(config.databasePath, {
@@ -412,7 +412,7 @@ export async function main(): Promise<number> {
   try {
     const client = new MlbClientImpl({ delayMs: config.mlbApiDelayMs });
     const ncaaClient = new NcaaClientImpl({ delayMs: config.ncaaScrapeDelayMs });
-    return await runSeed(process.argv.slice(2), {
+    return await runSeed(argv, {
       db,
       client,
       ncaaClient,
@@ -427,9 +427,9 @@ export async function main(): Promise<number> {
 
 if (isMain(import.meta.url)) {
   main()
-    .then((code) => process.exit(code))
+    .then(exitAfterDrain)
     .catch((err: unknown) => {
       process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
-      process.exit(1);
+      return exitAfterDrain(1);
     });
 }

@@ -1,0 +1,291 @@
+import { spawn, spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it, vi } from "vitest";
+import { COMMANDS, type Command, preflight, renderHelp, resolve, runRouter } from "../src/cli/router.js";
+
+const validArgs: Record<string, string[]> = {
+  "players lists create": ["--name", "Prospects"],
+  "players lists rename": ["--name", "Prospects", "--to", "Top 30"],
+  "players lists delete": ["--name", "Prospects"],
+  "players lists add": ["--name", "Prospects", "--person-ids", "1"],
+  "players lists remove": ["--name", "Prospects", "--person-ids", "1"],
+  "players backup": ["--out", "players.json"],
+  "players restore": ["--in", "players.json"],
+  "players batch-add": ["--person-ids", "1"],
+  "db restore": ["--from", "snapshot.db"],
+  "ncaa probe": ["--seq", "1"],
+  "seed add": ["--person-id", "1"],
+  "seed deactivate": ["--person-id", "1"],
+  "seed tag add": ["--person-id", "1", "--tag", "status:rostered"],
+  "seed tag remove": ["--person-id", "1", "--tag", "status:rostered"],
+  "seed tag list": ["--person-id", "1"],
+};
+
+describe("CLI router metadata", () => {
+  it("exposes every operator group and leaf through metadata help", () => {
+    for (const command of COMMANDS) {
+      const help = renderHelp(command.path);
+      expect(help).toContain(command.purpose);
+      expect(help).toContain(`Usage: ${command.usage}`);
+      expect(help).toContain(`Example: ${command.example}`);
+    }
+    const groups = new Map<string, string[]>();
+    for (const command of COMMANDS) {
+      for (let length = 0; length < command.path.length; length += 1) {
+        const path = command.path.slice(0, length);
+        groups.set(path.join("\0"), path);
+      }
+    }
+    for (const path of groups.values()) expect(renderHelp(path)).toContain("Usage:");
+  });
+
+  it("keeps every table-driven help and invalid path loader-free", async () => {
+    const loader = vi.fn(async () => ({ main: vi.fn(async () => 0) }));
+    const commands = COMMANDS.map((command) => ({ ...command, load: loader }));
+    const output = vi.fn();
+    const groups = new Map<string, string[]>();
+    for (const command of commands) {
+      for (let length = 0; length < command.path.length; length += 1) groups.set(command.path.slice(0, length).join("\0"), command.path.slice(0, length));
+      expect(await runRouter([...command.path, "--help"], output, commands)).toBe(0);
+      expect(await runRouter([...command.path, "--not-an-option"], output, commands)).toBe(1);
+    }
+    for (const group of groups.values()) expect(await runRouter([...group, "--help"], output, commands)).toBe(0);
+    expect(loader).not.toHaveBeenCalled();
+  });
+
+  it("resolves nested routes and keeps leaf arguments intact", () => {
+    const nested = resolve(["players", "lists", "create", "--name", "Prospects"]);
+    expect(nested.command?.path).toEqual(["players", "lists", "create"]);
+    expect(nested.argv).toEqual(["--name", "Prospects"]);
+    const digest = resolve(["digest", "-w", "7d", "--list", "Prospects"]);
+    expect(digest.argv).toEqual(["-w", "7d", "--list", "Prospects"]);
+    expect(resolve(["players", "lists", "help", "create"]).help).toEqual(["players", "lists", "create"]);
+    expect(renderHelp(["players", "lists"])).toContain("Usage: bryce players lists create");
+  });
+
+  it("rejects malformed numeric leaf arguments before a loader can run", () => {
+    const digest = COMMANDS.find((command) => command.path.join(" ") === "digest")!;
+    expect(preflight(digest, ["--window", "30d"])).toContain("invalid value");
+    expect(preflight(digest, ["--window"])).toContain("requires a value");
+    expect(preflight(digest, ["--window=7d=x"])).toContain("extra '='");
+    expect(preflight(digest, ["--bogus"])).toContain("unknown option");
+    expect(preflight(digest, ["operand"])).toContain("unexpected argument");
+    const probe = COMMANDS.find((command) => command.path.join(" ") === "ncaa probe")!;
+    expect(preflight(probe, ["--seq", "not-a-number"])).toContain("positive integer");
+    expect(preflight(probe, ["--season", "twenty"])).toContain("four-digit year");
+    expect(preflight(probe, ["--season", "2099"])).toContain("supported NCAA season");
+    expect(preflight(probe, ["--seq", "01"])).toContain("canonical positive integer");
+    const add = COMMANDS.find((command) => command.path.join(" ") === "seed add")!;
+    expect(preflight(add, ["--person-id", "1", "--pick", "2"])).toContain("requires '--search'");
+    expect(preflight(add, ["--search", "Acosta", "--pick", "01"])).toContain("canonical positive integer");
+  });
+
+  it("runs valid real adapters and propagates their statuses", async () => {
+    const work = mkdtempSync(join(tmpdir(), "bryce-router-adapters-"));
+    const previous = { cwd: process.cwd(), database: process.env.DATABASE_PATH, backup: process.env.BACKUP_DIR, mailer: process.env.MAILER_PROVIDER, token: process.env.API_TOKEN };
+    try {
+      process.chdir(work);
+      process.env.DATABASE_PATH = join(work, "bryce.db");
+      process.env.BACKUP_DIR = join(work, "backups");
+      process.env.MAILER_PROVIDER = "console";
+      process.env.API_TOKEN = "test-token";
+      expect(await runRouter(["db", "migrate"], vi.fn())).toBe(0);
+      expect(await runRouter(["db", "backup"], vi.fn())).toBe(0);
+      expect(await runRouter(["seed", "list"], vi.fn())).toBe(0);
+      expect(await runRouter(["players", "lists", "show"], vi.fn())).toBe(0);
+      expect(await runRouter(["players", "backup", "--out", join(work, "players.json")], vi.fn())).toBe(0);
+      expect(await runRouter(["digest", "--window", "7d"], vi.fn())).toBe(0);
+    } finally {
+      process.chdir(previous.cwd);
+      for (const [key, value] of Object.entries({ DATABASE_PATH: previous.database, BACKUP_DIR: previous.backup, MAILER_PROVIDER: previous.mailer, API_TOKEN: previous.token })) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      rmSync(work, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("rejects table-driven semantic invalid invocations before loader initialization", async () => {
+    const loader = vi.fn(async () => ({ main: vi.fn(async () => 0) }));
+    const commands = COMMANDS.map((command) => ({ ...command, load: loader }));
+    const invalidCases = [
+      ["players", "lists", "create"],
+      ["players", "lists", "create", "--name=Prospects"],
+      ["players", "backup"],
+      ["db", "restore"],
+      ["ncaa", "probe"],
+      ["seed", "add"],
+      ["seed", "add", "--person-id", "1", "--ncaa-seq", "2"],
+      ["seed", "tag", "add", "--tag", "status:rostered"],
+      ["players", "lists", "create", "--name", "   "],
+      ["players", "backup", "--out", ""],
+      ["digest", "--list", ""],
+      ["seed", "add", "--search", "   "],
+      ["digest", "--window=7d\nforged"],
+      ["players", "batch-add", "--person-ids", "1,1"],
+      ["players", "batch-add", "--person-ids", ",,"],
+      ["players", "batch-add", "--ncaa-seqs", ""],
+      ["players", "batch-add", "--person-ids", Array.from({ length: 26 }, (_, i) => String(i + 1)).join(",")],
+      ["players", "batch-add", "--names", "Acosta", "--names", "acosta"],
+      ["players", "batch-add", "--names", "x".repeat(121)],
+      ["seed", "list", "--tags", ",, ,"],
+      ["seed", "list", "--tags", "pos:ss:extra"],
+      ["seed", "tag", "add", "--person-id", "1", "--tag", "level:aaa"],
+      ["seed", "tag", "add", "--person-id", "1", "--tag", "status:unknown"],
+      ["players", "lists", "create", "--name", "line\nforged"],
+    ];
+    for (const args of invalidCases) expect(await runRouter(args, vi.fn(), commands)).toBe(1);
+    expect(loader).not.toHaveBeenCalled();
+  });
+
+  it("rejects blank/comment-only and malformed batch files before loading", async () => {
+    const work = mkdtempSync(join(tmpdir(), "bryce-batch-preflight-"));
+    const blank = join(work, "blank.txt");
+    const malformed = join(work, "malformed.txt");
+    const exact = join(work, "exact.txt");
+    writeFileSync(blank, "# comment\n\n");
+    writeFileSync(exact, `name:${"a ".repeat(59)}aa\n`);
+    writeFileSync(malformed, `name:${"x".repeat(121)}\n`);
+    const loader = vi.fn(async () => ({ main: vi.fn(async () => 0) }));
+    const commands = COMMANDS.map((command) => ({ ...command, load: loader }));
+    expect(await runRouter(["players", "batch-add", "--file", blank], vi.fn(), commands)).toBe(1);
+    expect(loader).not.toHaveBeenCalled();
+    loader.mockClear();
+    expect(await runRouter(["players", "batch-add", "--file", blank, "--person-ids", "1"], vi.fn(), commands)).toBe(0);
+    loader.mockClear();
+    expect(await runRouter(["players", "batch-add", "--file", exact], vi.fn(), commands)).toBe(0);
+    expect(loader).toHaveBeenCalledTimes(1);
+    loader.mockClear();
+    expect(await runRouter(["players", "batch-add", "--file", malformed], vi.fn(), commands)).toBe(1);
+    expect(loader).not.toHaveBeenCalled();
+    rmSync(work, { recursive: true, force: true });
+  });
+
+  it("keeps a routed server alive until it receives a termination signal", async () => {
+    const work = mkdtempSync(join(tmpdir(), "bryce-server-"));
+    const port = 34000 + Math.floor(Math.random() * 1000);
+    const child = spawn(join(process.cwd(), "bin", "bryce"), ["server"], {
+      cwd: work,
+      env: {
+        ...process.env,
+        API_TOKEN: "test-token",
+        MAILER_PROVIDER: "console",
+        DATABASE_PATH: join(work, "bryce.db"),
+        BACKUP_DIR: join(work, "backups"),
+        SERVER_PORT: String(port),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+    child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`server did not start: ${output}`)), 15_000);
+      const poll = setInterval(() => {
+        if (output.includes(`server listening port=${port}`)) {
+          clearTimeout(timer);
+          clearInterval(poll);
+          resolve();
+        }
+      }, 25);
+      child.once("error", reject);
+    });
+    expect(child.exitCode).toBeNull();
+    child.kill("SIGTERM");
+    const status = await new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
+    expect(status).toBe(0);
+    rmSync(work, { recursive: true, force: true });
+  }, 30_000);
+
+  it("accepts canonical space and supported digest inline forms", () => {
+    const digest = COMMANDS.find((command) => command.path.join(" ") === "digest")!;
+    expect(preflight(digest, ["--window", "7d", "--list", "Prospects"])).toBeNull();
+    expect(preflight(digest, ["--window=7d", "--list=Prospects"])).toBeNull();
+  });
+
+  it("injects loaders to prove argv forwarding and status propagation for every leaf", async () => {
+    const seen: string[][] = [];
+    const commands: Command[] = COMMANDS.map((command) => ({
+      ...command,
+      load: async () => ({ main: async (argv) => { seen.push(argv); return 23; } }),
+    }));
+    for (const command of commands) {
+      expect(await runRouter([...command.path, ...(validArgs[command.path.join(" ")] ?? [])], vi.fn(), commands)).toBe(23);
+    }
+    expect(seen).toHaveLength(COMMANDS.length);
+
+    const digestSeen: string[][] = [];
+    const digest = commands.find((command) => command.path[0] === "digest")!;
+    const digestOnly = [{ ...digest, load: async () => ({ main: async (argv: string[]) => { digestSeen.push(argv); return 29; } }) }];
+    expect(await runRouter(["digest", "-w", "7d"], vi.fn(), digestOnly)).toBe(29);
+    expect(digestSeen).toEqual([["-w", "7d"]]);
+  });
+
+  it("runs a generated real-adapter matrix for every routed leaf", async () => {
+    const work = mkdtempSync(join(tmpdir(), "bryce-router-matrix-"));
+    const previous = { cwd: process.cwd(), database: process.env.DATABASE_PATH, backup: process.env.BACKUP_DIR, mailer: process.env.MAILER_PROVIDER, token: process.env.API_TOKEN, mcp: process.env.MCP_URL };
+    try {
+      process.chdir(work);
+      process.env.DATABASE_PATH = join(work, "bryce.db");
+      process.env.BACKUP_DIR = join(work, "backups");
+      process.env.MAILER_PROVIDER = "console";
+      process.env.API_TOKEN = "test-token";
+      process.env.MCP_URL = "not-a-url"; // connector adapter returns its config status without network
+      vi.stubGlobal("fetch", vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url.includes("statsapi")) {
+          const body = url.includes("/people") ? { people: [] } : url.includes("/stats") ? { stats: [] } : { seasons: [] };
+          return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+        }
+        if (url.includes("stats.ncaa.org")) return new Response("<html><body></body></html>", { status: 200, headers: { "content-type": "text/html" } });
+        return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), { status: 200, headers: { "content-type": "application/json" } });
+      }));
+      for (const command of COMMANDS) {
+        if (command.path[0] === "server") continue; // starting the long-lived listener is covered separately
+        const args = validArgs[command.path.join(" ")] ?? [];
+        const result = await runRouter([...command.path, ...args], vi.fn());
+        expect(result, command.path.join(" ")).toBeGreaterThanOrEqual(0);
+        expect(result, command.path.join(" ")).toBeLessThanOrEqual(2);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+      process.chdir(previous.cwd);
+      for (const [key, value] of Object.entries({ DATABASE_PATH: previous.database, BACKUP_DIR: previous.backup, MAILER_PROVIDER: previous.mailer, API_TOKEN: previous.token, MCP_URL: previous.mcp })) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      rmSync(work, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it("keeps every direct compatibility entry point bounded and exit-draining on default argv", () => {
+    const work = mkdtempSync(join(tmpdir(), "bryce-compat-"));
+    try {
+      const entrypoints = [
+        "src/cli/backup.ts", "src/cli/batch-add.ts", "src/cli/connector-smoke.ts", "src/cli/digest.ts",
+        "src/cli/lists.ts", "src/cli/migrate.ts", "src/cli/ncaa-probe.ts", "src/cli/players-backup.ts",
+        "src/cli/players-restore.ts", "src/cli/refresh.ts", "src/cli/restore.ts", "src/cli/seed.ts", "src/server.ts",
+      ];
+      for (const entrypoint of entrypoints) {
+        const result = spawnSync(join(process.cwd(), "node_modules", ".bin", "tsx"), [join(process.cwd(), entrypoint)], {
+          cwd: work,
+          encoding: "utf8",
+          env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
+          timeout: 10_000,
+        });
+        expect(result.error).toBeUndefined();
+        expect(result.status).not.toBeNull();
+        expect(`${result.stderr}`).toMatch(/error[=:]/);
+      }
+    } finally {
+      rmSync(work, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("reports unknown and incomplete commands without loading a leaf", async () => {
+    const output = vi.fn();
+    expect(await runRouter(["unknown"], output)).toBe(1);
+    expect(await runRouter(["players", "lists"], output)).toBe(1);
+    expect(output.mock.calls.map(([line]) => line).join("\n")).toContain("error:");
+  });
+});

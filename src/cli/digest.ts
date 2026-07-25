@@ -8,7 +8,7 @@ import type { Mailer } from "../mailer/types.js";
 import { runDigest } from "../jobs/digest.js";
 import { UnknownListError, resolveListByName } from "../lists/service.js";
 import { createMailer } from "../mailer/index.js";
-import { isMain } from "./main.js";
+import { exitAfterDrain, isMain } from "./main.js";
 
 /**
  * The digest CLI: `npm run digest [-- --window 7d] [-- --force]`. A thin
@@ -47,6 +47,11 @@ export function parseForce(argv: string[]): boolean {
  * window selection the window IS the content.
  */
 export function parseWindow(argv: string[]): WindowSpec | null {
+  const shortAt = argv.indexOf("-w");
+  if (shortAt !== -1) {
+    const value = argv[shortAt + 1];
+    return value === undefined ? null : parseWindowSpec(value);
+  }
   const inline = argv.find((a) => a.startsWith("--window="));
   if (inline !== undefined) return parseWindowSpec(inline.slice("--window=".length));
   const at = argv.indexOf("--window");
@@ -126,7 +131,7 @@ export async function runDigestCli(argv: string[], deps: DigestCliDeps): Promise
   return result.action === "failed" ? 1 : 0;
 }
 
-export async function main(): Promise<number> {
+export async function main(argv = process.argv.slice(2)): Promise<number> {
   loadDotEnv();
   const config = loadConfig();
   const { db, close } = await startupDb(config.databasePath, {
@@ -134,7 +139,7 @@ export async function main(): Promise<number> {
     keepLast: config.backupKeepLast,
   });
   try {
-    return await runDigestCli(process.argv.slice(2), {
+    return await runDigestCli(argv, {
       db,
       mailer: createMailer(config),
       now: () => new Date(),
@@ -153,9 +158,9 @@ export async function main(): Promise<number> {
 
 if (isMain(import.meta.url)) {
   main()
-    .then((code) => process.exit(code))
+    .then(exitAfterDrain)
     .catch((err: unknown) => {
       process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
-      process.exit(1);
+      return exitAfterDrain(1);
     });
 }

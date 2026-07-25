@@ -3,7 +3,7 @@ import { loadDotEnv } from "../env.js";
 import { MIGRATIONS_FOLDER } from "../db/client.js";
 import { DatabaseBusyError } from "../db/lock.js";
 import { isKnownRestoreError, restoreSnapshot } from "../backup/restore.js";
-import { isMain } from "./main.js";
+import { exitAfterDrain, isMain } from "./main.js";
 
 /**
  * `db:restore --from FILE` — swap a validated Snapshot into place.
@@ -84,12 +84,12 @@ export async function runRestore(argv: string[], deps: RestoreRunDeps): Promise<
   }
 }
 
-export async function main(): Promise<number> {
+export async function main(argv = process.argv.slice(2)): Promise<number> {
   loadDotEnv();
   const config = loadConfig();
   // Deliberately never opens config.databasePath here — the restore service owns
   // the file-level swap; opening/migrating it would defeat the whole design.
-  return runRestore(process.argv.slice(2), {
+  return runRestore(argv, {
     liveDbPath: config.databasePath,
     backupDir: config.backupDir,
     keepLast: config.backupKeepLast,
@@ -100,11 +100,9 @@ export async function main(): Promise<number> {
 
 if (isMain(import.meta.url)) {
   main()
-    .then((code) => {
-      process.exitCode = code;
-    })
+    .then(exitAfterDrain)
     .catch((err: unknown) => {
       process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
-      process.exitCode = 1;
+      return exitAfterDrain(1);
     });
 }

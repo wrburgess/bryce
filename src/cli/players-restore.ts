@@ -11,7 +11,7 @@ import {
   UnresolvedBackupMemberError,
   restorePlayerListBackup,
 } from "../watchlist/service.js";
-import { isMain } from "./main.js";
+import { exitAfterDrain, isMain } from "./main.js";
 
 /**
  * `players:restore --in FILE` — re-import a Player List Backup, network-free and
@@ -113,7 +113,7 @@ export async function runPlayersRestore(
   }
 }
 
-export async function main(): Promise<number> {
+export async function main(argv = process.argv.slice(2)): Promise<number> {
   loadDotEnv();
   const config = loadConfig();
   const started = await startupDb(config.databasePath, {
@@ -122,7 +122,7 @@ export async function main(): Promise<number> {
     migrationsFolder: MIGRATIONS_FOLDER,
   });
   try {
-    return await runPlayersRestore(process.argv.slice(2), {
+    return await runPlayersRestore(argv, {
       db: started.db,
       now: () => new Date(),
       write: (line) => process.stdout.write(`${line}\n`),
@@ -134,11 +134,9 @@ export async function main(): Promise<number> {
 
 if (isMain(import.meta.url)) {
   main()
-    .then((code) => {
-      process.exitCode = code;
-    })
+    .then(exitAfterDrain)
     .catch((err: unknown) => {
       process.stderr.write(`error: ${err instanceof Error ? err.message : String(err)}\n`);
-      process.exitCode = 1;
+      return exitAfterDrain(1);
     });
 }
