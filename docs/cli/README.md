@@ -146,7 +146,7 @@ non-zero on any fetch or parse failure.
 ## `db:migrate` — apply pending migrations
 
 ```sh
-npm run db:migrate
+bryce db migrate
 ```
 
 Opens (creating if needed) the SQLite database, which **applies any pending migrations as a side
@@ -158,7 +158,7 @@ takes an automatic **Snapshot before any pending migration applies** (see `db:ba
 ## `db:backup` — take a Snapshot and prune
 
 ```sh
-npm run db:backup
+bryce db backup
 ```
 
 Takes a **Snapshot** — a consistent, whole-database point-in-time copy — into `BACKUP_DIR` (default

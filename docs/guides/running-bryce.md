@@ -17,7 +17,7 @@ below (Player, Refresh, Digest, Offseason Sleep) is defined in
 nvm use              # Node 22 (.nvmrc)
 npm ci
 cp .env.example .env # then fill in values
-npm run db:migrate   # optional: jobs also migrate themselves at startup
+bryce db migrate   # optional: jobs also migrate themselves at startup
 ```
 
 Seed the watch list, then run the jobs by hand once:
@@ -122,7 +122,7 @@ to do about it.
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string><string>-lc</string>
-    <string>bryce refresh >> logs/refresh.log 2>&1</string>
+    <string>npm run refresh >> logs/refresh.log 2>&1</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>30</integer></dict>
@@ -202,7 +202,7 @@ loss (it faithfully replicates a bad migration's corruption too). Keep both.
 Every entrypoint (server, refresh, digest, seed, migrate) now takes an **automatic Snapshot before any
 pending migration applies** — the known-good state to roll back to if the migration goes wrong. A
 schema-less first run has nothing to lose, so it is skipped; a failed pre-migration Snapshot **aborts**
-the migration. Take one on demand with `npm run db:backup` (Snapshot + prune to `BACKUP_KEEP_LAST`).
+the migration. Take one on demand with `bryce db backup` (Snapshot + prune to `BACKUP_KEEP_LAST`).
 
 Schedule a nightly Snapshot with launchd, same shape as the Refresh/Digest jobs above:
 

@@ -69,6 +69,7 @@ describe("CLI router metadata", () => {
     const digest = COMMANDS.find((command) => command.path.join(" ") === "digest")!;
     expect(preflight(digest, ["--window", "30d"])).toContain("invalid value");
     expect(preflight(digest, ["--window"])).toContain("requires a value");
+    expect(preflight(digest, ["--window=7d=x"])).toContain("extra '='");
     expect(preflight(digest, ["--bogus"])).toContain("unknown option");
     expect(preflight(digest, ["operand"])).toContain("unexpected argument");
     const probe = COMMANDS.find((command) => command.path.join(" ") === "ncaa probe")!;
@@ -91,7 +92,10 @@ describe("CLI router metadata", () => {
       process.env.MAILER_PROVIDER = "console";
       process.env.API_TOKEN = "test-token";
       expect(await runRouter(["db", "migrate"], vi.fn())).toBe(0);
+      expect(await runRouter(["db", "backup"], vi.fn())).toBe(0);
+      expect(await runRouter(["seed", "list"], vi.fn())).toBe(0);
       expect(await runRouter(["players", "lists", "show"], vi.fn())).toBe(0);
+      expect(await runRouter(["players", "backup", "--out", join(work, "players.json")], vi.fn())).toBe(0);
       expect(await runRouter(["digest", "--window", "7d"], vi.fn())).toBe(0);
     } finally {
       process.chdir(previous.cwd);
@@ -118,6 +122,9 @@ describe("CLI router metadata", () => {
       ["players", "backup", "--out", ""],
       ["digest", "--list", ""],
       ["seed", "add", "--search", "   "],
+      ["digest", "--window=7d\nforged"],
+      ["players", "batch-add", "--person-ids", "1,1"],
+      ["players", "batch-add", "--person-ids", Array.from({ length: 26 }, (_, i) => String(i + 1)).join(",")],
       ["seed", "list", "--tags", ",, ,"],
       ["seed", "list", "--tags", "pos:ss:extra"],
       ["seed", "tag", "add", "--person-id", "1", "--tag", "level:aaa"],
