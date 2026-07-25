@@ -253,7 +253,7 @@ as `https://your-host.example.com/mcp`), authenticating with the bearer token.
 client end to end:
 
 ```sh
-API_TOKEN=... MCP_URL=https://your-host.example.com/mcp npm run connector:smoke
+API_TOKEN=... MCP_URL=https://your-host.example.com/mcp bryce connector smoke
 ```
 
 It runs `initialize` → `tools/list` (asserts all twenty-two tools) → `status` → a read-only

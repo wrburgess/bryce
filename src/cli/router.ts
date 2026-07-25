@@ -70,11 +70,16 @@ const uniqueBoundedIntegerList = (value: string): string | null => {
   if (new Set(parts).size !== parts.length) return "a comma-separated list without duplicate IDs";
   return null;
 };
+const batchName = (value: string): string | null => value.trim().length > 120 ? "a name of at most 120 characters" : null;
+const normalizedBatchName = (value: string): string => value.normalize("NFC").replace(/\s+/g, " ").trim().toLowerCase();
 const batchShape = (values: ReadonlyMap<string, readonly string[]>): string | null => {
   const personIds = (values.get("person-ids") ?? []).flatMap((value) => value.split(",").map((part) => part.trim()).filter(Boolean));
   const ncaaSeqs = (values.get("ncaa-seqs") ?? []).flatMap((value) => value.split(",").map((part) => part.trim()).filter(Boolean));
   if (new Set(personIds).size !== personIds.length || new Set(ncaaSeqs).size !== ncaaSeqs.length) return "batch IDs must be unique within each identity type";
   const names = values.get("names") ?? [];
+  if (names.some((name) => batchName(name) !== null)) return "batch names must be at most 120 characters";
+  const nameKeys = new Set(names.map(normalizedBatchName));
+  if (nameKeys.size !== names.length) return "batch names must be unique ignoring case and whitespace";
   let fileEntries: string[] = [];
   for (const file of values.get("file") ?? []) {
     try {
@@ -84,10 +89,19 @@ const batchShape = (values: ReadonlyMap<string, readonly string[]>): string | nu
       return `batch file '${file}' is unreadable`;
     }
   }
+  if ((values.get("file")?.length ?? 0) > 0 && fileEntries.length === 0) return "batch file must contain at least one entry";
   const filePersonIds = fileEntries.filter((entry) => /^\d+$/.test(entry));
   const fileNcaaSeqs = fileEntries.filter((entry) => entry.startsWith("ncaa:")).map((entry) => entry.slice(5).trim());
   if (new Set([...personIds, ...filePersonIds]).size !== personIds.length + filePersonIds.length || new Set([...ncaaSeqs, ...fileNcaaSeqs]).size !== ncaaSeqs.length + fileNcaaSeqs.length) {
     return "batch IDs must be unique within each identity type";
+  }
+  const fileNames = fileEntries.filter((entry) => !/^\d+$/.test(entry) && !entry.startsWith("ncaa:")).map((entry) => entry.startsWith("name:") ? entry.slice(5).trim() : entry);
+  if (fileNames.some((name) => name.length === 0)) return "batch file contains a blank name";
+  if (fileNames.some((name) => /\p{Cc}/u.test(name))) return "batch file names must not contain control characters";
+  if (fileNames.some((name) => normalizedBatchName(name).length > 120)) return "batch names must be at most 120 characters";
+  for (const name of fileNames.map(normalizedBatchName)) {
+    if (nameKeys.has(name)) return "batch names must be unique ignoring case and whitespace";
+    nameKeys.add(name);
   }
   const total = personIds.length + ncaaSeqs.length + names.length + fileEntries.length;
   if (fileEntries.some((entry) => entry.startsWith("ncaa:") && positiveInteger(entry.slice(5).trim()) !== null)) return "batch file contains an invalid NCAA sequence";
@@ -126,7 +140,7 @@ export const COMMANDS: readonly Command[] = [
   leaf(["players", "lists", "show"], "Show named lists or their members.", "bryce players lists show [--name NAME]", "bryce players lists show", () => import("./lists.js"), [value("name", "List name.")]),
   leaf(["players", "backup"], "Write a player-list backup.", "bryce players backup --out FILE", "bryce players backup --out backups/players.json", () => import("./players-backup.js"), [value("out", "Output file.")], { required: ["out"] }),
   leaf(["players", "restore"], "Restore a player-list backup.", "bryce players restore --in FILE", "bryce players restore --in backups/players.json", () => import("./players-restore.js"), [value("in", "Input file.")], { required: ["in"] }),
-  leaf(["players", "batch-add"], "Stage many players.", "bryce players batch-add [--person-ids IDS] [--ncaa-seqs IDS] [--names NAME] [--file FILE]", "bryce players batch-add --person-ids 691185", () => import("./batch-add.js"), [value("person-ids", "Comma-separated MLB ids.", undefined, undefined, uniqueBoundedIntegerList), value("ncaa-seqs", "Comma-separated NCAA ids.", undefined, undefined, uniqueBoundedIntegerList), value("names", "Player name; repeatable."), value("file", "Input file.")], { oneOf: [["person-ids", "ncaa-seqs", "names", "file"]], semantic: batchShape }),
+  leaf(["players", "batch-add"], "Stage many players.", "bryce players batch-add [--person-ids IDS] [--ncaa-seqs IDS] [--names NAME] [--file FILE]", "bryce players batch-add --person-ids 691185", () => import("./batch-add.js"), [value("person-ids", "Comma-separated MLB ids.", undefined, undefined, uniqueBoundedIntegerList), value("ncaa-seqs", "Comma-separated NCAA ids.", undefined, undefined, uniqueBoundedIntegerList), value("names", "Player name; repeatable.", undefined, undefined, batchName), value("file", "Input file.")], { oneOf: [["person-ids", "ncaa-seqs", "names", "file"]], semantic: batchShape }),
   leaf(["db", "migrate"], "Apply pending database migrations.", "bryce db migrate", "bryce db migrate", () => import("./migrate.js")),
   leaf(["db", "backup"], "Create a database snapshot.", "bryce db backup", "bryce db backup", () => import("./backup.js")),
   leaf(["db", "restore"], "Restore a database snapshot.", "bryce db restore --from FILE", "bryce db restore --from backups/bryce-YYYYMMDDTHHMMSSZ-000.db", () => import("./restore.js"), [value("from", "Snapshot file.")], { required: ["from"] }),

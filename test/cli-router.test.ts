@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -125,6 +125,8 @@ describe("CLI router metadata", () => {
       ["digest", "--window=7d\nforged"],
       ["players", "batch-add", "--person-ids", "1,1"],
       ["players", "batch-add", "--person-ids", Array.from({ length: 26 }, (_, i) => String(i + 1)).join(",")],
+      ["players", "batch-add", "--names", "Acosta", "--names", "acosta"],
+      ["players", "batch-add", "--names", "x".repeat(121)],
       ["seed", "list", "--tags", ",, ,"],
       ["seed", "list", "--tags", "pos:ss:extra"],
       ["seed", "tag", "add", "--person-id", "1", "--tag", "level:aaa"],
@@ -133,6 +135,20 @@ describe("CLI router metadata", () => {
     ];
     for (const args of invalidCases) expect(await runRouter(args, vi.fn(), commands)).toBe(1);
     expect(loader).not.toHaveBeenCalled();
+  });
+
+  it("rejects blank/comment-only and malformed batch files before loading", async () => {
+    const work = mkdtempSync(join(tmpdir(), "bryce-batch-preflight-"));
+    const blank = join(work, "blank.txt");
+    const malformed = join(work, "malformed.txt");
+    writeFileSync(blank, "# comment\n\n");
+    writeFileSync(malformed, `name:${"x".repeat(121)}\nname:ok\nname:OK\n`);
+    const loader = vi.fn(async () => ({ main: vi.fn(async () => 0) }));
+    const commands = COMMANDS.map((command) => ({ ...command, load: loader }));
+    expect(await runRouter(["players", "batch-add", "--file", blank], vi.fn(), commands)).toBe(1);
+    expect(await runRouter(["players", "batch-add", "--file", malformed], vi.fn(), commands)).toBe(1);
+    expect(loader).not.toHaveBeenCalled();
+    rmSync(work, { recursive: true, force: true });
   });
 
   it("keeps a routed server alive until it receives a termination signal", async () => {
