@@ -121,7 +121,8 @@ describe("renderDigest — tables", () => {
   it("renders a Batters table with a Lvl column and no level sections", () => {
     const mail = renderDigest(assemblyWith({ spec: "7d", batters: [harper7d] }));
     expect(mail.text).toContain("Batters");
-    expect(mail.text).toMatch(/Player\s+Lvl\s+GP\s+OBP\/SLG\/OPS/);
+    expect(mail.text).toMatch(/Player\s+Lvl\s+GP\s+OPS/);
+    expect(mail.text).toContain("1.319");
     expect(mail.text).not.toContain("MiLB - Triple-A");
     expect(mail.text).toContain("MLB");
   });
@@ -138,9 +139,9 @@ describe("renderDigest — tables", () => {
     const mail = renderDigest(assemblyWith({ spec: "1d", batters: [penaGm1, penaGm2] }));
     expect(mail.text).toMatch(/Player\s+Lvl\s+Gm\s+PA/);
     expect(mail.text).not.toMatch(/\bGP\b/);
-    // No OBP/SLG/OPS column either: a one-game slash line is noise beside the raw
+    // No OPS column either: a one-game rate is noise beside the raw
     // counts already on the row.
-    expect(mail.text).not.toContain("OBP/SLG/OPS");
+    expect(mail.text).not.toContain("OPS");
   });
 
   it("leaves Gm blank for a player who played once in a 1d window", () => {
@@ -154,22 +155,22 @@ describe("renderDigest — tables", () => {
     expect(dataLine).toMatch(/^Harper, B\s+MLB\s+4\b/);
   });
 
-  it("renders a zero row as .000/.000/.000 rather than a dash", () => {
+  it("renders a zero row's OPS as .000 rather than a dash", () => {
     const mail = renderDigest(assemblyWith({ spec: "7d", batters: [idleRow] }));
-    expect(mail.text).toContain(".000/.000/.000");
+    expect(mail.text).toContain(".000");
     const dataLine = mail.text.split("\n").find((l) => l.includes("Player, I"));
     expect(dataLine).toContain(" 0 ");
   });
 
-  it("derives the slash line from summed counters, never by averaging games", () => {
-    // 3-for-4 then 0-for-1: summed is .600, averaged would be .375.
+  it("derives OPS from summed counters, never by averaging games", () => {
+    // 3-for-4 then 0-for-1: summed OPS is 1.200, not an average of game rates.
     const uneven = row("Sum Test", "batting", [
       { atBats: 4, hits: 3, totalBases: 3 },
       { atBats: 1, hits: 0, totalBases: 0 },
     ]);
     const mail = renderDigest(assemblyWith({ spec: "7d", batters: [uneven] }));
-    expect(mail.text).toContain(".600/.600/.600");
-    expect(mail.text).not.toContain(".375");
+    expect(mail.text).toContain("1.200");
+    expect(mail.text).not.toContain(".750");
   });
 
   it("renders quality starts as a count, mid-row now that RW/RL end the line", () => {
@@ -305,7 +306,7 @@ describe("renderDigest — tables", () => {
   it("adds BB% and K% right after PA on a long (>=21d) window, absent on short ones", () => {
     const long = renderDigest(assemblyWith({ spec: "21d", batters: [harper7d] }));
     const header = long.text.split("\n").find((l) => l.startsWith("Player"))!;
-    expect(header).toMatch(/OBP\/SLG\/OPS\s+PA\s+BB%\s+K%\s+H\b/);
+    expect(header).toMatch(/OPS\s+PA\s+BB%\s+K%\s+H\b/);
     // Derived from SUMMED counters: 1 BB / 9 PA = 11.1%, 2 K / 9 PA = 22.2%.
     const dataLine = long.text.split("\n").find((l) => l.includes("Harper, B"))!;
     expect(dataLine).toContain("11.1");
@@ -480,17 +481,17 @@ describe("digestTableRows", () => {
       assemblyWith({ spec: "7d", batters: [harper7d] }),
       "batters",
     );
-    expect(headers.slice(0, 4)).toEqual(["Player", "Lvl", "GP", "OBP/SLG/OPS"]);
+    expect(headers.slice(0, 4)).toEqual(["Player", "Lvl", "GP", "OPS"]);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.[0]).toBe("Harper, B");
     expect(rows[0]?.every((c) => typeof c === "string")).toBe(true);
   });
 
-  it("uses the 1d window's game-grouped columns (Gm, no GP/OBP/SLG/OPS)", () => {
+  it("uses the 1d window's game-grouped columns (Gm, no GP/OPS)", () => {
     const { headers } = digestTableRows(assemblyWith({ spec: "1d", batters: [harper7d] }), "batters");
     expect(headers.slice(0, 3)).toEqual(["Player", "Lvl", "Gm"]);
     expect(headers).not.toContain("GP");
-    expect(headers).not.toContain("OBP/SLG/OPS");
+    expect(headers).not.toContain("OPS");
   });
 
   it("is header-only when the requested table has no rows", () => {
