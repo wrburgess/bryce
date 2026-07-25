@@ -77,6 +77,40 @@ describe("stat_lines schema invariants (ADR 0029)", () => {
     ).rejects.toThrow(/UNIQUE constraint failed/);
   });
 
+  it("source-qualifies NCAA game identity so legacy and Highlightly ids never collide", async () => {
+    const player = await insertPlayer(opened.db, {
+      externalId: null,
+      ncaaPlayerSeq: 2649785,
+      level: "ncaa",
+      milbLevel: null,
+      ncaaSourceState: "legacy_html",
+    });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 77,
+      statType: "batting",
+      sportId: 22,
+      source: "ncaa_html_legacy",
+    });
+    await insertStatLine(opened.db, {
+      playerId: player.id,
+      gameId: 77,
+      statType: "batting",
+      sportId: 22,
+      source: "highlightly_ncaa",
+      availableStats: ["atBats", "hits"],
+    });
+    await expect(
+      insertStatLine(opened.db, {
+        playerId: player.id,
+        gameId: 77,
+        statType: "batting",
+        sportId: 22,
+        source: "highlightly_ncaa",
+      }),
+    ).rejects.toThrow(/UNIQUE constraint failed/);
+  });
+
   it("rejects a duplicate ncaa_player_seq at the DATABASE level (ADR 0032)", async () => {
     await insertPlayer(opened.db, {
       externalId: null,

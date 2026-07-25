@@ -30,10 +30,16 @@ import {
 } from "../lists/service.js";
 import { MlbApiError } from "../mlb/client.js";
 import {
-  NcaaAccessDeniedError,
-  NcaaApiError,
-  UnsupportedNcaaSeasonError,
-} from "../ncaa/client.js";
+  HighlightlyAuthError,
+  HighlightlyCoverageError,
+  HighlightlyError,
+  HighlightlyIdentityMismatchError,
+  HighlightlyMigrationRequiredError,
+  HighlightlyNotConfiguredError,
+  HighlightlyPlayerNotFoundError,
+  HighlightlyQuotaError,
+  HighlightlyUpstreamError,
+} from "../highlightly/client.js";
 import { queryStatLines } from "../queries/statLines.js";
 import type { ServiceDeps } from "../server/deps.js";
 import {
@@ -46,10 +52,10 @@ import {
 import type { PlayerRef } from "../watchlist/service.js";
 import {
   PlayerNotFoundError,
-  UnknownNcaaPlayerError,
   UnknownPersonError,
-  addNcaaPlayer,
+  addHighlightlyNcaaPlayer,
   addPlayer,
+  attachHighlightlyNcaaPlayer,
   batchAddPlayers,
   deactivatePlayer,
   listPlayers,
@@ -58,11 +64,13 @@ import {
 import {
   AddNcaaPlayerInputSchema,
   AddPlayerInputSchema,
+  HighlightlyNcaaIdentitySchema,
   DigestInputSchema,
   DigestPreviewQueryInputSchema,
   ListCreateBodySchema,
   ListMembersBodySchema,
   ListRenameBodySchema,
+  HighlightlyPlayerIdSchema,
   NcaaPlayerSeqSchema,
   PersonIdSchema,
   PlayerSearchInputSchema,
@@ -73,8 +81,8 @@ import {
 } from "./schemas.js";
 
 /** Project a validated member reference into the service's PlayerRef union. */
-function toPlayerRef(ref: { personId?: number; ncaaPlayerSeq?: number }): PlayerRef {
-  return ref.personId !== undefined ? ref.personId : { ncaaPlayerSeq: ref.ncaaPlayerSeq! };
+function toPlayerRef(ref: { personId?: number; highlightlyPlayerId?: number }): PlayerRef {
+  return ref.personId !== undefined ? ref.personId : { kind: "highlightly", playerId: ref.highlightlyPlayerId! };
 }
 
 /**
@@ -107,7 +115,6 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     }
     if (
       err instanceof UnknownPersonError ||
-      err instanceof UnknownNcaaPlayerError ||
       err instanceof PlayerNotFoundError ||
       err instanceof UnknownListError
     ) {
@@ -115,6 +122,24 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     }
     if (err instanceof DuplicateListNameError) {
       return c.json({ error: err.message }, 409);
+    }
+    // Stable provider code is intentionally distinct from display prose, so
+    // REST, MCP, CLI, batch, and scheduled failures can make the same decision.
+    if (err instanceof HighlightlyError) {
+      const status =
+        err instanceof HighlightlyNotConfiguredError || err instanceof HighlightlyCoverageError
+          ? 503
+          : err instanceof HighlightlyQuotaError
+            ? 429
+            : err instanceof HighlightlyPlayerNotFoundError
+              ? 404
+              : err instanceof HighlightlyIdentityMismatchError ||
+                  err instanceof HighlightlyMigrationRequiredError
+                ? 409
+                : err instanceof HighlightlyAuthError || err instanceof HighlightlyUpstreamError
+                  ? 502
+                  : 502;
+      return c.json({ error: err.code, message: err.message }, status);
     }
     if (err instanceof BlankListNameError) {
       return c.json({ error: err.message }, 400);
@@ -124,14 +149,9 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
       // unknown namespace/value) — the tag service owns the semantics.
       return c.json({ error: err.message }, 400);
     }
-    if (err instanceof MlbApiError || err instanceof NcaaApiError || err instanceof NcaaAccessDeniedError) {
-      // Upstream (MLB Stats API / stats.ncaa.org) failure: a bad gateway.
+    if (err instanceof MlbApiError) {
+      // Upstream MLB Stats API failure.
       return c.json({ error: err.message }, 502);
-    }
-    if (err instanceof UnsupportedNcaaSeasonError) {
-      // A bundled-data gap on OUR side (src/ncaa/seasons.ts needs its annual
-      // update), not an upstream failure — unavailable until the table grows.
-      return c.json({ error: err.message }, 503);
     }
     if (err instanceof SyntaxError) {
       // Malformed JSON body — a client error, not a server one.
@@ -140,12 +160,11 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     throw err;
   });
 
-  /** Resolve an external ref (personId or ncaaPlayerSeq) to a row, or 404. */
+  /** Resolve an external ref (personId or Highlightly player ID) to a row, or 404. */
   async function resolvePlayer(ref: PlayerRef) {
-    const where =
-      typeof ref === "number"
-        ? eq(players.externalId, ref)
-        : eq(players.ncaaPlayerSeq, ref.ncaaPlayerSeq);
+    const where = typeof ref === "number"
+      ? eq(players.externalId, ref)
+      : eq(players.highlightlyPlayerId, ref.playerId);
     const row = (await deps.db.select().from(players).where(where))[0];
     if (row === undefined) throw new PlayerNotFoundError(ref);
     return row;
@@ -170,23 +189,22 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     }
   });
 
-  // NCAA tag routes are registered BEFORE the personId (`:id`) variants so the
-  // literal `ncaa` segment is never captured as an :id (same ordering as the
-  // deactivate routes below).
-  api.get("/players/ncaa/:seq/tags", async (c) => {
-    const player = await resolvePlayer({ ncaaPlayerSeq: NcaaPlayerSeqSchema.parse(c.req.param("seq")) });
+  // NCAA routes address the explicit Highlightly ID. A historical NCAA sequence
+  // is never accepted on an operational route.
+  api.get("/players/ncaa/:highlightlyPlayerId/tags", async (c) => {
+    const player = await resolvePlayer({ kind: "highlightly", playerId: HighlightlyPlayerIdSchema.parse(c.req.param("highlightlyPlayerId")) });
     return c.json({ tags: listTags(deps.db, player.id) });
   });
 
-  api.post("/players/ncaa/:seq/tags", async (c) => {
-    const player = await resolvePlayer({ ncaaPlayerSeq: NcaaPlayerSeqSchema.parse(c.req.param("seq")) });
+  api.post("/players/ncaa/:highlightlyPlayerId/tags", async (c) => {
+    const player = await resolvePlayer({ kind: "highlightly", playerId: HighlightlyPlayerIdSchema.parse(c.req.param("highlightlyPlayerId")) });
     const body = TagWriteBodySchema.parse(await c.req.json());
     const tag = addManualTag(deps.db, player.id, body.namespace, body.value, deps.now());
     return c.json({ tag }, 201);
   });
 
-  api.delete("/players/ncaa/:seq/tags/:namespace/:value", async (c) => {
-    const player = await resolvePlayer({ ncaaPlayerSeq: NcaaPlayerSeqSchema.parse(c.req.param("seq")) });
+  api.delete("/players/ncaa/:highlightlyPlayerId/tags/:namespace/:value", async (c) => {
+    const player = await resolvePlayer({ kind: "highlightly", playerId: HighlightlyPlayerIdSchema.parse(c.req.param("highlightlyPlayerId")) });
     removeManualTag(deps.db, player.id, c.req.param("namespace"), c.req.param("value"));
     return c.json({ removed: true });
   });
@@ -217,8 +235,15 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
 
   api.post("/players/ncaa", async (c) => {
     const body = AddNcaaPlayerInputSchema.parse(await c.req.json());
-    const result = await addNcaaPlayer(deps, body.ncaaPlayerSeq);
+    const result = await addHighlightlyNcaaPlayer(deps, body);
     return c.json(result, result.action === "added" ? 201 : 200);
+  });
+
+  api.post("/players/ncaa/:seq/attach-highlightly", async (c) => {
+    const seq = NcaaPlayerSeqSchema.parse(c.req.param("seq"));
+    const body = HighlightlyNcaaIdentitySchema.parse(await c.req.json());
+    const player = await attachHighlightlyNcaaPlayer(deps, seq, body);
+    return c.json({ player, state: "highlightly_pending" });
   });
 
   // Batch-add (issue #68 / ADR 0045). A bad shape (over-cap, blank, untyped,
@@ -238,9 +263,9 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     },
   );
 
-  api.post("/players/ncaa/:seq/deactivate", async (c) => {
-    const ncaaPlayerSeq = NcaaPlayerSeqSchema.parse(c.req.param("seq"));
-    const player = await deactivatePlayer(deps, { ncaaPlayerSeq });
+  api.post("/players/ncaa/:highlightlyPlayerId/deactivate", async (c) => {
+    const highlightlyPlayerId = HighlightlyPlayerIdSchema.parse(c.req.param("highlightlyPlayerId"));
+    const player = await deactivatePlayer(deps, { kind: "highlightly", playerId: highlightlyPlayerId });
     return c.json({ player });
   });
 
@@ -347,7 +372,7 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     // client error (SyntaxError -> 400 via onError), never a full refresh.
     const raw = await c.req.text();
     const body = RefreshInputSchema.parse(raw.trim().length === 0 ? {} : JSON.parse(raw));
-    if (body.personId === undefined && body.ncaaPlayerSeq === undefined) {
+    if (body.personId === undefined && body.highlightlyPlayerId === undefined) {
       // Whole-list refresh contract change (#23): a `failed` status — a BLOCKED
       // run that refreshed nobody — maps to 502, mirroring the digest endpoint
       // precedent above (`result.action === "failed" ? 502 : 200`). `ok`,
@@ -359,13 +384,13 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
       return c.json(summary, summary.status === "failed" ? 502 : 200);
     }
     const where =
-      body.ncaaPlayerSeq !== undefined
-        ? eq(players.ncaaPlayerSeq, body.ncaaPlayerSeq)
+      body.highlightlyPlayerId !== undefined
+        ? eq(players.highlightlyPlayerId, body.highlightlyPlayerId)
         : eq(players.externalId, body.personId!);
     const player = (await deps.db.select().from(players).where(where))[0];
     if (player === undefined) {
       throw new PlayerNotFoundError(
-        body.ncaaPlayerSeq !== undefined ? { ncaaPlayerSeq: body.ncaaPlayerSeq } : body.personId!,
+        body.highlightlyPlayerId !== undefined ? { kind: "highlightly", playerId: body.highlightlyPlayerId } : body.personId!,
       );
     }
     return c.json(await runRefreshForPlayer(deps, player.id));

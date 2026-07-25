@@ -20,6 +20,11 @@ describe("loadConfig backup settings", () => {
     expect(config.backupKeepLast).toBe(25);
   });
 
+  it("normalizes the optional Highlightly API key without requiring it for MLB-only operation", () => {
+    expect(loadConfig({ ...base }, () => {}).highlightlyApiKey).toBeNull();
+    expect(loadConfig({ ...base, HIGHLIGHTLY_API_KEY: "  provider-key  " }, () => {}).highlightlyApiKey).toBe("provider-key");
+  });
+
   it("rejects a non-positive or non-integer BACKUP_KEEP_LAST (fail closed)", () => {
     for (const bad of ["0", "-1", "1.5", "abc", ""]) {
       expect(() => loadConfig({ ...base, BACKUP_KEEP_LAST: bad }, () => {}), bad).toThrow();

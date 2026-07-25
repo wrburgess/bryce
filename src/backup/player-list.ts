@@ -22,13 +22,14 @@ import { fsyncDir } from "./snapshot.js";
  */
 
 /**
- * The version `createPlayerListBackup` EMITS. Bumped to 2 for named lists
+ * The version `createPlayerListBackup` EMITS. Bumped to 3 for explicit NCAA
+ * Highlightly identity/source state while retaining v1/v2 import compatibility.
  * (issue #70 / ADR 0046): a v2 payload adds optional `lists` (live list
  * definitions) and `members` (each referencing a player by natural id and a list
  * by name). The parser still accepts a v1 payload (no lists/members) — the bump
  * is backward compatible.
  */
-export const PLAYER_BACKUP_VERSION = 2 as const;
+export const PLAYER_BACKUP_VERSION = 3 as const;
 
 /** Refuse absurd inputs before Zod even runs — a cheap denial-of-service guard. */
 export const MAX_BACKUP_BYTES = 16 * 1024 * 1024;
@@ -57,6 +58,12 @@ const playerEntrySchema = z
     id: z.number().int().positive().optional(),
     externalId: z.number().int().positive().nullable().default(null),
     ncaaPlayerSeq: z.number().int().positive().nullable().default(null),
+    highlightlyPlayerId: z.number().int().positive().nullable().default(null),
+    highlightlyTeamId: z.number().int().positive().nullable().default(null),
+    ncaaSourceState: z
+      .enum(["legacy_html", "highlightly_pending", "highlightly_active"])
+      .nullable()
+      .default(null),
     fullName: z.string().min(1),
     level: z.enum(["mlb", "milb", "ncaa"]),
     milbLevel: z.string().nullable().default(null),
@@ -90,18 +97,18 @@ const playerEntrySchema = z
     }
     const hasExternal = row.externalId != null;
     const hasSeq = row.ncaaPlayerSeq != null;
-    if (!hasExternal && !hasSeq) {
+    if (!hasExternal && !hasSeq && row.highlightlyPlayerId == null) {
       ctx.addIssue({
         code: "custom",
-        message: "a player must carry at least one natural identity (externalId or ncaaPlayerSeq)",
+        message: "a player must carry at least one natural identity",
       });
     }
     if (row.level === "ncaa") {
-      if (!hasSeq) {
+      if (!hasSeq && row.highlightlyPlayerId == null) {
         ctx.addIssue({
           code: "custom",
           path: ["ncaaPlayerSeq"],
-          message: "an ncaa player requires ncaaPlayerSeq",
+        message: "an ncaa player requires a legacy or Highlightly identity",
         });
       }
       if (hasExternal) {
@@ -177,7 +184,7 @@ const backupMemberSchema = z
 export const playerListBackupSchema = z
   .object({
     // v1 or v2: a v1 payload (no lists/members) still restores (ADR 0046).
-    version: z.union([z.literal(1), z.literal(2)]),
+    version: z.union([z.literal(1), z.literal(2), z.literal(3)]),
     exportedAt: isoTimestamp.optional(),
     players: z.array(playerEntrySchema),
     lists: z.array(backupListSchema).optional(),
@@ -237,7 +244,7 @@ export class PlayerBackupParseError extends Error {
 
 /**
  * Serialize every Player row into a versioned, re-importable backup envelope
- * (version 2). LIVE named lists and their memberships are included so the HC's
+ * (version 3). LIVE named lists and their memberships are included so the HC's
  * roster choices survive a restore (soft-deleted lists are excluded — a deleted
  * list is not a roster choice to preserve). Each membership references its player
  * by natural id and its list by name.
@@ -291,6 +298,9 @@ export async function createPlayerListBackup(
         id: r.id,
         externalId: r.externalId,
         ncaaPlayerSeq: r.ncaaPlayerSeq,
+        highlightlyPlayerId: r.highlightlyPlayerId,
+        highlightlyTeamId: r.highlightlyTeamId,
+        ncaaSourceState: r.ncaaSourceState,
         fullName: r.fullName,
         level: r.level,
         milbLevel: r.milbLevel,

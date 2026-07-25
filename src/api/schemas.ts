@@ -10,6 +10,8 @@ import { StatLineFilterShape, StatLineQuerySchema, refineFromTo } from "../queri
  */
 
 export const PersonIdSchema = z.coerce.number().int().positive();
+export const HighlightlyPlayerIdSchema = z.coerce.number().int().positive();
+/** Legacy sequence parsing is retained only for the explicit history-attach route. */
 export const NcaaPlayerSeqSchema = z.coerce.number().int().positive();
 
 /**
@@ -22,6 +24,7 @@ export const NcaaPlayerSeqSchema = z.coerce.number().int().positive();
  * a coercing validator at a typed-JSON boundary").
  */
 export const StrictPersonIdSchema = z.number().int().positive();
+export const StrictHighlightlyPlayerIdSchema = z.number().int().positive();
 export const StrictNcaaPlayerSeqSchema = z.number().int().positive();
 
 export const AddPlayerInputSchema = z.object({
@@ -30,11 +33,15 @@ export const AddPlayerInputSchema = z.object({
   ),
 });
 
-export const AddNcaaPlayerInputSchema = z.object({
-  ncaaPlayerSeq: NcaaPlayerSeqSchema.describe(
-    "stats.ncaa.org stats_player_seq of the NCAA player to add; his name and school are resolved from his game-log page.",
-  ),
-});
+/** Explicit provider identity; names validate the selected ID and never search. */
+export const HighlightlyNcaaIdentitySchema = z.object({
+  playerId: z.number().int().positive().describe("Explicit Highlightly NCAA player ID."),
+  canonicalName: z.string().trim().min(1).max(160).describe("Canonical Highlightly player name used to validate the selected ID."),
+  teamId: z.number().int().positive().describe("Highlightly team ID used to validate the selected player."),
+}).strict();
+
+/** NCAA operational identity is Highlightly-only; legacy sequences only attach history. */
+export const AddNcaaPlayerInputSchema = HighlightlyNcaaIdentitySchema;
 
 /**
  * Batch-add (issue #68 / ADR 0045). A batch of *typed identity entries* staged
@@ -49,14 +56,8 @@ export const AddNcaaPlayerInputSchema = z.object({
 
 /**
  * Per-call entry cap. This is a LATENCY bound, not a byte-DoS bound like
- * MAX_BACKUP_BYTES: resolving one NCAA stats_player_seq fetches a game-log page
- * at the NCAA client's DEFAULT ~3 s politeness interval, so an all-NCAA batch of
- * N costs ~3 N seconds. 25 entries is a worst case ~75 s, comfortably under the
- * ~100 s Cloudflare-edge timeout (ADR 0045). MLB entries are far cheaper (teams
- * cached). The cap PRESUMES that default ~3 s delay: raising NCAA_SCRAPE_DELAY_MS
- * proportionally lengthens an all-NCAA batch and narrows the safe size, so an
- * operator who raises it should add players in smaller batches. A client-side
- * timeout is non-destructive — batch-add is best-effort and non-transactional, so
+ * MAX_BACKUP_BYTES. Highlightly identity validation is a bounded provider lookup;
+ * a client-side timeout is non-destructive — batch-add is best-effort and non-transactional, so
  * already-staged rows persist and are valid (re-run to view outcomes, or
  * run_refresh to backfill). A config-derived dynamic cap is out of scope for this
  * single-user host (PR #84 review).
@@ -68,15 +69,15 @@ const BATCH_STRING_MAX = 120;
 // numbers before building entries), so they must NOT coerce — z.coerce.number() would turn `true`→1
 // or `[123]`→123 and stage the wrong player, defeating the strict-shape guarantee (PR #84 review).
 const BatchPersonIdSchema = z.number().int().positive();
-const BatchNcaaPlayerSeqSchema = z.number().int().positive();
+const BatchHighlightlyPlayerIdSchema = z.number().int().positive();
 
-/** One typed identity entry: exactly one of personId, ncaaPlayerSeq, or name. */
+/** One typed identity entry: MLB id/name, or a complete Highlightly identity. */
 export const BatchAddEntrySchema = z
   .object({
     personId: BatchPersonIdSchema.optional().describe("MLB Stats API personId (MLB/MiLB)."),
-    ncaaPlayerSeq: BatchNcaaPlayerSeqSchema.optional().describe(
-      "stats.ncaa.org stats_player_seq (NCAA).",
-    ),
+    highlightlyPlayerId: BatchHighlightlyPlayerIdSchema.optional().describe("Explicit Highlightly NCAA player ID."),
+    canonicalName: z.string().trim().min(1).max(BATCH_STRING_MAX).optional().describe("Canonical provider name validating highlightlyPlayerId."),
+    teamId: z.number().int().positive().optional().describe("Highlightly team ID validating highlightlyPlayerId."),
     name: z
       .string()
       .trim()
@@ -89,12 +90,15 @@ export const BatchAddEntrySchema = z
   .superRefine((val, ctx) => {
     const present =
       (val.personId !== undefined ? 1 : 0) +
-      (val.ncaaPlayerSeq !== undefined ? 1 : 0) +
       (val.name !== undefined ? 1 : 0);
-    if (present !== 1) {
+    const highlightlyParts = [val.highlightlyPlayerId, val.canonicalName, val.teamId].filter((v) => v !== undefined).length;
+    if ((present === 1 && highlightlyParts === 0) || (present === 0 && highlightlyParts === 3)) {
+      return;
+    }
+    {
       ctx.addIssue({
         code: "custom",
-        message: "each entry must carry exactly one of personId, ncaaPlayerSeq, or name",
+        message: "each entry must carry personId, name, or all of highlightlyPlayerId/canonicalName/teamId",
       });
     }
   });
@@ -115,7 +119,7 @@ export const BatchAddInputBase = z
       .min(1)
       .max(MAX_BATCH_ENTRIES)
       .describe(
-        `The batch of 1 to ${MAX_BATCH_ENTRIES} typed identity entries to stage; each is exactly one of personId, ncaaPlayerSeq, or name. Their seasons backfill at the next refresh, not inline.`,
+        `The batch of 1 to ${MAX_BATCH_ENTRIES} typed identity entries to stage; each is personId, name, or an explicit Highlightly NCAA identity. Their seasons backfill at the next refresh, not inline.`,
       ),
     list: z
       .string()
@@ -139,7 +143,7 @@ export const BatchAddInputBase = z
  */
 export const BatchAddInputSchema = BatchAddInputBase.superRefine((val, ctx) => {
   const seenPersonId = new Set<number>();
-  const seenNcaaSeq = new Set<number>();
+  const seenHighlightly = new Set<number>();
   const seenName = new Set<string>();
   val.entries.forEach((entry, i) => {
     if (entry.personId !== undefined) {
@@ -152,15 +156,15 @@ export const BatchAddInputSchema = BatchAddInputBase.superRefine((val, ctx) => {
       }
       seenPersonId.add(entry.personId);
     }
-    if (entry.ncaaPlayerSeq !== undefined) {
-      if (seenNcaaSeq.has(entry.ncaaPlayerSeq)) {
+    if (entry.highlightlyPlayerId !== undefined) {
+      if (seenHighlightly.has(entry.highlightlyPlayerId)) {
         ctx.addIssue({
           code: "custom",
           path: ["entries", i],
-          message: `duplicate ncaaPlayerSeq ${entry.ncaaPlayerSeq} in batch`,
+          message: `duplicate highlightlyPlayerId ${entry.highlightlyPlayerId} in batch`,
         });
       }
-      seenNcaaSeq.add(entry.ncaaPlayerSeq);
+      seenHighlightly.add(entry.highlightlyPlayerId);
     }
     if (entry.name !== undefined) {
       const key = entry.name.trim().toLowerCase();
@@ -201,26 +205,26 @@ export const ListMemberRefSchema = z
       .int()
       .positive()
       .optional()
-      .describe("MLB Stats API personId (MLB/MiLB). Provide exactly one of personId or ncaaPlayerSeq."),
-    ncaaPlayerSeq: z
+      .describe("MLB Stats API personId (MLB/MiLB). Provide exactly one of personId or highlightlyPlayerId."),
+    highlightlyPlayerId: z
       .number()
       .int()
       .positive()
       .optional()
-      .describe("stats.ncaa.org stats_player_seq (NCAA). Provide exactly one of personId or ncaaPlayerSeq."),
+      .describe("Explicit Highlightly NCAA player ID. Provide exactly one of personId or highlightlyPlayerId."),
   })
   .strict()
   .superRefine((val, ctx) => {
-    const present = (val.personId !== undefined ? 1 : 0) + (val.ncaaPlayerSeq !== undefined ? 1 : 0);
+    const present = (val.personId !== undefined ? 1 : 0) + (val.highlightlyPlayerId !== undefined ? 1 : 0);
     if (present !== 1) {
       ctx.addIssue({
         code: "custom",
-        message: "each player reference must carry exactly one of personId or ncaaPlayerSeq",
+        message: "each player reference must carry exactly one of personId or highlightlyPlayerId",
       });
     }
   });
 
-const LIST_MEMBERS_DESCRIPTION = `The players to add or remove, 1 to ${MAX_LIST_MEMBER_REFS} references, each exactly one of personId (MLB/MiLB) or ncaaPlayerSeq (NCAA).`;
+const LIST_MEMBERS_DESCRIPTION = `The players to add or remove, 1 to ${MAX_LIST_MEMBER_REFS} references, each exactly one of personId (MLB/MiLB) or highlightlyPlayerId (NCAA).`;
 
 /** MCP tool shape: `{ name }` — create/delete/show a list by name. */
 export const ListNameInputShape = {
@@ -255,28 +259,28 @@ export const ListMembersBodySchema = z
   })
   .strict();
 
-/** Shared "exactly one of personId/ncaaPlayerSeq" refinement (deactivate + tag tools). */
+/** Shared "exactly one of personId/highlightlyPlayerId" refinement (deactivate + tag tools). */
 function refineExactlyOnePlayerRef(
-  input: { personId?: number; ncaaPlayerSeq?: number },
+  input: { personId?: number; highlightlyPlayerId?: number },
   ctx: z.RefinementCtx,
 ): void {
-  const count = (input.personId !== undefined ? 1 : 0) + (input.ncaaPlayerSeq !== undefined ? 1 : 0);
+  const count = (input.personId !== undefined ? 1 : 0) + (input.highlightlyPlayerId !== undefined ? 1 : 0);
   if (count !== 1) {
     ctx.addIssue({
       code: "custom",
       path: ["personId"],
-      message: "provide exactly one of personId or ncaaPlayerSeq",
+      message: "provide exactly one of personId or highlightlyPlayerId",
     });
   }
 }
 
-/** Deactivate addressing: exactly one of personId or ncaaPlayerSeq (ADR 0032). */
+/** Deactivate addressing: exactly one of personId or explicit Highlightly player ID. */
 export const DeactivateInputShape = {
   personId: PersonIdSchema.optional().describe(
-    "MLB Stats API personId (MLB/MiLB). Provide exactly one of personId or ncaaPlayerSeq.",
+    "MLB Stats API personId (MLB/MiLB). Provide exactly one of personId or highlightlyPlayerId.",
   ),
-  ncaaPlayerSeq: NcaaPlayerSeqSchema.optional().describe(
-    "stats.ncaa.org stats_player_seq (NCAA). Provide exactly one of personId or ncaaPlayerSeq.",
+  highlightlyPlayerId: HighlightlyPlayerIdSchema.optional().describe(
+    "Explicit Highlightly NCAA player ID. Provide exactly one of personId or highlightlyPlayerId.",
   ),
 };
 
@@ -293,10 +297,10 @@ export const DeactivateInputSchema = z
  */
 export const StrictPlayerRefShape = {
   personId: StrictPersonIdSchema.optional().describe(
-    "MLB Stats API personId (MLB/MiLB). Provide exactly one of personId or ncaaPlayerSeq.",
+    "MLB Stats API personId (MLB/MiLB). Provide exactly one of personId or highlightlyPlayerId.",
   ),
-  ncaaPlayerSeq: StrictNcaaPlayerSeqSchema.optional().describe(
-    "stats.ncaa.org stats_player_seq (NCAA). Provide exactly one of personId or ncaaPlayerSeq.",
+  highlightlyPlayerId: StrictHighlightlyPlayerIdSchema.optional().describe(
+    "Explicit Highlightly NCAA player ID. Provide exactly one of personId or highlightlyPlayerId.",
   ),
 };
 
@@ -367,17 +371,17 @@ export const RefreshInputShape = {
   personId: PersonIdSchema.optional().describe(
     "MLB Stats API personId (MLB/MiLB) to refresh; omit both fields to refresh every active player.",
   ),
-  ncaaPlayerSeq: NcaaPlayerSeqSchema.optional().describe(
-    "stats.ncaa.org stats_player_seq (NCAA) to refresh; omit both fields to refresh every active player.",
+  highlightlyPlayerId: z.coerce.number().int().positive().optional().describe(
+    "Explicit Highlightly NCAA player ID to refresh; omit both fields to refresh every active player.",
   ),
 };
 
 export const RefreshInputSchema = z.object(RefreshInputShape).superRefine((input, ctx) => {
-  if (input.personId !== undefined && input.ncaaPlayerSeq !== undefined) {
+  if (input.personId !== undefined && input.highlightlyPlayerId !== undefined) {
     ctx.addIssue({
       code: "custom",
-      path: ["ncaaPlayerSeq"],
-      message: "provide personId or ncaaPlayerSeq, not both",
+      path: ["highlightlyPlayerId"],
+      message: "provide personId or highlightlyPlayerId, not both",
     });
   }
 });

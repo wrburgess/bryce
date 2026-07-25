@@ -27,13 +27,8 @@ export interface NcaaSeason {
   /** year_stat_category_id selecting the pitching game log. */
   pitchingCategoryId: number;
   /**
-   * year_stat_category_id selecting the fielding game log. UNVERIFIED: the
-   * source assigns the three category ids consecutively (batting, pitching,
-   * fielding — observable on any player page's category tabs), and these
-   * follow that pattern, but Akamai blocks live confirmation from the build
-   * environment. Verify on the host with
-   * `npm run ncaa:probe -- --seq N --type fielding`; a wrong id fails loud
-   * (parse error / empty table), never a silent gap.
+   * Historical fielding category ID retained only to interpret archived
+   * provenance. New NCAA ingestion does not query this source.
    */
   fieldingCategoryId: number;
   /** Division-I opening day (YYYY-MM-DD). */

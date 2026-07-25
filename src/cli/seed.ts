@@ -8,8 +8,8 @@ import { players } from "../db/schema.js";
 import { startupDb } from "../db/startup.js";
 import type { MlbClient } from "../mlb/client.js";
 import { MlbClient as MlbClientImpl } from "../mlb/client.js";
-import type { NcaaClient } from "../ncaa/client.js";
-import { NcaaClient as NcaaClientImpl } from "../ncaa/client.js";
+import type { HighlightlyClient } from "../highlightly/client.js";
+import { HighlightlyClient as HighlightlyClientImpl, HighlightlyError } from "../highlightly/client.js";
 import {
   ManualWriteToDerivedNamespaceError,
   UnknownTagError,
@@ -20,9 +20,8 @@ import {
 } from "../tags/service.js";
 import {
   PlayerNotFoundError,
-  UnknownNcaaPlayerError,
   UnknownPersonError,
-  addNcaaPlayer,
+  addHighlightlyNcaaPlayer,
   addPlayer,
   deactivatePlayer,
   listPlayers,
@@ -39,21 +38,21 @@ import { exitAfterDrain, isMain } from "./main.js";
  *
  * Subcommands:
  *   add --person-id N          add by MLB Stats API personId
- *   add --ncaa-seq N           add an NCAA player by stats.ncaa.org stats_player_seq
+ *   add --highlightly-player-id N --canonical-name NAME --team-id N
  *   add --search "name" [--pick i]   search by name; --pick chooses (1-based)
  *   deactivate --person-id N   remove from the Watch List (history kept)
- *   deactivate --ncaa-seq N    remove an NCAA player from the Watch List
+ *   deactivate --highlightly-player-id N    remove an NCAA player from the Watch List
  *   list [--tags EXPR]         print every player row, optionally tag-filtered
- *   tag add --person-id N|--ncaa-seq N --tag ns:value      add a manual tag
- *   tag remove --person-id N|--ncaa-seq N --tag ns:value   remove a manual tag
- *   tag list --person-id N|--ncaa-seq N                    list a player's tags
+ *   tag add --person-id N|--highlightly-player-id N --tag ns:value      add a manual tag
+ *   tag remove --person-id N|--highlightly-player-id N --tag ns:value   remove a manual tag
+ *   tag list --person-id N|--highlightly-player-id N                    list a player's tags
  *   tag rebuild                re-derive every player's derived tags (backfill)
  */
 
 export interface SeedDeps {
   db: Db;
   client: MlbClient;
-  ncaaClient: NcaaClient;
+  highlightlyClient?: HighlightlyClient;
   now: () => Date;
   tz: string;
   write: (line: string) => void;
@@ -73,7 +72,7 @@ export async function runSeed(argv: string[], deps: SeedDeps): Promise<number> {
       return runTag(rest, flags, deps);
     default:
       deps.write(
-        "error: usage: seed <add|deactivate|list|tag> [--person-id N] [--ncaa-seq N] [--search NAME] [--pick I] [--tags EXPR] [--tag ns:value]",
+        "error: usage: seed <add|deactivate|list|tag> [--person-id N] [--highlightly-player-id N] [--search NAME] [--pick I] [--tags EXPR] [--tag ns:value]",
       );
       return 1;
   }
@@ -93,9 +92,34 @@ function parseFlags(args: string[]): Map<string, string> {
 }
 
 async function runAdd(flags: Map<string, string>, deps: SeedDeps): Promise<number> {
+  const highlightlyId = flags.get("highlightly-player-id");
+  if (highlightlyId !== undefined) {
+    const name = flags.get("canonical-name");
+    const team = flags.get("team-id");
+    const playerId = Number(highlightlyId);
+    const teamId = Number(team);
+    if (!Number.isInteger(playerId) || playerId <= 0 || !Number.isInteger(teamId) || teamId <= 0 || !name?.trim()) {
+      deps.write("error: Highlightly add requires --highlightly-player-id N --canonical-name NAME --team-id N");
+      return 1;
+    }
+    try {
+      const result = await addHighlightlyNcaaPlayer(
+        { ...deps }, { playerId, canonicalName: name, teamId },
+      );
+      deps.write(`${result.action} player id=${result.player.id} highlightlyPlayerId=${playerId} name=${result.player.fullName}`);
+      return 0;
+    } catch (err) {
+      if (err instanceof HighlightlyError) {
+        deps.write(`error: ${err.code}: ${err.message}`);
+        return err.code === "highlightly_not_configured" ? 78 : err.code === "highlightly_quota_exhausted" || err.code === "highlightly_coverage_incomplete" ? 75 : err.code === "highlightly_player_not_found" || err.code === "highlightly_identity_mismatch" ? 65 : 69;
+      }
+      throw err;
+    }
+  }
   const ncaaSeqFlag = flags.get("ncaa-seq");
   if (ncaaSeqFlag !== undefined) {
-    return runAddNcaa(ncaaSeqFlag, deps);
+    deps.write("error: --ncaa-seq is retired; use --highlightly-player-id with --canonical-name and --team-id");
+    return 1;
   }
 
   const personIdFlag = flags.get("person-id");
@@ -113,14 +137,14 @@ async function runAdd(flags: Map<string, string>, deps: SeedDeps): Promise<numbe
     if (picked === null) return 1;
     personId = picked;
   } else {
-    deps.write("error: add requires --person-id N, --ncaa-seq N, or --search NAME");
+    deps.write("error: add requires --person-id N, --highlightly-player-id N with --canonical-name/--team-id, or --search NAME");
     return 1;
   }
 
   let result;
   try {
     result = await addPlayer(
-      { db: deps.db, client: deps.client, ncaaClient: deps.ncaaClient, now: deps.now, tz: deps.tz },
+      { db: deps.db, client: deps.client, highlightlyClient: deps.highlightlyClient, now: deps.now, tz: deps.tz },
       personId,
     );
   } catch (err) {
@@ -138,42 +162,6 @@ async function runAdd(flags: Map<string, string>, deps: SeedDeps): Promise<numbe
   }
 
   deps.write(`added player id=${player.id} personId=${personId} name=${player.fullName}`);
-  if (refresh === null || refresh.skipped) {
-    deps.write("refresh skipped reason=offseason-sleep");
-  } else {
-    deps.write(`refresh done inserted=${refresh.inserted} updated=${refresh.updated}`);
-  }
-  return 0;
-}
-
-async function runAddNcaa(seqFlag: string, deps: SeedDeps): Promise<number> {
-  const seq = Number.parseInt(seqFlag, 10);
-  if (!Number.isInteger(seq) || seq <= 0) {
-    deps.write(`error: invalid --ncaa-seq ${seqFlag}`);
-    return 1;
-  }
-
-  let result;
-  try {
-    result = await addNcaaPlayer(
-      { db: deps.db, client: deps.client, ncaaClient: deps.ncaaClient, now: deps.now, tz: deps.tz },
-      seq,
-    );
-  } catch (err) {
-    if (err instanceof UnknownNcaaPlayerError) {
-      deps.write(`error: ${err.message}`);
-      return 1;
-    }
-    throw err;
-  }
-
-  const { player, refresh } = result;
-  if (result.action === "updated") {
-    deps.write(`updated player id=${player.id} ncaaSeq=${seq} name=${player.fullName}`);
-    return 0;
-  }
-
-  deps.write(`added player id=${player.id} ncaaSeq=${seq} name=${player.fullName}`);
   if (refresh === null || refresh.skipped) {
     deps.write("refresh skipped reason=offseason-sleep");
   } else {
@@ -215,23 +203,23 @@ async function pickFromSearch(
 }
 
 async function runDeactivate(flags: Map<string, string>, deps: SeedDeps): Promise<number> {
-  const ncaaSeqFlag = flags.get("ncaa-seq");
+  const highlightlyIdFlag = flags.get("highlightly-player-id");
   const personIdFlag = flags.get("person-id");
 
-  let ref: number | { ncaaPlayerSeq: number };
+  let ref: number | { kind: "highlightly"; playerId: number };
   let label: string;
-  if (ncaaSeqFlag !== undefined) {
-    const seq = Number.parseInt(ncaaSeqFlag, 10);
-    if (!Number.isInteger(seq) || seq <= 0) {
-      deps.write("error: deactivate requires --ncaa-seq N");
+  if (highlightlyIdFlag !== undefined) {
+    const playerId = Number.parseInt(highlightlyIdFlag, 10);
+    if (!Number.isInteger(playerId) || playerId <= 0) {
+      deps.write("error: deactivate requires --highlightly-player-id N");
       return 1;
     }
-    ref = { ncaaPlayerSeq: seq };
-    label = `ncaaSeq=${seq}`;
+    ref = { kind: "highlightly", playerId };
+    label = `highlightlyPlayerId=${playerId}`;
   } else {
     const personId = personIdFlag !== undefined ? Number.parseInt(personIdFlag, 10) : Number.NaN;
     if (!Number.isInteger(personId) || personId <= 0) {
-      deps.write("error: deactivate requires --person-id N or --ncaa-seq N");
+      deps.write("error: deactivate requires --person-id N or --highlightly-player-id N");
       return 1;
     }
     ref = personId;
@@ -275,27 +263,27 @@ async function runList(flags: Map<string, string>, deps: SeedDeps): Promise<numb
     const base =
       `player id=${p.id} personId=${p.externalId ?? "-"} name=${p.fullName} ` +
       `level=${p.level} milbLevel=${p.milbLevel ?? "-"} team=${p.teamName ?? "-"} active=${p.active}`;
-    // NCAA rows carry a school and a stats_player_seq instead of a team/personId.
+    // NCAA rows carry an explicit Highlightly identity instead of a personId.
     const suffix =
-      p.level === "ncaa" ? ` school=${p.schoolName ?? "-"} ncaaSeq=${p.ncaaPlayerSeq ?? "-"}` : "";
+      p.level === "ncaa" ? ` school=${p.schoolName ?? "-"} highlightlyPlayerId=${p.highlightlyPlayerId ?? "-"}` : "";
     deps.write(`${base}${suffix}`);
   }
   deps.write(`total=${rows.length}`);
   return 0;
 }
 
-/** Resolve --person-id / --ncaa-seq to a Player row; print an error and return null on miss. */
+/** Resolve --person-id / --highlightly-player-id to a Player row; print an error and return null on miss. */
 async function resolveTagPlayer(flags: Map<string, string>, deps: SeedDeps): Promise<PlayerRow | null> {
-  const ncaaSeqFlag = flags.get("ncaa-seq");
-  if (ncaaSeqFlag !== undefined) {
-    const seq = Number.parseInt(ncaaSeqFlag, 10);
-    if (!Number.isInteger(seq) || seq <= 0) {
-      deps.write(`error: invalid --ncaa-seq ${ncaaSeqFlag}`);
+  const highlightlyIdFlag = flags.get("highlightly-player-id");
+  if (highlightlyIdFlag !== undefined) {
+    const playerId = Number.parseInt(highlightlyIdFlag, 10);
+    if (!Number.isInteger(playerId) || playerId <= 0) {
+      deps.write(`error: invalid --highlightly-player-id ${highlightlyIdFlag}`);
       return null;
     }
-    const row = (await deps.db.select().from(players).where(eq(players.ncaaPlayerSeq, seq)))[0];
+    const row = (await deps.db.select().from(players).where(eq(players.highlightlyPlayerId, playerId)))[0];
     if (row === undefined) {
-      deps.write(`error: ${new PlayerNotFoundError({ ncaaPlayerSeq: seq }).message}`);
+      deps.write(`error: ${new PlayerNotFoundError({ kind: "highlightly", playerId }).message}`);
       return null;
     }
     return row;
@@ -303,7 +291,7 @@ async function resolveTagPlayer(flags: Map<string, string>, deps: SeedDeps): Pro
   const personIdFlag = flags.get("person-id");
   const personId = personIdFlag !== undefined ? Number.parseInt(personIdFlag, 10) : Number.NaN;
   if (!Number.isInteger(personId) || personId <= 0) {
-    deps.write("error: tag requires --person-id N or --ncaa-seq N");
+    deps.write("error: tag requires --person-id N or --highlightly-player-id N");
     return null;
   }
   const row = (await deps.db.select().from(players).where(eq(players.externalId, personId)))[0];
@@ -335,7 +323,7 @@ async function runTag(rest: string[], flags: Map<string, string>, deps: SeedDeps
       return runTagRebuild(deps);
     default:
       deps.write(
-        "error: usage: seed tag <add|remove|list|rebuild> [--person-id N|--ncaa-seq N] [--tag ns:value]",
+        "error: usage: seed tag <add|remove|list|rebuild> [--person-id N|--highlightly-player-id N] [--tag ns:value]",
       );
       return 1;
   }
@@ -411,11 +399,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   });
   try {
     const client = new MlbClientImpl({ delayMs: config.mlbApiDelayMs });
-    const ncaaClient = new NcaaClientImpl({ delayMs: config.ncaaScrapeDelayMs });
+    const highlightlyClient = new HighlightlyClientImpl({ apiKey: config.highlightlyApiKey });
     return await runSeed(argv, {
       db,
       client,
-      ncaaClient,
+      highlightlyClient,
       now: () => new Date(),
       tz: config.tz,
       write: (line) => process.stdout.write(`${line}\n`),

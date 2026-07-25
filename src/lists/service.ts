@@ -229,31 +229,32 @@ export interface ListMembershipResult {
 
 /**
  * Resolve every PlayerRef to its Watch List row IN INPUT ORDER, in bulk — one
- * query for the MLB `personId` (externalId) refs and one for the NCAA
- * `{ncaaPlayerSeq}` refs, never a query per ref (rules/backend.md: no N+1). The
+ * query for MLB `personId` (externalId) refs and one for explicit Highlightly
+ * player IDs, never a query per ref (rules/backend.md: no N+1). The
  * ref set is capped at the boundary, so the two `inArray` lists are bounded.
  * The first ref that resolves to no player throws PlayerNotFoundError for that
  * ref (as the prior per-ref loop did), so a bad ref aborts the whole mutation.
  */
 async function resolvePlayers(db: Db, refs: PlayerRef[]): Promise<PlayerRow[]> {
   const externalIds = refs.filter((r): r is number => typeof r === "number");
-  const ncaaSeqs = refs
-    .filter((r): r is { ncaaPlayerSeq: number } => typeof r !== "number")
-    .map((r) => r.ncaaPlayerSeq);
+  const highlightlyIds = refs
+    .filter((r): r is { kind: "highlightly"; playerId: number } => typeof r !== "number")
+    .map((r) => r.playerId);
 
   const byExternal = new Map<number, PlayerRow>();
   if (externalIds.length > 0) {
     const rows = await db.select().from(players).where(inArray(players.externalId, externalIds));
     for (const row of rows) if (row.externalId !== null) byExternal.set(row.externalId, row);
   }
-  const byNcaa = new Map<number, PlayerRow>();
-  if (ncaaSeqs.length > 0) {
-    const rows = await db.select().from(players).where(inArray(players.ncaaPlayerSeq, ncaaSeqs));
-    for (const row of rows) if (row.ncaaPlayerSeq !== null) byNcaa.set(row.ncaaPlayerSeq, row);
+  const byHighlightly = new Map<number, PlayerRow>();
+  if (highlightlyIds.length > 0) {
+    const rows = await db.select().from(players).where(inArray(players.highlightlyPlayerId, highlightlyIds));
+    for (const row of rows) if (row.highlightlyPlayerId !== null) byHighlightly.set(row.highlightlyPlayerId, row);
   }
-
   return refs.map((ref) => {
-    const row = typeof ref === "number" ? byExternal.get(ref) : byNcaa.get(ref.ncaaPlayerSeq);
+    const row = typeof ref === "number"
+      ? byExternal.get(ref)
+      : byHighlightly.get(ref.playerId);
     if (row === undefined) throw new PlayerNotFoundError(ref);
     return row;
   });

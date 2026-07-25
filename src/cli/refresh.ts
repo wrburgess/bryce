@@ -4,7 +4,7 @@ import type { Db } from "../db/client.js";
 import { startupDb } from "../db/startup.js";
 import { runRefresh } from "../jobs/refresh.js";
 import { MlbClient } from "../mlb/client.js";
-import { NcaaClient } from "../ncaa/client.js";
+import { HighlightlyClient } from "../highlightly/client.js";
 import { exitAfterDrain, isMain } from "./main.js";
 
 /**
@@ -21,7 +21,7 @@ import { exitAfterDrain, isMain } from "./main.js";
 export interface RefreshCliDeps {
   db: Db;
   client: MlbClient;
-  ncaaClient: NcaaClient;
+  highlightlyClient?: HighlightlyClient;
   now: () => Date;
   tz: string;
   write: (line: string) => void;
@@ -33,7 +33,7 @@ export async function runRefreshCli(deps: RefreshCliDeps): Promise<number> {
   const summary = await runRefresh({
     db: deps.db,
     client: deps.client,
-    ncaaClient: deps.ncaaClient,
+    highlightlyClient: deps.highlightlyClient,
     now: deps.now,
     tz: deps.tz,
   });
@@ -84,7 +84,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return await runRefreshCli({
       db,
       client: new MlbClient({ delayMs: config.mlbApiDelayMs }),
-      ncaaClient: new NcaaClient({ delayMs: config.ncaaScrapeDelayMs }),
+      highlightlyClient: new HighlightlyClient({ apiKey: config.highlightlyApiKey }),
       now: () => new Date(),
       tz: config.tz,
       write: (line) => process.stdout.write(`${line}\n`),

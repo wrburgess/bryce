@@ -12,8 +12,8 @@ import { exitAfterDrain, isMain } from "./main.js";
 
 /**
  * The digest CLI: `npm run digest [-- --window 7d] [-- --force]`. A thin
- * presenter over `runDigest`, injectable like the other CLIs (src/cli/seed.ts,
- * src/cli/ncaa-probe.ts) so the WIRING is testable and not merely the parse —
+ * presenter over `runDigest`, injectable like the other CLIs (src/cli/seed.ts)
+ * so the WIRING is testable and not merely the parse —
  * a flag that parsed correctly and was then dropped on the way to `runDigest`
  * would be silently dead with the suite still green
  * (rules/testing.md: build the infrastructure the scenario needs).

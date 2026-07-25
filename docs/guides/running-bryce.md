@@ -24,7 +24,7 @@ Seed the watch list, then run the jobs by hand once:
 
 ```sh
 bryce seed add --search "acosta" --pick 1   # or: add --person-id 691185
-bryce seed add --ncaa-seq 2649785           # NCAA player by stats_player_seq (see NCAA below)
+bryce seed add --highlightly-player-id 501 --canonical-name "C Guy" --team-id 10
 bryce seed list
 bryce refresh
 bryce digest
@@ -84,7 +84,6 @@ working directory for predictable operation.
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | with smtp | port `465` | SMTP relay credentials |
 | `DIGEST_TO` / `DIGEST_FROM` | unless console | — | Digest recipient and sender addresses |
 | `MLB_API_DELAY_MS` | no | `500` | Polite delay between MLB Stats API calls |
-| `NCAA_SCRAPE_DELAY_MS` | no | `3000` | Polite delay between stats.ncaa.org scrape requests |
 | `SERVER_PORT` | no | `3000` | HTTP server port (`/health`, `/api`, `/mcp`) |
 | `API_TOKEN` | for `/api` + `/mcp` | — | Bearer token guarding `/api/*` and `/mcp`; without it the server **fails closed and refuses to start at all** — nothing is served, including `/health` |
 
@@ -571,42 +570,15 @@ so they never drift:
 
 ## NCAA players
 
-NCAA baseball has no MLB Stats API `personId`, so an NCAA Player is identified by his stats.ncaa.org
-`stats_player_seq` and its data is scraped from stats.ncaa.org through an isolated adapter
-([ADR 0032](../adr/0032-ncaa-identity-stats-player-seq-scrape-adapter.md)).
-
-**Finding a player's `stats_player_seq`:** open his player page on stats.ncaa.org — for example,
-`https://stats.ncaa.org/players/9702101?year_stat_category_id=15867`. The number immediately after
-`/players/` is the seq; `year_stat_category_id` only selects the stats view and is not passed to Bryce.
-
-**Adding him** (his first Refresh runs immediately, unless the pipeline is in Offseason Sleep):
+NCAA players use an explicit Highlightly player ID. Supply its canonical name and team ID so Bryce can
+validate the selected provider identity before the first JSON refresh:
 
 ```sh
-bryce seed add --ncaa-seq 2649785
+bryce seed add --highlightly-player-id 501 --canonical-name "C Guy" --team-id 10
 ```
 
-- **REST:** `POST /api/players/ncaa` with `{"ncaaPlayerSeq": 2649785}`.
-- **MCP / Claude:** the `watchlist_add_ncaa` tool — or just ask "add NCAA player 2649785 to my watch
-  list". His name and school are resolved from his game-log page.
+- **REST:** `POST /api/players/ncaa` with `{"playerId":501,"canonicalName":"C Guy","teamId":10}`.
+- **MCP:** `watchlist_add_ncaa` with the same three fields.
 
-**Validating the scrape on this host** — stats.ncaa.org is behind Akamai bot protection, so confirm a
-live fetch and parse from the Mac before relying on it:
-
-```sh
-bryce ncaa probe --seq 2649785 --season 2025 --type batting
-```
-
-It prints the HTTP status and what the parser extracted (name, school, row count), exiting non-zero on
-any failure.
-
-**Annual season-lookup update:** stats.ncaa.org keys requests by opaque per-season ids that change
-each year. `src/ncaa/seasons.ts` bundles them (plus each season's Division-I opening/closing dates)
-per season; add a new entry each January (the file documents exactly where to read the ids off a
-player page). A season with no bundled entry is simply treated as not In Season for NCAA — logged
-loudly, never a silent gap.
-
-**Scraping posture / terms of use:** this is an unofficial scrape (there is no official NCAA stats
-API). Bryce is deliberately a polite, single-user client — a generous `NCAA_SCRAPE_DELAY_MS` between
-requests and no parallel fetching — and fails loudly rather than hammering the site. Respect
-stats.ncaa.org's terms of use; if the site blocks or rate-limits, back off rather than working around
-the protection.
+The former stats.ncaa.org HTML scraper, sequence identity, and host probe are removed. Historical
+source markers remain only to migrate existing rows and preserve stat-line provenance.

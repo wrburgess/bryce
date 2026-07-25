@@ -15,7 +15,6 @@ const validArgs: Record<string, string[]> = {
   "players restore": ["--in", "players.json"],
   "players batch-add": ["--person-ids", "1"],
   "db restore": ["--from", "snapshot.db"],
-  "ncaa probe": ["--seq", "1"],
   "seed add": ["--person-id", "1"],
   "seed deactivate": ["--person-id", "1"],
   "seed tag add": ["--person-id", "1", "--tag", "status:rostered"],
@@ -72,11 +71,6 @@ describe("CLI router metadata", () => {
     expect(preflight(digest, ["--window=7d=x"])).toContain("extra '='");
     expect(preflight(digest, ["--bogus"])).toContain("unknown option");
     expect(preflight(digest, ["operand"])).toContain("unexpected argument");
-    const probe = COMMANDS.find((command) => command.path.join(" ") === "ncaa probe")!;
-    expect(preflight(probe, ["--seq", "not-a-number"])).toContain("positive integer");
-    expect(preflight(probe, ["--season", "twenty"])).toContain("four-digit year");
-    expect(preflight(probe, ["--season", "2099"])).toContain("supported NCAA season");
-    expect(preflight(probe, ["--seq", "01"])).toContain("canonical positive integer");
     const add = COMMANDS.find((command) => command.path.join(" ") === "seed add")!;
     expect(preflight(add, ["--person-id", "1", "--pick", "2"])).toContain("requires '--search'");
     expect(preflight(add, ["--search", "Acosta", "--pick", "01"])).toContain("canonical positive integer");
@@ -114,9 +108,8 @@ describe("CLI router metadata", () => {
       ["players", "lists", "create", "--name=Prospects"],
       ["players", "backup"],
       ["db", "restore"],
-      ["ncaa", "probe"],
       ["seed", "add"],
-      ["seed", "add", "--person-id", "1", "--ncaa-seq", "2"],
+      ["seed", "add", "--person-id", "1", "--highlightly-player-id", "2"],
       ["seed", "tag", "add", "--tag", "status:rostered"],
       ["players", "lists", "create", "--name", "   "],
       ["players", "backup", "--out", ""],
@@ -125,7 +118,7 @@ describe("CLI router metadata", () => {
       ["digest", "--window=7d\nforged"],
       ["players", "batch-add", "--person-ids", "1,1"],
       ["players", "batch-add", "--person-ids", ",,"],
-      ["players", "batch-add", "--ncaa-seqs", ""],
+      ["players", "batch-add", "--highlightly-player-id", ""],
       ["players", "batch-add", "--person-ids", Array.from({ length: 26 }, (_, i) => String(i + 1)).join(",")],
       ["players", "batch-add", "--names", "Acosta", "--names", "acosta"],
       ["players", "batch-add", "--names", "x".repeat(121)],
@@ -238,7 +231,6 @@ describe("CLI router metadata", () => {
           const body = url.includes("/people") ? { people: [] } : url.includes("/stats") ? { stats: [] } : { seasons: [] };
           return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
         }
-        if (url.includes("stats.ncaa.org")) return new Response("<html><body></body></html>", { status: 200, headers: { "content-type": "text/html" } });
         return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: {} }), { status: 200, headers: { "content-type": "application/json" } });
       }));
       for (const command of COMMANDS) {
@@ -263,7 +255,7 @@ describe("CLI router metadata", () => {
     try {
       const entrypoints = [
         "src/cli/backup.ts", "src/cli/batch-add.ts", "src/cli/connector-smoke.ts", "src/cli/digest.ts",
-        "src/cli/lists.ts", "src/cli/migrate.ts", "src/cli/ncaa-probe.ts", "src/cli/players-backup.ts",
+        "src/cli/lists.ts", "src/cli/migrate.ts", "src/cli/players-backup.ts",
         "src/cli/players-restore.ts", "src/cli/refresh.ts", "src/cli/restore.ts", "src/cli/seed.ts", "src/server.ts",
       ];
       for (const entrypoint of entrypoints) {

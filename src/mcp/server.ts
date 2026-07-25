@@ -3,6 +3,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { eq } from "drizzle-orm";
 import { ZodError } from "zod";
 import { players } from "../db/schema.js";
+import { HighlightlyError } from "../highlightly/client.js";
 import { runReadonlyQuery, ReadonlyQueryError } from "../db/readonly.js";
 import { assembleDigest } from "../digest/assemble.js";
 import {
@@ -16,11 +17,6 @@ import { sqlResultToCsv, statLinesToCsv } from "../export/tabular.js";
 import { runDigest } from "../jobs/digest.js";
 import { runRefresh, runRefreshForPlayer } from "../jobs/refresh.js";
 import { MlbApiError } from "../mlb/client.js";
-import {
-  NcaaAccessDeniedError,
-  NcaaApiError,
-  UnsupportedNcaaSeasonError,
-} from "../ncaa/client.js";
 import { queryStatLines } from "../queries/statLines.js";
 import type { ServiceDeps } from "../server/deps.js";
 import { healthSnapshot } from "../server/health.js";
@@ -34,9 +30,8 @@ import {
 import type { PlayerRef } from "../watchlist/service.js";
 import {
   PlayerNotFoundError,
-  UnknownNcaaPlayerError,
   UnknownPersonError,
-  addNcaaPlayer,
+  addHighlightlyNcaaPlayer,
   addPlayer,
   batchAddPlayers,
   deactivatePlayer,
@@ -87,8 +82,8 @@ import {
 } from "../api/schemas.js";
 
 /** Project a validated member reference into the service's PlayerRef union. */
-function toPlayerRef(ref: { personId?: number; ncaaPlayerSeq?: number }): PlayerRef {
-  return ref.personId !== undefined ? ref.personId : { ncaaPlayerSeq: ref.ncaaPlayerSeq! };
+function toPlayerRef(ref: { personId?: number; highlightlyPlayerId?: number }): PlayerRef {
+  return ref.personId !== undefined ? ref.personId : { kind: "highlightly", playerId: ref.highlightlyPlayerId! };
 }
 
 /**
@@ -124,7 +119,6 @@ function errorResult(err: unknown): CallToolResult {
     err instanceof ZodError
       ? `invalid input: ${err.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`
       : err instanceof UnknownPersonError ||
-          err instanceof UnknownNcaaPlayerError ||
           err instanceof PlayerNotFoundError ||
           err instanceof UnknownListError ||
           err instanceof DuplicateListNameError ||
@@ -133,9 +127,7 @@ function errorResult(err: unknown): CallToolResult {
           err instanceof UnknownTagError ||
           err instanceof ReadonlyQueryError ||
           err instanceof MlbApiError ||
-          err instanceof NcaaApiError ||
-          err instanceof NcaaAccessDeniedError ||
-          err instanceof UnsupportedNcaaSeasonError
+          err instanceof HighlightlyError
         ? err.message
         : null;
   if (known === null) throw err instanceof Error ? err : new Error(String(err));
@@ -153,20 +145,21 @@ async function guarded(run: () => Promise<CallToolResult>): Promise<CallToolResu
 export function buildMcpServer(deps: ServiceDeps): McpServer {
   const server = new McpServer({ name: "bryce", version: APP_VERSION });
 
-  /** Resolve an external ref (personId or ncaaPlayerSeq) to a row, or throw. */
+  /** Resolve an external ref (personId or Highlightly player ID) to a row, or throw. */
   async function resolvePlayerRow(ref: PlayerRef) {
-    const where =
-      typeof ref === "number"
-        ? eq(players.externalId, ref)
-        : eq(players.ncaaPlayerSeq, ref.ncaaPlayerSeq);
+    const where = typeof ref === "number"
+      ? eq(players.externalId, ref)
+      : eq(players.highlightlyPlayerId, ref.playerId);
     const row = (await deps.db.select().from(players).where(where))[0];
     if (row === undefined) throw new PlayerNotFoundError(ref);
     return row;
   }
 
   /** exactly-one addressing → a PlayerRef (the deactivate pattern). */
-  const refOf = (input: { personId?: number; ncaaPlayerSeq?: number }): PlayerRef =>
-    input.ncaaPlayerSeq !== undefined ? { ncaaPlayerSeq: input.ncaaPlayerSeq } : input.personId!;
+  const refOf = (input: { personId?: number; highlightlyPlayerId?: number }): PlayerRef =>
+    input.highlightlyPlayerId !== undefined
+      ? { kind: "highlightly", playerId: input.highlightlyPlayerId }
+      : input.personId!;
 
   server.registerTool(
     "watchlist_list",
@@ -203,13 +196,13 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "watchlist_add_ncaa",
     {
       description:
-        "Add an NCAA player to the watch list by stats.ncaa.org stats_player_seq. His name and school are resolved from his game-log page, and his current season is backfilled immediately (his first Refresh) unless the pipeline is in Offseason Sleep.",
+        "Add an NCAA player by an explicit Highlightly player ID. canonicalName and teamId validate the selected provider identity; no HTML/NCAA name lookup is performed.",
       inputSchema: AddNcaaPlayerInputSchema.shape,
     },
     (args) =>
       guarded(async () => {
         const input = AddNcaaPlayerInputSchema.parse(args);
-        const result = await addNcaaPlayer(deps, input.ncaaPlayerSeq);
+        const result = await addHighlightlyNcaaPlayer(deps, input);
         return jsonResult({ action: result.action, player: result.player, refresh: result.refresh });
       }),
   );
@@ -218,7 +211,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "watchlist_batch_add",
     {
       description:
-        "Batch-add up to 25 players to the watch list in one call (issue #68). entries is an array of typed identity entries, each EXACTLY one of: personId (MLB/MiLB), ncaaPlayerSeq (NCAA), or name (an MLB-only people-search convenience that must resolve to exactly one player — there is no NCAA name search). Unlike watchlist_add, NO season backfill runs inline: each player's identity is resolved and staged now, and his stats appear at the next run_refresh (call run_refresh afterward to backfill early). The whole call is rejected as a usage error if the SHAPE is bad — empty, over 25, an untyped/multi-key entry, an unknown top-level key, or an in-batch duplicate (a personId N and an ncaaPlayerSeq N are different players, never a duplicate) — before any network or write. Otherwise every entry is resolved best-effort and the result reports a per-entry outcome (added/updated/unresolved/failed) plus a summary; one entry failing never aborts the others.",
+        "Batch-add up to 25 players to the watch list in one call. Each entry is exactly one of an MLB/MiLB personId, an MLB-only name, or a complete explicit Highlightly NCAA identity (highlightlyPlayerId, canonicalName, teamId). Unlike watchlist_add, no season backfill runs inline; staged players backfill at the next run_refresh.",
       // The strict BatchAddInputBase object (NOT its raw .shape): the MCP SDK
       // (@modelcontextprotocol/sdk 1.29.0) accepts a full schema for inputSchema
       // and preserves its .strict(), so an unknown top-level key is rejected here
@@ -237,16 +230,13 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "watchlist_deactivate",
     {
       description:
-        "Deactivate a watch-list player by personId (MLB/MiLB) or ncaaPlayerSeq (NCAA) — exactly one. His row and full stat history are kept.",
+        "Deactivate a watch-list player by personId (MLB/MiLB) or explicit highlightlyPlayerId (NCAA) — exactly one. His row and full stat history are kept.",
       inputSchema: DeactivateInputShape,
     },
     (args) =>
       guarded(async () => {
         const input = DeactivateInputSchema.parse(args);
-        const ref =
-          input.ncaaPlayerSeq !== undefined
-            ? { ncaaPlayerSeq: input.ncaaPlayerSeq }
-            : input.personId!;
+        const ref = refOf(input);
         return jsonResult({ player: await deactivatePlayer(deps, ref) });
       }),
   );
@@ -348,24 +338,24 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "run_refresh",
     {
       description:
-        "Run a refresh now: re-ingest the full current season for every active player, or just one player when personId (MLB/MiLB) or ncaaPlayerSeq (NCAA) is given. A whole-watch-list refresh records a freshness run (start, outcome, counts) the daily digest gates on; it no-ops (skipped, reason 'already-running') when another sweep already holds a live lease, and is a no-op (reason 'offseason-sleep') during Offseason Sleep. A single-player refresh records no freshness run. Observe freshness via GET /health or the status tool.",
+        "Run a refresh now: re-ingest the full current season for every active player, or just one player when personId (MLB/MiLB) or highlightlyPlayerId (NCAA) is given. A whole-watch-list refresh records a freshness run; a single-player refresh does not.",
       inputSchema: RefreshInputShape,
     },
     (args) =>
       guarded(async () => {
         const input = RefreshInputSchema.parse(args);
-        if (input.personId === undefined && input.ncaaPlayerSeq === undefined) {
+        if (input.personId === undefined && input.highlightlyPlayerId === undefined) {
           return jsonResult({ ...(await runRefresh(deps)) });
         }
         const where =
-          input.ncaaPlayerSeq !== undefined
-            ? eq(players.ncaaPlayerSeq, input.ncaaPlayerSeq)
+          input.highlightlyPlayerId !== undefined
+            ? eq(players.highlightlyPlayerId, input.highlightlyPlayerId)
             : eq(players.externalId, input.personId!);
         const player = (await deps.db.select().from(players).where(where))[0];
         if (player === undefined) {
           throw new PlayerNotFoundError(
-            input.ncaaPlayerSeq !== undefined
-              ? { ncaaPlayerSeq: input.ncaaPlayerSeq }
+            input.highlightlyPlayerId !== undefined
+              ? { kind: "highlightly", playerId: input.highlightlyPlayerId }
               : input.personId!,
           );
         }
@@ -377,7 +367,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "player_tag_add",
     {
       description:
-        "Add a MANUAL tag to a watch-list player, addressed by personId (MLB/MiLB) or ncaaPlayerSeq (NCAA) — exactly one. Manual tags live in the 'status' namespace (value 'rostered' or 'scouted'); a write to a derived namespace (level/pos/prospect) or an unknown namespace/value is rejected. Idempotent: re-adding the same tag is a no-op.",
+        "Add a MANUAL tag to a watch-list player, addressed by personId (MLB/MiLB) or highlightlyPlayerId (NCAA) — exactly one.",
       inputSchema: TagWriteInputShape,
     },
     (args) =>
@@ -393,7 +383,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "player_tag_remove",
     {
       description:
-        "Remove a MANUAL tag from a watch-list player, addressed by personId (MLB/MiLB) or ncaaPlayerSeq (NCAA) — exactly one. A derived namespace (level/pos/prospect) is rejected; removing an absent manual tag is a no-op.",
+        "Remove a MANUAL tag from a watch-list player, addressed by personId (MLB/MiLB) or highlightlyPlayerId (NCAA) — exactly one.",
       inputSchema: TagWriteInputShape,
     },
     (args) =>
@@ -409,7 +399,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "player_tags_list",
     {
       description:
-        "List every tag (derived AND manual) for a watch-list player, addressed by personId (MLB/MiLB) or ncaaPlayerSeq (NCAA) — exactly one. Ordered by namespace, value, source.",
+        "List every tag for a watch-list player, addressed by personId (MLB/MiLB) or highlightlyPlayerId (NCAA) — exactly one.",
       // Strict, non-coercing IDs: a typed-JSON boundary, so `personId: [123]`/`true`/`"123"`
       // is rejected (isError), never coerced onto the wrong player.
       inputSchema: StrictPlayerRefShape,
@@ -533,7 +523,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "list_add_players",
     {
       description:
-        "Add players to a named list, idempotently (re-adding an existing member is a no-op). Each player reference is exactly one of personId (MLB/MiLB) or ncaaPlayerSeq (NCAA). An unknown list, or a reference to a player not on the Watch List, is rejected and nothing is added.",
+        "Add players to a named list, idempotently. Each player reference is exactly one of personId (MLB/MiLB) or highlightlyPlayerId (NCAA).",
       inputSchema: ListMembersMutateShape,
     },
     (args) =>
@@ -553,7 +543,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "list_remove_players",
     {
       description:
-        "Remove players from a named list (hard-deletes the membership rows; the players and their stats are untouched). Removing a non-member is a no-op. Each reference is exactly one of personId or ncaaPlayerSeq. An unknown list, or a reference to a player not on the Watch List, is rejected.",
+        "Remove players from a named list. Each reference is exactly one of personId or highlightlyPlayerId.",
       inputSchema: ListMembersMutateShape,
     },
     (args) =>

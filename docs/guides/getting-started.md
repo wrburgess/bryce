@@ -106,7 +106,6 @@ Every other line can stay at its default. For reference, what they mean:
 | `SMTP_HOST/PORT/USER/PASS` | Only when provider is `smtp` (e.g. Forward Email) | empty |
 | `DIGEST_TO` / `DIGEST_FROM` | Recipient and sender for real email (not needed for `console`) | empty |
 | `MLB_API_DELAY_MS` | Politeness delay between MLB Stats API calls | `500` |
-| `NCAA_SCRAPE_DELAY_MS` | Politeness delay between stats.ncaa.org requests | `3000` |
 | `SERVER_PORT` | Port for the local REST/MCP server | `3000` |
 | `API_TOKEN` | Bearer token guarding `/api` and `/mcp`; server fails closed without it | empty |
 
@@ -141,12 +140,10 @@ Adding a player immediately fetches his **entire current-season game log** (his 
 so expect it to take a few seconds and print what it ingested. If you already know a player's MLB
 Stats API personId you can use `add --person-id 702616` instead.
 
-**NCAA players** are added by their stats.ncaa.org ID (`stats_player_seq`). Search for the player on
-stats.ncaa.org, open the player's page, and copy the `stats_player_seq` value from its URL — see
-[Running Bryce → NCAA players](running-bryce.md#ncaa-players) for an example:
+**NCAA players** are added by an explicit Highlightly player ID, canonical name, and team ID:
 
 ```bash
-bryce seed add --ncaa-seq 2649785
+bryce seed add --highlightly-player-id 501 --canonical-name "C Guy" --team-id 10
 ```
 
 Note: NCAA's season is roughly February–June, so an NCAA player added in the offseason has no new
@@ -157,7 +154,7 @@ stats until spring — that's normal.
 ```bash
 bryce seed list                          # who's being watched
 bryce seed deactivate --person-id 702616 # stop watching (all history is kept)
-bryce seed deactivate --ncaa-seq 2649785
+bryce seed deactivate --highlightly-player-id 501
 ```
 
 ## 7. Run a Refresh and send your first Digest
@@ -228,18 +225,10 @@ Two behaviors that surprise people, both by design:
   Series to the earliest watched opening day the whole pipeline sleeps, and a weekly heartbeat
   email replaces the daily digest.
 
-## 8. Validate the NCAA scraper (one time)
+## 8. Add NCAA players with Highlightly
 
-The NCAA page parser needs one live confirmation from your machine:
-
-```bash
-bryce ncaa probe --seq 2649785 --season 2025 --type batting
-```
-
-It fetches one real stats.ncaa.org game-log page and prints the HTTP status, the player name and
-school it resolved, and how many game rows it parsed. A clean parse = NCAA support is fully
-validated. (If it fails, the fix is isolated to one file — report the output.) Run it once more
-with `--type fielding`: the bundled fielding category ids follow the source's consecutive-id
+Use an explicit Highlightly player ID together with its canonical name and team ID. Bryce validates
+those assertions against Highlightly before adding the player; it does not scrape NCAA HTML pages.
 pattern but are unverified until this probe confirms them
 ([ADR 0033](../adr/0033-digest-stat-set-single-game-rates-fielding.md)).
 
@@ -309,5 +298,4 @@ bryce digest  # database migrations apply automatically on the next run of anyth
 | `bryce digest` shows no games | No watched player appeared in the selected window; the scheduled daily Digest still sends an empty report, while Offseason Sleep replaces it with a weekly heartbeat |
 | Weekly "heartbeat" email instead of a daily digest | Offseason Sleep (World Series → earliest watched opening day) — expected |
 | Real email not arriving | `DIGEST_FROM` not a verified Postmark Sender Signature, or wrong server token |
-| NCAA add/probe fails with a 403 or parse error | stats.ncaa.org edge/selector drift — run the probe and see [Running Bryce → NCAA players](running-bryce.md#ncaa-players) |
-| `no bundled stats.ncaa.org season lookup for year N` | Annual one-line update needed in `src/ncaa/seasons.ts` |
+| NCAA add fails | Verify `HIGHLIGHTLY_API_KEY` and the explicit Highlightly player identity. |

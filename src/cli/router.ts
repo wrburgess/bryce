@@ -1,4 +1,3 @@
-import { NCAA_SEASONS } from "../ncaa/seasons.js";
 import { readFileSync, statSync } from "node:fs";
 
 /**
@@ -36,12 +35,11 @@ export type Group = {
 
 export const GROUPS: readonly Group[] = [
   { path: ["players"], purpose: "Manage players, lists, and backups.", usage: "bryce players <command>", options: [], example: "bryce players lists show" },
-  { path: ["players", "lists"], purpose: "Manage named player lists.", usage: "bryce players lists <command>", options: ["--name", "--person-ids", "--ncaa-seqs"], example: "bryce players lists show" },
+  { path: ["players", "lists"], purpose: "Manage named player lists.", usage: "bryce players lists <command>", options: ["--name", "--person-ids", "--highlightly-player-ids"], example: "bryce players lists show" },
   { path: ["db"], purpose: "Manage the Bryce database.", usage: "bryce db <command>", options: [], example: "bryce db migrate" },
-  { path: ["ncaa"], purpose: "Probe NCAA data sources.", usage: "bryce ncaa <command>", options: ["--seq", "--season", "--type"], example: "bryce ncaa probe --seq 2649785" },
   { path: ["connector"], purpose: "Check external connectors.", usage: "bryce connector <command>", options: ["--mutate"], example: "bryce connector smoke" },
-  { path: ["seed"], purpose: "Manage the watch list and player tags.", usage: "bryce seed <command>", options: ["--person-id", "--ncaa-seq", "--tags"], example: "bryce seed list" },
-  { path: ["seed", "tag"], purpose: "Manage manual and derived player tags.", usage: "bryce seed tag <command>", options: ["--person-id", "--ncaa-seq", "--tag"], example: "bryce seed tag list --person-id 691185" },
+  { path: ["seed"], purpose: "Manage the watch list and player tags.", usage: "bryce seed <command>", options: ["--person-id", "--highlightly-player-id", "--tags"], example: "bryce seed list" },
+  { path: ["seed", "tag"], purpose: "Manage manual and derived player tags.", usage: "bryce seed tag <command>", options: ["--person-id", "--highlightly-player-id", "--tag"], example: "bryce seed tag list --person-id 691185" },
 ];
 
 const leaf = (
@@ -59,10 +57,6 @@ const inlineValue = (name: string, description: string, values?: readonly string
   ({ name, description, values, aliases, validate: withNonBlank(validate), inline: true });
 const flag = (name: string, description: string): Option => ({ name, description, value: false });
 const positiveInteger = (value: string): string | null => /^\d+$/.test(value) && String(Number(value)) === value && Number.isSafeInteger(Number(value)) && Number(value) > 0 ? null : "a canonical positive integer";
-const supportedSeasons = NCAA_SEASONS.map((season) => season.year);
-const year = (value: string): string | null => /^\d{4}$/.test(value)
-  ? (supportedSeasons.includes(value) ? null : `a supported NCAA season (${supportedSeasons.join(", ")})`)
-  : "a four-digit year";
 const positiveIntegerList = (value: string): string | null => value.split(",").every((part) => positiveInteger(part.trim()) === null) ? null : "a comma-separated list of positive integers";
 const uniqueBoundedIntegerList = (value: string): string | null => {
   const parts = value.split(",").map((part) => part.trim()).filter(Boolean);
@@ -75,8 +69,8 @@ const batchName = (value: string): string | null => value.trim().length > 120 ? 
 const normalizedBatchName = (value: string): string => value.normalize("NFC").replace(/\s+/g, " ").trim().toLowerCase();
 const batchShape = (values: ReadonlyMap<string, readonly string[]>): string | null => {
   const personIds = (values.get("person-ids") ?? []).flatMap((value) => value.split(",").map((part) => part.trim()).filter(Boolean));
-  const ncaaSeqs = (values.get("ncaa-seqs") ?? []).flatMap((value) => value.split(",").map((part) => part.trim()).filter(Boolean));
-  if (new Set(personIds).size !== personIds.length || new Set(ncaaSeqs).size !== ncaaSeqs.length) return "batch IDs must be unique within each identity type";
+  const highlightlyIds = values.get("highlightly-player-id") ?? [];
+  if (new Set(personIds).size !== personIds.length || new Set(highlightlyIds).size !== highlightlyIds.length) return "batch IDs must be unique within each identity type";
   const names = values.get("names") ?? [];
   if (names.some((name) => batchName(name) !== null)) return "batch names must be at most 120 characters";
   const nameKeys = new Set(names.map(normalizedBatchName));
@@ -91,11 +85,11 @@ const batchShape = (values: ReadonlyMap<string, readonly string[]>): string | nu
     }
   }
   const filePersonIds = fileEntries.filter((entry) => /^\d+$/.test(entry));
-  const fileNcaaSeqs = fileEntries.filter((entry) => entry.startsWith("ncaa:")).map((entry) => entry.slice(5).trim());
-  if (new Set([...personIds, ...filePersonIds]).size !== personIds.length + filePersonIds.length || new Set([...ncaaSeqs, ...fileNcaaSeqs]).size !== ncaaSeqs.length + fileNcaaSeqs.length) {
+  const fileHighlightlyIds = fileEntries.filter((entry) => entry.startsWith("highlightly:")).map((entry) => entry.slice("highlightly:".length).split("|")[0] ?? "");
+  if (new Set([...personIds, ...filePersonIds]).size !== personIds.length + filePersonIds.length || new Set([...highlightlyIds, ...fileHighlightlyIds]).size !== highlightlyIds.length + fileHighlightlyIds.length) {
     return "batch IDs must be unique within each identity type";
   }
-  const fileNames = fileEntries.filter((entry) => !/^\d+$/.test(entry) && !entry.startsWith("ncaa:")).map((entry) => entry.startsWith("name:") ? entry.slice(5).trim() : entry);
+  const fileNames = fileEntries.filter((entry) => !/^\d+$/.test(entry) && !entry.startsWith("highlightly:")).map((entry) => entry.startsWith("name:") ? entry.slice(5).trim() : entry);
   if (fileNames.some((name) => name.length === 0)) return "batch file contains a blank name";
   if (fileNames.some((name) => /\p{Cc}/u.test(name))) return "batch file names must not contain control characters";
   if (fileNames.some((name) => name.trim().length > 120)) return "batch names must be at most 120 characters";
@@ -103,9 +97,9 @@ const batchShape = (values: ReadonlyMap<string, readonly string[]>): string | nu
     if (nameKeys.has(name)) return "batch names must be unique ignoring case and whitespace";
     nameKeys.add(name);
   }
-  const total = personIds.length + ncaaSeqs.length + names.length + fileEntries.length;
+  const total = personIds.length + highlightlyIds.length + names.length + fileEntries.length;
   if (total === 0) return "batch must contain at least one entry";
-  if (fileEntries.some((entry) => entry.startsWith("ncaa:") && positiveInteger(entry.slice(5).trim()) !== null)) return "batch file contains an invalid NCAA sequence";
+  if (fileEntries.some((entry) => entry.startsWith("highlightly:") && !/^highlightly:\d+\|[^|]+\|\d+$/.test(entry))) return "batch file contains an invalid Highlightly identity";
   if (fileEntries.some((entry) => /^\d+$/.test(entry) && positiveInteger(entry) !== null)) return "batch file contains an invalid person ID";
   return total > 25 ? "batch contains at most 25 entries" : null;
 };
@@ -136,23 +130,22 @@ export const COMMANDS: readonly Command[] = [
   leaf(["players", "lists", "create"], "Create a named player list.", "bryce players lists create --name NAME", "bryce players lists create --name Prospects", () => import("./lists.js"), [value("name", "List name.")], { required: ["name"] }),
   leaf(["players", "lists", "rename"], "Rename a named player list.", "bryce players lists rename --name OLD --to NEW", "bryce players lists rename --name Prospects --to 'Top 30'", () => import("./lists.js"), [value("name", "Current list name."), value("to", "New list name.")], { required: ["name", "to"] }),
   leaf(["players", "lists", "delete"], "Delete a named player list.", "bryce players lists delete --name NAME", "bryce players lists delete --name Prospects", () => import("./lists.js"), [value("name", "List name.")], { required: ["name"] }),
-  leaf(["players", "lists", "add"], "Add players to a named list.", "bryce players lists add --name NAME [--person-ids IDS] [--ncaa-seqs IDS]", "bryce players lists add --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids.", undefined, undefined, positiveIntegerList), value("ncaa-seqs", "Comma-separated NCAA ids.", undefined, undefined, positiveIntegerList)], { required: ["name"], oneOf: [["person-ids", "ncaa-seqs"]] }),
-  leaf(["players", "lists", "remove"], "Remove players from a named list.", "bryce players lists remove --name NAME [--person-ids IDS] [--ncaa-seqs IDS]", "bryce players lists remove --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids.", undefined, undefined, positiveIntegerList), value("ncaa-seqs", "Comma-separated NCAA ids.", undefined, undefined, positiveIntegerList)], { required: ["name"], oneOf: [["person-ids", "ncaa-seqs"]] }),
+  leaf(["players", "lists", "add"], "Add players to a named list.", "bryce players lists add --name NAME [--person-ids IDS] [--highlightly-player-ids IDS]", "bryce players lists add --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids.", undefined, undefined, positiveIntegerList), value("highlightly-player-ids", "Comma-separated Highlightly NCAA ids.", undefined, undefined, positiveIntegerList)], { required: ["name"], oneOf: [["person-ids", "highlightly-player-ids"]] }),
+  leaf(["players", "lists", "remove"], "Remove players from a named list.", "bryce players lists remove --name NAME [--person-ids IDS] [--highlightly-player-ids IDS]", "bryce players lists remove --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids.", undefined, undefined, positiveIntegerList), value("highlightly-player-ids", "Comma-separated Highlightly NCAA ids.", undefined, undefined, positiveIntegerList)], { required: ["name"], oneOf: [["person-ids", "highlightly-player-ids"]] }),
   leaf(["players", "lists", "show"], "Show named lists or their members.", "bryce players lists show [--name NAME]", "bryce players lists show", () => import("./lists.js"), [value("name", "List name.")]),
   leaf(["players", "backup"], "Write a player-list backup.", "bryce players backup --out FILE", "bryce players backup --out backups/players.json", () => import("./players-backup.js"), [value("out", "Output file.")], { required: ["out"] }),
   leaf(["players", "restore"], "Restore a player-list backup.", "bryce players restore --in FILE", "bryce players restore --in backups/players.json", () => import("./players-restore.js"), [value("in", "Input file.")], { required: ["in"] }),
-  leaf(["players", "batch-add"], "Stage many players.", "bryce players batch-add [--person-ids IDS] [--ncaa-seqs IDS] [--names NAME] [--file FILE]", "bryce players batch-add --person-ids 691185", () => import("./batch-add.js"), [value("person-ids", "Comma-separated MLB ids.", undefined, undefined, uniqueBoundedIntegerList), value("ncaa-seqs", "Comma-separated NCAA ids.", undefined, undefined, uniqueBoundedIntegerList), value("names", "Player name; repeatable.", undefined, undefined, batchName), value("file", "Input file.")], { oneOf: [["person-ids", "ncaa-seqs", "names", "file"]], semantic: batchShape }),
+  leaf(["players", "batch-add"], "Stage many players.", "bryce players batch-add [--person-ids IDS] [--highlightly-player-id ID --canonical-name NAME --team-id ID] [--names NAME] [--file FILE]", "bryce players batch-add --person-ids 691185", () => import("./batch-add.js"), [value("person-ids", "Comma-separated MLB ids.", undefined, undefined, uniqueBoundedIntegerList), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger), value("canonical-name", "Canonical Highlightly name."), value("team-id", "Highlightly team id.", undefined, undefined, positiveInteger), value("names", "Player name; repeatable.", undefined, undefined, batchName), value("file", "Input file.")], { oneOf: [["person-ids", "highlightly-player-id", "names", "file"]], semantic: batchShape }),
   leaf(["db", "migrate"], "Apply pending database migrations.", "bryce db migrate", "bryce db migrate", () => import("./migrate.js")),
   leaf(["db", "backup"], "Create a database snapshot.", "bryce db backup", "bryce db backup", () => import("./backup.js")),
   leaf(["db", "restore"], "Restore a database snapshot.", "bryce db restore --from FILE", "bryce db restore --from backups/bryce-YYYYMMDDTHHMMSSZ-000.db", () => import("./restore.js"), [value("from", "Snapshot file.")], { required: ["from"] }),
-  leaf(["ncaa", "probe"], "Probe the NCAA scraper.", "bryce ncaa probe --seq N [--season YYYY] [--type TYPE]", "bryce ncaa probe --seq 2649785", () => import("./ncaa-probe.js"), [value("seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("season", "Season year.", supportedSeasons, undefined, year), value("type", "Stat type.", ["batting", "pitching", "fielding"])], { required: ["seq"] }),
   leaf(["connector", "smoke"], "Smoke-test a running MCP connector.", "bryce connector smoke [--mutate]", "bryce connector smoke", () => import("./connector-smoke.js"), [flag("mutate", "Also run the configured mutation probe.")]),
-  leaf(["seed", "add"], "Add a watch-list player.", "bryce seed add (--person-id N|--ncaa-seq N|--search NAME) [--pick I]", "bryce seed add --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("search", "Player name."), value("pick", "One-based search result.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "ncaa-seq", "search"]], requires: [["pick", "search"]] }),
-  leaf(["seed", "deactivate"], "Deactivate a watch-list player.", "bryce seed deactivate (--person-id N|--ncaa-seq N)", "bryce seed deactivate --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "ncaa-seq"]] }),
+  leaf(["seed", "add"], "Add a watch-list player.", "bryce seed add (--person-id N|--highlightly-player-id N|--search NAME) [--pick I]", "bryce seed add --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger), value("canonical-name", "Canonical Highlightly name."), value("team-id", "Highlightly team id.", undefined, undefined, positiveInteger), value("search", "Player name."), value("pick", "One-based search result.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "highlightly-player-id", "search"]], requires: [["pick", "search"], ["canonical-name", "highlightly-player-id"], ["team-id", "highlightly-player-id"]] }),
+  leaf(["seed", "deactivate"], "Deactivate a watch-list player.", "bryce seed deactivate (--person-id N|--highlightly-player-id N)", "bryce seed deactivate --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "highlightly-player-id"]] }),
   leaf(["seed", "list"], "List watch-list players.", "bryce seed list [--tags EXPR]", "bryce seed list --tags status:rostered", () => import("./seed.js"), [value("tags", "Tag selector.", undefined, undefined, tagSelector)]),
-  leaf(["seed", "tag", "add"], "Add a manual player tag.", "bryce seed tag add (--person-id N|--ncaa-seq N) --tag TAG", "bryce seed tag add --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("tag", "Manual tag.", undefined, undefined, manualTag)], { required: ["tag"], exactlyOneOf: [["person-id", "ncaa-seq"]] }),
-  leaf(["seed", "tag", "remove"], "Remove a manual player tag.", "bryce seed tag remove (--person-id N|--ncaa-seq N) --tag TAG", "bryce seed tag remove --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger), value("tag", "Manual tag.", undefined, undefined, manualTag)], { required: ["tag"], exactlyOneOf: [["person-id", "ncaa-seq"]] }),
-  leaf(["seed", "tag", "list"], "List player tags.", "bryce seed tag list (--person-id N|--ncaa-seq N)", "bryce seed tag list --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("ncaa-seq", "NCAA player sequence.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "ncaa-seq"]] }),
+  leaf(["seed", "tag", "add"], "Add a manual player tag.", "bryce seed tag add (--person-id N|--highlightly-player-id N) --tag TAG", "bryce seed tag add --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger), value("tag", "Manual tag.", undefined, undefined, manualTag)], { required: ["tag"], exactlyOneOf: [["person-id", "highlightly-player-id"]] }),
+  leaf(["seed", "tag", "remove"], "Remove a manual player tag.", "bryce seed tag remove (--person-id N|--highlightly-player-id N) --tag TAG", "bryce seed tag remove --person-id 691185 --tag status:rostered", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger), value("tag", "Manual tag.", undefined, undefined, manualTag)], { required: ["tag"], exactlyOneOf: [["person-id", "highlightly-player-id"]] }),
+  leaf(["seed", "tag", "list"], "List player tags.", "bryce seed tag list (--person-id N|--highlightly-player-id N)", "bryce seed tag list --person-id 691185", () => import("./seed.js"), [value("person-id", "MLB person id.", undefined, undefined, positiveInteger), value("highlightly-player-id", "Highlightly NCAA player id.", undefined, undefined, positiveInteger)], { exactlyOneOf: [["person-id", "highlightly-player-id"]] }),
   leaf(["seed", "tag", "rebuild"], "Rebuild derived tags.", "bryce seed tag rebuild", "bryce seed tag rebuild", () => import("./seed.js")),
   { ...leaf(["server"], "Run the REST and MCP server.", "bryce server", "bryce server", () => import("../server.js")), longRunning: true },
 ];

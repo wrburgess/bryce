@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { playerTags, players, statLines } from "../src/db/schema.js";
+import { listMembers, playerTags, players, statLines } from "../src/db/schema.js";
 import {
   MAX_BACKUP_BYTES,
   PlayerBackupParseError,
@@ -67,7 +67,7 @@ describe("createPlayerListBackup", () => {
     });
 
     const backup = await createPlayerListBackup(opened.db, fakeClock("2026-07-22T12:00:00Z").now);
-    expect(backup.version).toBe(2);
+    expect(backup.version).toBe(3);
     expect(backup.exportedAt).toBe("2026-07-22T12:00:00.000Z");
     expect(backup.players).toHaveLength(2);
     expect(backup.players[1]).toMatchObject({
@@ -322,20 +322,23 @@ describe("writePlayerListBackupFile", () => {
 });
 
 describe("parsePlayerListBackup: strict validation", () => {
-  it("rejects an absent or wrong version (1 and 2 are accepted, #70)", () => {
+  it("rejects an absent or wrong version (v1/v2/v3 are accepted)", () => {
     expect(() =>
       parsePlayerListBackup(JSON.stringify({ players: [makeBackupEntry()] })),
     ).toThrow(PlayerBackupParseError);
-    // v3 is not a known version.
+    // v4 is not a known version.
     expect(() =>
-      parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 3 }))),
+      parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 4 }))),
     ).toThrow(PlayerBackupParseError);
-    // Both v1 and v2 parse.
+    // v1/v2 remain compatible and v3 is the current envelope.
     expect(() =>
       parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 1 }))),
     ).not.toThrow();
     expect(() =>
       parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 2 }))),
+    ).not.toThrow();
+    expect(() =>
+      parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 3 }))),
     ).not.toThrow();
   });
 
@@ -475,11 +478,12 @@ describe("named lists in the backup (v2, #70 / ADR 0046)", () => {
       fullName: "Ncaa Guy",
       schoolName: "LSU",
     });
-    await createList(opened.db, "Prospects", NOW);
-    await addToList(opened.db, "Prospects", [mlb.externalId!, { ncaaPlayerSeq: 555 }], NOW);
+    const list = await createList(opened.db, "Prospects", NOW);
+    await addToList(opened.db, "Prospects", [mlb.externalId!], NOW);
+    await opened.db.insert(listMembers).values({ listId: list.id, playerId: ncaa.id, createdAt: NOW.toISOString() });
 
     const backup = await createPlayerListBackup(opened.db, () => NOW);
-    expect(backup.version).toBe(2);
+    expect(backup.version).toBe(3);
     expect(backup.lists).toEqual([{ name: "Prospects", createdAt: expect.any(String), updatedAt: expect.any(String) }]);
     expect(backup.members).toHaveLength(2);
     // The envelope round-trips through the strict parser.

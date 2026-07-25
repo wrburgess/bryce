@@ -32,8 +32,7 @@ import type {
   MailReceipt,
   Mailer,
 } from "../src/mailer/types.js";
-import type { NcaaFetchLike } from "../src/ncaa/client.js";
-import { NcaaClient } from "../src/ncaa/client.js";
+import { HighlightlyClient } from "../src/highlightly/client.js";
 import { NCAA_SEASONS } from "../src/ncaa/seasons.js";
 import type { NcaaStatCategory } from "../src/ncaa/seasons.js";
 import type { AppDeps } from "../src/server.js";
@@ -615,7 +614,7 @@ export class FakeNcaaApi {
     this.options = options;
   }
 
-  get fetch(): NcaaFetchLike {
+  get fetch(): (url: string, headers: Record<string, string>) => Promise<{ ok: boolean; status: number; text(): Promise<string> }> {
     return (url: string, headers: Record<string, string>) => {
       this.calls.push(url);
       this.headers.push(headers);
@@ -659,8 +658,27 @@ function categoryForId(catId: number): NcaaStatCategory | "unknown" {
 }
 
 /** A NcaaClient wired to a FakeNcaaApi with zero politeness delay. */
-export function fakeNcaaClient(api: FakeNcaaApi): NcaaClient {
-  return new NcaaClient({ fetchImpl: api.fetch, delayMs: 0 });
+export function fakeNcaaClient(api: FakeNcaaApi): { getGameLogPage(seq: number, _season: string, category: NcaaStatCategory): Promise<string> } {
+  return {
+    async getGameLogPage(seq, _season, category) {
+      const key = `${seq}:${category}`;
+      const page = api.options.pages?.[key];
+      if (page === undefined) throw new Error(`retired NCAA test fixture has no page for ${key}`);
+      return page;
+    },
+  };
+}
+
+/** Offline Highlightly boundary used by the operational NCAA surface tests. */
+export function fakeHighlightlyClient(): HighlightlyClient {
+  return new HighlightlyClient({
+    apiKey: "test-highlightly-key",
+    fetchImpl: async (url) => {
+      if (url.includes("/players/")) return { ok: true, status: 200, headers: { get: () => "99" }, json: async () => ({ id: 501, fullName: "C Guy", team: { id: 10, name: "Tigers" }, statistics: [] }) };
+      if (url.includes("/matches?")) return { ok: true, status: 200, headers: { get: () => "99" }, json: async () => ({ data: [], pagination: { totalCount: 0, offset: 0, limit: 100 } }) };
+      throw new Error(`FakeHighlightly: unrouted ${url}`);
+    },
+  });
 }
 
 // --- App deps builder (createApp / REST / MCP tests) ------------------------
@@ -678,7 +696,7 @@ export function testAppDeps(opened: OpenedDb, overrides: Partial<AppDeps> = {}):
     db: opened.db,
     readonlySqlite: opened.sqlite,
     client: new MlbClient({ fetchImpl: new FakeStatsApi().fetch, delayMs: 0 }),
-    ncaaClient: fakeNcaaClient(new FakeNcaaApi()),
+    highlightlyClient: fakeHighlightlyClient(),
     mailer: new CapturingMailer(),
     now: fakeClock(MID_SEASON).now,
     tz: TEST_TZ,

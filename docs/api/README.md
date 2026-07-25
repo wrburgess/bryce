@@ -51,7 +51,7 @@ updated.
 
 ### `POST /api/players/ncaa`
 
-Add an NCAA Player by `stats_player_seq`. Body `{ "ncaaPlayerSeq": N }`; name and school are resolved
+Add an NCAA Player by explicit Highlightly identity. Body `{ "playerId": N, "canonicalName": "Name", "teamId": N }`; Bryce validates the selected provider ID against the supplied canonical name and team before writing. Legacy `stats_player_seq` values are historical migration metadata only and are not accepted by operational API routes.
 from his game-log page. Returns **201** on add, **200** on update — same convention as the MLB add.
 
 ### `POST /api/players/batch`
@@ -190,7 +190,7 @@ Errors are shaped by a single `onError` handler; the status is chosen by error t
 | Manual write to a derived tag namespace / unknown tag namespace or value (#30) | **400** | `{ "error": "<message>" }` |
 | Unknown person / unknown NCAA player / player not found / **unknown list** (#70) | **404** | `{ "error": "<message>" }` |
 | **Duplicate live list name** (#70) | **409** | `{ "error": "<message>" }` |
-| MLB Stats API or stats.ncaa.org upstream failure | **502** | `{ "error": "<message>" }` |
+| MLB Stats API upstream failure | **502** | `{ "error": "<message>" }` |
 | No bundled NCAA season lookup for the requested year | **503** | `{ "error": "<message>" }` |
 | `POST /api/digest/send` where the run's `action` is `"failed"` | **502** | the normal result object (see above) |
 
