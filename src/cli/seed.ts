@@ -164,7 +164,7 @@ async function runAdd(flags: Map<string, string>, deps: SeedDeps): Promise<numbe
 
   deps.write(`added player id=${player.id} personId=${personId} name=${player.fullName}`);
   if (refresh === null || refresh.skipped) {
-    deps.write("refresh skipped reason=offseason-sleep");
+    deps.write(`refresh skipped reason=${refresh?.reason ?? "offseason-sleep"}`);
   } else {
     deps.write(`refresh done inserted=${refresh.inserted} updated=${refresh.updated}`);
   }

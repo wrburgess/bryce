@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, inArray, isNull, lt, or } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, isNull, lt, max, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { RefreshRunStatus } from "../db/schema.js";
 import { refreshRuns } from "../db/schema.js";
@@ -141,12 +141,70 @@ export function claimRefreshRun(db: Db, args: ClaimRefreshArgs): ClaimRefreshRes
  * before its next write rather than clobber the successor's newer data.
  */
 export function renewRefreshRun(db: Db, runId: number, now: Date): boolean {
+  const cutoffIso = new Date(now.getTime() - REFRESH_LEASE_MS).toISOString();
   const result = db
     .update(refreshRuns)
     .set({ claimedAt: now.toISOString() })
-    .where(and(eq(refreshRuns.id, runId), eq(refreshRuns.status, "running")))
+    // A lease is strictly live: exactly at expiry the worker has lost its
+    // authority and may not revive itself before a successor happens to reap it.
+    .where(and(eq(refreshRuns.id, runId), eq(refreshRuns.status, "running"), gt(refreshRuns.claimedAt, cutoffIso)))
     .run();
   return result.changes > 0;
+}
+
+/** A fence carried from admission to every ingestion mutation. */
+export type IngestionFence =
+  | { kind: "whole-refresh"; runId: number; now: Date; leaseMs?: number }
+  | { kind: "targeted-refresh"; admittedAfterRunId: number };
+
+export type GuardedMutationResult<T> =
+  | { committed: true; value: T }
+  | { committed: false; reason: "lost-ownership" | "whole-refresh-running" };
+
+/**
+ * Execute an ingestion write only while its authority is still current.  The
+ * predicate and callback share one BEGIN IMMEDIATE transaction; callers must
+ * buffer provider I/O before reaching here.
+ */
+export function withIngestionFence<T>(
+  db: Db,
+  fence: IngestionFence | undefined,
+  mutation: (tx: Parameters<Parameters<Db["transaction"]>[0]>[0]) => T,
+): GuardedMutationResult<T> {
+  if (fence === undefined) return { committed: true, value: db.transaction(mutation, { behavior: "immediate" }) };
+  return db.transaction((tx): GuardedMutationResult<T> => {
+    if (fence.kind === "whole-refresh") {
+      const cutoffIso = new Date(fence.now.getTime() - (fence.leaseMs ?? REFRESH_LEASE_MS)).toISOString();
+      const owned = tx.select({ id: refreshRuns.id }).from(refreshRuns)
+        .where(and(eq(refreshRuns.id, fence.runId), eq(refreshRuns.status, "running"), gt(refreshRuns.claimedAt, cutoffIso)))
+        .limit(1).all()[0];
+      if (owned === undefined) return { committed: false, reason: "lost-ownership" };
+    } else {
+      // refresh_runs ids are a durable generation: a claim committed after
+      // targeted admission has a higher id. BEGIN IMMEDIATE serializes this
+      // test with the claim and the mutation, closing the admission TOCTOU.
+      const newer = tx.select({ id: refreshRuns.id }).from(refreshRuns)
+        .where(gt(refreshRuns.id, fence.admittedAfterRunId)).limit(1).all()[0];
+      if (newer !== undefined) return { committed: false, reason: "whole-refresh-running" };
+    }
+    return { committed: true, value: mutation(tx) };
+  }, { behavior: "immediate" });
+}
+
+export type TargetedRefreshAdmission =
+  | { admitted: true; fence: Extract<IngestionFence, { kind: "targeted-refresh" }> }
+  | { admitted: false; reason: "whole-refresh-running" };
+
+/** Atomically reject a targeted refresh behind a live sweep and capture its generation otherwise. */
+export function admitTargetedRefresh(db: Db, now: Date, leaseMs = REFRESH_LEASE_MS): TargetedRefreshAdmission {
+  const cutoffIso = new Date(now.getTime() - leaseMs).toISOString();
+  return db.transaction((tx): TargetedRefreshAdmission => {
+    const live = tx.select({ id: refreshRuns.id }).from(refreshRuns)
+      .where(and(eq(refreshRuns.status, "running"), gt(refreshRuns.claimedAt, cutoffIso))).limit(1).all()[0];
+    if (live !== undefined) return { admitted: false, reason: "whole-refresh-running" };
+    const latest = tx.select({ id: max(refreshRuns.id) }).from(refreshRuns).all()[0];
+    return { admitted: true, fence: { kind: "targeted-refresh", admittedAfterRunId: latest?.id ?? 0 } };
+  }, { behavior: "immediate" });
 }
 
 export interface RefreshCounts {

@@ -1,4 +1,6 @@
 import { desc, eq } from "drizzle-orm";
+import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { openDb } from "../src/db/client.js";
@@ -6,11 +8,13 @@ import { refreshRuns } from "../src/db/schema.js";
 import {
   SUPERSEDED_MESSAGE,
   claimRefreshRun,
+  admitTargetedRefresh,
   digestFreshnessFor,
   refreshHealth,
   renewRefreshRun,
   settleRefreshRun,
   updateRefreshRunProgress,
+  withIngestionFence,
 } from "../src/jobs/refresh-run.js";
 import { TEST_TZ, insertRefreshRun, testDb, testFileDb } from "./factories.js";
 
@@ -130,6 +134,30 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0043)", () => {
     expect(renewRefreshRun(opened.db, owner.runId, at(PAST_RENEWED_LEASE))).toBe(false);
     // And a renew of a wholly unknown id is likewise false (nothing to own).
     expect(renewRefreshRun(opened.db, 999_999, at(PAST_RENEWED_LEASE))).toBe(false);
+  });
+
+  it("does not let an expired but unreaped worker renew itself at the exact lease boundary", () => {
+    const claim = claimRefreshRun(opened.db, { now: at(T0), playersTotal: 1 });
+    if (!claim.claimed) throw new Error("expected claim");
+    expect(renewRefreshRun(opened.db, claim.runId, at("2026-07-19T07:10:00.000Z"))).toBe(false);
+    expect(opened.db.select().from(refreshRuns).where(eq(refreshRuns.id, claim.runId)).all()[0]?.claimedAt).toBe(T0);
+  });
+
+  it("rejects a guarded whole-refresh mutation after the owner is reaped", () => {
+    const a = claimRefreshRun(opened.db, { now: at(T0), playersTotal: 1 });
+    if (!a.claimed) throw new Error("expected claim");
+    claimRefreshRun(opened.db, { now: at(PAST_LEASE), playersTotal: 1 });
+    const result = withIngestionFence(opened.db, { kind: "whole-refresh", runId: a.runId, now: at(PAST_LEASE) }, () => "written");
+    expect(result).toEqual({ committed: false, reason: "lost-ownership" });
+  });
+
+  it("captures a targeted generation and rejects its write when a sweep claims first", () => {
+    const targeted = admitTargetedRefresh(opened.db, at(T0));
+    if (!targeted.admitted) throw new Error("expected targeted admission");
+    const sweep = claimRefreshRun(opened.db, { now: at(T0), playersTotal: 1 });
+    if (!sweep.claimed) throw new Error("expected sweep claim");
+    const result = withIngestionFence(opened.db, targeted.fence, () => "written");
+    expect(result).toEqual({ committed: false, reason: "whole-refresh-running" });
   });
 
   it("persists live progress only while the run still owns its running row", () => {
@@ -399,6 +427,63 @@ describe("refresh run claim across two file-db connections (ADR 0043)", () => {
       expect(file.opened.db.select().from(refreshRuns).all()).toHaveLength(1);
     } finally {
       second.close();
+      file.cleanup();
+    }
+  });
+});
+
+describe("refresh fencing across a real child process (ADR 0048)", () => {
+  it("refuses a targeted write buffered before a whole sweep claims", async () => {
+    const file = testFileDb();
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
+      const { openDb } = await import(process.env.DB_CLIENT);
+      const { admitTargetedRefresh, withIngestionFence } = await import(process.env.REFRESH_RUN);
+      const opened = openDb(process.env.DB_PATH);
+      const admission = admitTargetedRefresh(opened.db, new Date(process.env.NOW));
+      process.stdout.write(JSON.stringify(admission) + "\\n");
+      process.stdin.once("data", () => {
+        const result = admission.admitted
+          ? withIngestionFence(opened.db, admission.fence, () => "stale-write")
+          : admission;
+        process.stdout.write(JSON.stringify(result) + "\\n");
+        opened.close();
+        process.exit(0);
+      });
+    `], {
+      env: {
+        ...process.env,
+        DB_PATH: file.path,
+        NOW: T0,
+        DB_CLIENT: pathToFileURL(new URL("../src/db/client.ts", import.meta.url).pathname).href,
+        REFRESH_RUN: pathToFileURL(new URL("../src/jobs/refresh-run.ts", import.meta.url).pathname).href,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    try {
+      const lines: string[] = [];
+      let stderr = "";
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => lines.push(...chunk.trim().split("\n").filter(Boolean)));
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+      await new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.stdout.once("data", () => resolve());
+        child.once("exit", (code) => reject(new Error(`child exited before ready (${code}): ${stderr}`)));
+      });
+      expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({ admitted: true });
+
+      // This is the deterministic barrier: child has buffered its admission;
+      // parent now claims in a separate process before releasing the write.
+      expect(claimRefreshRun(file.opened.db, { now: at(T0), playersTotal: 1 }).claimed).toBe(true);
+      child.stdin.write("write\n");
+      await new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`child exit ${code}`)));
+      });
+      expect(JSON.parse(lines[1] ?? "{}")).toEqual({ committed: false, reason: "whole-refresh-running" });
+    } finally {
+      child.kill();
       file.cleanup();
     }
   });

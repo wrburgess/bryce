@@ -81,6 +81,22 @@ function calendarWriteThrows(db: Db, err: Error): Db {
   return new Proxy(db, {
     get(target, prop) {
       const value: unknown = Reflect.get(target, prop);
+      if (prop === "transaction") {
+        const realTransaction = (value as (fn: (tx: unknown) => unknown, config?: unknown) => unknown).bind(target);
+        return (fn: (tx: unknown) => unknown, config?: unknown): unknown => realTransaction((tx) => {
+          const txProxy = new Proxy(tx as object, {
+            get(t, p) {
+              const v: unknown = Reflect.get(t, p);
+              if (p === "insert") return (table: unknown) => {
+                if (table === seasonCalendar) throw err;
+                return (v as (arg: unknown) => unknown).call(t, table);
+              };
+              return typeof v === "function" ? v.bind(t) : v;
+            },
+          });
+          return fn(txProxy);
+        }, config);
+      }
       if (prop === "insert") {
         return (table: unknown) => {
           if (table === seasonCalendar) throw err;
