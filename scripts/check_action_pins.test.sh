@@ -53,7 +53,8 @@ check() { # $1=label  $2=expected-exit  $3=root  [$4=expected substring in outpu
   echo "  ok    $label"; PASS=$((PASS + 1))
 }
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" || TMP=""
+[ -n "$TMP" ] && [ -d "$TMP" ] || { echo "tests require a writable temp dir (mktemp -d failed)"; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 
 # 1. SHA-pinned external action -> pass
