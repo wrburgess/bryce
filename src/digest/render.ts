@@ -129,18 +129,15 @@ const rate =
     deriveRate(row.agg, key);
 
 /**
- * AVG/OBP/SLG/OPS from the SUMMED counters. A zero denominator renders ".000"
+ * OPS from the SUMMED counters. A zero denominator renders ".000"
  * rather than deriveRate's "-": an idle player's row reads as a zero line, and
  * a pinch-runner with no at-bats did bat .000, which is the conventional
  * baseball display.
  */
-const slashLine: Column["value"] = (row) =>
-  ["avg", "obp", "slg", "ops"]
-    .map((key) => {
-      const value = deriveRate(row.agg, key);
-      return value === "-" ? ".000" : value;
-    })
-    .join("/");
+const ops: Column["value"] = (row) => {
+  const value = deriveRate(row.agg, "ops");
+  return value === "-" ? ".000" : value;
+};
 
 const PLAYER_COLUMNS: Column[] = [
   { header: "Player", align: "left", value: (r) => abbreviate(r.player.fullName) },
@@ -165,10 +162,10 @@ function leadColumns(window: ResolvedWindow, statType: "batting" | "pitching"): 
   }
   const gp: Column = { header: "GP", align: "right", value: (r) => String(r.agg.games) };
   return statType === "batting"
-    // Left, unlike every other non-name column: slash lines are fixed width, so
-    // they stay aligned either way, and a right-padded composite header floats
+    // Left, unlike every other non-name column: rate values are fixed width, so
+    // they stay aligned either way, and a right-padded OPS header floats
     // away from the column it names.
-    ? [gp, { header: "AVG/OBP/SLG/OPS", align: "left", value: slashLine }]
+    ? [gp, { header: "OPS", align: "left", value: ops }]
     : [gp];
 }
 
