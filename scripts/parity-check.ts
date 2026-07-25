@@ -122,6 +122,11 @@ function inspectArray(arr: string[]): string {
   return "[" + arr.map(esc).join(", ") + "]";
 }
 
+export interface ParityResult {
+  readonly errors: readonly string[];
+  readonly skillCount: number;
+}
+
 class ParityCheck {
   private readonly root: string;
   private readonly errors: string[] = [];
@@ -130,7 +135,7 @@ class ParityCheck {
     this.root = root;
   }
 
-  run(): number {
+  run(): ParityResult {
     this.checkCanonicalExists();
     this.checkImportAdapters();
     this.checkCopilotAdapter();
@@ -143,8 +148,10 @@ class ParityCheck {
     this.checkGuides();
     this.checkAdrNumbers();
     this.checkLinks();
-    this.report();
-    return this.errors.length === 0 ? 0 : 1;
+    return {
+      errors: this.errors.slice(),
+      skillCount: this.dirExists(SKILLS_DIR) ? this.presentSkills().length : 0,
+    };
   }
 
   private path(rel: string): string {
@@ -498,18 +505,6 @@ class ParityCheck {
     }
   }
 
-  private report(): void {
-    if (this.errors.length === 0) {
-      const skills = this.dirExists(SKILLS_DIR) ? this.presentSkills().length : 0;
-      process.stdout.write(
-        `parity_check: OK - Canonical Source, ${IMPORT_ADAPTERS.length + 1} Adapters, Project Config, ` +
-        `${skills} Skill${skills !== 1 ? "s" : ""}, and links all resolve.\n`,
-      );
-    } else {
-      process.stdout.write(`parity_check: FAILED (${this.errors.length} problem${this.errors.length !== 1 ? "s" : ""})\n`);
-      for (const e of this.errors) process.stdout.write(`  - ${e}\n`);
-    }
-  }
 }
 
 function arraysEqual(a: string[], b: string[]): boolean {
@@ -517,7 +512,27 @@ function arraysEqual(a: string[], b: string[]): boolean {
   return a.every((v, i) => v === b[i]);
 }
 
-function main(args: string[]): number {
+/** Run every parity assertion without writing output or changing process state. */
+export function runParityCheck(root = "."): ParityResult {
+  return new ParityCheck(root).run();
+}
+
+/** Render a run result for the command-line interface. */
+export function formatParityResult(result: ParityResult): string {
+  if (result.errors.length === 0) {
+    return (
+      `parity_check: OK - Canonical Source, ${IMPORT_ADAPTERS.length + 1} Adapters, Project Config, ` +
+      `${result.skillCount} Skill${result.skillCount !== 1 ? "s" : ""}, and links all resolve.\n`
+    );
+  }
+
+  return (
+    `parity_check: FAILED (${result.errors.length} problem${result.errors.length !== 1 ? "s" : ""})\n` +
+    result.errors.map((error) => `  - ${error}\n`).join("")
+  );
+}
+
+export function main(args: string[]): number {
   let root = ".";
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -537,7 +552,9 @@ function main(args: string[]): number {
       return 2;
     }
   }
-  return new ParityCheck(root).run();
+  const result = runParityCheck(root);
+  process.stdout.write(formatParityResult(result));
+  return result.errors.length === 0 ? 0 : 1;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolvePath(process.argv[1])) {
