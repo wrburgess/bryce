@@ -121,7 +121,8 @@ describe("renderDigest — tables", () => {
   it("renders a Batters table with a Lvl column and no level sections", () => {
     const mail = renderDigest(assemblyWith({ spec: "7d", batters: [harper7d] }));
     expect(mail.text).toContain("Batters");
-    expect(mail.text).toMatch(/Player\s+Lvl\s+GP\s+OBP\/SLG\/OPS/);
+    expect(mail.text).toMatch(/Player\s+Lvl\s+GP\s+AVG\/OBP\/SLG\/OPS/);
+    expect(mail.text).toContain(".375/.444/.875/1.319");
     expect(mail.text).not.toContain("MiLB - Triple-A");
     expect(mail.text).toContain("MLB");
   });
@@ -138,9 +139,9 @@ describe("renderDigest — tables", () => {
     const mail = renderDigest(assemblyWith({ spec: "1d", batters: [penaGm1, penaGm2] }));
     expect(mail.text).toMatch(/Player\s+Lvl\s+Gm\s+PA/);
     expect(mail.text).not.toMatch(/\bGP\b/);
-    // No OBP/SLG/OPS column either: a one-game slash line is noise beside the raw
+    // No AVG/OBP/SLG/OPS column either: a one-game slash line is noise beside the raw
     // counts already on the row.
-    expect(mail.text).not.toContain("OBP/SLG/OPS");
+    expect(mail.text).not.toContain("AVG/OBP/SLG/OPS");
   });
 
   it("leaves Gm blank for a player who played once in a 1d window", () => {
@@ -305,7 +306,7 @@ describe("renderDigest — tables", () => {
   it("adds BB% and K% right after PA on a long (>=21d) window, absent on short ones", () => {
     const long = renderDigest(assemblyWith({ spec: "21d", batters: [harper7d] }));
     const header = long.text.split("\n").find((l) => l.startsWith("Player"))!;
-    expect(header).toMatch(/OBP\/SLG\/OPS\s+PA\s+BB%\s+K%\s+H\b/);
+    expect(header).toMatch(/AVG\/OBP\/SLG\/OPS\s+PA\s+BB%\s+K%\s+H\b/);
     // Derived from SUMMED counters: 1 BB / 9 PA = 11.1%, 2 K / 9 PA = 22.2%.
     const dataLine = long.text.split("\n").find((l) => l.includes("Harper, B"))!;
     expect(dataLine).toContain("11.1");
@@ -480,17 +481,17 @@ describe("digestTableRows", () => {
       assemblyWith({ spec: "7d", batters: [harper7d] }),
       "batters",
     );
-    expect(headers.slice(0, 4)).toEqual(["Player", "Lvl", "GP", "OBP/SLG/OPS"]);
+    expect(headers.slice(0, 4)).toEqual(["Player", "Lvl", "GP", "AVG/OBP/SLG/OPS"]);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.[0]).toBe("Harper, B");
     expect(rows[0]?.every((c) => typeof c === "string")).toBe(true);
   });
 
-  it("uses the 1d window's game-grouped columns (Gm, no GP/OBP/SLG/OPS)", () => {
+  it("uses the 1d window's game-grouped columns (Gm, no GP/AVG/OBP/SLG/OPS)", () => {
     const { headers } = digestTableRows(assemblyWith({ spec: "1d", batters: [harper7d] }), "batters");
     expect(headers.slice(0, 3)).toEqual(["Player", "Lvl", "Gm"]);
     expect(headers).not.toContain("GP");
-    expect(headers).not.toContain("OBP/SLG/OPS");
+    expect(headers).not.toContain("AVG/OBP/SLG/OPS");
   });
 
   it("is header-only when the requested table has no rows", () => {

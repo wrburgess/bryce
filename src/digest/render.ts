@@ -129,13 +129,13 @@ const rate =
     deriveRate(row.agg, key);
 
 /**
- * AVG/OBP/SLG from the SUMMED counters. A zero denominator renders ".000"
+ * AVG/OBP/SLG/OPS from the SUMMED counters. A zero denominator renders ".000"
  * rather than deriveRate's "-": an idle player's row reads as a zero line, and
  * a pinch-runner with no at-bats did bat .000, which is the conventional
  * baseball display.
  */
 const slashLine: Column["value"] = (row) =>
-  ["avg", "obp", "slg"]
+  ["avg", "obp", "slg", "ops"]
     .map((key) => {
       const value = deriveRate(row.agg, key);
       return value === "-" ? ".000" : value;
@@ -168,7 +168,7 @@ function leadColumns(window: ResolvedWindow, statType: "batting" | "pitching"): 
     // Left, unlike every other non-name column: slash lines are fixed width, so
     // they stay aligned either way, and a right-padded composite header floats
     // away from the column it names.
-    ? [gp, { header: "OBP/SLG/OPS", align: "left", value: slashLine }]
+    ? [gp, { header: "AVG/OBP/SLG/OPS", align: "left", value: slashLine }]
     : [gp];
 }
 

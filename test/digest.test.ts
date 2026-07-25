@@ -95,7 +95,7 @@ describe("runDigest", () => {
     // the numbers are the WINDOW's — 3-for-9 with 6 total bases across two
     // games, derived from summed counters rather than averaged per game.
     expect(cells(mail?.text ?? "", "M Acosta")).toEqual(
-      ["M", "Acosta", "AAA", "2", ".333/.333/.667", "9", "3", "0", "2", "0", "0", "1", "3", "0", "0", "0", "0"],
+      ["M", "Acosta", "AAA", "2", ".333/.333/.667/1.000", "9", "3", "0", "2", "0", "0", "1", "3", "0", "0", "0", "0"],
     );
     expect(mail?.html).toContain("<td");
     expect(mail?.html).toContain("Acosta, M");
@@ -659,7 +659,7 @@ describe("runDigest", () => {
     expect(week.statLineCount).toBe(2);
     const weekText = mailer.sent[1]?.text ?? "";
     expect(weekText.split("\n").filter((l) => l.startsWith("Acosta, M"))).toHaveLength(1);
-    expect(cells(weekText, "M Acosta").slice(2, 6)).toEqual(["AAA", "2", ".429/.429/.571", "7"]);
+    expect(cells(weekText, "M Acosta").slice(2, 6)).toEqual(["AAA", "2", ".429/.429/.571/1.000", "7"]);
   });
 
   it("gives a two-way player a row in each table, and leaves Gm blank for one game", async () => {
@@ -1478,7 +1478,7 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     expect(nextDay).toMatchObject({ action: "sent", statLineCount: 1 });
     expect(mailer.sent).toHaveLength(2);
     expect(cells(mailer.sent[1]?.text ?? "", "M Acosta")).toEqual(
-      ["M", "Acosta", "AAA", "1", ".500/.500/1.250", "4", "2", "0", "0", "0", "0", "1", "3", "0", "0", "0", "0"],
+      ["M", "Acosta", "AAA", "1", ".500/.500/1.250/1.750", "4", "2", "0", "0", "0", "0", "1", "3", "0", "0", "0", "0"],
     );
   });
 
