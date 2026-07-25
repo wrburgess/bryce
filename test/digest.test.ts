@@ -30,8 +30,12 @@ import {
  * collapsed — asserts every column without depending on column padding, which
  * shifts whenever a wider value shares the table.
  */
-const cells = (text: string, startsWith: string): string[] =>
-  (text.split("\n").find((l) => l.startsWith(startsWith)) ?? "").trim().split(/\s+/);
+const cells = (text: string, startsWith: string): string[] => {
+  const [firstName, ...surname] = startsWith.split(" ");
+  const renderedName = surname.length === 0 ? startsWith : `${surname.join(" ")}, ${firstName![0]}`;
+  const values = (text.split("\n").find((l) => l.startsWith(renderedName)) ?? "").trim().split(/\s+/);
+  return values[0]?.endsWith(",") ? [values[1]!, values[0].slice(0, -1), ...values.slice(2)] : values;
+};
 
 describe("runDigest", () => {
   let opened: OpenedDb;
@@ -94,7 +98,7 @@ describe("runDigest", () => {
       ["M", "Acosta", "AAA", "2", ".333/.333/.667", "9", "3", "0", "2", "0", "0", "1", "3", "0", "0", "0", "0"],
     );
     expect(mail?.html).toContain("<td");
-    expect(mail?.html).toContain("M Acosta");
+    expect(mail?.html).toContain("Acosta, M");
     expect(mail?.html).toContain(".333/.333/.667");
     // Level sections are gone: the level is a column now, because a window can
     // span a promotion and a section heading could not say that.
@@ -499,7 +503,7 @@ describe("runDigest", () => {
     expect(cells(mail?.text ?? "", "M Acosta")).toEqual(
       ["M", "Acosta", "AAA", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0"],
     );
-    expect(mail?.html).toContain("M Acosta");
+    expect(mail?.html).toContain("Acosta, M");
   });
 
   it("reports a line by its GAME date, so a late arrival lands in the window it belongs to", async () => {
@@ -551,7 +555,7 @@ describe("runDigest", () => {
     const text = mailer.sent[0]?.text ?? "";
     // Batters, top of the ladder first; no level SECTIONS, just a Lvl column.
     expect(text).not.toContain("MiLB - Triple-A");
-    expect(text.indexOf("M Acosta")).toBeLessThan(text.indexOf("D Guy"));
+    expect(text.indexOf("Acosta, M")).toBeLessThan(text.indexOf("Guy, D"));
     expect(cells(text, "M Acosta")[2]).toBe("AAA");
     expect(cells(text, "D Guy")[2]).toBe("AA");
     // The pitcher's whole row, including the derived single-game rates and the
@@ -602,8 +606,8 @@ describe("runDigest", () => {
     expect(cells(text, "M Acosta")[2]).toBe("AAA");
     expect(cells(text, "C Guy")[2]).toBe("NCAA");
     // NCAA is the bottom of the ladder, below every MiLB level.
-    expect(text.indexOf("M Acosta")).toBeLessThan(text.indexOf("C Guy"));
-    expect(mailer.sent[0]?.html).toContain("C Guy");
+    expect(text.indexOf("Acosta, M")).toBeLessThan(text.indexOf("Guy, C"));
+    expect(mailer.sent[0]?.html).toContain("Guy, C");
   });
 
   it("omits an out-of-season player entirely from the zero rows", async () => {
@@ -620,7 +624,7 @@ describe("runDigest", () => {
     const result = await runDigest(deps());
     expect(result.action).toBe("sent");
     const text = mailer.sent[0]?.text ?? "";
-    expect(text).toContain("S Playing");
+    expect(text).toContain("Playing, S");
     expect(text).not.toContain("Season Guy");
   });
 
@@ -644,9 +648,9 @@ describe("runDigest", () => {
     await runDigest(deps());
     const oneDay = mailer.sent[0]?.text ?? "";
     // Two rows, told apart by Gm — there is no opponent column to do it.
-    expect(oneDay.split("\n").filter((l) => l.startsWith("M Acosta"))).toHaveLength(2);
+    expect(oneDay.split("\n").filter((l) => l.startsWith("Acosta, M"))).toHaveLength(2);
     expect(oneDay).toMatch(/Player\s+Lvl\s+Gm\s+PA/);
-    const rows = oneDay.split("\n").filter((l) => l.startsWith("M Acosta"));
+    const rows = oneDay.split("\n").filter((l) => l.startsWith("Acosta, M"));
     expect(rows[0]?.trim().split(/\s+/).slice(2, 6)).toEqual(["AAA", "1", "3", "1"]);
     expect(rows[1]?.trim().split(/\s+/).slice(2, 6)).toEqual(["AAA", "2", "4", "2"]);
 
@@ -654,7 +658,7 @@ describe("runDigest", () => {
     const week = await runDigest({ ...deps(), spec: "7d", force: true });
     expect(week.statLineCount).toBe(2);
     const weekText = mailer.sent[1]?.text ?? "";
-    expect(weekText.split("\n").filter((l) => l.startsWith("M Acosta"))).toHaveLength(1);
+    expect(weekText.split("\n").filter((l) => l.startsWith("Acosta, M"))).toHaveLength(1);
     expect(cells(weekText, "M Acosta").slice(2, 6)).toEqual(["AAA", "2", ".429/.429/.571", "7"]);
   });
 
@@ -699,7 +703,7 @@ describe("runDigest", () => {
     const result = await runDigest(deps());
     const text = mailer.sent[0]?.text ?? "";
     // One row, carrying the batting line with E merged in — never a third table.
-    expect(text.split("\n").filter((l) => l.startsWith("E Prone"))).toHaveLength(1);
+    expect(text.split("\n").filter((l) => l.startsWith("Prone, E"))).toHaveLength(1);
     expect(cells(text, "E Prone")).toEqual(
       ["E", "Prone", "AAA", "4", "1", "0", "2", "0", "0", "0", "0", "0", "0", "0", "2"],
     );
@@ -759,8 +763,8 @@ describe("runDigest", () => {
     const result = await runDigest(deps());
     expect(result.statLineCount).toBe(1);
     const text = mailer.sent[0]?.text ?? "";
-    expect(text).toContain("A Guy");
-    expect(text).not.toContain("D Guy");
+    expect(text).toContain("Guy, A");
+    expect(text).not.toContain("Guy, D");
   });
 });
 
@@ -1868,7 +1872,7 @@ describe("forced delivery", () => {
     // predicate to widen, and nothing about the first send to work around.
     const forced = await runDigest(deps(true));
     expect(forced).toMatchObject({ action: "sent", statLineCount: 2 });
-    const rows = (mailer.sent[1]?.text ?? "").split("\n").filter((l) => l.startsWith("M Acosta"));
+    const rows = (mailer.sent[1]?.text ?? "").split("\n").filter((l) => l.startsWith("Acosta, M"));
     expect(rows).toHaveLength(2);
 
     // A test send consumes nothing, so the next SCHEDULED run over the same

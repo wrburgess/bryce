@@ -496,7 +496,7 @@ describe("MCP server over Streamable HTTP", () => {
       statLineCount: 1,
     });
     expect(mailer.sent).toHaveLength(1);
-    expect(mailer.sent[0]?.text).toContain("M Acosta");
+    expect(mailer.sent[0]?.text).toContain("Acosta, M");
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(1);
   });
 
@@ -517,7 +517,7 @@ describe("MCP server over Streamable HTTP", () => {
     expect(mailer.sent[0]?.text.split("\n")[0]).toBe(
       "ScoreKeeps Baseball - Tradebait List - Sat, July 18, 2026",
     );
-    expect(mailer.sent[0]?.text).toContain("T Member");
+    expect(mailer.sent[0]?.text).toContain("Member, T");
     expect(mailer.sent[0]?.text).not.toContain("Prospect");
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
   });
@@ -537,7 +537,7 @@ describe("MCP server over Streamable HTTP", () => {
     });
     const preview = await call("digest_preview");
     expect(preview.structuredContent).toMatchObject({ statLineCount: 1, playerCount: 1 });
-    expect((preview.structuredContent?.mail as { text: string }).text).toContain("M Acosta");
+    expect((preview.structuredContent?.mail as { text: string }).text).toContain("Acosta, M");
     expect(mailer.sent).toHaveLength(1);
 
     // Forced send re-mails it and leaves the delivery row exactly as it was.
@@ -696,7 +696,7 @@ describe("MCP server over Streamable HTTP", () => {
     expect(batters.structuredContent).toBeUndefined();
     expect(batters.content[0]?.text.startsWith("Player,Lvl,")).toBe(true);
     expect(batters.content[0]?.text).toContain("PA,H,BB,K"); // batting columns
-    expect(batters.content[0]?.text).toContain("M Acosta");
+    expect(batters.content[0]?.text).toContain("Acosta, M");
 
     const pitchers = await call("digest_preview", { format: "csv", table: "pitchers" });
     expect(pitchers.content[0]?.text).toContain("IP,ER,K,K/9"); // pitching columns

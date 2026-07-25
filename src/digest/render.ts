@@ -108,16 +108,14 @@ interface Column {
 }
 
 /**
- * "Bryce Harper" -> "B Harper"; a single-word name is left alone. The first
- * name is reduced to its initial BY DESIGN, so an accent living in the first
- * name ("Acuña Jr." -> "A Jr.") is legitimately dropped with the rest of that
- * token — that is abbreviation, not corruption. The accent is preserved
- * wherever it lands in a retained token ("Ronald Acuña Jr." -> "R Acuña Jr.");
- * #65's fidelity fixtures assert that rendered form.
+ * "Bryce Harper" -> "Harper, B"; a single-word name is left alone. The first
+ * name is reduced to its initial by design; the remaining tokens form the
+ * surname, retaining suffixes and their accents ("Ronald Acuña Jr." ->
+ * "Acuña Jr., R").
  */
 function abbreviate(fullName: string): string {
   const parts = fullName.trim().split(/\s+/);
-  return parts.length < 2 ? fullName : `${parts[0]![0]} ${parts.slice(1).join(" ")}`;
+  return parts.length < 2 ? fullName : `${parts.slice(1).join(" ")}, ${parts[0]![0]}`;
 }
 
 const counter =
