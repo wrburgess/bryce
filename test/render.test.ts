@@ -121,7 +121,7 @@ describe("renderDigest — tables", () => {
   it("renders a Batters table with a Lvl column and no level sections", () => {
     const mail = renderDigest(assemblyWith({ spec: "7d", batters: [harper7d] }));
     expect(mail.text).toContain("Batters");
-    expect(mail.text).toMatch(/Player\s+Lvl\s+GP\s+Batting/);
+    expect(mail.text).toMatch(/Player\s+Lvl\s+GP\s+OBP\/SLG\/OPS/);
     expect(mail.text).not.toContain("MiLB - Triple-A");
     expect(mail.text).toContain("MLB");
   });
@@ -138,9 +138,9 @@ describe("renderDigest — tables", () => {
     const mail = renderDigest(assemblyWith({ spec: "1d", batters: [penaGm1, penaGm2] }));
     expect(mail.text).toMatch(/Player\s+Lvl\s+Gm\s+PA/);
     expect(mail.text).not.toMatch(/\bGP\b/);
-    // No Batting column either: a one-game slash line is noise beside the raw
+    // No OBP/SLG/OPS column either: a one-game slash line is noise beside the raw
     // counts already on the row.
-    expect(mail.text).not.toContain("Batting");
+    expect(mail.text).not.toContain("OBP/SLG/OPS");
   });
 
   it("leaves Gm blank for a player who played once in a 1d window", () => {
@@ -305,7 +305,7 @@ describe("renderDigest — tables", () => {
   it("adds BB% and K% right after PA on a long (>=21d) window, absent on short ones", () => {
     const long = renderDigest(assemblyWith({ spec: "21d", batters: [harper7d] }));
     const header = long.text.split("\n").find((l) => l.startsWith("Player"))!;
-    expect(header).toMatch(/PA\s+BB%\s+K%\s+H\b/);
+    expect(header).toMatch(/OBP\/SLG\/OPS\s+PA\s+BB%\s+K%\s+H\b/);
     // Derived from SUMMED counters: 1 BB / 9 PA = 11.1%, 2 K / 9 PA = 22.2%.
     const dataLine = long.text.split("\n").find((l) => l.includes("Harper, B"))!;
     expect(dataLine).toContain("11.1");
@@ -320,11 +320,12 @@ describe("renderDigest — tables", () => {
     }
   });
 
-  it("draws the MLB / Other-Levels rule after the LAST MLB row when a table mixes levels", () => {
+  it("repeats headers at every level boundary and draws the MLB / Other-Levels rule", () => {
     const mlbA = row("Bryce Harper", "batting", [{ atBats: 4, hits: 2 }]);
     const mlbB = row("Kyle Schwarber", "batting", [{ atBats: 4, hits: 1 }]);
     const aaa = row("Farm Hand", "batting", [{ atBats: 3, hits: 1 }], { lvl: "AAA", lvlRank: 1 });
-    const mail = renderDigest(assemblyWith({ spec: "7d", batters: [mlbA, mlbB, aaa] }));
+    const aa = row("Farm Two", "batting", [{ atBats: 3, hits: 1 }], { lvl: "AA", lvlRank: 2 });
+    const mail = renderDigest(assemblyWith({ spec: "7d", batters: [mlbA, mlbB, aaa, aa] }));
 
     const lines = mail.text.split("\n");
     const ruleIdx = lines.findIndex((l) => /^-{3,}$/.test(l));
@@ -334,9 +335,11 @@ describe("renderDigest — tables", () => {
     expect(harperIdx).toBeLessThan(ruleIdx);
     expect(schwarberIdx).toBeLessThan(ruleIdx); // after BOTH MLB rows
     expect(ruleIdx).toBeLessThan(farmIdx); // before the non-MLB row
+    expect(lines.filter((line) => line.startsWith("Player")).length).toBe(3);
     // The HTML draws the same rule as a full-width colspan <hr> row.
     expect(mail.html).toContain("<hr");
     expect(mail.html).toContain("colspan");
+    expect(mail.html.match(/>Player<\/th>/g)).toHaveLength(3);
   });
 
   it("draws no divider when every row is MLB", () => {
@@ -477,17 +480,17 @@ describe("digestTableRows", () => {
       assemblyWith({ spec: "7d", batters: [harper7d] }),
       "batters",
     );
-    expect(headers.slice(0, 4)).toEqual(["Player", "Lvl", "GP", "Batting"]);
+    expect(headers.slice(0, 4)).toEqual(["Player", "Lvl", "GP", "OBP/SLG/OPS"]);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.[0]).toBe("Harper, B");
     expect(rows[0]?.every((c) => typeof c === "string")).toBe(true);
   });
 
-  it("uses the 1d window's game-grouped columns (Gm, no GP/Batting)", () => {
+  it("uses the 1d window's game-grouped columns (Gm, no GP/OBP/SLG/OPS)", () => {
     const { headers } = digestTableRows(assemblyWith({ spec: "1d", batters: [harper7d] }), "batters");
     expect(headers.slice(0, 3)).toEqual(["Player", "Lvl", "Gm"]);
     expect(headers).not.toContain("GP");
-    expect(headers).not.toContain("Batting");
+    expect(headers).not.toContain("OBP/SLG/OPS");
   });
 
   it("is header-only when the requested table has no rows", () => {
