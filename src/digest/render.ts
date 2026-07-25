@@ -166,9 +166,9 @@ function leadColumns(window: ResolvedWindow, statType: "batting" | "pitching"): 
   const gp: Column = { header: "GP", align: "right", value: (r) => String(r.agg.games) };
   return statType === "batting"
     // Left, unlike every other non-name column: slash lines are fixed width, so
-    // they stay aligned either way, and a right-padded "Batting" header floats
+    // they stay aligned either way, and a right-padded composite header floats
     // away from the column it names.
-    ? [gp, { header: "Batting", align: "left", value: slashLine }]
+    ? [gp, { header: "OBP/SLG/OPS", align: "left", value: slashLine }]
     : [gp];
 }
 
@@ -242,7 +242,17 @@ function mlbDividerIndex(rows: DigestRow[]): number | null {
   return lastMlb >= 0 && hasOther ? lastMlb + 1 : null;
 }
 
-function textTable(columns: Column[], rows: DigestRow[], dividerAfter: number | null = null): string[] {
+/** Indexes before rows that begin a new level. */
+function levelBreakIndexes(rows: DigestRow[]): number[] {
+  return rows.flatMap((row, index) => (index > 0 && row.lvlRank !== rows[index - 1]!.lvlRank ? [index] : []));
+}
+
+function textTable(
+  columns: Column[],
+  rows: DigestRow[],
+  dividerAfter: number | null = null,
+  levelBreaks: number[] = [],
+): string[] {
   const cells = rows.map((row) => columns.map((col) => col.value(row)));
   // Column widths use String#length (UTF-16 code units), which equals the
   // monospace display width for the Latin (incl. NFC-accented) names both
@@ -265,27 +275,32 @@ function textTable(columns: Column[], rows: DigestRow[], dividerAfter: number | 
       // Trailing pad on the last column is invisible noise in a mail client.
       .trimEnd();
   const lines = [line(columns.map((c) => c.header)), ...cells.map(line)];
-  if (dividerAfter !== null && dividerAfter > 0 && dividerAfter < rows.length) {
-    const maxLineWidth = lines.reduce((max, l) => Math.max(max, l.length), 0);
-    // +1 skips the header line so the rule lands after the last MLB data row.
-    lines.splice(1 + dividerAfter, 0, "-".repeat(maxLineWidth));
+  const maxLineWidth = lines.reduce((max, l) => Math.max(max, l.length), 0);
+  for (const index of [...levelBreaks].reverse()) {
+    const insertAt = 1 + index;
+    const divider = dividerAfter === index ? ["-".repeat(maxLineWidth)] : [];
+    lines.splice(insertAt, 0, ...divider, line(columns.map((c) => c.header)));
   }
   return lines;
 }
 
-function htmlTable(columns: Column[], rows: DigestRow[], dividerAfter: number | null = null): string {
+function htmlTable(
+  columns: Column[],
+  rows: DigestRow[],
+  dividerAfter: number | null = null,
+  levelBreaks: number[] = [],
+): string {
   const cell = (tag: "th" | "td", align: Column["align"], value: string): string =>
     `<${tag} style="text-align: ${align}; padding: 2px 6px">${escapeHtml(value)}</${tag}>`;
   const head = columns.map((col) => cell("th", col.align, col.header)).join("");
   const bodyRows = rows.map(
     (row) => `<tr>${columns.map((col) => cell("td", col.align, col.value(row))).join("")}</tr>`,
   );
-  if (dividerAfter !== null && dividerAfter > 0 && dividerAfter < rows.length) {
-    bodyRows.splice(
-      dividerAfter,
-      0,
-      `<tr><td colspan="${columns.length}" style="padding: 0"><hr style="border: none; border-top: 1px solid #ccc; margin: 4px 0" /></td></tr>`,
-    );
+  for (const index of [...levelBreaks].reverse()) {
+    const divider = dividerAfter === index
+      ? [`<tr><td colspan="${columns.length}" style="padding: 0"><hr style="border: none; border-top: 1px solid #ccc; margin: 4px 0" /></td></tr>`]
+      : [];
+    bodyRows.splice(index, 0, ...divider, `<tr>${head}</tr>`);
   }
   return `<table cellspacing="0" cellpadding="0"><thead><tr>${head}</tr></thead><tbody>${bodyRows.join("")}</tbody></table>`;
 }
@@ -347,10 +362,11 @@ export function renderDigest(assembly: DigestAssembly, freshness?: DigestFreshne
 
   for (const table of tables) {
     const divider = mlbDividerIndex(table.rows);
-    textParts.push(table.title, ...textTable(table.columns, table.rows, divider), "");
+    const levelBreaks = levelBreakIndexes(table.rows);
+    textParts.push(table.title, ...textTable(table.columns, table.rows, divider, levelBreaks), "");
     htmlParts.push(
       `<h2>${escapeHtml(table.title)}</h2>`,
-      htmlTable(table.columns, table.rows, divider),
+      htmlTable(table.columns, table.rows, divider, levelBreaks),
     );
   }
 
