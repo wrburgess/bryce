@@ -97,6 +97,15 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0043)", () => {
     });
   });
 
+  it("treats the exact lease boundary as expired for claim and reap", () => {
+    const first = claimRefreshRun(opened.db, { now: at(T0), playersTotal: 1 });
+    if (!first.claimed) throw new Error("expected claim");
+    const boundary = claimRefreshRun(opened.db, { now: at("2026-07-19T07:10:00.000Z"), playersTotal: 1 });
+    expect(boundary).toMatchObject({ claimed: true });
+    expect(opened.db.select().from(refreshRuns).where(eq(refreshRuns.id, first.runId)).all()[0])
+      .toMatchObject({ status: "failed", errorMessage: SUPERSEDED_MESSAGE });
+  });
+
   it("claimRefreshRun reaps an expired-lease `running` row to `failed` before inserting the new run", () => {
     // A crashed run left `running` with a long-stale lease, and no live lease
     // exists, so the next claim proceeds — and must fence the zombie first.

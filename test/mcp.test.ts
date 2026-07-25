@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { digestDeliveries, playerTags, players, refreshRuns, statLines } from "../src/db/schema.js";
 import { MlbClient } from "../src/mlb/client.js";
+import { claimRefreshRun } from "../src/jobs/refresh-run.js";
 import type { AppDeps } from "../src/server.js";
 import { createApp } from "../src/server.js";
 import {
@@ -585,6 +586,16 @@ describe("MCP server over Streamable HTTP", () => {
 
     const missing = await call("run_refresh", { personId: 424242 });
     expect(missing.isError).toBe(true);
+  });
+
+  it("run_refresh exposes targeted deferral rather than claiming a completed backfill", async () => {
+    await insertPlayer(opened.db, { externalId: 691185 });
+    expect(claimRefreshRun(opened.db, { now: clock.now(), playersTotal: 1 }).claimed).toBe(true);
+    const result = await call("run_refresh", { personId: 691185 });
+    expect(result.structuredContent).toMatchObject({
+      skipped: true, reason: "whole-refresh-running", inserted: 0, updated: 0, calendarFailures: [],
+    });
+    expect(api.calls).toHaveLength(0);
   });
 
   it("run_refresh surfaces the #23 status + failure arrays verbatim (no output-shape issue)", async () => {

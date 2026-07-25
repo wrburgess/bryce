@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, gte, inArray, isNull, lt, max, or } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lte, max, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { RefreshRunStatus } from "../db/schema.js";
 import { refreshRuns } from "../db/schema.js";
@@ -87,7 +87,7 @@ export function claimRefreshRun(db: Db, args: ClaimRefreshArgs): ClaimRefreshRes
       const live = tx
         .select({ id: refreshRuns.id })
         .from(refreshRuns)
-        .where(and(eq(refreshRuns.status, "running"), gte(refreshRuns.claimedAt, cutoffIso)))
+        .where(and(eq(refreshRuns.status, "running"), gt(refreshRuns.claimedAt, cutoffIso)))
         .limit(1)
         .all()[0];
       if (live !== undefined) {
@@ -103,7 +103,7 @@ export function claimRefreshRun(db: Db, args: ClaimRefreshArgs): ClaimRefreshRes
         .where(
           and(
             eq(refreshRuns.status, "running"),
-            or(isNull(refreshRuns.claimedAt), lt(refreshRuns.claimedAt, cutoffIso)),
+            or(isNull(refreshRuns.claimedAt), lte(refreshRuns.claimedAt, cutoffIso)),
           ),
         )
         .run();
