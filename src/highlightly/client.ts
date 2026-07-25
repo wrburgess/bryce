@@ -88,7 +88,7 @@ export class HighlightlyMigrationRequiredError extends HighlightlyError {
   }
 }
 
-const Team = z.looseObject({ id: z.number(), name: z.string(), displayName: z.string().optional() });
+const Team = z.looseObject({ id: z.number(), name: z.string(), displayName: z.string().optional(), league: z.string().optional() });
 const Match = z.looseObject({
   id: z.number(),
   date: z.string(),
@@ -109,10 +109,28 @@ const Player = z.looseObject({
   teamId: z.number().optional(),
   statistics: z.array(z.looseObject({ group: z.string(), name: z.string(), value: z.union([z.number(), z.string()]) })).default([]),
 });
+// The player-search endpoint returns flat records, while the detail endpoint
+// currently returns a one-item array and nests the team under `profile`.
+// Normalize both documented-in-practice shapes at this boundary.
+const PlayerDetail = Player.extend({
+  profile: z.looseObject({ team: Team.optional() }).optional(),
+});
+const PlayerResponse = z.union([
+  Player,
+  z.array(PlayerDetail).length(1).transform((players) => {
+    const player = players[0]!;
+    return Player.parse({ ...player, team: player.team ?? player.profile?.team });
+  }),
+]);
+const PlayerSearchPage = z.looseObject({
+  data: z.array(z.looseObject({ id: z.number(), fullName: z.string() })),
+  pagination: z.looseObject({ totalCount: z.number(), offset: z.number(), limit: z.number() }),
+});
 const BoxTeam = z.looseObject({ team: Team.optional(), boxScores: z.array(Player) });
 
 export type HighlightlyMatch = z.infer<typeof Match>;
 export type HighlightlyPlayer = z.infer<typeof Player>;
+export type HighlightlyNcaaPlayerSearchResult = { playerId: number; canonicalName: string; teamId: number };
 
 export interface HighlightlyClientOptions {
   apiKey: string | null;
@@ -207,18 +225,43 @@ export class HighlightlyClient {
     };
   }
 
-  /**
-   * Resolve an explicitly supplied provider identity before it can be attached
-   * to a Bryce row.  This deliberately does not offer name search: a name is
-   * only evidence used to validate an ID the operator already selected.
-   */
+  /** Resolve an explicitly supplied provider identity before it can be attached to a Bryce row. */
   async getPlayer(playerId: number): Promise<HighlightlyResponse<HighlightlyPlayer>> {
     const response = await this.request(`/players/${playerId}`);
     try {
-      return { value: Player.parse(response.value), remaining: response.remaining };
+      return { value: PlayerResponse.parse(response.value), remaining: response.remaining };
     } catch {
       throw new HighlightlyPlayerNotFoundError(playerId);
     }
+  }
+
+  /** Search provider players by name and retain only NCAA identities with a team. */
+  async searchNcaaPlayers(name: string): Promise<HighlightlyResponse<HighlightlyNcaaPlayerSearchResult[]>> {
+    const query = new URLSearchParams({ name, limit: "10", offset: "0" });
+    const response = await this.request(`/players?${query.toString()}`);
+    let page: z.infer<typeof PlayerSearchPage>;
+    try {
+      page = PlayerSearchPage.parse(response.value);
+    } catch {
+      throw new HighlightlyCoverageError("Highlightly returned an invalid player search page");
+    }
+    // Highlightly's name query is fuzzy. If its lightweight search records
+    // include an exact name, resolve only those candidates rather than using
+    // detail requests on every fuzzy hit.
+    const normalizedName = name.normalize("NFC").trim().toLocaleLowerCase("en-US");
+    const exactCandidates = page.data.filter(
+      (candidate) => candidate.fullName.normalize("NFC").trim().toLocaleLowerCase("en-US") === normalizedName,
+    );
+    const candidates = exactCandidates.length > 0 ? exactCandidates : page.data;
+    const results: HighlightlyNcaaPlayerSearchResult[] = [];
+    for (const candidate of candidates) {
+      const player = await this.getPlayer(candidate.id);
+      const teamId = highlightlyTeamId(player.value);
+      if (player.value.team?.league === "NCAA" && teamId !== null) {
+        results.push({ playerId: candidate.id, canonicalName: candidate.fullName.normalize("NFC"), teamId });
+      }
+    }
+    return { value: results, remaining: response.remaining };
   }
 
   async getBoxScore(matchId: number): Promise<HighlightlyResponse<Array<{ teamId: number | null; players: HighlightlyPlayer[] }>>> {

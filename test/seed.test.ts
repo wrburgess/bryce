@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { runSeed } from "../src/cli/seed.js";
+import { HighlightlyClient } from "../src/highlightly/client.js";
 import { claimRefreshRun } from "../src/jobs/refresh-run.js";
 import { MlbClient } from "../src/mlb/client.js";
 import { FakeStatsApi, MID_SEASON, TEST_TZ, fakeClock, fakeHighlightlyClient, makePerson, makeTeam, testDb } from "./factories.js";
@@ -14,6 +15,25 @@ describe("seed Highlightly NCAA commands", () => {
       });
       expect(code).toBe(0);
       expect(out[0]).toContain("highlightlyPlayerId=501");
+    } finally { opened.close(); }
+  });
+
+  it("finds and adds a unique NCAA player by name", async () => {
+    const opened = testDb();
+    const out: string[] = [];
+    const client = new HighlightlyClient({
+      apiKey: "test",
+      fetchImpl: async (url) => {
+        if (url.includes("/players?")) return { ok: true, status: 200, headers: { get: () => "99" }, json: async () => ({ data: [{ id: 501, fullName: "Roch Cholowsky" }], pagination: { totalCount: 1, offset: 0, limit: 10 } }) };
+        if (url.includes("/matches?")) return { ok: true, status: 200, headers: { get: () => "99" }, json: async () => ({ data: [], pagination: { totalCount: 0, offset: 0, limit: 100 } }) };
+        return { ok: true, status: 200, headers: { get: () => "99" }, json: async () => ({ id: 501, fullName: "Roch Cholowsky", team: { id: 10, name: "Bruins", league: "NCAA" }, statistics: [] }) };
+      },
+    });
+    try {
+      expect(await runSeed(["add", "--ncaa", "--name", "Roch Cholowsky"], {
+        db: opened.db, client: {} as never, highlightlyClient: client, now: fakeClock(MID_SEASON).now, tz: TEST_TZ, write: (line) => out.push(line),
+      })).toBe(0);
+      expect(out[0]).toContain("highlightlyPlayerId=501 name=Roch Cholowsky");
     } finally { opened.close(); }
   });
 

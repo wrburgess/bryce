@@ -93,6 +93,7 @@ fails closed. (Distinct from `seed list`, which prints players.)
 ```sh
 sk seed add --person-id 691185
 sk seed add --highlightly-player-id 501 --canonical-name "Gavin Kelly" --team-id 10
+sk seed add --ncaa --name "Roch Cholowsky"
 sk seed add --search "acosta"            # prints a numbered list if several match
 sk seed add --search "smith" --pick 2    # choose from that list (1-based)
 sk seed deactivate --person-id 691185
@@ -111,6 +112,7 @@ One required subcommand (`add` | `deactivate` | `list` | `tag`), then flags:
 |---|---|---|
 | `add` | `--person-id N` | Add an MLB/MiLB Player by MLB Stats API personId. |
 | `add` | `--highlightly-player-id N --canonical-name NAME --team-id N` | Add an NCAA Player by explicit Highlightly identity. |
+| `add` | `--ncaa --name "NAME"` | Search Highlightly for NCAA players by name and add the sole match; ambiguous results print the explicit identity needed to retry. |
 | `add` | `--search "NAME" [--pick I]` | Name search; `--pick I` is **one-based** and **search-only**. With one match and no `--pick`, it adds that Player; with several and no `--pick`, it prints a numbered list and exits `1`. |
 | `deactivate` | `--person-id N` \| `--highlightly-player-id N` | Remove a Player from the Watch List; his row and full history are kept. |
 | `list` | `[--tags EXPR]` | Print every Player row (active and inactive) plus a `total=` line. `--tags` is a comma-separated **AND** selector (a bare namespace like `prospect` matches any value); only matching rows print. |

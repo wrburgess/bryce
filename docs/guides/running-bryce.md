@@ -570,6 +570,15 @@ so they never drift:
 
 ## NCAA players
 
+NCAA players can be found through Highlightly by name:
+
+```sh
+sk seed add --ncaa --name "Roch Cholowsky"
+```
+
+When several players match, Bryce prints the explicit Highlightly identity needed to select one. You
+can also provide that identity directly:
+
 NCAA players use an explicit Highlightly player ID. Supply its canonical name and team ID so Bryce can
 validate the selected provider identity before the first JSON refresh:
 

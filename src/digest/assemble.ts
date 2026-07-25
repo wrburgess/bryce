@@ -422,9 +422,20 @@ function buildRows(
   return rows.sort(
     (a, b) =>
       a.lvlRank - b.lvlRank ||
-      a.player.fullName.localeCompare(b.player.fullName) ||
+      comparePlayerNames(a.player.fullName, b.player.fullName) ||
       (a.gameNumber ?? 0) - (b.gameNumber ?? 0),
   );
+}
+
+/** Sort by surname, then first initial, matching the digest's displayed name. */
+function comparePlayerNames(a: string, b: string): number {
+  const nameParts = (fullName: string): [surname: string, firstInitial: string] => {
+    const parts = fullName.trim().split(/\s+/);
+    return parts.length < 2 ? [fullName, ""] : [parts.slice(1).join(" "), parts[0]![0]!];
+  };
+  const [aSurname, aInitial] = nameParts(a);
+  const [bSurname, bInitial] = nameParts(b);
+  return aSurname.localeCompare(bSurname) || aInitial.localeCompare(bInitial);
 }
 
 /**

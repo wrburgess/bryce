@@ -524,7 +524,7 @@ describe("REST API", () => {
       expect(body.batters[0]).toMatchObject({ lvl: "AAA" });
       expect(body.batters[0]?.player.fullName).toBe("Maximo Acosta");
       expect(body.mail.subject).toBe("ScoreKeeps Baseball (Default) - Sat, July 18, 2026");
-      expect(body.mail.text).toContain("M Acosta");
+      expect(body.mail.text).toContain("Acosta, M");
 
       // Read-only: no send, no delivery row, no stamping.
       expect(mailer.sent).toHaveLength(0);
@@ -583,7 +583,7 @@ describe("REST API", () => {
       ]) {
         const body = await read(url);
         expect(body.statLineCount).toBe(1);
-        expect(body.mail.text).toContain("M Acosta");
+        expect(body.mail.text).toContain("Acosta, M");
       }
 
       // A junk value is rejected, never treated as truthy.
@@ -656,7 +656,7 @@ describe("REST API", () => {
       expect(batters.headers.get("content-disposition")).toBe(
         'attachment; filename="bryce-batters-1d.csv"',
       );
-      expect(await batters.text()).toContain("M Acosta");
+      expect(await batters.text()).toContain("Acosta, M");
 
       // Header-only when the chosen table has no rows.
       const pitchers = await app().request("/api/digest/preview?format=csv&table=pitchers", {
@@ -767,7 +767,7 @@ describe("REST API", () => {
 
       expect(mailer.sent).toHaveLength(1);
       expect(mailer.sent[0]?.to).toBe("hc@example.com");
-      expect(mailer.sent[0]?.text).toContain("M Acosta");
+      expect(mailer.sent[0]?.text).toContain("Acosta, M");
       const deliveries = await opened.db.select().from(digestDeliveries);
       expect(deliveries).toHaveLength(1);
       expect(deliveries[0]).toMatchObject({ kind: "digest", status: "sent", dateCovered: "2026-07-19" });
@@ -831,7 +831,7 @@ describe("REST API", () => {
       expect(mailer.sent[0]?.text.split("\n")[0]).toBe(
         "ScoreKeeps Baseball - Prospects List - Sat, July 18, 2026",
       );
-      expect(mailer.sent[0]?.text).toContain("P Member");
+      expect(mailer.sent[0]?.text).toContain("Member, P");
       expect(mailer.sent[0]?.text).not.toContain("Veteran");
       expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
     });
@@ -887,7 +887,7 @@ describe("REST API", () => {
 
       // The same content went out twice, and the delivery row never moved.
       expect(mailer.sent).toHaveLength(2);
-      expect(mailer.sent[1]?.text).toContain("M Acosta");
+      expect(mailer.sent[1]?.text).toContain("Acosta, M");
       expect(mailer.sent[1]?.text).toBe(mailer.sent[0]?.text);
       const after = await opened.db.select().from(digestDeliveries);
       expect(after).toHaveLength(1);

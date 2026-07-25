@@ -142,8 +142,10 @@ boundaries** and **externalize state** to the issue / PR / git rather than carry
 The PR gets an **independent second-model review** (the Reviewer named in
 [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* / the lifecycle's Reviewer role) so a delegated
 summary the orchestrator never saw cannot silently steer the outcome — with the plan gate `auto` in
-this host, the PR review is where that backstop concentrates. If the **whole Reviewer chain is
-exhausted** and no second model is reachable, the [`PROJECT.md`](../../PROJECT.md) *Reviewer
+this host, the PR review is where that backstop concentrates. At each review gate, run every
+available independent harness/model rung in the configured order; a same-model refusal or an
+unavailable runner is a failed rung, never a reason to ask the HC early. If the **whole Reviewer
+chain is exhausted** and no second model is reachable, the [`PROJECT.md`](../../PROJECT.md) *Reviewer
 degradation floor* applies — it is `stop-and-ask` and is **not configurable**: `ship` stops and asks
 the HC rather than delivering an unreviewed PR. The backstop is never silently dropped, and a run that
 cannot obtain an independent review does not certify itself.

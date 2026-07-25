@@ -52,7 +52,8 @@ ASSESS_MD="$REPO_ROOT/skills/assess/SKILL.md"
 [ -x "$TSX" ] || { echo "tests require tsx (run: npm ci)"; exit 1; }
 [ -f "$SCRIPT" ] || { echo "missing script under test: $SCRIPT"; exit 1; }
 
-TMP="$(mktemp -d)"
+TMP="$(mktemp -d)" || TMP=""
+[ -n "$TMP" ] && [ -d "$TMP" ] || { echo "tests require a writable temp dir (mktemp -d failed)"; exit 1; }
 trap 'chmod -R u+rwx "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 
 PASS=0; FAIL=0
@@ -235,6 +236,22 @@ report "work mode -> body file is the CLI's bytes, byte-for-byte" $?
 grep -qF -- "review --base main" "$FAKE_LOG"
 report "work mode -> CLI invoked as 'review --base <branch>'" $?
 
+make_fake_codex ok
+OUT="$TMP/codex-alt-model.md"
+expect_status "Codex AC -> distinct reviewer model succeeds" 0 "summon_reviewer: OK - work review" \
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --codex-bin "$FAKE_BIN" \
+  --ac codex --ac-model gpt-5.6 --reviewer-model gpt-5.6-terra
+grep -qF -- "--model gpt-5.6-terra review --base main" "$FAKE_LOG"
+report "Codex AC -> reviewer model is forwarded before the review subcommand" $?
+
+make_fake_codex ok
+expect_status "Codex AC -> same reviewer model is refused" 1 "FAILED (self_review)" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/codex-same-model.md" --codex-bin "$FAKE_BIN" \
+  --ac codex --ac-model gpt-5.6 --reviewer-model gpt-5.6
+
+expect_status "Codex AC -> missing acting model is a usage error" 1 "--ac codex requires --ac-model MODEL" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/codex-missing-acting-model.md" --codex-bin "$FAKE_BIN" --ac codex
+
 make_fake_codex echo_stdin
 PLAN="$TMP/plan.md"
 OUT="$TMP/plan-body.md"
@@ -387,11 +404,13 @@ echo "Failure ladder, continued:"
 make_fake_codex ok
 OUT="$TMP/self.md"
 expect_status "--ac codex -> FAILED (self_review)" 1 "FAILED (self_review)" \
-  "$TSX" "$SCRIPT" --mode work --out "$OUT" --ac codex --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --ac codex --ac-model gpt-5.6 \
+    --reviewer-model gpt-5.6 --codex-bin "$FAKE_BIN"
 [ ! -e "$FAKE_LOG" ]
 report "--ac codex -> the CLI is never spawned at all" $?
 expect_status "--ac CoDeX -> FAILED (self_review), case-insensitive" 1 "FAILED (self_review)" \
-  "$TSX" "$SCRIPT" --mode work --out "$OUT" --ac CoDeX --codex-bin "$FAKE_BIN"
+  "$TSX" "$SCRIPT" --mode work --out "$OUT" --ac CoDeX --ac-model GPT-5.6 \
+    --reviewer-model gpt-5.6 --codex-bin "$FAKE_BIN"
 
 # ---------------------------------------------------------------------------
 echo "Encoding safety (ASCII-only stdout; body bytes untouched):"
