@@ -17,6 +17,14 @@ export const players = sqliteTable("players", {
    * levels (ADR 0032). Null for MLB/MiLB; unique among NCAA rows.
    */
   ncaaPlayerSeq: integer("ncaa_player_seq").unique(),
+  /** Highlightly's explicit NCAA player identity; never inferred from a name. */
+  highlightlyPlayerId: integer("highlightly_player_id").unique(),
+  /** Provider team identity captured with the explicit player attachment. */
+  highlightlyTeamId: integer("highlightly_team_id"),
+  /** Legacy rows stay visible until an explicitly attached Highlightly backfill completes. */
+  ncaaSourceState: text("ncaa_source_state", {
+    enum: ["legacy_html", "highlightly_pending", "highlightly_active"],
+  }),
   fullName: text("full_name").notNull(),
   level: text("level", { enum: ["mlb", "milb", "ncaa"] }).notNull(),
   /** Triple-A | Double-A | High-A | Single-A | Rookie — only for level = milb. */
@@ -28,7 +36,17 @@ export const players = sqliteTable("players", {
   notes: text("notes"),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
-});
+}, (t) => [
+  // Keep identity state meaningful in the database as well as in services.
+  check(
+    "players_ncaa_identity_state_ck",
+    sql`(${t.level} = 'ncaa' and ${t.externalId} is null and ${t.ncaaSourceState} in ('legacy_html', 'highlightly_pending', 'highlightly_active')) or (${t.level} <> 'ncaa' and ${t.highlightlyPlayerId} is null and ${t.ncaaSourceState} is null)`,
+  ),
+  check(
+    "players_highlightly_active_identity_ck",
+    sql`${t.ncaaSourceState} <> 'highlightly_active' or ${t.highlightlyPlayerId} is not null`,
+  ),
+]);
 
 export const digestDeliveries = sqliteTable(
   "digest_deliveries",
@@ -82,6 +100,12 @@ export const statLines = sqliteTable(
       .references(() => players.id),
     /** Source-native game identifier (MLB Stats API gamePk). */
     gameId: integer("game_id").notNull(),
+    /** Provider namespace prevents legacy NCAA and Highlightly match ids colliding. */
+    source: text("source", {
+      enum: ["mlb_stats_api", "ncaa_html_legacy", "highlightly_ncaa"],
+    })
+      .notNull()
+      .default("mlb_stats_api"),
     statType: text("stat_type", { enum: ["batting", "pitching", "fielding"] }).notNull(),
     gameDate: text("game_date").notNull(),
     gameNumber: integer("game_number").notNull().default(1),
@@ -93,6 +117,8 @@ export const statLines = sqliteTable(
     leagueName: text("league_name"),
     /** The split's stat object (hits, atBats, inningsPitched, ...), verbatim. */
     stats: text("stats", { mode: "json" }).notNull(),
+    /** Canonical provider keys supplied on this played line; omitted means unavailable, not zero. */
+    availableStats: text("available_stats", { mode: "json" }).$type<string[] | null>(),
     /** The whole gameLog split, verbatim, for future re-processing. */
     raw: text("raw", { mode: "json" }).notNull(),
     createdAt: text("created_at").notNull(),
@@ -100,9 +126,44 @@ export const statLines = sqliteTable(
   },
   (t) => [
     // ADR 0029: per-game identity — never date-keyed (doubleheaders are two games).
-    uniqueIndex("stat_lines_player_game_type_uq").on(t.playerId, t.gameId, t.statType),
+    uniqueIndex("stat_lines_player_source_game_type_uq").on(t.playerId, t.source, t.gameId, t.statType),
   ],
 );
+
+/** Durable, fair NCAA backfill cursor. It advances only after an installed page. */
+export const highlightlyPlayerCursors = sqliteTable(
+  "highlightly_player_cursors",
+  {
+    playerId: integer("player_id").primaryKey().references(() => players.id),
+    season: integer("season").notNull(),
+    nextMatchDate: text("next_match_date"),
+    lastCompleteAt: text("last_complete_at"),
+    updatedAt: text("updated_at").notNull(),
+  },
+  (t) => [check("highlightly_cursor_season_ck", sql`${t.season} >= 2000`)],
+);
+
+/** Shared provider responses make retries quota-efficient and make coverage auditable. */
+export const highlightlyMatchCache = sqliteTable(
+  "highlightly_match_cache",
+  {
+    matchId: integer("match_id").primaryKey(),
+    season: integer("season").notNull(),
+    payload: text("payload", { mode: "json" }).notNull(),
+    complete: integer("complete", { mode: "boolean" }).notNull().default(false),
+    rateRemaining: integer("rate_remaining"),
+    fetchedAt: text("fetched_at").notNull(),
+  },
+  (t) => [index("highlightly_match_cache_season_idx").on(t.season)],
+);
+
+export const highlightlyBoxScoreCache = sqliteTable("highlightly_box_score_cache", {
+  matchId: integer("match_id").primaryKey(),
+  payload: text("payload", { mode: "json" }).notNull(),
+  complete: integer("complete", { mode: "boolean" }).notNull().default(false),
+  rateRemaining: integer("rate_remaining"),
+  fetchedAt: text("fetched_at").notNull(),
+});
 
 export const refreshRuns = sqliteTable(
   "refresh_runs",

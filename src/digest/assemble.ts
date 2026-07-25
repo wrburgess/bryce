@@ -311,6 +311,11 @@ function mergeFieldingIntoBatting(splits: Split[]): Split[] {
   );
   for (const split of splits) {
     if (split.line.statType !== "fielding") continue;
+    // Highlightly deliberately provides no NCAA fielding contract. Historical
+    // HTML fielding rows are retained for audit/backup, but must not make the
+    // presentation claim a fielding value for NCAA players after this source
+    // cutover.
+    if (split.line.source === "highlightly_ncaa") continue;
     const key = `${split.line.playerId}:${split.line.gameId}`;
     const errors = numberOr0(split.stats.errors);
     const target = byGame.get(key);

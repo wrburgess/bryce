@@ -9,11 +9,9 @@ import { refreshNcaaCalendar } from "../src/jobs/refresh.js";
 import { MlbClient } from "../src/mlb/client.js";
 import { NCAA_SPORT_ID } from "../src/mlb/levels.js";
 import {
-  FakeNcaaApi,
   FakeStatsApi,
   TEST_TZ,
   fakeClock,
-  fakeNcaaClient,
   insertPlayer,
   testDb,
 } from "./factories.js";
@@ -181,7 +179,6 @@ describe("refreshNcaaCalendar (ADR 0032)", () => {
   const deps = (now: string): RefreshDeps => ({
     db: opened.db,
     client: new MlbClient({ fetchImpl: new FakeStatsApi().fetch, delayMs: 0 }),
-    ncaaClient: fakeNcaaClient(new FakeNcaaApi()),
     now: fakeClock(now).now,
     tz: TEST_TZ,
   });

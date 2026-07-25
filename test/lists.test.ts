@@ -144,14 +144,15 @@ describe("lists service", () => {
       const mlb = await insertPlayer(opened.db);
       const ncaa = await insertPlayer(opened.db, {
         externalId: null,
-        ncaaPlayerSeq: 555,
+        highlightlyPlayerId: 555,
+        highlightlyTeamId: 10,
         level: "ncaa",
         milbLevel: null,
       });
       const result = await addToList(
         opened.db,
         "L",
-        [mlb.externalId!, { ncaaPlayerSeq: 555 }],
+        [mlb.externalId!, { kind: "highlightly", playerId: 555 }],
         clock.now(),
       );
       expect(result.changed).toBe(2);

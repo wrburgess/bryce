@@ -4,12 +4,10 @@ import type { RefreshCliDeps } from "../src/cli/refresh.js";
 import { runRefreshCli } from "../src/cli/refresh.js";
 import { MlbClient } from "../src/mlb/client.js";
 import {
-  FakeNcaaApi,
   FakeStatsApi,
   MID_SEASON,
   TEST_TZ,
   fakeClock,
-  fakeNcaaClient,
   insertCalendars2026,
   insertPlayer,
   makeGameLogBody,
@@ -30,7 +28,6 @@ import {
 describe("refresh CLI (#23, MF6)", () => {
   let opened: OpenedDb;
   let api: FakeStatsApi;
-  let ncaaApi: FakeNcaaApi;
   let clock: ReturnType<typeof fakeClock>;
   let output: string[];
   let errors: string[];
@@ -38,7 +35,6 @@ describe("refresh CLI (#23, MF6)", () => {
   const deps = (client?: MlbClient): RefreshCliDeps => ({
     db: opened.db,
     client: client ?? new MlbClient({ fetchImpl: api.fetch, delayMs: 0 }),
-    ncaaClient: fakeNcaaClient(ncaaApi),
     now: clock.now,
     tz: TEST_TZ,
     write: (line) => output.push(line),
@@ -61,7 +57,6 @@ describe("refresh CLI (#23, MF6)", () => {
       seasons: { 1: makeSeasonBody(), 11: makeSeasonBody({ regularSeasonStartDate: "2026-03-27" }) },
       gameLogs: { "11:hitting": makeGameLogBody("hitting", [makeSplit({ game: { gamePk: 900001, gameNumber: 1 } })]) },
     });
-    ncaaApi = new FakeNcaaApi();
     output = [];
     errors = [];
   });

@@ -32,8 +32,8 @@ import { preflightDirect } from "./router.js";
  *   create --name NAME                    create a new list
  *   rename --name OLD --to NEW            rename a live list
  *   delete --name NAME                    soft-delete a list (name frees for reuse)
- *   add    --name NAME --person-ids a,b --ncaa-seqs c   add members (idempotent)
- *   remove --name NAME --person-ids a,b --ncaa-seqs c   remove members
+ *   add    --name NAME --person-ids a,b --highlightly-player-ids c   add members (idempotent)
+ *   remove --name NAME --person-ids a,b --highlightly-player-ids c   remove members
  *   show                                  print every live list + member counts
  *   show   --name NAME                    print a list's active members
  */
@@ -158,14 +158,14 @@ async function runAddRemove(
   if (name === null) return 1;
   const personIds = parseIds(flags.get("person-ids"), deps, "--person-ids");
   if (personIds === null) return 1;
-  const ncaaSeqs = parseIds(flags.get("ncaa-seqs"), deps, "--ncaa-seqs");
-  if (ncaaSeqs === null) return 1;
+  const highlightlyIds = parseIds(flags.get("highlightly-player-ids"), deps, "--highlightly-player-ids");
+  if (highlightlyIds === null) return 1;
   const refs: PlayerRef[] = [
     ...personIds.map((id): PlayerRef => id),
-    ...ncaaSeqs.map((seq): PlayerRef => ({ ncaaPlayerSeq: seq })),
+    ...highlightlyIds.map((playerId): PlayerRef => ({ kind: "highlightly", playerId })),
   ];
   if (refs.length === 0) {
-    (deps.writeError ?? deps.write)(`error=${op} requires --person-ids and/or --ncaa-seqs`);
+    (deps.writeError ?? deps.write)(`error=${op} requires --person-ids and/or --highlightly-player-ids`);
     return 1;
   }
   if (op === "add") {
@@ -185,7 +185,7 @@ async function runShow(flags: Map<string, string>, deps: ListsDeps): Promise<num
     const members = await listMembersById(deps.db, list.id);
     for (const p of members) {
       const idRef =
-        p.level === "ncaa" ? `ncaaSeq=${p.ncaaPlayerSeq ?? "-"}` : `personId=${p.externalId ?? "-"}`;
+        p.level === "ncaa" ? `highlightlyPlayerId=${p.highlightlyPlayerId ?? "-"}` : `personId=${p.externalId ?? "-"}`;
       deps.write(`member listId=${list.id} playerId=${p.id} name=${p.fullName} ${idRef}`);
     }
     deps.write(`total=${members.length}`);

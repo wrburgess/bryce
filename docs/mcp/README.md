@@ -56,9 +56,9 @@ Add an MLB/MiLB Player by MLB Stats API personId.
 
 ### `watchlist_add_ncaa`
 
-Add an NCAA Player by stats.ncaa.org `stats_player_seq`.
+Add an NCAA Player by explicit Highlightly identity. The tool validates `playerId`, `canonicalName`, and `teamId`; it does not scrape stats.ncaa.org or search by name.
 
-- **Inputs:** `ncaaPlayerSeq` — the `stats_player_seq`.
+- **Inputs:** `playerId`, `canonicalName`, `teamId`.
 - **Success:** `{ "action": "added" | "updated", "player": {...}, "refresh": {...} }`.
 - **Side effects:** for a **newly added** Player, resolves his name and school from his game-log page,
   then the same first Refresh as `watchlist_add` (skipped during Offseason Sleep); re-adding a Player

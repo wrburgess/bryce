@@ -10,21 +10,20 @@ import type {
   PlayerBackupMember,
 } from "../backup/player-list.js";
 import { canonicalizeName } from "../domain/names.js";
+import {
+  HighlightlyIdentityMismatchError,
+  HighlightlyMigrationRequiredError,
+  HighlightlyError,
+  highlightlyTeamId,
+} from "../highlightly/client.js";
+import type { HighlightlyClient } from "../highlightly/client.js";
 import { addPlayerIdsToList, resolveListByName } from "../lists/service.js";
-import { hostDate } from "../domain/season.js";
 import type { CalendarFailure } from "../jobs/refresh.js";
 import { runRefreshForPlayer } from "../jobs/refresh.js";
 import type { MlbClient } from "../mlb/client.js";
 import { MlbApiError } from "../mlb/client.js";
 import { levelForSportId } from "../mlb/levels.js";
 import type { Person } from "../mlb/schemas.js";
-import type { NcaaClient } from "../ncaa/client.js";
-import {
-  NcaaAccessDeniedError,
-  NcaaApiError,
-  UnsupportedNcaaSeasonError,
-} from "../ncaa/client.js";
-import { parseGameLogPage } from "../ncaa/parse.js";
 import {
   isManualTag,
   parseTagSelector,
@@ -41,7 +40,7 @@ import {
 export interface WatchlistDeps {
   db: Db;
   client: MlbClient;
-  ncaaClient: NcaaClient;
+  highlightlyClient?: HighlightlyClient;
   now: () => Date;
   tz: string;
 }
@@ -50,7 +49,10 @@ export interface WatchlistDeps {
  * How a caller addresses an existing watch-list Player: an MLB Stats API
  * personId (the default numeric form) or an NCAA stats_player_seq (ADR 0032).
  */
-export type PlayerRef = number | { ncaaPlayerSeq: number };
+export type PlayerRef = number | { kind: "highlightly"; playerId: number };
+
+/** Explicit provider identity; a raw number is never treated as an NCAA ID. */
+export type HighlightlyPlayerRef = { kind: "highlightly"; playerId: number };
 
 /** The MLB Stats API has no person for the requested personId. */
 export class UnknownPersonError extends Error {
@@ -63,17 +65,6 @@ export class UnknownPersonError extends Error {
   }
 }
 
-/** stats.ncaa.org has no resolvable player for the requested stats_player_seq. */
-export class UnknownNcaaPlayerError extends Error {
-  readonly playerSeq: number;
-
-  constructor(playerSeq: number) {
-    super(`no NCAA player with ncaaPlayerSeq=${playerSeq}`);
-    this.name = "UnknownNcaaPlayerError";
-    this.playerSeq = playerSeq;
-  }
-}
-
 /** No watch-list row exists for the requested Player reference. */
 export class PlayerNotFoundError extends Error {
   readonly ref: PlayerRef;
@@ -82,7 +73,7 @@ export class PlayerNotFoundError extends Error {
     super(
       typeof ref === "number"
         ? `no player with personId=${ref}`
-        : `no player with ncaaPlayerSeq=${ref.ncaaPlayerSeq}`,
+        : `no player with highlightlyPlayerId=${ref.playerId}`,
     );
     this.name = "PlayerNotFoundError";
     this.ref = ref;
@@ -102,6 +93,92 @@ export interface AddPlayerResult {
   player: PlayerRow;
   /** Null on a duplicate add — only a brand-new Player gets his first Refresh. */
   refresh: FirstRefreshSummary | null;
+}
+
+/**
+ * Add a new NCAA player from an operator-selected Highlightly ID. The canonical
+ * name and team ID are assertions, not a fuzzy search: a mismatch prevents an
+ * accidental same-name attachment.
+ */
+export async function addHighlightlyNcaaPlayer(
+  deps: WatchlistDeps,
+  input: { playerId: number; canonicalName: string; teamId: number },
+): Promise<AddPlayerResult> {
+  const staged = await stageHighlightlyNcaaPlayer(deps, input);
+  if (staged.action === "updated") return { ...staged, refresh: null };
+  const refresh = await runRefreshForPlayer(deps, staged.player.id);
+  return { ...staged, refresh };
+}
+
+/** Resolve and stage a Highlightly identity without running a first refresh (batch seam). */
+export async function stageHighlightlyNcaaPlayer(
+  deps: WatchlistDeps,
+  input: { playerId: number; canonicalName: string; teamId: number },
+): Promise<{ action: "added" | "updated"; player: PlayerRow }> {
+  if (deps.highlightlyClient === undefined) throw new HighlightlyMigrationRequiredError();
+  const resolved = await deps.highlightlyClient.getPlayer(input.playerId);
+  const providerTeamId = highlightlyTeamId(resolved.value);
+  if (
+    canonicalizeName(resolved.value.fullName) !== canonicalizeName(input.canonicalName) ||
+    providerTeamId !== input.teamId
+  ) {
+    throw new HighlightlyIdentityMismatchError("Highlightly player ID does not match the supplied canonical name and team ID");
+  }
+  const nowIso = deps.now().toISOString();
+  const existing = (await deps.db.select().from(players)
+    .where(eq(players.highlightlyPlayerId, input.playerId)))[0];
+  if (existing !== undefined) {
+    const player = (await deps.db.update(players).set({ active: true, updatedAt: nowIso })
+      .where(eq(players.id, existing.id)).returning())[0];
+    if (player === undefined) throw new Error(`update failed for player id ${existing.id}`);
+    return { action: "updated", player };
+  }
+  const player = (await deps.db.insert(players).values({
+    externalId: null,
+    ncaaPlayerSeq: null,
+    highlightlyPlayerId: input.playerId,
+    highlightlyTeamId: input.teamId,
+    ncaaSourceState: "highlightly_active",
+    fullName: canonicalizeName(resolved.value.fullName),
+    level: "ncaa",
+    milbLevel: null,
+    teamName: resolved.value.team?.name ?? null,
+    schoolName: resolved.value.team?.name ?? null,
+    position: null,
+    active: true,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  }).returning())[0];
+  if (player === undefined) throw new Error("insert failed");
+  return { action: "added", player };
+}
+
+/**
+ * Attach an existing legacy identity without guessing from its historical name.
+ * This only enters `highlightly_pending`; `refreshHighlightlyNcaaPlayer` owns
+ * the transaction that replaces presentation after a complete backfill.
+ */
+export async function attachHighlightlyNcaaPlayer(
+  deps: WatchlistDeps,
+  legacySeq: number,
+  input: { playerId: number; canonicalName: string; teamId: number },
+): Promise<PlayerRow> {
+  if (deps.highlightlyClient === undefined) throw new HighlightlyMigrationRequiredError();
+  const legacy = (await deps.db.select().from(players).where(eq(players.ncaaPlayerSeq, legacySeq)))[0];
+  if (legacy === undefined) throw new Error(`no legacy NCAA player with ncaaPlayerSeq=${legacySeq}`);
+  const resolved = await deps.highlightlyClient.getPlayer(input.playerId);
+  if (
+    canonicalizeName(resolved.value.fullName) !== canonicalizeName(input.canonicalName) ||
+    highlightlyTeamId(resolved.value) !== input.teamId
+  ) throw new HighlightlyIdentityMismatchError("Highlightly player ID does not match the supplied canonical name and team ID");
+  const updated = (await deps.db.update(players).set({
+    highlightlyPlayerId: input.playerId,
+    highlightlyTeamId: input.teamId,
+    ncaaSourceState: "highlightly_pending",
+    updatedAt: deps.now().toISOString(),
+  }).where(eq(players.id, legacy.id)).returning())[0];
+  if (updated === undefined) throw new Error(`update failed for player id ${legacy.id}`);
+  return updated;
 }
 
 export type PlayerListFilter = "active" | "inactive" | "all";
@@ -199,7 +276,7 @@ export async function addPlayer(deps: WatchlistDeps, personId: number): Promise<
   let refresh: FirstRefreshSummary;
   try {
     refresh = await runRefreshForPlayer(
-      { db, client, ncaaClient: deps.ncaaClient, now, tz: deps.tz },
+      { db, client, highlightlyClient: deps.highlightlyClient, now, tz: deps.tz },
       player.id,
     );
   } catch (err) {
@@ -220,126 +297,8 @@ export async function addPlayer(deps: WatchlistDeps, personId: number): Promise<
 }
 
 /**
- * Add an NCAA Player by stats.ncaa.org stats_player_seq (ADR 0032). Mirrors
- * addPlayer: fetch his current-season game-log page to resolve name/school, a
- * duplicate is a no-op identity/school refresh, and a brand-new add runs his
- * first Refresh (Sleep-aware). Only a genuine not-found (HTTP 404 or a page
- * with no resolvable player) becomes UnknownNcaaPlayerError; upstream failures
- * (NcaaApiError) and an unbundled season (UnsupportedNcaaSeasonError)
- * propagate untouched, exactly like addPlayer surfaces MlbApiError.
- */
-export async function addNcaaPlayer(
-  deps: WatchlistDeps,
-  playerSeq: number,
-): Promise<AddPlayerResult> {
-  const { db, client, ncaaClient, now, tz } = deps;
-  const nowIso = now().toISOString();
-  const { action, player } = await upsertNcaaPlayer(deps, playerSeq, nowIso);
-
-  if (action === "updated") {
-    // Heal on re-add (mirrors addPlayer): a previously-untagged NCAA player gets
-    // his derived tags now from the committed identity columns. Idempotent.
-    syncDerivedTags(db, player.id, now());
-    return { action, player, refresh: null };
-  }
-
-  let refresh: FirstRefreshSummary;
-  try {
-    refresh = await runRefreshForPlayer({ db, client, ncaaClient, now, tz }, player.id);
-  } catch (err) {
-    // Best-effort derive from the committed columns before rethrowing, so a
-    // first-add whose Refresh threw is never left untagged (mirrors addPlayer).
-    syncDerivedTags(db, player.id, now());
-    throw err;
-  }
-  // SC1: mirror addPlayer — only derive here when the first Refresh was SKIPPED
-  // (Offseason Sleep); a completed Refresh already synced via refreshNcaaPlayer.
-  if (refresh.skipped) {
-    syncDerivedTags(db, player.id, now());
-  }
-  return { action: "added", player, refresh };
-}
-
-/**
- * Resolve an NCAA stats_player_seq to identity (name/school, from his game-log
- * page) and insert/re-activate his row — the Refresh-free CORE shared by
- * single-add (`addNcaaPlayer`) and batch-add (`batchAddPlayers`). Error handling
- * mirrors the single-add path: only a genuine not-found (HTTP 404 or a page with
- * no resolvable player) becomes UnknownNcaaPlayerError; a non-404 NcaaApiError
- * and an unbundled season (UnsupportedNcaaSeasonError) propagate untouched. The
- * season is derived from the single captured clock (nowIso) — no second read.
- */
-export async function upsertNcaaPlayer(
-  deps: Pick<WatchlistDeps, "db" | "ncaaClient" | "tz">,
-  playerSeq: number,
-  nowIso: string,
-): Promise<{ action: "added" | "updated"; player: PlayerRow }> {
-  const { db, ncaaClient, tz } = deps;
-  const season = hostDate(new Date(nowIso), tz).slice(0, 4);
-
-  let identity: { fullName: string; schoolName: string };
-  try {
-    const html = await ncaaClient.getGameLogPage(playerSeq, season, "batting");
-    const page = parseGameLogPage(html);
-    identity = { fullName: page.fullName, schoolName: page.schoolName };
-  } catch (err) {
-    // Upstream trouble is NOT a missing player: a non-404 HTTP failure and an
-    // unbundled season propagate untouched for the callers' error seams.
-    if (err instanceof NcaaAccessDeniedError) throw err;
-    if (err instanceof NcaaApiError && err.status !== 404) throw err;
-    if (err instanceof UnsupportedNcaaSeasonError) throw err;
-    // A genuine not-found — HTTP 404 or a page with no resolvable player —
-    // means there is no Player to add.
-    throw new UnknownNcaaPlayerError(playerSeq);
-  }
-
-  const existing = (
-    await db.select().from(players).where(eq(players.ncaaPlayerSeq, playerSeq))
-  )[0];
-
-  if (existing !== undefined) {
-    const updatedRows = await db
-      .update(players)
-      .set({
-        fullName: identity.fullName,
-        schoolName: identity.schoolName,
-        active: true,
-        updatedAt: nowIso,
-      })
-      .where(eq(players.id, existing.id))
-      .returning();
-    const updated = updatedRows[0];
-    if (updated === undefined) {
-      throw new Error(`update failed for player id ${existing.id}`);
-    }
-    return { action: "updated", player: updated };
-  }
-
-  const insertedRows = await db
-    .insert(players)
-    .values({
-      externalId: null,
-      ncaaPlayerSeq: playerSeq,
-      fullName: identity.fullName,
-      level: "ncaa",
-      milbLevel: null,
-      teamName: null,
-      schoolName: identity.schoolName,
-      active: true,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    })
-    .returning();
-  const inserted = insertedRows[0];
-  if (inserted === undefined) {
-    throw new Error("insert failed");
-  }
-  return { action: "added", player: inserted };
-}
-
-/**
  * Why a batch entry did not become an active Player. `person_not_found` /
- * `name_no_match` / `name_ambiguous` / `ncaa_not_found` are SOFT outcomes
+ * `name_no_match` / `name_ambiguous` / `highlightly_player_not_found` are SOFT outcomes
  * (`unresolved` — the identity did not resolve); `unsupported_season` /
  * `upstream_error` are HARD failures (`failed` — something upstream broke).
  */
@@ -347,8 +306,7 @@ export type BatchAddReasonCode =
   | "person_not_found"
   | "name_no_match"
   | "name_ambiguous"
-  | "ncaa_not_found"
-  | "unsupported_season"
+  | "highlightly_player_not_found"
   | "upstream_error";
 
 /** A disambiguation candidate offered when a name matches more than one player. */
@@ -404,13 +362,10 @@ function classifyBatchFailure(entry: BatchAddEntry, err: unknown): BatchAddEntry
   if (err instanceof UnknownPersonError) {
     return { status: "unresolved", entry, reason: "person_not_found" };
   }
-  if (err instanceof UnknownNcaaPlayerError) {
-    return { status: "unresolved", entry, reason: "ncaa_not_found" };
+  if (err instanceof HighlightlyError && err.code === "highlightly_player_not_found") {
+    return { status: "unresolved", entry, reason: "highlightly_player_not_found" };
   }
-  if (err instanceof UnsupportedNcaaSeasonError) {
-    return { status: "failed", entry, reason: "unsupported_season", message: err.message };
-  }
-  if (err instanceof MlbApiError || err instanceof NcaaApiError || err instanceof NcaaAccessDeniedError) {
+  if (err instanceof MlbApiError || err instanceof HighlightlyError) {
     return { status: "failed", entry, reason: "upstream_error", message: err.message };
   }
   return {
@@ -461,8 +416,12 @@ export async function batchAddPlayers(
       if (entry.personId !== undefined) {
         const { action, player } = await upsertMlbPlayer(deps, entry.personId, nowIso, teamCache);
         entries.push({ status: action, entry, player });
-      } else if (entry.ncaaPlayerSeq !== undefined) {
-        const { action, player } = await upsertNcaaPlayer(deps, entry.ncaaPlayerSeq, nowIso);
+      } else if (entry.highlightlyPlayerId !== undefined) {
+        const { action, player } = await stageHighlightlyNcaaPlayer(deps, {
+          playerId: entry.highlightlyPlayerId,
+          canonicalName: entry.canonicalName!,
+          teamId: entry.teamId!,
+        });
         entries.push({ status: action, entry, player });
       } else {
         // A name is an MLB-only people-search convenience; it must resolve to
@@ -530,18 +489,17 @@ export async function batchAddPlayers(
 }
 
 /**
- * Deactivate a Player by reference — an MLB personId or an NCAA
- * stats_player_seq (ADR 0032) — the row and his whole history are kept.
+ * Deactivate a Player by MLB personId or explicit Highlightly player ID. The
+ * row and its history are retained.
  */
 export async function deactivatePlayer(
   deps: Pick<WatchlistDeps, "db" | "now">,
   ref: PlayerRef,
 ): Promise<PlayerRow> {
   const { db, now } = deps;
-  const where =
-    typeof ref === "number"
-      ? eq(players.externalId, ref)
-      : eq(players.ncaaPlayerSeq, ref.ncaaPlayerSeq);
+  const where = typeof ref === "number"
+    ? eq(players.externalId, ref)
+    : eq(players.highlightlyPlayerId, ref.playerId);
   const existing = (await db.select().from(players).where(where))[0];
   if (existing === undefined) {
     throw new PlayerNotFoundError(ref);
@@ -707,6 +665,10 @@ export function restorePlayerListBackup(
           : canonicalizeName(row.schoolName);
 
       let playerId: number;
+      const ncaaSourceState =
+        row.level === "ncaa" ? (row.ncaaSourceState ?? "legacy_html") : null;
+      const highlightlyPlayerId = row.level === "ncaa" ? row.highlightlyPlayerId ?? null : null;
+      const highlightlyTeamId = row.level === "ncaa" ? row.highlightlyTeamId ?? null : null;
       if (existing !== undefined) {
         // Coalesce natural ids so a backup can ADD an id without erasing one the
         // existing row already holds (the promotion case keeps ncaa_player_seq).
@@ -715,6 +677,9 @@ export function restorePlayerListBackup(
           .set({
             externalId: row.externalId ?? existing.externalId,
             ncaaPlayerSeq: row.ncaaPlayerSeq ?? existing.ncaaPlayerSeq,
+            highlightlyPlayerId: highlightlyPlayerId ?? existing.highlightlyPlayerId,
+            highlightlyTeamId: highlightlyTeamId ?? existing.highlightlyTeamId,
+            ncaaSourceState,
             fullName,
             level: row.level,
             milbLevel: row.milbLevel ?? null,
@@ -735,6 +700,9 @@ export function restorePlayerListBackup(
           .values({
             externalId: row.externalId ?? null,
             ncaaPlayerSeq: row.ncaaPlayerSeq ?? null,
+            highlightlyPlayerId,
+            highlightlyTeamId,
+            ncaaSourceState,
             fullName,
             level: row.level,
             milbLevel: row.milbLevel ?? null,

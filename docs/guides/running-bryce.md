@@ -1,9 +1,9 @@
 # Running Bryce (MLB/MiLB/NCAA pipeline + MCP/REST server)
 
-For interactive administration, activate the local command once with `npm link` and use `bryce …`.
+For interactive administration, activate the local command once with `npm link` and use `sk …`.
 Keep the existing `npm run …` form in launchd plists: launchd has a deliberately minimal PATH.
 Where a direct executable is needed, use its absolute project path (for example
-`/Users/YOU/code/bryce/bin/bryce`).
+`/Users/YOU/code/sk/bin/sk`).
 
 How to run the daily pipeline on its intended host: a Mac (laptop or mini) with Node 22, launchd
 for scheduling, and optional Litestream replication + Cloudflare Tunnel exposure
@@ -24,7 +24,7 @@ Seed the watch list, then run the jobs by hand once:
 
 ```sh
 sk seed add --search "acosta" --pick 1   # or: add --person-id 691185
-sk seed add --ncaa-seq 2649785           # NCAA player by stats_player_seq (see NCAA below)
+sk seed add --highlightly-player-id 501 --canonical-name "C Guy" --team-id 10
 sk seed list
 sk refresh
 sk digest
@@ -67,7 +67,7 @@ they set `WorkingDirectory` to the repo. `loadConfig` (see
 [`src/config.ts`](../../src/config.ts)) then validates on startup and fails closed on anything
 missing.
 
-The interactive `bryce` command follows the same rule: invoke it from the directory whose `.env`,
+The interactive `sk` command follows the same rule: invoke it from the directory whose `.env`,
 database, backup directory, and other relative paths you intend to use. The executable itself is
 project-local and can be called from elsewhere, but changing the current working directory changes
 where relative runtime files are resolved. Scheduled jobs retain the `npm run …` form and an explicit
@@ -75,7 +75,7 @@ working directory for predictable operation.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `DATABASE_PATH` | no | `data/bryce.db` | SQLite file; created and migrated automatically |
+| `DATABASE_PATH` | no | `data/sk.db` | SQLite file; created and migrated automatically |
 | `BRYCE_TZ` | no | `America/Chicago` | Host timezone for "today" (digest windows, season math) |
 | `BACKUP_DIR` | no | `backups` | Directory for local Snapshots and Player List Backups (gitignored) |
 | `BACKUP_KEEP_LAST` | no | `10` | Newest Snapshots retention keeps (positive integer; `<1`/non-integer fails closed) |
@@ -84,7 +84,6 @@ working directory for predictable operation.
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | with smtp | port `465` | SMTP relay credentials |
 | `DIGEST_TO` / `DIGEST_FROM` | unless console | — | Digest recipient and sender addresses |
 | `MLB_API_DELAY_MS` | no | `500` | Polite delay between MLB Stats API calls |
-| `NCAA_SCRAPE_DELAY_MS` | no | `3000` | Polite delay between stats.ncaa.org scrape requests |
 | `SERVER_PORT` | no | `3000` | HTTP server port (`/health`, `/api`, `/mcp`) |
 | `API_TOKEN` | for `/api` + `/mcp` | — | Bearer token guarding `/api/*` and `/mcp`; without it the server **fails closed and refuses to start at all** — nothing is served, including `/health` |
 
@@ -109,7 +108,7 @@ out again — Digest is **at-least-once** across that one window, a deliberate c
 missing digest. See *Stuck deliveries and duplicate emails* below for what that looks like and what
 to do about it.
 
-`~/Library/LaunchAgents/com.bryce.refresh.plist`:
+`~/Library/LaunchAgents/com.sk.refresh.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -117,8 +116,8 @@ to do about it.
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.bryce.refresh</string>
-  <key>WorkingDirectory</key><string>/Users/YOU/code/bryce</string>
+  <key>Label</key><string>com.sk.refresh</string>
+  <key>WorkingDirectory</key><string>/Users/YOU/code/sk</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string><string>-lc</string>
@@ -130,7 +129,7 @@ to do about it.
 </plist>
 ```
 
-`~/Library/LaunchAgents/com.bryce.digest.plist` — identical shape, label `com.bryce.digest`,
+`~/Library/LaunchAgents/com.sk.digest.plist` — identical shape, label `com.sk.digest`,
 command `npm run digest >> logs/digest.log 2>&1`, and:
 
 ```xml
@@ -141,8 +140,8 @@ command `npm run digest >> logs/digest.log 2>&1`, and:
 Load both:
 
 ```sh
-launchctl load ~/Library/LaunchAgents/com.bryce.refresh.plist
-launchctl load ~/Library/LaunchAgents/com.bryce.digest.plist
+launchctl load ~/Library/LaunchAgents/com.sk.refresh.plist
+launchctl load ~/Library/LaunchAgents/com.sk.digest.plist
 ```
 
 During Offseason Sleep ([ADR 0031](../adr/0031-offseason-sleep-world-series-to-opening-day.md))
@@ -206,7 +205,7 @@ the migration. Take one on demand with `sk db backup` (Snapshot + prune to `BACK
 
 Schedule a nightly Snapshot with launchd, same shape as the Refresh/Digest jobs above:
 
-`~/Library/LaunchAgents/com.bryce.backup.plist`:
+`~/Library/LaunchAgents/com.sk.backup.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -214,8 +213,8 @@ Schedule a nightly Snapshot with launchd, same shape as the Refresh/Digest jobs 
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>com.bryce.backup</string>
-  <key>WorkingDirectory</key><string>/Users/YOU/code/bryce</string>
+  <key>Label</key><string>com.sk.backup</string>
+  <key>WorkingDirectory</key><string>/Users/YOU/code/sk</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string><string>-lc</string>
@@ -228,10 +227,10 @@ Schedule a nightly Snapshot with launchd, same shape as the Refresh/Digest jobs 
 ```
 
 ```sh
-launchctl load ~/Library/LaunchAgents/com.bryce.backup.plist
+launchctl load ~/Library/LaunchAgents/com.sk.backup.plist
 ```
 
-Snapshots are owner-only (`0600`) and named `bryce-YYYYMMDDTHHMMSSZ-NNN.db` (UTC). Retention keeps the
+Snapshots are owner-only (`0600`) and named `sk-YYYYMMDDTHHMMSSZ-NNN.db` (UTC). Retention keeps the
 newest `BACKUP_KEEP_LAST`; an off-box home for Snapshots is deliberately deferred (the Replica remains
 the off-box story).
 
@@ -258,9 +257,9 @@ hand first:
    Litestream so nothing is writing the file:
 
    ```sh
-   launchctl unload ~/Library/LaunchAgents/com.bryce.refresh.plist
-   launchctl unload ~/Library/LaunchAgents/com.bryce.digest.plist
-   launchctl unload ~/Library/LaunchAgents/com.bryce.backup.plist
+   launchctl unload ~/Library/LaunchAgents/com.sk.refresh.plist
+   launchctl unload ~/Library/LaunchAgents/com.sk.digest.plist
+   launchctl unload ~/Library/LaunchAgents/com.sk.backup.plist
    # stop the server process (Ctrl-C or its launchd/label), and:
    brew services stop litestream   # or stop the litestream replicate job
    ```
@@ -275,7 +274,7 @@ hand first:
 4. **Restore:**
 
    ```sh
-   sk db restore --from backups/bryce-20260722T030000Z-000.db
+   sk db restore --from backups/sk-20260722T030000Z-000.db
    ```
 
    It validates the candidate (integrity check, foreign-key check, expected tables, migration
@@ -293,17 +292,17 @@ Continuous SQLite replication (the database is the only state worth protecting):
 ```yml
 # /usr/local/etc/litestream.yml
 dbs:
-  - path: /Users/YOU/code/bryce/data/bryce.db
+  - path: /Users/YOU/code/sk/data/sk.db
     replicas:
       - type: s3
-        bucket: bryce-backup
-        path: bryce.db
+        bucket: sk-backup
+        path: sk.db
         endpoint: https://ACCOUNT_ID.r2.cloudflarestorage.com
         # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from the R2 API token, via env
 ```
 
 Run `litestream replicate` under its own launchd job (or `brew services start litestream`).
-Restore with `litestream restore -o data/bryce.db s3://bryce-backup/bryce.db`.
+Restore with `litestream restore -o data/sk.db s3://sk-backup/sk.db`.
 
 ## Remote access: Cloudflare Tunnel
 
@@ -311,9 +310,9 @@ The server (`sk server`, [`src/server.ts`](../../src/server.ts)) binds locally; 
 without opening ports via a named tunnel:
 
 ```sh
-cloudflared tunnel create bryce
-cloudflared tunnel route dns bryce bryce.example.com
-cloudflared tunnel run --url http://localhost:3000 bryce
+cloudflared tunnel create sk
+cloudflared tunnel route dns sk sk.example.com
+cloudflared tunnel run --url http://localhost:3000 sk
 ```
 
 `GET /health` returns `{ ok, players, statLines, lastDelivery }` — a glanceable check that the
@@ -401,7 +400,7 @@ designated, **already-inactive** `SMOKE_PERSON_ID` sentinel (it refuses a blank,
 currently-active id), deactivating it as an idempotent no-op. It **writes to the target DB and is
 staging-only, never production**, and it never calls `send_digest`.
 
-### Manual Verification Stage (the gate that closes [#37](https://github.com/wrburgess/bryce/issues/37))
+### Manual Verification Stage (the gate that closes [#37](https://github.com/wrburgess/sk/issues/37))
 
 The hosted claude.ai web + iPhone connector path **cannot** be proven by the CI test suite — it needs
 a real browser, a real Cloudflare account, and the live tunnel. Until the HC runs the checklist below
@@ -432,7 +431,7 @@ runbook the HC executes by hand, then fills in.
 5. **Close out.** Replace every placeholder in this section (`your-host.example.com`, the recorded
    statuses) with the real values, update the proven/unsupported status line in
    [`docs/mcp/README.md`](../mcp/README.md) → *claude.ai / Claude mobile*, then close
-   [#37](https://github.com/wrburgess/bryce/issues/37).
+   [#37](https://github.com/wrburgess/sk/issues/37).
 
 ## Stuck deliveries and duplicate emails
 
@@ -474,7 +473,7 @@ verbatim, including `sending`:
   how many times that slot was claimed:
 
   ```sh
-  sqlite3 data/bryce.db \
+  sqlite3 data/sk.db \
     "SELECT kind, date_covered, status, attempt_count, claimed_at, sent_at, provider_message_id,
             reconciled_at
        FROM digest_deliveries ORDER BY id DESC LIMIT 5;"
@@ -512,7 +511,7 @@ To force it out **now** rather than wait for the next scheduled run, reopen the 
 `failed` row is re-claimable; an already-`sent` slot can be reopened by setting it `failed`:
 
 ```sh
-sqlite3 data/bryce.db \
+sqlite3 data/sk.db \
   "UPDATE digest_deliveries SET status = 'failed'
      WHERE kind = 'digest' AND date_covered = '$(date +%F)';"
 sk digest
@@ -532,7 +531,7 @@ longer applies.
 ## The MCP server and REST API
 
 The primary interface ([ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)) is the **MCP
-server** at `POST https://bryce.example.com/mcp` (Streamable HTTP), with a thin **REST API** under
+server** at `POST https://sk.example.com/mcp` (Streamable HTTP), with a thin **REST API** under
 `/api` for scripted clients. Both share one service layer and one Zod validation per input shape,
 and both sit behind the same bearer token. During Offseason Sleep
 ([ADR 0031](../adr/0031-offseason-sleep-world-series-to-opening-day.md)) they stay live — history
@@ -560,7 +559,7 @@ so they never drift:
 - **[MCP Reference](../mcp/README.md)** — all twenty-two tools, their inputs and result shapes, and how
   to connect a Claude client. **Claude Code** connects today with a static bearer header; the hosted
   **claude.ai / Claude mobile** custom-connector flow is **pending verification**
-  ([#37](https://github.com/wrburgess/bryce/issues/37)) — a static `Authorization: Bearer` header is
+  ([#37](https://github.com/wrburgess/sk/issues/37)) — a static `Authorization: Bearer` header is
   not yet confirmed to work there, so do not rely on it for the hosted apps. The decided Cloudflare
   Access topology and the manual proof that closes #37 are in
   [*Cloudflare Access in front of the tunnel*](#cloudflare-access-in-front-of-the-tunnel) above;
@@ -571,42 +570,15 @@ so they never drift:
 
 ## NCAA players
 
-NCAA baseball has no MLB Stats API `personId`, so an NCAA Player is identified by his stats.ncaa.org
-`stats_player_seq` and its data is scraped from stats.ncaa.org through an isolated adapter
-([ADR 0032](../adr/0032-ncaa-identity-stats-player-seq-scrape-adapter.md)).
-
-**Finding a player's `stats_player_seq`:** open his player page on stats.ncaa.org — for example,
-`https://stats.ncaa.org/players/9702101?year_stat_category_id=15867`. The number immediately after
-`/players/` is the seq; `year_stat_category_id` only selects the stats view and is not passed to Bryce.
-
-**Adding him** (his first Refresh runs immediately, unless the pipeline is in Offseason Sleep):
+NCAA players use an explicit Highlightly player ID. Supply its canonical name and team ID so Bryce can
+validate the selected provider identity before the first JSON refresh:
 
 ```sh
-sk seed add --ncaa-seq 2649785
+sk seed add --highlightly-player-id 501 --canonical-name "C Guy" --team-id 10
 ```
 
-- **REST:** `POST /api/players/ncaa` with `{"ncaaPlayerSeq": 2649785}`.
-- **MCP / Claude:** the `watchlist_add_ncaa` tool — or just ask "add NCAA player 2649785 to my watch
-  list". His name and school are resolved from his game-log page.
+- **REST:** `POST /api/players/ncaa` with `{"playerId":501,"canonicalName":"C Guy","teamId":10}`.
+- **MCP:** `watchlist_add_ncaa` with the same three fields.
 
-**Validating the scrape on this host** — stats.ncaa.org is behind Akamai bot protection, so confirm a
-live fetch and parse from the Mac before relying on it:
-
-```sh
-sk ncaa probe --seq 2649785 --season 2025 --type batting
-```
-
-It prints the HTTP status and what the parser extracted (name, school, row count), exiting non-zero on
-any failure.
-
-**Annual season-lookup update:** stats.ncaa.org keys requests by opaque per-season ids that change
-each year. `src/ncaa/seasons.ts` bundles them (plus each season's Division-I opening/closing dates)
-per season; add a new entry each January (the file documents exactly where to read the ids off a
-player page). A season with no bundled entry is simply treated as not In Season for NCAA — logged
-loudly, never a silent gap.
-
-**Scraping posture / terms of use:** this is an unofficial scrape (there is no official NCAA stats
-API). Bryce is deliberately a polite, single-user client — a generous `NCAA_SCRAPE_DELAY_MS` between
-requests and no parallel fetching — and fails loudly rather than hammering the site. Respect
-stats.ncaa.org's terms of use; if the site blocks or rate-limits, back off rather than working around
-the protection.
+The former stats.ncaa.org HTML scraper, sequence identity, and host probe are removed. Historical
+source markers remain only to migrate existing rows and preserve stat-line provenance.

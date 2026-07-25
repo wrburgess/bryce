@@ -1,7 +1,7 @@
 # CLI Reference
 
 The command-line entry points to Bryce's pipeline. Activate the project-local executable once with
-`npm link`, then run `bryce …` from any directory. The executable resolves its own project-local
+`npm link`, then run `sk …` from any directory. The executable resolves its own project-local
 TypeScript runtime; it does not require a global `tsx`. Each is a thin presenter over the same service layer the [REST API](../api/README.md) and
 [MCP tools](../mcp/README.md) use. Each job's **summary** is a deterministic `key=value` line and
 every command exits non-zero on failure — but the output is not purely ASCII `key=value`: `digest`
@@ -17,10 +17,7 @@ Built-in help is the canonical source for command syntax and supported options: 
 Existing `npm run …` scripts remain migration-compatible; arguments after one must follow `--`. The
 activated `sk` executable may run from any directory; `.env` and relative configured paths are
 resolved from the current working directory, so run it from the directory whose data/configuration
-you intend to use. Options are strict: unknown flags, positional arguments, missing values, and
-repeated non-repeatable options exit `1` before configuration or service initialization. `--` and
-clustered short options are not supported. Only `players batch-add` accepts repeated input options;
-digest alone retains `--window=SPEC` and `--list=NAME` compatibility forms.
+you intend to use.
 
 ## `refresh` — re-ingest the current season
 
@@ -40,7 +37,6 @@ sk digest                         # default 1d window
 sk digest -w 7d                   # short alias
 sk digest --window=14d            # equals form
 sk digest --force                 # daily-slot test replay
-sk digest -f                      # short force alias
 ```
 
 Builds the Digest for a **Window** and sends it through the configured mailer. Writes no stat-line
@@ -50,7 +46,7 @@ state, so re-running a Window always sends the same content.
 |---|---|---|
 | `--window <spec>` / `--window=<spec>` | `1d` | `1d`, `7d`, `14d`, `21d`, `28d`, `35d`, `60d`, `ytd` |
 | `--list <name>` / `--list=<name>` | off (all active) | any existing list name (#70) |
-| `--force` / `-f` | off (boolean) | present or absent |
+| `--force` | off (boolean) | present or absent |
 
 - Both `--window 7d` and `--window=7d` are accepted. An unsupported window (e.g. `30d`) **fails
   closed**: the command exits `1`, writes an `error: unsupported --window value; supported: …` line
@@ -67,7 +63,7 @@ state, so re-running a Window always sends the same content.
   on-demand report that takes no slot and answers even during Offseason Sleep
   ([ADR 0035](../adr/0035-window-selected-digest.md)).
 - `--list NAME` scopes the send to a named list's active members
-  ([#70](https://github.com/wrburgess/bryce/issues/70) / [ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)).
+  ([#70](https://github.com/wrburgess/sk/issues/70) / [ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)).
   A named-list send is **on-demand only** (it takes no daily slot); an unknown list **fails closed**
   (exit `1`, `error: no list named "…"`, nothing sent).
 
@@ -76,7 +72,7 @@ state, so re-running a Window always sends the same content.
 ```sh
 sk players lists create --name Prospects
 sk players lists rename --name Prospects --to "Top 30"
-sk players lists add    --name "Top 30" --person-ids 691185,700001 --ncaa-seqs 2649785
+sk players lists add    --name "Top 30" --person-ids 691185,700001 --highlightly-player-ids 501
 sk players lists remove --name "Top 30" --person-ids 700001
 sk players lists show                       # every live list + member counts
 sk players lists show   --name "Top 30"     # a list's active members
@@ -87,7 +83,7 @@ A thin presenter over the named-list service ([ADR 0046](../adr/0046-named-playe
 a list is curated membership over the Watch List, distinct from tags (#30) and rosters (#69). A
 scope selects a list's **active** members (`players.active` stays the master gate). Output is greppable
 `key=value` lines; a failure writes an `error=…` line to stderr and exits `1`. Members are addressed
-by `--person-ids` (MLB/MiLB, comma-separated) and/or `--ncaa-seqs` (NCAA); `add` is idempotent and
+by `--person-ids` (MLB/MiLB, comma-separated) and/or `--highlightly-player-ids` (NCAA); `add` is idempotent and
 `remove` no-ops on a non-member. An unknown list, or a reference to a Player not on the Watch List,
 fails closed. (Distinct from `seed list`, which prints players.)
 
@@ -95,11 +91,11 @@ fails closed. (Distinct from `seed list`, which prints players.)
 
 ```sh
 sk seed add --person-id 691185
-sk seed add --ncaa-seq 2649785
+sk seed add --highlightly-player-id 501 --canonical-name "Gavin Kelly" --team-id 10
 sk seed add --search "acosta"            # prints a numbered list if several match
 sk seed add --search "smith" --pick 2    # choose from that list (1-based)
 sk seed deactivate --person-id 691185
-sk seed deactivate --ncaa-seq 2649785
+sk seed deactivate --highlightly-player-id 501
 sk seed list
 sk seed list --tags status:rostered,level:aaa   # tag-filtered roster (comma = AND)
 sk seed tag add --person-id 691185 --tag status:rostered
@@ -113,13 +109,13 @@ One required subcommand (`add` | `deactivate` | `list` | `tag`), then flags:
 | Subcommand | Flags | Notes |
 |---|---|---|
 | `add` | `--person-id N` | Add an MLB/MiLB Player by MLB Stats API personId. |
-| `add` | `--ncaa-seq N` | Add an NCAA Player by stats.ncaa.org `stats_player_seq`. |
+| `add` | `--highlightly-player-id N --canonical-name NAME --team-id N` | Add an NCAA Player by explicit Highlightly identity. |
 | `add` | `--search "NAME" [--pick I]` | Name search; `--pick I` is **one-based** and **search-only**. With one match and no `--pick`, it adds that Player; with several and no `--pick`, it prints a numbered list and exits `1`. |
-| `deactivate` | `--person-id N` \| `--ncaa-seq N` | Remove a Player from the Watch List; his row and full history are kept. |
+| `deactivate` | `--person-id N` \| `--highlightly-player-id N` | Remove a Player from the Watch List; his row and full history are kept. |
 | `list` | `[--tags EXPR]` | Print every Player row (active and inactive) plus a `total=` line. `--tags` is a comma-separated **AND** selector (a bare namespace like `prospect` matches any value); only matching rows print. |
-| `tag add` | `--person-id N` \| `--ncaa-seq N`, `--tag ns:value` | Add a **manual** tag (`status:rostered` \| `status:scouted`). A write to a derived namespace (`level`/`pos`/`prospect`) or an unknown value exits `1`. |
-| `tag remove` | `--person-id N` \| `--ncaa-seq N`, `--tag ns:value` | Remove a manual tag (no-op if absent). |
-| `tag list` | `--person-id N` \| `--ncaa-seq N` | Print every tag (derived + manual) for the Player plus a `total=` line. |
+| `tag add` | `--person-id N` \| `--highlightly-player-id N`, `--tag ns:value` | Add a **manual** tag (`status:rostered` \| `status:scouted`). A write to a derived namespace (`level`/`pos`/`prospect`) or an unknown value exits `1`. |
+| `tag remove` | `--person-id N` \| `--highlightly-player-id N`, `--tag ns:value` | Remove a manual tag (no-op if absent). |
+| `tag list` | `--person-id N` \| `--highlightly-player-id N` | Print every tag (derived + manual) for the Player plus a `total=` line. |
 | `tag rebuild` | — | Re-derive the `level`/`pos`/`prospect` tags for **every** Player (the one-shot backfill). |
 
 See the [Player tag model reference](../domain/tags.md) for the full namespace vocabulary, the derived
@@ -130,22 +126,8 @@ backfilled — unless the pipeline is in Offseason Sleep, in which case the add 
 Refresh is skipped. Re-adding a Player already on the Watch List is a no-op update with no Refresh;
 use `refresh` to re-pull his season.
 
-## `ncaa:probe` — validate the NCAA scrape on this host
-
-```sh
-sk ncaa probe --seq 2649785 --season 2025 --type batting
-```
-
-Fetches **one** live stats.ncaa.org game-log page and reports the HTTP status plus what the parser
-extracted (name, school, row count). Use it to confirm the scrape adapter works from the host before
-relying on it ([ADR 0032](../adr/0032-ncaa-identity-stats-player-seq-scrape-adapter.md)); it exits
-non-zero on any fetch or parse failure.
-
-| Flag | Required | Default |
-|---|---|---|
-| `--seq N` | **yes** (`stats_player_seq`) | — |
-| `--season YYYY` | no | current calendar year |
-| `--type batting\|pitching\|fielding` | no | `batting` |
+NCAA adds use an explicit Highlightly player ID plus canonical name and team ID; no NCAA HTML probe
+or sequence-based command is available.
 
 ## `db:migrate` — apply pending migrations
 
@@ -170,7 +152,7 @@ Takes a **Snapshot** — a consistent, whole-database point-in-time copy — int
 malformed invocation fails loud. Output is two `key=value` lines:
 
 ```
-snapshot created name=bryce-20260722T030000Z-000.db dir=backups
+snapshot created name=sk-20260722T030000Z-000.db dir=backups
 retention keepLast=10 kept=10 deleted=1
 ```
 
@@ -182,7 +164,7 @@ Snapshot files are owner-only (`0600`). Schedule it nightly with launchd — see
 ## `db:restore` — swap a Snapshot into place
 
 ```sh
-sk db restore --from backups/bryce-20260722T030000Z-000.db
+sk db restore --from backups/sk-20260722T030000Z-000.db
 ```
 
 **Restore** is the destructive recovery op: it validates the candidate Snapshot (integrity check,
@@ -236,12 +218,12 @@ invalid payload or a split-identity conflict fails the whole import with a non-z
 ## `players:batch-add` — stage many Players in one call
 
 ```sh
-sk players batch-add --person-ids 691185,700001 --ncaa-seqs 2649785
+sk players batch-add --person-ids 691185,700001
 sk players batch-add --names "Bobby Witt Jr." --names "Gunnar Henderson"
 sk players batch-add --file roster.txt
 ```
 
-Stages up to **25** Players onto the Watch List in one call ([#68](https://github.com/wrburgess/bryce/issues/68),
+Stages up to **25** Players onto the Watch List in one call ([#68](https://github.com/wrburgess/sk/issues/68),
 [ADR 0045](../adr/0045-batch-add-stages-by-identity-best-effort-defers-backfill.md)). Each Player's
 **identity** is resolved and his row is staged **now**, but — unlike `seed add` — **no first Refresh
 runs inline**: his Stat Lines appear at the next `sk refresh`. Prints one greppable
@@ -251,7 +233,7 @@ line. All flags and the file merge into one batch.
 | Flag | Notes |
 |---|---|
 | `--person-ids 1,2,3` | Comma-separated MLB personIds. Repeatable; a non-integer token is a usage error. |
-| `--ncaa-seqs 10,20` | Comma-separated NCAA `stats_player_seq`. Repeatable; a non-integer token is a usage error. |
+| `--highlightly-player-id ID --canonical-name NAME --team-id ID` | One explicit Highlightly NCAA identity. |
 | `--names NAME` | One MLB/MiLB name to people-search (must resolve to exactly one Player). Repeat the flag per name. |
 | `--file PATH` | A paste-friendly file of tagged lines (below), combinable with the flags. |
 

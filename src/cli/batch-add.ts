@@ -6,8 +6,8 @@ import type { Db } from "../db/client.js";
 import { startupDb } from "../db/startup.js";
 import type { MlbClient } from "../mlb/client.js";
 import { MlbClient as MlbClientImpl } from "../mlb/client.js";
-import type { NcaaClient } from "../ncaa/client.js";
-import { NcaaClient as NcaaClientImpl } from "../ncaa/client.js";
+import type { HighlightlyClient } from "../highlightly/client.js";
+import { HighlightlyClient as HighlightlyClientImpl } from "../highlightly/client.js";
 import type { BatchAddEntryResult } from "../watchlist/service.js";
 import { batchAddPlayers } from "../watchlist/service.js";
 import { exitAfterDrain, isMain } from "./main.js";
@@ -23,12 +23,12 @@ import { preflightDirect } from "./router.js";
  *
  * Three quick flags plus a paste-friendly file, all merged into one entries[]:
  *   --person-ids 1,2,3     comma-separated MLB personIds (repeatable)
- *   --ncaa-seqs 10,20      comma-separated NCAA stats_player_seq (repeatable)
+ *   --highlightly-player-id ID --canonical-name NAME --team-id ID
  *   --names NAME           one MLB/MiLB name to people-search (repeatable)
  *   --file PATH            tagged lines (see below), combinable with the flags
  *
  * File grammar (each line trimmed; blank lines and `#` comments ignored):
- *   ncaa:<n>   -> an NCAA stats_player_seq (a non-numeric `ncaa:` is a usage error)
+ *   highlightly:<id>|<name>|<team-id> -> an explicit Highlightly NCAA identity
  *   name:<x>   -> an explicit name (the escape hatch for a name that is all digits)
  *   <digits>   -> an MLB personId
  *   <other>    -> a name
@@ -40,18 +40,18 @@ import { preflightDirect } from "./router.js";
  */
 
 const USAGE =
-  "usage: players:batch-add [--person-ids 1,2,3] [--ncaa-seqs 10,20] [--names NAME]... [--file PATH]";
+  "usage: players:batch-add [--person-ids 1,2,3] [--highlightly-player-id ID --canonical-name NAME --team-id ID] [--names NAME]... [--file PATH]";
 
 /** A batch file may not exceed this size — a cheap guard, mirroring MAX_BACKUP_BYTES. */
 export const MAX_BATCH_FILE_BYTES = 64 * 1024;
 
 /** One typed entry as the CLI assembles it, before the service parses/validates. */
-type BatchEntryInput = { personId: number } | { ncaaPlayerSeq: number } | { name: string };
+type BatchEntryInput = { personId: number } | { name: string } | { highlightlyPlayerId: number; canonicalName: string; teamId: number };
 
 export interface BatchAddRunDeps {
   db: Db;
   client: MlbClient;
-  ncaaClient: NcaaClient;
+  highlightlyClient?: HighlightlyClient;
   now: () => Date;
   tz: string;
   write: (line: string) => void;
@@ -61,7 +61,7 @@ export interface BatchAddRunDeps {
 
 interface ParsedFlags {
   personIds: number[];
-  ncaaSeqs: number[];
+  highlightly: { playerId: number; canonicalName: string; teamId: number } | null;
   names: string[];
   file: string | null;
   error: string | null;
@@ -81,11 +81,11 @@ function parseIntList(value: string): { ints: number[]; bad: string | null } {
 
 /**
  * Parse the CLI flags. Every flag takes the following token as its value;
- * `--person-ids`/`--ncaa-seqs`/`--names` accumulate across repeats. An unknown
+ * `--person-ids`/`--names` accumulate across repeats. An unknown
  * flag, a missing value, or a non-integer id token is a usage error.
  */
 function parseBatchFlags(args: string[]): ParsedFlags {
-  const out: ParsedFlags = { personIds: [], ncaaSeqs: [], names: [], file: null, error: null };
+  const out: ParsedFlags = { personIds: [], highlightly: null, names: [], file: null, error: null };
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
     if (arg === undefined) continue;
@@ -105,10 +105,20 @@ function parseBatchFlags(args: string[]): ParsedFlags {
         out.personIds.push(...ints);
         break;
       }
-      case "ncaa-seqs": {
-        const { ints, bad } = parseIntList(value);
-        if (bad !== null) return { ...out, error: `invalid --ncaa-seqs token ${bad}` };
-        out.ncaaSeqs.push(...ints);
+      case "highlightly-player-id": {
+        const playerId = Number.parseInt(value, 10);
+        const nameFlag = args[i + 1];
+        const canonicalName = args[i + 2];
+        const teamFlag = args[i + 3];
+        const idValue = args[i + 4];
+        if (!Number.isInteger(playerId) || playerId <= 0 || nameFlag !== "--canonical-name" || canonicalName === undefined || teamFlag !== "--team-id" || idValue === undefined) {
+          return { ...out, error: "--highlightly-player-id requires ID --canonical-name NAME --team-id ID" };
+        }
+        const teamId = Number.parseInt(idValue, 10);
+        if (!Number.isInteger(teamId) || teamId <= 0 || canonicalName.trim().length === 0) return { ...out, error: "invalid Highlightly identity" };
+        if (out.highlightly !== null) return { ...out, error: "only one --highlightly-player-id identity may be supplied" };
+        out.highlightly = { playerId, canonicalName, teamId };
+        i += 4;
         break;
       }
       case "names":
@@ -130,10 +140,12 @@ function parseBatchFile(raw: string): { entries: BatchEntryInput[]; error: strin
   for (const rawLine of raw.split(/\r?\n/)) {
     const line = rawLine.trim();
     if (line.length === 0 || line.startsWith("#")) continue;
-    if (line.startsWith("ncaa:")) {
-      const seq = line.slice("ncaa:".length).trim();
-      if (!/^\d+$/.test(seq)) return { entries, error: `invalid ncaa seq in file line: ${line}` };
-      entries.push({ ncaaPlayerSeq: Number.parseInt(seq, 10) });
+    if (line.startsWith("highlightly:")) {
+      const [id, canonicalName, teamId] = line.slice("highlightly:".length).split("|").map((part) => part.trim());
+      if (!/^\d+$/.test(id ?? "") || !/^\d+$/.test(teamId ?? "") || !canonicalName) return { entries, error: `invalid Highlightly identity in file line: ${line}` };
+      entries.push({ highlightlyPlayerId: Number(id), canonicalName, teamId: Number(teamId) });
+    } else if (line.startsWith("ncaa:")) {
+      return { entries, error: "ncaa: entries are no longer supported; use highlightly:<id>|<name>|<team-id>" };
     } else if (line.startsWith("name:")) {
       entries.push({ name: line.slice("name:".length).trim() });
     } else if (/^\d+$/.test(line)) {
@@ -163,7 +175,7 @@ function asciiField(value: string): string {
 function describeEntry(result: BatchAddEntryResult): string {
   const entry = result.entry;
   if (entry.personId !== undefined) return `personId=${entry.personId}`;
-  if (entry.ncaaPlayerSeq !== undefined) return `ncaaSeq=${entry.ncaaPlayerSeq}`;
+  if (entry.highlightlyPlayerId !== undefined) return `highlightlyPlayerId=${entry.highlightlyPlayerId}`;
   return `name=${asciiField(entry.name ?? "")}`;
 }
 
@@ -190,7 +202,9 @@ export async function runBatchAdd(argv: string[], deps: BatchAddRunDeps): Promis
 
   const entries: BatchEntryInput[] = [];
   for (const personId of flags.personIds) entries.push({ personId });
-  for (const ncaaPlayerSeq of flags.ncaaSeqs) entries.push({ ncaaPlayerSeq });
+  if (flags.highlightly !== null) {
+    entries.push({ highlightlyPlayerId: flags.highlightly.playerId, canonicalName: flags.highlightly.canonicalName, teamId: flags.highlightly.teamId });
+  }
   for (const name of flags.names) entries.push({ name });
 
   if (flags.file !== null) {
@@ -217,7 +231,7 @@ export async function runBatchAdd(argv: string[], deps: BatchAddRunDeps): Promis
   let result;
   try {
     result = await batchAddPlayers(
-      { db: deps.db, client: deps.client, ncaaClient: deps.ncaaClient, now: deps.now, tz: deps.tz },
+      { db: deps.db, client: deps.client, highlightlyClient: deps.highlightlyClient, now: deps.now, tz: deps.tz },
       { entries },
     );
   } catch (err) {
@@ -258,11 +272,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   });
   try {
     const client = new MlbClientImpl({ delayMs: config.mlbApiDelayMs });
-    const ncaaClient = new NcaaClientImpl({ delayMs: config.ncaaScrapeDelayMs });
+    const highlightlyClient = new HighlightlyClientImpl({ apiKey: config.highlightlyApiKey });
     return await runBatchAdd(argv, {
       db,
       client,
-      ncaaClient,
+      highlightlyClient,
       now: () => new Date(),
       tz: config.tz,
       write: (line) => process.stdout.write(`${line}\n`),

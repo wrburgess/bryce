@@ -1,17 +1,28 @@
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { NewStatLineRow, PlayerRow } from "../db/schema.js";
-import { players, seasonCalendar, statLines } from "../db/schema.js";
+import {
+  highlightlyBoxScoreCache,
+  highlightlyMatchCache,
+  highlightlyPlayerCursors,
+  players,
+  seasonCalendar,
+  statLines,
+} from "../db/schema.js";
+import {
+  HighlightlyCoverageError,
+  HighlightlyMigrationRequiredError,
+  normalizeHighlightlyStats,
+  type HighlightlyMatch,
+  type HighlightlyPlayer,
+} from "../highlightly/client.js";
+import type { HighlightlyClient } from "../highlightly/client.js";
 import type { CalendarEntry } from "../domain/season.js";
 import { calendarHasUsableDates, hostDate, sleepWindow, sportIdForPlayer } from "../domain/season.js";
 import type { MlbClient, StatGroup } from "../mlb/client.js";
 import { isIngestedGameType } from "../mlb/gameTypes.js";
 import { levelForSportId, NCAA_SPORT_ID, SPORT_IDS } from "../mlb/levels.js";
 import type { GameLogSplit } from "../mlb/schemas.js";
-import type { NcaaClient } from "../ncaa/client.js";
-import { normalizeGameLog } from "../ncaa/normalize.js";
-import { parseGameLogPage } from "../ncaa/parse.js";
-import type { NcaaStatCategory } from "../ncaa/seasons.js";
 import { ncaaSeasonFor } from "../ncaa/seasons.js";
 import { syncDerivedTags } from "../tags/service.js";
 import type { RefreshTerminalStatus } from "./refresh-run.js";
@@ -20,12 +31,12 @@ import { claimRefreshRun, renewRefreshRun, settleRefreshRun, updateRefreshRunPro
 export interface RefreshDeps {
   db: Db;
   client: MlbClient;
-  ncaaClient: NcaaClient;
+  /** Optional only for installations without an attached NCAA player. */
+  highlightlyClient?: HighlightlyClient;
   now: () => Date;
   tz: string;
 }
 
-const NCAA_CATEGORIES: readonly NcaaStatCategory[] = ["batting", "pitching", "fielding"];
 
 /** A swept sportId whose `getSeason` fetch threw (#23): its cached row is left untouched. */
 export interface CalendarFailure {
@@ -559,90 +570,151 @@ async function refreshOnePlayer(
       // pipeline awake — nothing new to scrape until next season (issue #15).
       return null;
     }
-    return refreshNcaaPlayer(deps, player, season);
+    // NCAA HTML is historical data only. Operational refresh has exactly one
+    // provider: Highlightly. An unattached legacy row is deliberately reported
+    // as migration-required instead of silently spending a browser scrape.
+    if (
+      player.ncaaSourceState === "highlightly_active" ||
+      player.ncaaSourceState === "highlightly_pending"
+    ) {
+      return refreshHighlightlyNcaaPlayer(deps, player, Number(season));
+    }
+    throw new HighlightlyMigrationRequiredError();
   }
   if (player.externalId === null) return null;
   return refreshPlayer(deps, player, season);
 }
 
+type HighlightlyBox = Array<{ teamId: number | null; players: HighlightlyPlayer[] }>;
+
 /**
- * Refresh one NCAA Player (ADR 0032): fetch his batting + pitching + fielding
- * game-log pages for the current season, normalize, and upsert idempotently on the ADR
- * 0029 key. Identity (name/school) is refreshed from the page — a transfer
- * CHANGES the row, never creates a second Player. No bundled season for the
- * year → zero HTTP, nothing ingested.
+ * Ingest an explicitly attached Highlightly player.  HTTP/cache work happens
+ * before the write transaction.  Thus a legacy player remains wholly legacy
+ * while pending; a complete backfill installs the new batting/pitching set and
+ * activates the provider identity atomically.
  */
-export async function refreshNcaaPlayer(
+export async function refreshHighlightlyNcaaPlayer(
   deps: RefreshDeps,
   player: PlayerRow,
-  season: string,
+  season: number,
 ): Promise<{ inserted: number; updated: number }> {
-  const { db, ncaaClient, now } = deps;
-  const seq = player.ncaaPlayerSeq;
-  if (seq === null) {
-    throw new Error(`refreshNcaaPlayer requires an ncaaPlayerSeq (player id ${player.id})`);
+  if (player.highlightlyPlayerId === null || player.highlightlyTeamId === null) {
+    throw new HighlightlyMigrationRequiredError();
   }
-  if (ncaaSeasonFor(season) === null) {
-    process.stderr.write(
-      `refresh: no bundled NCAA season lookup for year=${season}; ` +
-        `skipping NCAA player id=${player.id}\n`,
-    );
-    return { inserted: 0, updated: 0 };
-  }
+  if (deps.highlightlyClient === undefined) throw new HighlightlyMigrationRequiredError();
 
-  // Buffer ALL page fetches FIRST into identity + rows (#23): the atomic write
-  // below must never be held open across HTTP I/O.
-  const timestamp = now().toISOString();
+  const timestamp = deps.now().toISOString();
+  const schedule = await deps.highlightlyClient.getFinalTeamMatches(player.highlightlyTeamId, season);
   const rows: NewStatLineRow[] = [];
-  let latestFullName: string | null = null;
-  let latestSchoolName: string | null = null;
-  for (const category of NCAA_CATEGORIES) {
-    const html = await ncaaClient.getGameLogPage(seq, season, category);
-    const page = parseGameLogPage(html);
-    latestFullName = page.fullName;
-    latestSchoolName = page.schoolName;
-    rows.push(
-      ...normalizeGameLog({ playerId: player.id, seq, category, rows: page.rows, timestamp }),
-    );
+  for (const match of schedule.value) {
+    await deps.db
+      .insert(highlightlyMatchCache)
+      .values({
+        matchId: match.id,
+        season,
+        payload: match,
+        complete: true,
+        rateRemaining: schedule.remaining,
+        fetchedAt: timestamp,
+      })
+      .onConflictDoUpdate({
+        target: highlightlyMatchCache.matchId,
+        set: { season, payload: match, complete: true, rateRemaining: schedule.remaining, fetchedAt: timestamp },
+      });
+
+    const cached = (await deps.db.select().from(highlightlyBoxScoreCache)
+      .where(eq(highlightlyBoxScoreCache.matchId, match.id)))[0];
+    let box: HighlightlyBox;
+    if (cached?.complete) {
+      box = cached.payload as HighlightlyBox;
+    } else {
+      const fetched = await deps.highlightlyClient.getBoxScore(match.id);
+      box = fetched.value;
+      await deps.db
+        .insert(highlightlyBoxScoreCache)
+        .values({ matchId: match.id, payload: box, complete: true, rateRemaining: fetched.remaining, fetchedAt: timestamp })
+        .onConflictDoUpdate({
+          target: highlightlyBoxScoreCache.matchId,
+          set: { payload: box, complete: true, rateRemaining: fetched.remaining, fetchedAt: timestamp },
+        });
+    }
+    const providerPlayer = box
+      .filter((team) => team.teamId === player.highlightlyTeamId)
+      .flatMap((team) => team.players)
+      .find((candidate) => candidate.id === player.highlightlyPlayerId);
+    // An omitted player from a complete box score is a DNP, not fabricated
+    // zeroes. A record for the opponent is never allowed to attach by name.
+    if (providerPlayer !== undefined) rows.push(...highlightlyRowsForMatch(player, match, providerPlayer, timestamp));
   }
 
-  // Identity refresh: a name or school change CHANGES the one Player row.
-  const identity: Partial<typeof players.$inferInsert> = { updatedAt: timestamp };
-  if (latestFullName !== null && latestFullName !== player.fullName) {
-    identity.fullName = latestFullName;
-  }
-  if (latestSchoolName !== null && latestSchoolName !== player.schoolName) {
-    identity.schoolName = latestSchoolName;
-  }
-
-  // Insert/update counts (informational): read the pre-existing keys, then diff.
-  const existing = await db
+  const existing = await deps.db
     .select({ gameId: statLines.gameId, statType: statLines.statType })
     .from(statLines)
-    .where(eq(statLines.playerId, player.id));
-  const existingKeys = new Set(existing.map((r) => `${r.gameId}:${r.statType}`));
-  let inserted = 0;
-  let updated = 0;
-  for (const row of rows) {
-    const key = `${row.gameId}:${row.statType}`;
-    if (existingKeys.has(key)) {
-      updated += 1;
-    } else {
-      inserted += 1;
-      existingKeys.add(key);
-    }
-  }
+    .where(and(eq(statLines.playerId, player.id), eq(statLines.source, "highlightly_ncaa")));
+  const existingKeys = new Set(existing.map((row) => `${row.gameId}:${row.statType}`));
+  const inserted = rows.filter((row) => !existingKeys.has(`${row.gameId}:${row.statType}`)).length;
 
-  // Atomic identity + stat lines (#23): one BEGIN IMMEDIATE transaction, so a
-  // throw mid-upsert rolls the identity update back with it.
-  writePlayerRefresh(db, { playerId: player.id, identity, rows });
-
-  // Identity and this NCAA player's Stat Lines are now current — re-derive his
-  // tags from the single entry point (idempotent; manual tags untouched).
-  // Best-effort AFTER the transaction (#23, MF5): a tag-sync failure must not
-  // mark the player failed nor corrupt his already-committed identity/stats.
+  deps.db.transaction(
+    (tx) => {
+      if (player.ncaaSourceState === "highlightly_pending") {
+        tx.delete(statLines)
+          .where(and(eq(statLines.playerId, player.id), eq(statLines.source, "ncaa_html_legacy"))).run();
+      }
+      upsertStatLinesInto(tx, rows);
+      tx.update(players)
+        .set({ ncaaSourceState: "highlightly_active", updatedAt: timestamp })
+        .where(eq(players.id, player.id)).run();
+      tx.insert(highlightlyPlayerCursors)
+        .values({ playerId: player.id, season, nextMatchDate: null, lastCompleteAt: timestamp, updatedAt: timestamp })
+        .onConflictDoUpdate({
+          target: highlightlyPlayerCursors.playerId,
+          set: { season, nextMatchDate: null, lastCompleteAt: timestamp, updatedAt: timestamp },
+        }).run();
+    },
+    { behavior: "immediate" },
+  );
   syncDerivedTagsBestEffort(deps, player.id);
-  return { inserted, updated };
+  return { inserted, updated: rows.length - inserted };
+}
+
+function highlightlyRowsForMatch(
+  player: PlayerRow,
+  match: HighlightlyMatch,
+  providerPlayer: HighlightlyPlayer,
+  timestamp: string,
+): NewStatLineRow[] {
+  const gameDate = match.date.slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(gameDate)) {
+    throw new HighlightlyCoverageError(`Highlightly match ${match.id} has an invalid date`);
+  }
+  const isHome = match.homeTeam.id === player.highlightlyTeamId;
+  const ownTeam = isHome ? match.homeTeam : match.awayTeam;
+  const opponent = isHome ? match.awayTeam : match.homeTeam;
+  return (["Batting", "Pitching"] as const).flatMap((group) => {
+    const normalized = normalizeHighlightlyStats(providerPlayer, group);
+    // NCAA fielding is deliberately unsupported, and no supplied key is a DNP
+    // or unavailable line rather than an all-zero played appearance.
+    if (normalized.availableStats.length === 0) return [];
+    return [{
+      playerId: player.id,
+      gameId: match.id,
+      source: "highlightly_ncaa" as const,
+      statType: group === "Batting" ? "batting" as const : "pitching" as const,
+      gameDate,
+      gameNumber: 1,
+      gameType: "R",
+      isHome,
+      opponentName: opponent.name,
+      teamName: ownTeam.name,
+      sportId: NCAA_SPORT_ID,
+      leagueName: "NCAA",
+      stats: normalized.stats,
+      availableStats: normalized.availableStats,
+      raw: providerPlayer,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }];
+  });
 }
 
 /**
@@ -812,7 +884,7 @@ export function upsertStatLinesInto(db: StatLinesDb, rows: NewStatLineRow[]): vo
       .insert(statLines)
       .values(chunk)
       .onConflictDoUpdate({
-        target: [statLines.playerId, statLines.gameId, statLines.statType],
+        target: [statLines.playerId, statLines.source, statLines.gameId, statLines.statType],
         set: {
           gameDate: sql`excluded.game_date`,
           gameNumber: sql`excluded.game_number`,
@@ -823,6 +895,7 @@ export function upsertStatLinesInto(db: StatLinesDb, rows: NewStatLineRow[]): vo
           sportId: sql`excluded.sport_id`,
           leagueName: sql`excluded.league_name`,
           stats: sql`excluded.stats`,
+          availableStats: sql`excluded.available_stats`,
           raw: sql`excluded.raw`,
           updatedAt: sql`excluded.updated_at`,
         },
@@ -906,10 +979,17 @@ export async function runRefreshForPlayer(
   const season = currentSeason(deps);
   if (player.level === "ncaa") {
     await refreshNcaaCalendar(deps, season, activePlayers);
-    if (player.ncaaPlayerSeq === null) {
+    if (
+      player.ncaaPlayerSeq === null &&
+      player.ncaaSourceState !== "highlightly_active" &&
+      player.ncaaSourceState !== "highlightly_pending"
+    ) {
       return { skipped: false, inserted: 0, updated: 0, calendarFailures: [] };
     }
-    const ncaaResult = await refreshNcaaPlayer(deps, player, season);
+    const ncaaResult =
+      player.ncaaSourceState === "highlightly_active" || player.ncaaSourceState === "highlightly_pending"
+        ? await refreshHighlightlyNcaaPlayer(deps, player, Number(season))
+        : (() => { throw new HighlightlyMigrationRequiredError(); })();
     return { skipped: false, ...ncaaResult, calendarFailures: [] };
   }
   const calendarFailures = await refreshCalendars(deps, season);

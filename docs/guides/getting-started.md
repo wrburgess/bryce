@@ -2,7 +2,7 @@
 
 From nothing to your first digest email, step by step. No prior knowledge of this codebase is
 assumed — if you can use GitHub, you can run ScoreKeeps Baseball Tracker (the development project is named Bryce). Production operations (scheduling, remote
-access, backup) live in [Running Bryce](running-bryce.md); this guide gets you testing locally.
+access, backup) live in [Running Bryce](running-sk.md); this guide gets you testing locally.
 
 **What Bryce is, in one paragraph:** you keep a personal watch list of baseball players (MLB,
 minor league, NCAA). A nightly *Refresh* pulls each player's full season game log; a daily *Digest*
@@ -42,12 +42,12 @@ No Docker. No database server. Storage is a single SQLite file the app creates i
 ## 2. Get the code
 
 ```bash
-git clone https://github.com/wrburgess/bryce.git
-cd bryce
+git clone https://github.com/wrburgess/sk.git
+cd sk
 ```
 
-(Or `gh repo clone wrburgess/bryce`, or clone your fork — anything that leaves you inside a
-`bryce/` directory works.)
+(Or `gh repo clone wrburgess/sk`, or clone your fork — anything that leaves you inside a
+`sk/` directory works.)
 
 ## 3. Install the packages
 
@@ -99,14 +99,13 @@ Every other line can stay at its default. For reference, what they mean:
 
 | Variable | What it is | Default |
 |---|---|---|
-| `DATABASE_PATH` | Where the SQLite file lives; created + migrated automatically | `data/bryce.db` |
+| `DATABASE_PATH` | Where the SQLite file lives; created + migrated automatically | `data/sk.db` |
 | `BRYCE_TZ` | Your timezone — defines "today" for digests and season boundaries | `America/Chicago` |
 | `MAILER_PROVIDER` | `console` (print), `postmark`, or `smtp` | `postmark` |
 | `POSTMARK_SERVER_TOKEN` | Only when provider is `postmark` (see step 9) | empty |
 | `SMTP_HOST/PORT/USER/PASS` | Only when provider is `smtp` (e.g. Forward Email) | empty |
 | `DIGEST_TO` / `DIGEST_FROM` | Recipient and sender for real email (not needed for `console`) | empty |
 | `MLB_API_DELAY_MS` | Politeness delay between MLB Stats API calls | `500` |
-| `NCAA_SCRAPE_DELAY_MS` | Politeness delay between stats.ncaa.org requests | `3000` |
 | `SERVER_PORT` | Port for the local REST/MCP server | `3000` |
 | `API_TOKEN` | Bearer token guarding `/api` and `/mcp`; server fails closed without it | empty |
 
@@ -119,7 +118,7 @@ npm test
 Expected: a Vitest run ending in `Tests  225 passed` (a few seconds). Optionally also
 `npx tsx scripts/parity-check.ts`, which should print `parity_check: OK`. Green here means your
 machine is fully set up. There is no "create the database" step — the first real command below
-creates and migrates `data/bryce.db` on its own.
+creates and migrates `data/sk.db` on its own.
 
 ## 6. Add players to your watch list
 
@@ -141,12 +140,10 @@ Adding a player immediately fetches his **entire current-season game log** (his 
 so expect it to take a few seconds and print what it ingested. If you already know a player's MLB
 Stats API personId you can use `add --person-id 702616` instead.
 
-**NCAA players** are added by their stats.ncaa.org ID (`stats_player_seq`). Search for the player on
-stats.ncaa.org, open the player's page, and copy the `stats_player_seq` value from its URL — see
-[Running Bryce → NCAA players](running-bryce.md#ncaa-players) for an example:
+**NCAA players** are added by an explicit Highlightly player ID, canonical name, and team ID:
 
 ```bash
-sk seed add --ncaa-seq 2649785
+sk seed add --highlightly-player-id 501 --canonical-name "C Guy" --team-id 10
 ```
 
 Note: NCAA's season is roughly February–June, so an NCAA player added in the offseason has no new
@@ -157,7 +154,7 @@ stats until spring — that's normal.
 ```bash
 sk seed list                          # who's being watched
 sk seed deactivate --person-id 702616 # stop watching (all history is kept)
-sk seed deactivate --ncaa-seq 2649785
+sk seed deactivate --highlightly-player-id 501
 ```
 
 ## 7. Run a Refresh and send your first Digest
@@ -228,18 +225,10 @@ Two behaviors that surprise people, both by design:
   Series to the earliest watched opening day the whole pipeline sleeps, and a weekly heartbeat
   email replaces the daily digest.
 
-## 8. Validate the NCAA scraper (one time)
+## 8. Add NCAA players with Highlightly
 
-The NCAA page parser needs one live confirmation from your machine:
-
-```bash
-sk ncaa probe --seq 2649785 --season 2025 --type batting
-```
-
-It fetches one real stats.ncaa.org game-log page and prints the HTTP status, the player name and
-school it resolved, and how many game rows it parsed. A clean parse = NCAA support is fully
-validated. (If it fails, the fix is isolated to one file — report the output.) Run it once more
-with `--type fielding`: the bundled fielding category ids follow the source's consecutive-id
+Use an explicit Highlightly player ID together with its canonical name and team ID. Bryce validates
+those assertions against Highlightly before adding the player; it does not scrape NCAA HTML pages.
 pattern but are unverified until this probe confirms them
 ([ADR 0033](../adr/0033-digest-stat-set-single-game-rates-fielding.md)).
 
@@ -282,13 +271,13 @@ using the CLI. Tool list, REST routes, and remote setup: the [MCP](../mcp/README
 
 ## 11. Make it permanent (production)
 
-Everything so far ran by hand. [Running Bryce](running-bryce.md) covers turning it into the
+Everything so far ran by hand. [Running Bryce](running-sk.md) covers turning it into the
 set-and-forget daily email:
 
-1. [Scheduling with launchd](running-bryce.md#scheduling-with-launchd) — nightly refresh + morning
+1. [Scheduling with launchd](running-sk.md#scheduling-with-launchd) — nightly refresh + morning
    digest that self-heal if the laptop was asleep.
-2. [Litestream backup to Cloudflare R2](running-bryce.md#backup-litestream-to-cloudflare-r2).
-3. [Cloudflare Tunnel](running-bryce.md#remote-access-cloudflare-tunnel) +
+2. [Litestream backup to Cloudflare R2](running-sk.md#backup-litestream-to-cloudflare-r2).
+3. [Cloudflare Tunnel](running-sk.md#remote-access-cloudflare-tunnel) +
    [connecting a Claude client to the remote MCP endpoint](../mcp/README.md)
    — manage the watch list from your phone, from anywhere.
 
@@ -309,5 +298,4 @@ sk digest  # database migrations apply automatically on the next run of anything
 | `sk digest` shows no games | No watched player appeared in the selected window; the scheduled daily Digest still sends an empty report, while Offseason Sleep replaces it with a weekly heartbeat |
 | Weekly "heartbeat" email instead of a daily digest | Offseason Sleep (World Series → earliest watched opening day) — expected |
 | Real email not arriving | `DIGEST_FROM` not a verified Postmark Sender Signature, or wrong server token |
-| NCAA add/probe fails with a 403 or parse error | stats.ncaa.org edge/selector drift — run the probe and see [Running Bryce → NCAA players](running-bryce.md#ncaa-players) |
-| `no bundled stats.ncaa.org season lookup for year N` | Annual one-line update needed in `src/ncaa/seasons.ts` |
+| NCAA add fails | Verify `HIGHLIGHTLY_API_KEY` and the explicit Highlightly player identity. |

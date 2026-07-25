@@ -38,7 +38,8 @@ const EnvSchema = z
     DIGEST_TO: z.string().optional(),
     DIGEST_FROM: z.string().optional(),
     MLB_API_DELAY_MS: z.coerce.number().int().nonnegative().default(500),
-    NCAA_SCRAPE_DELAY_MS: z.coerce.number().int().nonnegative().default(3000),
+    /** RapidAPI credential for Highlightly's college-baseball JSON API. */
+    HIGHLIGHTLY_API_KEY: z.string().optional(),
     SERVER_PORT: z.coerce.number().int().positive().default(3000),
     /** Bearer token guarding /api and /mcp; whitespace-only is treated as absent. */
     API_TOKEN: z.string().optional(),
@@ -92,7 +93,8 @@ export interface Config {
   digestTo: string | null;
   digestFrom: string | null;
   mlbApiDelayMs: number;
-  ncaaScrapeDelayMs: number;
+  /** Kept nullable so non-NCAA installations do not need a provider credential. */
+  highlightlyApiKey: string | null;
   serverPort: number;
   apiToken: string | null;
 }
@@ -132,7 +134,7 @@ export function loadConfig(
     digestTo: clean(parsed.DIGEST_TO),
     digestFrom: clean(parsed.DIGEST_FROM),
     mlbApiDelayMs: parsed.MLB_API_DELAY_MS,
-    ncaaScrapeDelayMs: parsed.NCAA_SCRAPE_DELAY_MS,
+    highlightlyApiKey: clean(parsed.HIGHLIGHTLY_API_KEY),
     serverPort: parsed.SERVER_PORT,
     apiToken: clean(parsed.API_TOKEN),
   };

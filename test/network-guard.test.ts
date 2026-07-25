@@ -4,7 +4,6 @@ import tls from "node:tls";
 import http from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { MlbClient } from "../src/mlb/client.js";
-import { NcaaClient } from "../src/ncaa/client.js";
 import { PostmarkMailer } from "../src/mailer/postmark.js";
 import { SmtpMailer } from "../src/mailer/smtp.js";
 import type { MailMessage } from "../src/mailer/types.js";
@@ -566,14 +565,6 @@ describe("provider canaries — default clients must fail closed", () => {
     const client = new MlbClient();
     await expect(client.findPerson(123)).rejects.toBeInstanceOf(NetworkBlockedError);
     expect(takeAttempts()).toEqual([{ surface: "fetch", host: "statsapi.mlb.com", port: 443 }]);
-  });
-
-  it("NCAA: a default NcaaClient rejects and records a fetch attempt", async () => {
-    const client = new NcaaClient();
-    await expect(client.getGameLogPage(12345, "2024", "batting")).rejects.toBeInstanceOf(
-      NetworkBlockedError,
-    );
-    expect(takeAttempts()).toEqual([{ surface: "fetch", host: "stats.ncaa.org", port: 443 }]);
   });
 
   it("Postmark send: a default mailer rejects and records a fetch attempt", async () => {
