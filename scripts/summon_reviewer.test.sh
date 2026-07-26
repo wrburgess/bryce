@@ -276,6 +276,18 @@ expect_status "Codex acting harness normalizes whitespace and case before self-r
   "$TSX" "$SCRIPT" --mode work --out "$TMP/codex-normalized.md" --codex-bin "$FAKE_BIN" \
   --ac "  CoDeX  " --ac-model gpt-5.6 --reviewer-model GPT-5.6
 
+expect_status "every AC -> unknown acting model is refused before spawn" 1 "FAILED (self_review)" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/unknown-acting.md" --codex-bin /nonexistent/codex \
+  --ac claude --ac-model unknown --reviewer-model gpt-5.6-terra
+
+expect_status "every AC -> unknown reviewer model is refused before spawn" 1 "FAILED (self_review)" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/unknown-reviewer.md" --codex-bin /nonexistent/codex \
+  --ac claude --ac-model claude-opus --reviewer-model UNKNOWN
+
+expect_status "every AC -> matching models are refused before spawn" 1 "FAILED (self_review)" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/matching-claude.md" --codex-bin /nonexistent/codex \
+  --ac claude --ac-model Claude-Opus --reviewer-model claude-opus
+
 make_fake_codex echo_stdin
 PLAN="$TMP/plan.md"
 OUT="$TMP/plan-body.md"
@@ -284,8 +296,8 @@ expect_status "plan mode -> exit 0, OK status line" 0 "summon_reviewer: OK - pla
   "$TSX" "$SCRIPT" --mode plan --input "$PLAN" --out "$OUT" --codex-bin "$FAKE_BIN"
 grep -qF "Add the widget reaper." "$OUT"
 report "plan mode -> plan text reached the CLI on stdin" $?
-grep -qE '(^| )exec$' "$FAKE_LOG"
-report "plan mode -> CLI invoked as 'exec'" $?
+grep -qF -- "--model gpt-5.6-terra exec" "$FAKE_LOG"
+report "plan mode -> CLI invoked as '--model MODEL exec'" $?
 
 # ---------------------------------------------------------------------------
 echo "Failure ladder (each classification distinct and reachable):"
@@ -511,6 +523,8 @@ expect_status "missing --mode -> usage error" 1 "usage error" \
   "$TSX" "$SCRIPT" --out "$TMP/nomode.md" --codex-bin "$FAKE_BIN"
 expect_status "--mode bogus -> usage error" 1 "usage error" \
   "$TSX" "$SCRIPT" --mode bogus --out "$TMP/bogus.md" --codex-bin "$FAKE_BIN"
+expect_status "usage synopsis includes mandatory reviewer identity flags" 1 "--ac claude --ac-model acting-model --reviewer-model reviewer-model" \
+  "$TSX" "$SCRIPT" --mode bogus --out "$TMP/bogus-models.md" --codex-bin "$FAKE_BIN"
 expect_status "missing --out -> usage error" 1 "usage error" \
   "$TSX" "$SCRIPT" --mode work --codex-bin "$FAKE_BIN"
 expect_status "plan mode without --input -> usage error" 1 "usage error" \
@@ -560,6 +574,9 @@ if [ ! -f "$PROJECT_MD" ]; then
 else
   report "PROJECT.md is readable" 0
 
+  ! grep -qF "PROJECT.md" "$SCRIPT"
+  report "reviewer invocation does not derive models from attribution data" $?
+
   make_fake_codex ok
   DOC_PLAN="$TMP/doc-plan.md"
   DOC_OUT="$TMP/doc-review.md"
@@ -572,7 +589,7 @@ else
   PLAN_ARGS="$(printf '%s' "$PLAN_CMD" |
     sed -e "s#^npx tsx scripts/summon-reviewer.ts##" \
         -e "s#PLAN_FILE#$DOC_PLAN#" -e "s#OUT_FILE#$DOC_OUT#" -e "s#AC_NAME#claude#" \
-        -e "s#AC_MODEL#opus-4.8#" -e "s#REVIEWER_MODEL#gpt-5.6-terra#")"
+        -e "s#AC_MODEL#claude-opus#" -e "s#REVIEWER_MODEL#gpt-5.6-terra#")"
   expect_status "PROJECT.md's plan-mode command runs (exit 0, not a usage error)" 0 \
     "summon_reviewer: OK - plan review" \
     "$TSX" "$SCRIPT" $PLAN_ARGS --codex-bin "$FAKE_BIN"
@@ -586,19 +603,19 @@ else
   WORK_ARGS="$(printf '%s' "$WORK_CMD" |
     sed -e "s#^npx tsx scripts/summon-reviewer.ts##" \
         -e "s#OUT_FILE#$DOC_OUT#" -e "s#AC_NAME#claude#" -e "s#BRANCH#main#" \
-        -e "s#AC_MODEL#opus-4.8#" -e "s#REVIEWER_MODEL#gpt-5.6-terra#")"
+        -e "s#AC_MODEL#claude-opus#" -e "s#REVIEWER_MODEL#gpt-5.6-terra#")"
   expect_status "PROJECT.md's work-mode command runs (exit 0, not a usage error)" 0 \
     "summon_reviewer: OK - work review" \
     "$TSX" "$SCRIPT" $WORK_ARGS --codex-bin "$FAKE_BIN"
 
-  # Identity is fail-closed: the documented command must carry every field that
-  # identifies the actor and independent reviewer.
+  # All three identity arguments are mandatory, so documented commands cannot
+  # silently fall back to an unverified acting or reviewer model.
   printf '%s\n%s\n' "$PLAN_CMD" "$WORK_CMD" | grep -qF -- "--ac "
-  report "the documented invocations pass --ac (identity is explicit)" $?
+  report "the documented invocations pass --ac" $?
   printf '%s\n%s\n' "$PLAN_CMD" "$WORK_CMD" | grep -qF -- "--ac-model "
-  report "the documented invocations pass --ac-model (identity is explicit)" $?
+  report "the documented invocations pass --ac-model" $?
   printf '%s\n%s\n' "$PLAN_CMD" "$WORK_CMD" | grep -qF -- "--reviewer-model "
-  report "the documented invocations pass --reviewer-model (identity is explicit)" $?
+  report "the documented invocations pass --reviewer-model" $?
   printf '%s\n%s\n' "$PLAN_CMD" "$WORK_CMD" | grep -qF -- "--out "
   report "the documented invocations pass --out (it is required)" $?
 

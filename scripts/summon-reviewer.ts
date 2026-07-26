@@ -12,18 +12,18 @@
 // Runs on the app's own Node/TS toolchain via `tsx` (ADR 0039).
 //
 // Usage:
-//   npx tsx scripts/summon-reviewer.ts --mode work --out FILE [--base BRANCH]
-//   npx tsx scripts/summon-reviewer.ts --mode plan --input FILE --out FILE
+//   npx tsx scripts/summon-reviewer.ts --mode work --out FILE --ac NAME --ac-model MODEL --reviewer-model MODEL [--base BRANCH]
+//   npx tsx scripts/summon-reviewer.ts --mode plan --input FILE --out FILE --ac NAME --ac-model MODEL --reviewer-model MODEL
 //     --mode plan|work    plan = critique the plan text in --input; work = review the branch's diff
 //     --input FILE        plan mode only: the plan text to critique (required in plan mode)
 //     --base BRANCH       work mode only: the branch to review against (default: main)
 //     --out FILE          where to write the reviewer's body, raw bytes (required)
 //     --codex-bin PATH    the Codex CLI to summon (default: codex, resolved on PATH)
 //     --timeout SECONDS   wall-clock cap on the review (default: 900)
-//     --ac NAME           the acting harness (required; never inferred)
-//     --ac-model MODEL    the acting model (required; never inferred)
+//     --ac NAME           the acting harness (required)
+//     --ac-model MODEL    the acting model (required)
 //     --reviewer-model MODEL
-//                         Codex model to use for this review (required; never inferred)
+//                         Codex model to use for this review (required)
 //     --min-bytes N       substance floor on the review body (default: 200; 0 disables)
 //
 // Output (stdout, ASCII only — rules/scripting.md / ADR 0011), exactly two shapes:
@@ -46,8 +46,8 @@ import { resolve as resolvePath } from "node:path";
 import { argv, env } from "node:process";
 
 const USAGE =
-  "Usage: npx tsx scripts/summon-reviewer.ts --mode work --out FILE [--base BRANCH]\n" +
-  "       npx tsx scripts/summon-reviewer.ts --mode plan --input FILE --out FILE\n";
+  "Usage: npx tsx scripts/summon-reviewer.ts --mode work --out FILE --ac claude --ac-model acting-model --reviewer-model reviewer-model [--base BRANCH]\n" +
+  "       npx tsx scripts/summon-reviewer.ts --mode plan --input FILE --out FILE --ac claude --ac-model acting-model --reviewer-model reviewer-model\n";
 
 const MODES = ["plan", "work"];
 
@@ -56,10 +56,9 @@ const DEFAULT_CODEX_BIN = "codex";
 const DEFAULT_TIMEOUT = 900;
 
 const PREFLIGHT_TIMEOUT = 30;
-const CODEX_AC = "codex";
-// These are harnesses, not model families. Keep this list aligned with PROJECT.md's
-// Attribution & Model Declaration table. Aliases accept the short names agents use
-// at the command line while preserving one canonical value for policy checks.
+// These are harnesses, not model families. Keep this list aligned with the declared
+// attribution harnesses. Aliases accept the short names agents use at the command line
+// while preserving one canonical value for policy checks.
 const HARNESS_ALIASES = new Map<string, string>([
   ["claude", "claude"],
   ["claude-code", "claude"],
@@ -184,9 +183,9 @@ class SummonReviewer {
     const problem = this.usageProblem();
     if (problem) return this.usageError(problem);
 
-    if (this.selfReview()) {
+    if (this.invalidIndependence()) {
       return this.failed("self_review", [
-        `acting model \`${ascii(this.opts.acModel as string)}\` matches Codex reviewer model - the Reviewer must be a different model`,
+        "acting and reviewer models must be known, distinct identifiers - the Reviewer must be a different model",
       ]);
     }
 
@@ -279,10 +278,12 @@ class SummonReviewer {
     return null;
   }
 
-  private selfReview(): boolean {
-    return this.opts.ac === CODEX_AC &&
-      this.opts.acModel !== null && this.opts.reviewerModel !== null &&
-      this.opts.acModel.trim().toLowerCase() === this.opts.reviewerModel.trim().toLowerCase();
+  private invalidIndependence(): boolean {
+    const acModel = this.opts.acModel as string;
+    const reviewerModel = this.opts.reviewerModel as string;
+    return acModel.trim().toLowerCase() === "unknown" ||
+      reviewerModel.trim().toLowerCase() === "unknown" ||
+      acModel.trim().toLowerCase() === reviewerModel.trim().toLowerCase();
   }
 
   private outPathProblem(): string | null {

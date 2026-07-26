@@ -10,7 +10,7 @@ Read and respond to the review comments on the existing PR named in the invocati
 
 Read host-specific values — the review severities from [`PROJECT.md`](../../PROJECT.md) → *Review
 Severity Framework*, the quality-check commands from *Quality Checks*, the lifecycle host from
-*Lifecycle Host*, the attribution/model from *Attribution & Model Declaration*. Never hardcode them.
+*Lifecycle Host*, the attribution format and identity email from *Attribution & Model Declaration*. Never hardcode them.
 
 **This stage operates on the existing PR — it never opens one.** It is **human-in-the-loop**: you
 summarize and propose, but you change nothing until the HC chooses which findings to address.
@@ -53,7 +53,8 @@ the stop-and-ask judgment stay with the orchestrator. On a tool without sub-agen
 3. Self-review the changes against [`rules/self-review.md`](../../rules/self-review.md) — don't
    introduce new problems while fixing old ones.
 4. Commit with a message referencing the review feedback (attribution trailer per
-   [`PROJECT.md`](../../PROJECT.md) → *Attribution & Model Declaration*), and push to the PR branch.
+   [`PROJECT.md`](../../PROJECT.md) → *Attribution & Model Declaration*, using the runtime-actual model
+   or literal `unknown`), and push to the PR branch.
 5. **Reply to each addressed thread** explaining what changed:
    ```markdown
    Fixed in [commit] — [brief description of the change].

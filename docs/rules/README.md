@@ -29,10 +29,11 @@ Notice that every deferred deep doc above (e.g. `docs/rules/scripting-postmortem
 **backticked inline-code path**, not a `[text](path)` markdown link — even though it names a real
 target pattern. That is deliberate and load-bearing:
 
-- The parity check's link validator (`checkLinks` in `scripts/parity-check.ts`) resolves **only
-  markdown links**, and **only** in the scanned files (`AGENTS.md`, `CLAUDE.md`, `GEMINI.md`,
-  `PROJECT.md`, `.github/copilot-instructions.md`). A markdown link to a file that doesn't exist yet
-  reddens CI with a dead-link failure; a backticked path is inert text the validator ignores.
+- The parity check's dead-link validator (`checkLinks` in `scripts/parity-check.ts`) resolves **only
+  markdown links**, and **only** in its explicit `LINK_CHECKED` file list. A markdown link to a file that doesn't exist yet
+  reddens CI with a dead-link failure; a backticked path is inert text the validator ignores. A
+  separate repository-wide Markdown scan checks only local `[ADR NNNN](MMMM-...md)` links for a
+  disagreement between their displayed and target ADR numbers; it does not resolve additional links.
 - This is what lets the Rules Layer ship a trigger table — and any forward-reference to a
   planned-but-absent file — **without creating empty placeholder files** just to satisfy the checker.
 

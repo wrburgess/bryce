@@ -16,7 +16,7 @@ phase's canonical body, which `ship` reads and follows in order. What `ship` own
 faithfulness backstop.
 
 Read host-specific values — the lifecycle host and its artifact map, the branch/PR policy, the
-quality-check commands, the review severities, the attribution/model — from
+quality-check commands, the review severities, the attribution format and identity email — from
 [`PROJECT.md`](../../PROJECT.md). Never hardcode them here.
 
 **Design goal: a lean main-thread context** ([ADR 0005](../../docs/adr/0005-ship-hybrid-delegation-offload-retrieval-protect-judgment.md)).
@@ -165,7 +165,8 @@ to the HC); no emergency stop is
 outstanding; every delegated phase returned and was reconciled against its handoff contract; the
 terminal artifact of each phase exists (assessment, plan, PR, self-review, review replies, SOW). Sign
 every lifecycle-host comment with the attribution footer from [`PROJECT.md`](../../PROJECT.md) →
-*Attribution & Model Declaration*, using your runtime-actual model.
+*Attribution & Model Declaration*, using your runtime-actual model or literal `unknown` when it cannot
+be determined.
 
 **Terminal artifact:** a delivered PR carrying the SOW, with the merge gate intact and the issue
 linked — ready for the HC to merge.

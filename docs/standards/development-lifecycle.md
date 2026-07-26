@@ -2,7 +2,7 @@
 
 The full stage spec the [Canonical Source](../../AGENTS.md) summarizes under *Development lifecycle*.
 It is **business-neutral**: it names no company, product, stack, or domain. A Host App reads its
-host-specific values — quality-check commands, attribution, review severities, the lifecycle host and
+host-specific values — quality-check commands, runtime-actual attribution (or literal `unknown`), review severities, the lifecycle host and
 its artifact map — from [`PROJECT.md`](../../PROJECT.md), never from this file.
 
 ## Purpose

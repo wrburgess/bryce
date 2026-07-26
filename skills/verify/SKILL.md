@@ -11,7 +11,7 @@ when the Reviewer sees it they find nothing. This is **Stage 4 (Verify)** of the
 
 Read host-specific values — the review severities from [`PROJECT.md`](../../PROJECT.md) → *Review
 Severity Framework*, the quality-check commands from *Quality Checks*, the lifecycle host from
-*Lifecycle Host*, the attribution/model from *Attribution & Model Declaration*. Never hardcode them.
+*Lifecycle Host*, the attribution format and identity email from *Attribution & Model Declaration*. Never hardcode them.
 
 **This stage operates on the PR `invoke` already opened — it never opens one.** If there is no PR, a
 prior stage's terminal artifact was skipped: stop and recheck, don't reinterpret the lifecycle.
@@ -149,7 +149,7 @@ post its saved body as a **new** PR comment, capture that new comment's URL in `
 and disposition. Never claim success from a local file alone.
 
 Sign with the attribution footer from [`PROJECT.md`](../../PROJECT.md) → *Attribution & Model
-Declaration*.
+Declaration*, using the runtime-actual model or literal `unknown`.
 
 **Then summon the Reviewer — the AC does this, not the HC.** With the self-review comment posted,
 request the independent second-model review of the PR using the Reviewer declared in

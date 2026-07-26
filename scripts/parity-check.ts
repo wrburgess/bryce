@@ -17,8 +17,8 @@
 //   Rendered adapter:          <!-- parity:render source=AGENTS.md --> … <!-- parity:endrender -->
 //                              (the region between the markers must equal AGENTS.md byte-for-byte)
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, dirname, resolve as resolvePath } from "node:path";
+import { lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { basename, join, dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { argv } from "node:process";
 import { fromFile as protectedBranchesFromFile } from "./protected-branches.js";
@@ -28,6 +28,7 @@ import {
   asciiSafe as asciiSafeGateValue,
   DEFAULTS as DEFAULT_HUMAN_GATES,
 } from "./human-gates.js";
+import { fromFile as attributionFromFile } from "./attribution.js";
 
 const CANONICAL = "AGENTS.md";
 
@@ -56,6 +57,12 @@ const REQUIRED_GUIDES = ["docs/guides/usage.md"];
 
 const ADR_DIR = "docs/adr";
 const ADR_FILENAME = /^(\d+)-.+\.md$/;
+const ADR_LINK_LABEL = /^ADR (\d{4})$/;
+const ADR_LINK_TARGET = /^(\d{4})-[^/]+\.md$/;
+// Inline links cannot cross a line boundary. Keeping this deliberately narrow
+// means a malformed opening link cannot consume and misclassify a later line.
+const MARKDOWN_LINK = /\[([^\]\r\n]*)\]\(([^)\r\n]+)\)/g;
+const MARKDOWN_SCAN_EXCLUDED_DIRS = new Set([".git", "node_modules", ".claude/worktrees", ".codex-worktrees"]);
 
 const RULES_DIR = "rules";
 const REQUIRED_RULES = [
@@ -142,12 +149,14 @@ class ParityCheck {
     this.checkCopilotAdapter();
     this.checkRenderedRegions();
     this.checkProjectSections();
+    this.checkAttribution();
     this.checkHumanGates();
     this.checkRules();
     this.checkSkills();
     this.checkGuardrails();
     this.checkGuides();
     this.checkAdrNumbers();
+    this.checkAdrLinkNumbers();
     this.checkLinks();
     return {
       status: this.errors.length === 0 ? 0 : 1,
@@ -307,6 +316,11 @@ class ParityCheck {
         );
       }
     }
+  }
+
+  private checkAttribution(): void {
+    if (!this.exists(PROJECT_CONFIG)) return;
+    for (const error of attributionFromFile(this.path(PROJECT_CONFIG)).errors) this.err(error);
   }
 
   private checkRules(): void {
@@ -476,14 +490,86 @@ class ParityCheck {
     }
   }
 
+  /**
+   * Reject structurally provable ADR citation drift without attempting to interpret prose. This scans
+   * every shipped Markdown file, unlike checkLinks(), whose dead-link scope remains LINK_CHECKED.
+   */
+  private checkAdrLinkNumbers(): void {
+    for (const rel of this.markdownFiles()) {
+      for (const match of this.read(rel).matchAll(MARKDOWN_LINK)) {
+        const label = match[1] ?? "";
+        const labelMatch = ADR_LINK_LABEL.exec(label);
+        if (labelMatch === null) continue;
+
+        const rawTarget = (match[2] ?? "").trim();
+        if (
+          rawTarget === "" ||
+          rawTarget.startsWith("#") ||
+          rawTarget.includes("%") ||
+          /^(?:[a-z][a-z0-9+.-]*:)/i.test(rawTarget)
+        ) {
+          continue;
+        }
+
+        const target = rawTarget.split("#")[0] ?? "";
+        const targetMatch = ADR_LINK_TARGET.exec(basename(target));
+        if (targetMatch === null) continue;
+
+        const displayed = labelMatch[1] as string;
+        const targetNumber = targetMatch[1] as string;
+        if (displayed !== targetNumber) {
+          this.err(`ADR link number mismatch in ${rel}: label ADR ${displayed} targets ADR ${targetNumber}`);
+        }
+      }
+    }
+  }
+
+  private markdownFiles(dir = "", files: string[] = []): string[] {
+    const absolute = this.path(dir);
+    let children: string[];
+    try {
+      children = readdirSync(absolute).sort();
+    } catch {
+      return files;
+    }
+
+    for (const child of children) {
+      const rel = dir === "" ? child : join(dir, child);
+      if (MARKDOWN_SCAN_EXCLUDED_DIRS.has(rel)) continue;
+
+      let entry;
+      try {
+        entry = lstatSync(this.path(rel));
+      } catch {
+        continue;
+      }
+      let stat = entry;
+      if (entry.isSymbolicLink()) {
+        try {
+          // Follow file links so shipped Markdown aliases remain covered, but
+          // never recurse into a directory link that could point back upward.
+          stat = statSync(this.path(rel));
+        } catch {
+          continue;
+        }
+        if (stat.isDirectory()) continue;
+      }
+      if (stat.isDirectory()) {
+        this.markdownFiles(rel, files);
+      } else if (stat.isFile() && rel.endsWith(".md")) {
+        files.push(rel);
+      }
+    }
+    return files;
+  }
+
   private checkLinks(): void {
-    const linkRe = /\[[^\]]*\]\(([^)]+)\)/g;
     for (const rel of LINK_CHECKED) {
       if (!this.exists(rel)) continue;
 
       const dir = dirname(this.path(rel));
-      for (const m of this.read(rel).matchAll(linkRe)) {
-        let target = (m[1] ?? "").trim();
+      for (const m of this.read(rel).matchAll(MARKDOWN_LINK)) {
+        let target = (m[2] ?? "").trim();
         if (target === "") continue;
         if (
           target.startsWith("http://") ||
