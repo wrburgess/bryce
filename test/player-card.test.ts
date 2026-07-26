@@ -17,6 +17,9 @@ describe("single-player card", () => {
       await insertStatLine(opened.db, { playerId: player.id, source: "mlb_stats_api", gameId: 102, gameDate: "2026-07-18", gameNumber: 2, sportId: 1, stats: { hits: 2, atBats: 4 } });
       await insertStatLine(opened.db, { playerId: player.id, source: "mlb_stats_api", gameId: 102, gameDate: "2026-07-18", gameNumber: 2, sportId: 1, statType: "fielding", stats: { errors: 1 } });
       await insertStatLine(opened.db, { playerId: other.id, source: "mlb_stats_api", gameId: 102, gameDate: "2026-07-18", gameNumber: 2, sportId: 1, stats: { hits: 99, atBats: 99 } });
+      // Current host-date data is incomplete and must not consume a last-N
+      // slot, even though its date would otherwise sort first.
+      await insertStatLine(opened.db, { playerId: player.id, source: "mlb_stats_api", gameId: 104, gameDate: "2026-07-19", stats: { hits: 99, atBats: 99 } });
       // Postseason is filtered before the game limit.
       await insertStatLine(opened.db, { playerId: player.id, source: "mlb_stats_api", gameId: 103, gameDate: "2026-07-19", gameType: "F", stats: { hits: 99, atBats: 99 } });
 

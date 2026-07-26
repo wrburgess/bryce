@@ -142,7 +142,7 @@ function assembleWindow(
   spec: PlayerCardWindowSpec,
   lastCompletedDate: string,
 ): PlayerCardWindow {
-  const bounds = ytdBounds(sqlite, player, lastCompletedDate, spec);
+  const bounds = windowBounds(sqlite, player, lastCompletedDate, spec);
   const games = selectGames(sqlite, player.id, spec === "last10" ? 10 : spec === "last30" ? 30 : null, bounds);
   if (games.length === 0) {
     return { spec, requestedGames: requestedGames(spec), actualGames: 0, from: null, to: null, empty: true, batters: [], pitchers: [] };
@@ -163,8 +163,10 @@ function requestedGames(spec: PlayerCardWindowSpec): number | null {
   return spec === "last10" ? 10 : spec === "last30" ? 30 : null;
 }
 
-function ytdBounds(sqlite: Database.Database, player: RawPlayer, lastCompletedDate: string, spec: PlayerCardWindowSpec): { from: string; to: string } | null {
-  if (spec !== "ytd") return null;
+function windowBounds(sqlite: Database.Database, player: RawPlayer, lastCompletedDate: string, spec: PlayerCardWindowSpec): { from?: string; to: string } {
+  // Every card window excludes the in-progress host date. Game-count windows
+  // are otherwise unbounded; YTD also applies its season-start lower bound.
+  if (spec !== "ytd") return { to: lastCompletedDate };
   const sportId = sportIdForPlayer({ level: player.level as "mlb" | "milb" | "ncaa", milbLevel: player.milb_level });
   const season = lastCompletedDate.slice(0, 4);
   const start = sportId === null
@@ -173,13 +175,12 @@ function ytdBounds(sqlite: Database.Database, player: RawPlayer, lastCompletedDa
   return { from: start ?? `${season}-01-01`, to: lastCompletedDate };
 }
 
-function selectGames(sqlite: Database.Database, playerId: number, limit: number | null, bounds: { from: string; to: string } | null): GameKey[] {
+function selectGames(sqlite: Database.Database, playerId: number, limit: number | null, bounds: { from?: string; to: string }): GameKey[] {
   const clauses = ["player_id = ?", "game_type = 'R'"];
   const params: Array<number | string> = [playerId];
-  if (bounds !== null) {
-    clauses.push("game_date >= ?", "game_date <= ?");
-    params.push(bounds.from, bounds.to);
-  }
+  if (bounds.from !== undefined) { clauses.push("game_date >= ?"); params.push(bounds.from); }
+  clauses.push("game_date <= ?");
+  params.push(bounds.to);
   const sql = `SELECT id, source, game_id, game_date FROM stat_lines WHERE ${clauses.join(" AND ")} ORDER BY game_date DESC, game_number DESC, id DESC`;
   const selected: GameKey[] = [];
   const seen = new Set<string>();
