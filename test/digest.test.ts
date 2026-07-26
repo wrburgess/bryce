@@ -532,6 +532,7 @@ describe("runDigest", () => {
   it("orders rows by the level ladder and labels each with the level the GAME was played at", async () => {
     const mlb = await insertPlayer(opened.db, {
       fullName: "Paul Skenes",
+      position: "P",
       level: "mlb",
       milbLevel: null,
       teamName: "Pittsburgh Pirates",
@@ -662,7 +663,7 @@ describe("runDigest", () => {
     expect(cells(weekText, "M Acosta").slice(2, 6)).toEqual(["AAA", "2", "1.000", "7"]);
   });
 
-  it("gives a two-way player a row in each table, and leaves Gm blank for one game", async () => {
+  it("keeps a position player's pitching line out of the pitchers table", async () => {
     const player = await insertPlayer(opened.db, { fullName: "Two Way" });
     await insertStatLine(opened.db, { playerId: player.id, gameId: 880001, statType: "batting" });
     await insertStatLine(opened.db, {
@@ -673,14 +674,11 @@ describe("runDigest", () => {
     });
     await runDigest(deps());
     const text = mailer.sent[0]?.text ?? "";
-    // One game apiece, so no Gm value on either row: the third cell is PA / IP.
+    // The player's declared non-pitcher position keeps him in Batters only.
     expect(cells(text, "T Way")).toEqual(
       ["T", "Way", "AAA", "4", "2", "0", "1", "0", "0", "1", "3", "1", "0", "0", "0"],
     );
-    const pitchingRow = text.slice(text.indexOf("Pitchers"));
-    expect(cells(pitchingRow, "T Way")).toEqual(
-      ["T", "Way", "AAA", "5.0", "2", "6", "10.80", "1", "3", "0", "3.60", "0.80", "0", "0", "0", "0", "0", "0"],
-    );
+    expect(text).not.toContain("Pitchers");
   });
 
   it("merges a fielding row's errors into the same game's batting line, never a third line", async () => {
