@@ -129,6 +129,23 @@ describe("parity check - Tier-2 deep-doc pointers", () => {
     });
   });
 
+  // Each token on a line is classified from its OWN `before` slice, so a line may legitimately mix
+  // the two forms. Nothing asserted this before the rewrite, and the link branch's early return is
+  // exactly the kind of change that could leak one token's verdict into the next.
+  it("classifies a bare pointer and a promoted link on the same line independently", () => {
+    withRuleBody(`- **Never x** — see \`${DEEP_DOC}\` and also [the deep doc](../${DEEP_DOC}).`, (errors) => {
+      expect(errors).toEqual([]);
+    });
+  });
+
+  it("reports both tokens when a line carries a bad pointer and a bad link", () => {
+    withRuleBody(`- **Never x** — see \`${ABSENT_DEEP_DOC}\` and also [it](${DEEP_DOC}).`, (errors) => {
+      expect(errors).toHaveLength(2);
+      expect(errors[0]).toContain("case-study pointer `docs/rules/absent-postmortems.md` does not exist");
+      expect(errors[1]).toContain("does not resolve from rules/");
+    });
+  });
+
   it("ignores absolute, traversal, URL, and fenced-code forms", () => {
     withRuleBody(
       [

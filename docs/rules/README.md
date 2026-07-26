@@ -30,7 +30,8 @@ Notice that every deferred deep doc above (e.g. `docs/rules/scripting-postmortem
 target pattern. That is deliberate and load-bearing:
 
 - The parity check's dead-link validator (`checkLinks` in `scripts/parity-check.ts`) resolves **only
-  markdown links**, and **only** in its explicit `LINK_CHECKED` file list. A markdown link to a file that doesn't exist yet
+  markdown links**, and **only** in its explicit `LINK_CHECKED` file list. In one of those files, a
+  markdown link to a file that doesn't exist yet
   reddens CI with a dead-link failure; a backticked path is inert text the validator ignores. A
   separate repository-wide Markdown scan checks only local `[ADR NNNN](MMMM-...md)` links for a
   disagreement between their displayed and target ADR numbers; it does not resolve additional links.
