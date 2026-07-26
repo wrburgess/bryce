@@ -56,7 +56,7 @@ It is measured **per bullet, not per file**, and a bullet that carries its point
 length** — so a rule file may grow indefinitely in well-shaped lessons, and the check never asks more of
 a bullet that has already been trimmed (the longest such bullet today is 604 characters). What it
 catches is the one thing the two-tier split forbids: a case narrative written inline instead of pushed
-down here.
+down here. A bullet is counted across its wrapped continuation lines, so re-flowing it changes nothing.
 
 When it fires, the remedy depends on the state of your domain's deep doc — the error message says which
 one applies, read from disk:

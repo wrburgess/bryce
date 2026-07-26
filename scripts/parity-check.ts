@@ -474,18 +474,27 @@ class ParityCheck {
 
   /**
    * Every `- **…**` bullet in a Tier-1 rule file, in source order, with the fenced-code skipping
-   * checkRulesPointers() uses. Returns the bolded imperative (the allowlist key) alongside the whole
-   * line, because the limit is measured on the LINE and the exemption is read off the line too.
+   * checkRulesPointers() uses. Returns the bolded imperative (the allowlist key) alongside the
+   * bullet's FULL text, because both the limit and the pointer exemption are read off that text.
+   *
+   * A bullet is measured INCLUDING its wrapped continuation lines, joined the way markdown renders
+   * them (newline -> space). Measuring only the first line would let any prose-wrapper -- an editor
+   * reflow, a formatter with `proseWrap` on -- silently disable this guard for the entire tree at
+   * once by re-flowing every bullet: a false green, arrived at by a routine, well-intentioned edit.
+   * Today's files happen to write one bullet per line, which is exactly why the assumption is
+   * dangerous to encode.
    *
    * Length is JS `String.length` (UTF-16 code units), not bytes. These files are full of em dashes,
    * which are one char and three bytes, so the two measures disagree by ~10% on a typical bullet;
    * chars is the honest unit for "how much does a reader have to take in".
    */
-  private ruleBullets(rel: string): { key: string; line: string }[] {
-    const bullets: { key: string; line: string }[] = [];
+  private ruleBullets(rel: string): { key: string; text: string }[] {
+    const bullets: { key: string; text: string }[] = [];
+    const lines = this.read(rel).split("\n").map(rstrip);
     let fenced = false;
-    for (const raw of this.read(rel).split("\n")) {
-      const line = rstrip(raw);
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i] as string;
       if (/^\s*```/.test(line)) {
         fenced = !fenced;
         continue;
@@ -494,16 +503,30 @@ class ParityCheck {
 
       const match = RULE_BULLET.exec(line);
       if (match === null) continue;
-      bullets.push({ key: match[1] as string, line });
+
+      // Consume wrapped continuation lines: indented, non-blank, and not the start of another block.
+      // Anything that opens a new block (a list item, a heading, a fence, a quote) ends this bullet
+      // and is re-examined by the outer loop, so a fence can never be swallowed as prose.
+      const parts = [line];
+      while (i + 1 < lines.length) {
+        const next = lines[i + 1] as string;
+        if (next === "") break;
+        if (!/^\s+\S/.test(next)) break;                       // not indented -> not a continuation
+        if (/^\s*(?:[-*+]\s|\d+\.\s|#|```|>)/.test(next)) break;   // opens a new block
+        parts.push(strip(next));
+        i++;
+      }
+
+      bullets.push({ key: match[1] as string, text: parts.join(" ") });
     }
     return bullets;
   }
 
   /** A bullet is over the limit and not exempted by its own domain's case-study pointer. */
-  private narrativeTrips(rel: string, line: string): boolean {
-    if (line.length <= NARRATIVE_MAX_CHARS) return false;
+  private narrativeTrips(rel: string, text: string): boolean {
+    if (text.length <= NARRATIVE_MAX_CHARS) return false;
     const deepDoc = RULE_DEEP_DOC[rel];
-    return !(deepDoc !== null && deepDoc !== undefined && line.includes(`\`${deepDoc}\``));
+    return !(deepDoc !== null && deepDoc !== undefined && text.includes(`\`${deepDoc}\``));
   }
 
   /**
@@ -571,11 +594,11 @@ class ParityCheck {
       const bullets = this.ruleBullets(rel);
       const allowed = NARRATIVE_ALLOWLIST[rel] ?? [];
 
-      for (const { key, line } of bullets) {
-        if (!this.narrativeTrips(rel, line)) continue;
+      for (const { key, text } of bullets) {
+        if (!this.narrativeTrips(rel, text)) continue;
         if (allowed.includes(key)) continue;
         this.err(
-          `Tier-1 narrative ${rel}: bullet "${asciiSafeGateValue(key)}" is ${line.length} characters ` +
+          `Tier-1 narrative ${rel}: bullet "${asciiSafeGateValue(key)}" is ${text.length} characters ` +
           `(limit ${NARRATIVE_MAX_CHARS}) and carries no case-study pointer; ${this.narrativeRemedy(rel)}`,
         );
       }
@@ -597,7 +620,7 @@ class ParityCheck {
           );
           continue;
         }
-        if (!this.narrativeTrips(rel, (matches[0] as { line: string }).line)) {
+        if (!this.narrativeTrips(rel, (matches[0] as { text: string }).text)) {
           this.err(
             `Tier-1 narrative allowlist ${rel}: entry "${safeKey}" is no longer needed - the bullet is now ` +
             `within the limit or carries its case-study pointer; remove the entry (this list only shrinks)`,

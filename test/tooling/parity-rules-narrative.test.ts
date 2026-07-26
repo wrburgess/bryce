@@ -256,6 +256,72 @@ describe("parity check - the narrative allowlist is itself checked", () => {
   });
 });
 
+// Found by the Stage-4 adversarial pass, not by the plan. Measuring only a bullet's FIRST line meant
+// any prose-wrapper -- an editor reflow, a formatter with `proseWrap` on -- would silently disable the
+// guard for the whole tree at once, by a routine and well-intentioned edit. Today's files happen to
+// write one bullet per line, which is exactly what made the assumption dangerous to encode.
+describe("parity check - a bullet is measured across its wrapped continuation lines", () => {
+  /** The same content as `oneLine`, re-flowed at ~95 columns the way a prose-wrapper would write it. */
+  function wrap(oneLine: string): string {
+    const words = oneLine.split(" ");
+    const lines: string[] = [];
+    let current = words.shift() as string;
+    for (const word of words) {
+      if (current.length + 1 + word.length > 95) {
+        lines.push(current);
+        current = `  ${word}`;
+      } else {
+        current += ` ${word}`;
+      }
+    }
+    lines.push(current);
+    return lines.join("\n");
+  }
+
+  const OVER = longBullet(NARRATIVE_MAX_CHARS + 210, "Never write the case study inline");
+
+  it("rejects a wrapped over-limit bullet", () => {
+    const wrapped = wrap(OVER);
+    expect(wrapped).toContain("\n");   // the fixture must actually be wrapped, or this proves nothing
+    withRuleBody("rules/testing.md", wrapped, (errors) => {
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain("carries no case-study pointer");
+    });
+  });
+
+  // Wrap-invariance: the reported length must not depend on where the line breaks fell.
+  it("reports the same length whether the bullet is wrapped or not", () => {
+    const lengths: number[] = [];
+    for (const body of [OVER, wrap(OVER)]) {
+      withRuleBody("rules/testing.md", body, (errors) => {
+        expect(errors).toHaveLength(1);
+        lengths.push(Number(/is (\d+) characters/.exec(errors[0] as string)?.[1]));
+      });
+    }
+    expect(lengths[0]).toBe(NARRATIVE_MAX_CHARS + 210);
+    expect(lengths[1]).toBe(lengths[0]);
+  });
+
+  it("accepts a wrapped bullet whose case-study pointer sits on a continuation line", () => {
+    const body = `${wrap(OVER)}\n  *(Host case study: \`docs/rules/testing-postmortems.md\`.)*`;
+    withRuleBody("rules/testing.md", body, (errors) => {
+      expect(errors).toEqual([]);
+    });
+  });
+
+  // The continuation scan must not run away past the bullet: a blank line, a sibling bullet, and a
+  // fence each end it. Otherwise a short bullet would absorb the rest of the file and trip.
+  it.each([
+    ["a blank line", `- **A short one** — fine.\n\n${"x".repeat(NARRATIVE_MAX_CHARS + 100)}`],
+    ["a sibling bullet", `- **A short one** — fine.\n- **Another short one** — also fine.`],
+    ["a fenced block", `- **A short one** — fine.\n  \`\`\`\n  ${"x".repeat(NARRATIVE_MAX_CHARS + 100)}\n  \`\`\``],
+  ])("stops the bullet at %s", (_label, body) => {
+    withRuleBody("rules/testing.md", body, (errors) => {
+      expect(errors).toEqual([]);
+    });
+  });
+});
+
 describe("parity check - narrative guard structural edge cases", () => {
   it("ignores an over-limit bullet inside a fenced code block", () => {
     const body = ["```md", longBullet(NARRATIVE_MAX_CHARS + 200), "```", "", "- **A short one** — fine."].join("\n");

@@ -63,6 +63,13 @@ Five of the eight grandfathered bullets are `rules/backend.md` bullets that #151
 the check rediscovered that list from shape alone, which is the evidence that it tracks the real
 invariant rather than a proxy.
 
+**The measurement is wrap-invariant.** A bullet is measured across its wrapped continuation lines,
+joined the way markdown renders them. Measuring only the first line was the original implementation and
+it was wrong: any prose-wrapper — an editor reflow, a formatter with `proseWrap` enabled — would have
+silently disabled the guard for the **entire tree at once**, by a routine and well-intentioned edit.
+Today's rule files happen to write one bullet per line, which is precisely what made that assumption
+dangerous to encode. Caught by the Stage-4 adversarial pass, not by the plan.
+
 ## Rejected sub-decisions
 
 - **Requiring a `(Provenance: …)` tag** (as issue #152 originally proposed: over N chars *and* tagged
