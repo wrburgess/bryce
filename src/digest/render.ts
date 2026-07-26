@@ -145,12 +145,11 @@ const PLAYER_COLUMNS: Column[] = [
 ];
 
 /**
- * The two layouts differ in exactly two ways: a 1d window carries `Gm` (to tell
+ * The two layouts differ in exactly one way: a 1d window carries `Gm` (to tell
  * a doubleheader's two rows apart, since there is no opponent column) and no
- * `GP`, which would always be 1; an aggregated window carries `GP` and, for
- * batters, a leading slash line.
+ * `GP`, which would always be 1; an aggregated window carries `GP`.
  */
-function leadColumns(window: ResolvedWindow, statType: "batting" | "pitching"): Column[] {
+function leadColumns(window: ResolvedWindow): Column[] {
   if (window.groupBy === "game") {
     return [
       {
@@ -160,22 +159,26 @@ function leadColumns(window: ResolvedWindow, statType: "batting" | "pitching"): 
       },
     ];
   }
-  const gp: Column = { header: "GP", align: "right", value: (r) => String(r.agg.games) };
-  return statType === "batting"
-    // Left, unlike every other non-name column: rate values are fixed width, so
-    // they stay aligned either way, and a right-padded OPS header floats
-    // away from the column it names.
-    ? [gp, { header: "OPS", align: "left", value: ops }]
-    : [gp];
+  return [{ header: "GP", align: "right", value: (r) => String(r.agg.games) }];
 }
 
 function battingColumns(window: ResolvedWindow): Column[] {
   return [
     ...PLAYER_COLUMNS,
-    ...leadColumns(window, "batting"),
+    ...leadColumns(window),
     // PA is a summed counter; assemble.ts derives it per game when the
     // source omits it, so the fallback lives at the grain it is true at.
+    // It leads the rates rather than trailing them: PA is the sample size every
+    // rate to its right is read against, so it sits beside GP.
     { header: "PA", align: "right", value: counter("plateAppearances") },
+    // The slash line, on aggregated windows only — a one-game rate is noise
+    // beside the raw counts already on a 1d row.
+    // Left-aligned, unlike every other non-name column: rate values are fixed
+    // width, so they stay aligned either way, and a right-padded OPS header
+    // floats away from the column it names.
+    ...(window.groupBy === "game"
+      ? []
+      : ([{ header: "OPS", align: "left", value: ops }] as Column[])),
     // BB%/K% are display-only derived rates, shown only on the >=21d windows —
     // a single week's plate appearances are too few for a rate to mean much.
     // They are recomputed from summed counters like every other rate (deriveRate).
@@ -203,7 +206,7 @@ function battingColumns(window: ResolvedWindow): Column[] {
 function pitchingColumns(window: ResolvedWindow): Column[] {
   return [
     ...PLAYER_COLUMNS,
-    ...leadColumns(window, "pitching"),
+    ...leadColumns(window),
     { header: "IP", align: "right", value: (r) => formatOuts(r.agg.outs) },
     { header: "ER", align: "right", value: counter("earnedRuns") },
     { header: "K", align: "right", value: counter("strikeOuts") },

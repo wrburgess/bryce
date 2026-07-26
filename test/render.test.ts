@@ -121,10 +121,24 @@ describe("renderDigest — tables", () => {
   it("renders a Batters table with a Lvl column and no level sections", () => {
     const mail = renderDigest(assemblyWith({ spec: "7d", batters: [harper7d] }));
     expect(mail.text).toContain("Batters");
-    expect(mail.text).toMatch(/Player\s+Lvl\s+GP\s+OPS/);
+    expect(mail.text).toMatch(/Player\s+Lvl\s+GP\s+PA\s+OPS/);
     expect(mail.text).toContain("1.319");
     expect(mail.text).not.toContain("MiLB - Triple-A");
     expect(mail.text).toContain("MLB");
+  });
+
+  it("puts PA ahead of OPS on every rendered surface", () => {
+    // PA is the sample size the rate is read against, so it comes first. All
+    // four surfaces render from one Column[], but each lays it out itself —
+    // assert the order on each so a regression cannot hide in one of them.
+    const assembly = assemblyWith({ spec: "7d", batters: [harper7d] });
+    const mail = renderDigest(assembly);
+    const textHeader = mail.text.split("\n").find((l) => l.startsWith("Player"))!;
+    expect(textHeader.indexOf("PA")).toBeLessThan(textHeader.indexOf("OPS"));
+    expect(mail.html.indexOf(">PA<")).toBeLessThan(mail.html.indexOf(">OPS<"));
+    expect(renderDigestMarkdown(assembly)).toContain("| GP | PA | OPS |");
+    const { headers } = digestTableRows(assembly, "batters");
+    expect(headers.indexOf("PA")).toBeLessThan(headers.indexOf("OPS"));
   });
 
   it("omits GP and adds Gm for a 1d window", () => {
@@ -303,10 +317,10 @@ describe("renderDigest — tables", () => {
     expect(mail.html).toContain("No games in this window.");
   });
 
-  it("adds BB% and K% right after PA on a long (>=21d) window, absent on short ones", () => {
+  it("adds BB% and K% right after OPS on a long (>=21d) window, absent on short ones", () => {
     const long = renderDigest(assemblyWith({ spec: "21d", batters: [harper7d] }));
     const header = long.text.split("\n").find((l) => l.startsWith("Player"))!;
-    expect(header).toMatch(/OPS\s+PA\s+BB%\s+K%\s+H\b/);
+    expect(header).toMatch(/PA\s+OPS\s+BB%\s+K%\s+H\b/);
     // Derived from SUMMED counters: 1 BB / 9 PA = 11.1%, 2 K / 9 PA = 22.2%.
     const dataLine = long.text.split("\n").find((l) => l.includes("Harper, B"))!;
     expect(dataLine).toContain("11.1");
@@ -481,7 +495,7 @@ describe("digestTableRows", () => {
       assemblyWith({ spec: "7d", batters: [harper7d] }),
       "batters",
     );
-    expect(headers.slice(0, 4)).toEqual(["Player", "Lvl", "GP", "OPS"]);
+    expect(headers.slice(0, 5)).toEqual(["Player", "Lvl", "GP", "PA", "OPS"]);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.[0]).toBe("Harper, B");
     expect(rows[0]?.every((c) => typeof c === "string")).toBe(true);
