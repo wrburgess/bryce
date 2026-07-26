@@ -120,6 +120,16 @@ also run `npx tsx scripts/parity-check.ts`, which should print `parity_check: OK
 your machine is fully set up. There is no "create the database" step — the first real command below
 creates and migrates `data/bryce.db` on its own.
 
+If you're contributing a change rather than just setting up, run the fuller version before you're done:
+
+```bash
+npm run test:coverage
+```
+
+That's the same tests plus a coverage report and a per-file floor check; it should end with
+`coverage_floors: OK`. The report is written to `coverage/` (git-ignored). `npm test` stays the fast
+loop while you're iterating.
+
 ## 6. Add players to your watch list
 
 Bryce ships with an **empty watch list**; it only tracks players you add.

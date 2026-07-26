@@ -29,7 +29,10 @@ jobs:
       # `npm test` is the single, fully-offline test invocation: the network-egress
       # guard (issue #25) is active and the live tier (`npm run test:live`) is
       # excluded, so no required check ever reaches an external service.
+      # `test:coverage` is that same suite plus the coverage report and the per-file
+      # floor check (issue #28) -- one run, strictly more signal. The `text` report
+      # lands in this job's log, so no artifact upload is needed.
       - name: Test
-        run: npm test
+        run: npm run test:coverage
       - name: Dependency audit (runtime deps)
         run: npm run audit

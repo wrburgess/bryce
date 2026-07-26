@@ -26,8 +26,14 @@ this table — they never hardcode a stack's commands.
 | Branch-guard self-test | `bash .claude/hooks/enforce-branch-creation.test.sh` |
 | Typecheck | `npm run typecheck` |
 | Lint | `npm run lint` |
-| Tests | `npm test` |
+| Tests | `npm run test:coverage` |
 | Dependency audit | `npm run audit` |
+
+The **Tests** row runs `npm run test:coverage` — the same offline suite as `npm test`, plus the
+coverage report and `scripts/coverage-floors.ts`, which fails when a floored file drops below its
+per-file minimum or stops being measured at all ([#28](https://github.com/wrburgess/bryce/issues/28)).
+Plain `npm test` remains the fast local loop while iterating; the coverage command is what closes out
+the gate, and it is what CI runs.
 
 The dependency audit runs through **audit-ci** (`npm run audit`, config `audit-ci.jsonc`) rather than
 raw `npm audit`, so a reviewed, non-exploitable advisory can be allowlisted with a documented reason
