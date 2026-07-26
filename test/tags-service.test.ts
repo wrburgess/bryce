@@ -283,9 +283,28 @@ describe("tag service", () => {
       // MAX_TAG_SEGMENT_LENGTH each still render far past the 998-octet header
       // line RFC 5322 allows, so the aggregate is what must be bounded. (Caught
       // by the Stage-4 delta review of the per-segment fix.)
-      const seg = "a".repeat(MAX_TAG_SEGMENT_LENGTH);
-      const worstCase = Array.from({ length: MAX_SELECTOR_TOKENS }, (_, i) => `${seg}${i}:${seg}`).join(",");
-      expect(() => parseTagSelector(worstCase)).toThrow(ZodError);
+      // Every segment here is INSIDE MAX_TAG_SEGMENT_LENGTH and every token is
+      // distinct, so the only rule that can reject this is the aggregate one —
+      // if the label bound were removed, this expectation would fail. (An earlier
+      // version built a 65-character namespace, which the segment rule rejected
+      // first, so the test passed without exercising the bound at all: a false
+      // green the Stage-4 delta review caught.)
+      const value = "a".repeat(60);
+      const tokens = Array.from({ length: MAX_SELECTOR_TOKENS }, (_, i) => `n${i}:${value}`);
+      for (const token of tokens) {
+        const [namespace, tokenValue] = token.split(":");
+        expect(namespace!.length).toBeLessThanOrEqual(MAX_TAG_SEGMENT_LENGTH);
+        expect(tokenValue!.length).toBeLessThanOrEqual(MAX_TAG_SEGMENT_LENGTH);
+      }
+      const worstCase = tokens.join(",");
+      // Each token alone is legal...
+      expect(parseTagSelector(tokens[0]!)).toHaveLength(1);
+      // ...but together they render past the label limit.
+      expect(formatTagSelector(tokens.map((t) => {
+        const [namespace, tokenValue] = t.split(":");
+        return { namespace: namespace!, value: tokenValue! };
+      })).length).toBeGreaterThan(MAX_SELECTOR_LABEL_LENGTH);
+      expect(() => parseTagSelector(worstCase)).toThrow(/tag selector is too long/);
 
       // The bound is on the RENDERED label, so it holds whatever shape produces it.
       const underLimit = Array.from({ length: 4 }, (_, i) => `ns${i}:${"a".repeat(40)}`).join(",");
