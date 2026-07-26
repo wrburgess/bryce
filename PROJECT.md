@@ -141,7 +141,8 @@ npx tsx scripts/summon-reviewer.ts --mode work --base BRANCH --out OUT_FILE --ac
   `insufficient_output` (exit 0 with a body below the substance floor — a banner or a one-line bail,
   not a review), `drain_timeout` (the CLI finished but its output could not be read to EOF, so the
   review was lost rather than absent), `timeout` (no review inside the wall-clock cap),
-  `self_review` (the acting Codex model matches the requested Codex reviewer model).
+  `self_review` (the acting and reviewer model identifiers match, or either is `unknown`; an
+  unverified identity cannot establish independent review).
 
   **The fallback trigger is the EXIT STATUS, not the classification list: `0` = review in hand; any non-zero exit = try the next independent Reviewer.** Some failures are not classifications at all
   — a usage error (a malformed or incomplete command) and an unwritable `--out` print to stderr and

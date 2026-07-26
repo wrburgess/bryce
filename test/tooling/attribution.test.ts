@@ -44,8 +44,12 @@ describe("parseAttribution", () => {
       .toEqual(expect.arrayContaining([expect.stringContaining("exactly one `## Attribution & Model Declaration` section")]));
   });
 
-  it("rejects live declared/default reconciliation language", () => {
-    expect(errors(`${rows.join("\n")}\n\nUse the Declared model.`))
+  it.each([
+    "Use the Declared model.",
+    "Use the declared default.",
+    "Keep reconciling against the declared model.",
+  ])("rejects live declared/default reconciliation language: %s", (guidance) => {
+    expect(errors(`${rows.join("\n")}\n\n${guidance}`))
       .toEqual(expect.arrayContaining([expect.stringContaining("must not prescribe a declared model/default")]));
   });
 });

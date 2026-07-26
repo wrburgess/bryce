@@ -12,8 +12,8 @@
 // Runs on the app's own Node/TS toolchain via `tsx` (ADR 0039).
 //
 // Usage:
-//   npx tsx scripts/summon-reviewer.ts --mode work --out FILE [--base BRANCH]
-//   npx tsx scripts/summon-reviewer.ts --mode plan --input FILE --out FILE
+//   npx tsx scripts/summon-reviewer.ts --mode work --out FILE --ac NAME --ac-model MODEL --reviewer-model MODEL [--base BRANCH]
+//   npx tsx scripts/summon-reviewer.ts --mode plan --input FILE --out FILE --ac NAME --ac-model MODEL --reviewer-model MODEL
 //     --mode plan|work    plan = critique the plan text in --input; work = review the branch's diff
 //     --input FILE        plan mode only: the plan text to critique (required in plan mode)
 //     --base BRANCH       work mode only: the branch to review against (default: main)
