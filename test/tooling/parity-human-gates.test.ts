@@ -73,7 +73,7 @@ function healDeadLinks(root: string): void {
     if (!existsSync(file)) continue;
 
     for (const match of readFileSync(file, "utf-8").matchAll(MARKDOWN_LINK)) {
-      const raw = (match[1] ?? "").trim();
+      const raw = (match[2] ?? "").trim();
       if (raw === "" || /^(?:https?:|mailto:|#)/.test(raw)) continue;
 
       const target = raw.split("#")[0] ?? "";
