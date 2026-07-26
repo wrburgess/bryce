@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -158,40 +159,114 @@ describe("CLI router metadata", () => {
     rmSync(work, { recursive: true, force: true });
   });
 
-  it("keeps a routed server alive until it receives a termination signal", async () => {
+  it("serves health through the routed server and shuts down cleanly", async () => {
     const work = mkdtempSync(join(tmpdir(), "bryce-server-"));
-    const port = 34000 + Math.floor(Math.random() * 1000);
-    const child = spawn(join(process.cwd(), "bin", "bryce"), ["server"], {
-      cwd: work,
-      env: {
-        ...process.env,
-        API_TOKEN: "test-token",
-        MAILER_PROVIDER: "console",
-        DATABASE_PATH: join(work, "bryce.db"),
-        BACKUP_DIR: join(work, "backups"),
-        SERVER_PORT: String(port),
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const blocker = createServer();
+    let child: ReturnType<typeof spawn> | undefined;
     let output = "";
-    child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
-    child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`server did not start: ${output}`)), 15_000);
-      const poll = setInterval(() => {
-        if (output.includes(`server listening port=${port}`)) {
-          clearTimeout(timer);
-          clearInterval(poll);
-          resolve();
-        }
-      }, 25);
-      child.once("error", reject);
+    const waitForExit = (candidate: ReturnType<typeof spawn>, ms: number) => new Promise<number | null>((resolve) => {
+      const timer = setTimeout(() => resolve(null), ms);
+      candidate.once("exit", (code) => { clearTimeout(timer); resolve(code); });
     });
-    expect(child.exitCode).toBeNull();
-    child.kill("SIGTERM");
-    const status = await new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
-    expect(status).toBe(0);
-    rmSync(work, { recursive: true, force: true });
+    const stopChild = async (candidate: ReturnType<typeof spawn>): Promise<void> => {
+      if (candidate.exitCode !== null) return;
+      candidate.kill("SIGTERM");
+      if (await waitForExit(candidate, 5_000) === null) {
+        candidate.kill("SIGKILL");
+        await waitForExit(candidate, 5_000);
+      }
+    };
+    try {
+      // Start with a port that is definitely occupied, then retry with a
+      // distinct ephemeral port. This proves the operational smoke neither
+      // treats a failed bind as ready nor retries the rejected port.
+      await new Promise<void>((resolve, reject) => blocker.listen(0, resolve).once("error", reject));
+      const blockedAddress = blocker.address();
+      if (blockedAddress === null || typeof blockedAddress === "string") throw new Error("test blocker has no TCP port");
+      const finder = createServer();
+      await new Promise<void>((resolve, reject) => finder.listen(0, resolve).once("error", reject));
+      const retryAddress = finder.address();
+      if (retryAddress === null || typeof retryAddress === "string") throw new Error("test retry listener has no TCP port");
+      await new Promise<void>((resolve) => finder.close(() => resolve()));
+      const attemptedPorts = [blockedAddress.port, retryAddress.port];
+
+      for (const port of attemptedPorts) {
+        output = "";
+        const candidate = spawn(join(process.cwd(), "bin", "bryce"), ["server"], {
+          cwd: work,
+          env: { PATH: process.env.PATH, API_TOKEN: "test-token", MAILER_PROVIDER: "console", BRYCE_TZ: "America/Chicago", DATABASE_PATH: join(work, "bryce.db"), BACKUP_DIR: join(work, "backups"), SERVER_PORT: String(port) },
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        // Keep ownership immediately: every rejected collision/timeout child is
+        // terminated and reaped before the next retry can begin.
+        child = candidate;
+        candidate.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+        candidate.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+        const ready = await new Promise<boolean>((resolve, reject) => {
+          const timer = setTimeout(() => { cleanup(); reject(new Error(`server did not start: ${output}`)); }, 15_000);
+          const poll = setInterval(() => {
+            if (output.includes(`server listening port=${port}`)) { cleanup(); resolve(true); }
+            else if (output.includes("EADDRINUSE")) { cleanup(); resolve(false); }
+          }, 25);
+          const onError = (error: Error) => { cleanup(); reject(error); };
+          const cleanup = () => { clearTimeout(timer); clearInterval(poll); candidate.removeListener("error", onError); };
+          candidate.once("error", onError);
+        });
+        if (!ready) {
+          expect(output).toContain("EADDRINUSE");
+          await stopChild(candidate);
+          expect(candidate.exitCode).toBe(1);
+          child = undefined;
+          continue;
+        }
+        const response = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(5_000) });
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ ok: true, players: 0, statLines: 0, lastDelivery: null, refresh: null });
+        break;
+      }
+      expect(attemptedPorts[1]).not.toBe(attemptedPorts[0]);
+      expect(child, `server could not acquire a port: ${output}`).toBeDefined();
+      expect(child!.exitCode).toBeNull();
+    } finally {
+      if (child !== undefined && child.exitCode === null) {
+        child.kill("SIGTERM");
+        const status = await waitForExit(child, 5_000);
+        if (status === null) { child.kill("SIGKILL"); await waitForExit(child, 5_000); }
+        else expect(status).toBe(0);
+      }
+      if (blocker.listening) await new Promise<void>((resolve) => blocker.close(() => resolve()));
+      rmSync(work, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("exercises the server EADDRINUSE path and reaps the rejected process", async () => {
+    const work = mkdtempSync(join(tmpdir(), "bryce-server-collision-"));
+    const blocker = createServer();
+    let child: ReturnType<typeof spawn> | undefined;
+    try {
+      // Match Hono's unspecified-host listen behavior. A 127.0.0.1-only
+      // blocker can coexist with an IPv6 wildcard listener on macOS and would
+      // not actually exercise EADDRINUSE.
+      await new Promise<void>((resolve, reject) => blocker.listen(0, () => resolve()).once("error", reject));
+      const address = blocker.address();
+      if (address === null || typeof address === "string") throw new Error("test blocker has no TCP port");
+      child = spawn(join(process.cwd(), "bin", "bryce"), ["server"], {
+        cwd: work,
+        env: { PATH: process.env.PATH, API_TOKEN: "test-token", MAILER_PROVIDER: "console", BRYCE_TZ: "America/Chicago", DATABASE_PATH: join(work, "bryce.db"), BACKUP_DIR: join(work, "backups"), SERVER_PORT: String(address.port) },
+        stdio: "ignore",
+      });
+      const code = await new Promise<number | null>((resolve) => {
+        const timer = setTimeout(() => resolve(null), 10_000);
+        child!.once("exit", (status) => { clearTimeout(timer); resolve(status); });
+      });
+      expect(code).not.toBeNull();
+      expect(code).not.toBe(0);
+      expect(child.exitCode).not.toBeNull();
+    } finally {
+      if (child?.exitCode === null) { child.kill("SIGKILL"); await new Promise<void>((resolve) => child!.once("exit", () => resolve())); }
+      await new Promise<void>((resolve) => blocker.close(() => resolve()));
+      rmSync(work, { recursive: true, force: true });
+    }
   }, 30_000);
 
   it("accepts canonical space and supported digest inline forms", () => {

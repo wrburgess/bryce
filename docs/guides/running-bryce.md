@@ -75,7 +75,7 @@ working directory for predictable operation.
 
 | Variable | Required | Default | Purpose |
 |---|---|---|---|
-| `DATABASE_PATH` | no | `data/sk.db` | SQLite file; created and migrated automatically |
+| `DATABASE_PATH` | no | `data/bryce.db` | SQLite file; created and migrated automatically |
 | `BRYCE_TZ` | no | `America/Chicago` | Host timezone for "today" (digest windows, season math) |
 | `BACKUP_DIR` | no | `backups` | Directory for local Snapshots and Player List Backups (gitignored) |
 | `BACKUP_KEEP_LAST` | no | `10` | Newest Snapshots retention keeps (positive integer; `<1`/non-integer fails closed) |
@@ -89,7 +89,7 @@ working directory for predictable operation.
 
 ## Scheduling with launchd
 
-Two jobs: Refresh (nightly, after West Coast games finish) and Digest (~5 AM Central). Refresh is
+Three jobs: Backup (03:00), Refresh (nightly, after West Coast games finish), and Digest (~5 AM Central). Refresh is
 idempotent ([ADR 0030](../adr/0030-full-season-refresh-report-once-digest.md)), so re-running it is
 free. launchd runs missed jobs on wake, which is exactly what a sometimes-asleep laptop needs.
 
@@ -108,40 +108,34 @@ out again — Digest is **at-least-once** across that one window, a deliberate c
 missing digest. See *Stuck deliveries and duplicate emails* below for what that looks like and what
 to do about it.
 
-`~/Library/LaunchAgents/com.sk.refresh.plist`:
+The canonical, checked source templates are
+[`ops/templates/com.sk.refresh.plist`](../../ops/templates/com.sk.refresh.plist),
+[`com.sk.digest.plist`](../../ops/templates/com.sk.digest.plist), and
+[`com.sk.backup.plist`](../../ops/templates/com.sk.backup.plist). Copy each one to
+`~/Library/LaunchAgents/` and replace every literal `BRYCE_ROOT` with the absolute
+repository path before loading it. These are source templates, not launchable files
+until that copy-and-replace step is complete. They intentionally contain no secrets:
+the application loads the gitignored `BRYCE_ROOT/.env` itself.
+The templates use the repository path in both XML and a shell command, so their supported
+replacement paths are deliberately constrained: use only ASCII letters, digits, spaces,
+`/`, `.`, `_`, and `-`. A path containing a quote, dollar sign, backtick, backslash, XML
+metacharacter, or another shell metacharacter is unsupported; move or symlink the repository
+to a safe path before copying the templates. Do not add shell quotes around `BRYCE_ROOT`: the
+templates already quote their command-path uses.
+Each command first runs `mkdir -p BRYCE_ROOT/logs` **inside the shell before its output
+redirection**, so the first scheduled run cannot fail merely because `logs/` does not already
+exist. You may still create it during setup (`mkdir -p logs`) to make the location visible early.
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.sk.refresh</string>
-  <key>WorkingDirectory</key><string>/Users/YOU/code/sk</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/zsh</string><string>-lc</string>
-    <string>npm run refresh >> logs/refresh.log 2>&1</string>
-  </array>
-  <key>StartCalendarInterval</key>
-  <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>30</integer></dict>
-</dict>
-</plist>
-```
+The fixed host-local schedule is backup at 03:00, refresh at 03:30, and digest at
+05:00. Keep the Mac's local timezone and `BRYCE_TZ` aligned with the intended Central
+time cadence; launchd itself uses the host-local timezone.
 
-`~/Library/LaunchAgents/com.sk.digest.plist` — identical shape, label `com.sk.digest`,
-command `npm run digest >> logs/digest.log 2>&1`, and:
-
-```xml
-  <key>StartCalendarInterval</key>
-  <dict><key>Hour</key><integer>5</integer><key>Minute</key><integer>0</integer></dict>
-```
-
-Load both:
+Load all three:
 
 ```sh
 launchctl load ~/Library/LaunchAgents/com.sk.refresh.plist
 launchctl load ~/Library/LaunchAgents/com.sk.digest.plist
+launchctl load ~/Library/LaunchAgents/com.sk.backup.plist
 ```
 
 During Offseason Sleep ([ADR 0031](../adr/0031-offseason-sleep-world-series-to-opening-day.md))
@@ -203,34 +197,7 @@ pending migration applies** — the known-good state to roll back to if the migr
 schema-less first run has nothing to lose, so it is skipped; a failed pre-migration Snapshot **aborts**
 the migration. Take one on demand with `sk db backup` (Snapshot + prune to `BACKUP_KEEP_LAST`).
 
-Schedule a nightly Snapshot with launchd, same shape as the Refresh/Digest jobs above:
-
-`~/Library/LaunchAgents/com.sk.backup.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>com.sk.backup</string>
-  <key>WorkingDirectory</key><string>/Users/YOU/code/sk</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/zsh</string><string>-lc</string>
-    <string>npm run db:backup >> logs/backup.log 2>&1</string>
-  </array>
-  <key>StartCalendarInterval</key>
-  <dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>0</integer></dict>
-</dict>
-</plist>
-```
-
-```sh
-launchctl load ~/Library/LaunchAgents/com.sk.backup.plist
-```
-
-Snapshots are owner-only (`0600`) and named `sk-YYYYMMDDTHHMMSSZ-NNN.db` (UTC). Retention keeps the
+Snapshots are owner-only (`0600`) and named `bryce-YYYYMMDDTHHMMSSZ-NNN.db` (UTC). Retention keeps the
 newest `BACKUP_KEEP_LAST`; an off-box home for Snapshots is deliberately deferred (the Replica remains
 the off-box story).
 
@@ -274,7 +241,7 @@ hand first:
 4. **Restore:**
 
    ```sh
-   sk db restore --from backups/sk-20260722T030000Z-000.db
+   sk db restore --from backups/bryce-20260722T030000Z-000.db
    ```
 
    It validates the candidate (integrity check, foreign-key check, expected tables, migration
@@ -285,24 +252,65 @@ hand first:
 5. **Restart** the server and reload the launchd agents (and restart Litestream). The next `openDb`
    applies any now-corrected pending migrations cleanly.
 
-## Backup: Litestream to Cloudflare R2
+### Disposable restore drill
 
-Continuous SQLite replication (the database is the only state worth protecting):
+Practice restore only in a disposable directory, never against `data/` or the configured
+production database. This complete drill uses `sqlite3` (included with macOS) to make the
+pre-restore target observably different from the source Snapshot, then checks the replacement,
+the safety Snapshot, and integrity. Substitute the chosen absolute production Snapshot path only
+in `PRODUCTION_SNAPSHOT`; the commands never write back to it.
 
-```yml
-# /usr/local/etc/litestream.yml
-dbs:
-  - path: /Users/YOU/code/sk/data/sk.db
-    replicas:
-      - type: s3
-        bucket: sk-backup
-        path: sk.db
-        endpoint: https://ACCOUNT_ID.r2.cloudflarestorage.com
-        # AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from the R2 API token, via env
+```sh
+set -euo pipefail
+
+PRODUCTION_SNAPSHOT="/absolute/path/to/backups/bryce-YYYYMMDDTHHMMSSZ-NNN.db"
+DRILL_DIR="$(mktemp -d -t bryce-restore-drill)"
+cleanup() { rm -rf -- "$DRILL_DIR"; }
+trap cleanup EXIT HUP INT TERM
+SOURCE_DB="$DRILL_DIR/source.db"
+TARGET_DB="$DRILL_DIR/target.db"
+TARGET_BACKUPS="$DRILL_DIR/target-backups"
+mkdir -p "$TARGET_BACKUPS"
+cp "$PRODUCTION_SNAPSHOT" "$SOURCE_DB"
+cp "$SOURCE_DB" "$TARGET_DB"
+
+# Capture a source sentinel, then make the target deliberately different.
+SENTINEL="$(sqlite3 "$SOURCE_DB" 'SELECT full_name FROM players ORDER BY id LIMIT 1;')"
+test -n "$SENTINEL"
+sqlite3 "$TARGET_DB" 'DELETE FROM players;'
+test "$(sqlite3 "$TARGET_DB" 'SELECT count(*) FROM players;')" = 0
+
+DATABASE_PATH="$TARGET_DB" BACKUP_DIR="$TARGET_BACKUPS" sk db restore --from "$SOURCE_DB"
+INTEGRITY="$(sqlite3 "$TARGET_DB" 'PRAGMA integrity_check;')"
+test "$INTEGRITY" = ok
+RESTORED_SENTINEL="$(sqlite3 "$TARGET_DB" "SELECT full_name FROM players WHERE full_name = '$(printf %s "$SENTINEL" | sed "s/'/''/g")';")"
+test "$RESTORED_SENTINEL" = "$SENTINEL"
+
+# The safety Snapshot must preserve the empty pre-restore target.
+SAFETY_SNAPSHOT="$(find "$TARGET_BACKUPS" -name 'bryce-*.db' -type f | sort | tail -n 1)"
+test -n "$SAFETY_SNAPSHOT"
+test "$(sqlite3 "$SAFETY_SNAPSHOT" 'SELECT count(*) FROM players;')" = 0
+
+# The EXIT trap removes only the directory created by mktemp above, on success or failure.
 ```
 
+The assertions fail the shell unless `PRAGMA integrity_check` returns `ok`, the restored sentinel
+equals the source Player's name, and the safety Snapshot count remains `0`. The automated restore
+drill uses the same source/target distinction and additionally verifies that a corrupt candidate
+leaves its target unchanged.
+
+## Backup: Litestream to Cloudflare R2
+
+Continuous SQLite replication (the database is the only state worth protecting) uses the checked
+[`ops/templates/litestream.yml`](../../ops/templates/litestream.yml). Copy it to the local
+Litestream configuration and replace literal `BRYCE_DATA_DIR`, `R2_BUCKET`, and `R2_ENDPOINT`
+before use. `R2_ENDPOINT` is the R2 hostname only (for example,
+`ACCOUNT_ID.r2.cloudflarestorage.com`), not a full URL: the template supplies `https://`.
+It has no credential assignments: Litestream receives `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY` from its runtime environment.
+
 Run `litestream replicate` under its own launchd job (or `brew services start litestream`).
-Restore with `litestream restore -o data/sk.db s3://sk-backup/sk.db`.
+Restore with `litestream restore -o data/bryce.db s3://sk-backup/bryce.db`.
 
 ## Remote access: Cloudflare Tunnel
 
@@ -473,7 +481,7 @@ verbatim, including `sending`:
   how many times that slot was claimed:
 
   ```sh
-  sqlite3 data/sk.db \
+  sqlite3 data/bryce.db \
     "SELECT kind, date_covered, status, attempt_count, claimed_at, sent_at, provider_message_id,
             reconciled_at
        FROM digest_deliveries ORDER BY id DESC LIMIT 5;"
@@ -511,7 +519,7 @@ To force it out **now** rather than wait for the next scheduled run, reopen the 
 `failed` row is re-claimable; an already-`sent` slot can be reopened by setting it `failed`:
 
 ```sh
-sqlite3 data/sk.db \
+sqlite3 data/bryce.db \
   "UPDATE digest_deliveries SET status = 'failed'
      WHERE kind = 'digest' AND date_covered = '$(date +%F)';"
 sk digest

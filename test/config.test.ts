@@ -34,4 +34,16 @@ describe("loadConfig backup settings", () => {
   it("rejects a blank BACKUP_DIR", () => {
     expect(() => loadConfig({ ...base, BACKUP_DIR: "   " }, () => {})).toThrow();
   });
+
+  it("rejects a server port outside Node's valid range", () => {
+    for (const bad of ["0", "-1", "65536", "70000", "1.5", "abc"]) {
+      expect(() => loadConfig({ ...base, SERVER_PORT: bad }, () => {}), bad).toThrow();
+    }
+  });
+
+  it("rejects an SMTP port outside Node's valid range", () => {
+    for (const bad of ["0", "-1", "65536", "70000", "1.5", "abc"]) {
+      expect(() => loadConfig({ ...base, SMTP_PORT: bad }, () => {}), bad).toThrow();
+    }
+  });
 });

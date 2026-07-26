@@ -16,6 +16,8 @@ import { healthSnapshot } from "./server/health.js";
 import { isMain } from "./cli/main.js";
 import { exitAfterDrain } from "./cli/main.js";
 import { preflightDirect } from "./cli/router.js";
+import type Database from "better-sqlite3";
+import type { StartedDb } from "./db/startup.js";
 
 /**
  * Phase 2 HTTP server (ADR 0027): the MCP server at /mcp is the primary
@@ -62,6 +64,75 @@ export function createApp(deps: AppDeps): Hono {
 
 export interface ClosableListener {
   close: (callback: () => void) => unknown;
+}
+
+/** Close both handles before releasing the opener lock after a failed bind. */
+export function closeFailedBind(
+  readonlySqlite: Pick<Database.Database, "close">,
+  started: Pick<StartedDb, "close">,
+  markLockReleased: () => void,
+): void {
+  try {
+    readonlySqlite.close();
+  } finally {
+    try {
+      started.close();
+    } finally {
+      markLockReleased();
+    }
+  }
+}
+
+export interface ErrorAwareListener extends ClosableListener {
+  once(event: "error", listener: (error: Error) => void): unknown;
+  once(event: "listening", listener: () => void): unknown;
+  removeListener(event: "error" | "listening", listener: (() => void) | ((error: Error) => void)): unknown;
+}
+
+/** Wait for the first terminal result of binding the HTTP listener. */
+function waitForListener(listener: ErrorAwareListener): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onListening = (): void => {
+      listener.removeListener("error", onError);
+      resolve();
+    };
+    const onError = (error: Error): void => {
+      listener.removeListener("listening", onListening);
+      reject(error);
+    };
+    listener.once("error", onError);
+    listener.once("listening", onListening);
+  });
+}
+
+/**
+ * Create and bind the listener while the database ownership is still covered by
+ * the failed-bind cleanup boundary. `serve` can throw synchronously (for
+ * example, for an invalid port) as well as emit an asynchronous bind error.
+ */
+export async function createBoundListener(
+  createListener: () => ErrorAwareListener,
+  readonlySqlite: Pick<Database.Database, "close">,
+  started: Pick<StartedDb, "close">,
+  markLockReleased: () => void,
+): Promise<ErrorAwareListener> {
+  try {
+    const listener = createListener();
+    await waitForListener(listener);
+    return listener;
+  } catch (error) {
+    // A caller can catch a bind failure and keep its process alive (unlike the
+    // CLI wrapper, which exits). Close BOTH database handles in that case: a
+    // released advisory lock alone would leave the writable SQLite connection
+    // open and could interfere with the caller's next open or restore.
+    try {
+      closeFailedBind(readonlySqlite, started, markLockReleased);
+    } catch {
+      // The bind error is the actionable failure; best-effort cleanup must not
+      // replace it, and the helper already attempted every teardown step.
+    }
+    throw error;
+  }
 }
 
 /**
@@ -129,7 +200,17 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     digestTo: config.digestTo ?? "console@localhost",
     digestFrom: config.digestFrom ?? "bryce@localhost",
   });
-  const listener = serve({ fetch: app.fetch, port: config.serverPort });
+  // `serve` reports an occupied port asynchronously. Do not claim readiness
+  // until the listener has actually bound: a launchd retry or subprocess smoke
+  // must never mistake a pending (or failed) bind for a usable server. The
+  // factory belongs inside this boundary because `serve` can also throw before
+  // it returns a listener (for example, for a malformed port).
+  const listener = await createBoundListener(
+    () => serve({ fetch: app.fetch, port: config.serverPort }) as ErrorAwareListener,
+    readonlySqlite,
+    started,
+    () => { lockReleased = true; },
+  );
   const shutdown = createShutdown(listener, releaseLock);
   process.once("SIGINT", shutdown);
   process.once("SIGTERM", shutdown);

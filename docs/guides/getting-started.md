@@ -99,7 +99,7 @@ Every other line can stay at its default. For reference, what they mean:
 
 | Variable | What it is | Default |
 |---|---|---|
-| `DATABASE_PATH` | Where the SQLite file lives; created + migrated automatically | `data/sk.db` |
+| `DATABASE_PATH` | Where the SQLite file lives; created + migrated automatically | `data/bryce.db` |
 | `BRYCE_TZ` | Your timezone — defines "today" for digests and season boundaries | `America/Chicago` |
 | `MAILER_PROVIDER` | `console` (print), `postmark`, or `smtp` | `postmark` |
 | `POSTMARK_SERVER_TOKEN` | Only when provider is `postmark` (see step 9) | empty |
@@ -118,7 +118,7 @@ npm test
 Expected: a passing Vitest run (the exact test count changes as the application evolves). Optionally
 also run `npx tsx scripts/parity-check.ts`, which should print `parity_check: OK`. Green here means
 your machine is fully set up. There is no "create the database" step — the first real command below
-creates and migrates `data/sk.db` on its own.
+creates and migrates `data/bryce.db` on its own.
 
 ## 6. Add players to your watch list
 
