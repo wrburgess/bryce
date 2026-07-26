@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -471,6 +471,13 @@ describe("parity check - local ADR link labels", () => {
         "docs/adr-link-malformed-followed-by-valid.md",
         `[ADR 0041](adr/broken.md\n[ADR 0041](adr/${ADR_0041})\n`,
       );
+      expect(runParityCheck(root)).toMatchObject({ status: 0, errors: [] });
+    });
+  });
+
+  it("skips a directory symlink instead of recursively traversing its target", () => {
+    withBundleCopy((root) => {
+      symlinkSync(".", join(root, "docs", "adr-link-loop"));
       expect(runParityCheck(root)).toMatchObject({ status: 0, errors: [] });
     });
   });

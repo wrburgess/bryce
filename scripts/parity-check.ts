@@ -17,7 +17,7 @@
 //   Rendered adapter:          <!-- parity:render source=AGENTS.md --> … <!-- parity:endrender -->
 //                              (the region between the markers must equal AGENTS.md byte-for-byte)
 
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { basename, join, dirname, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { argv } from "node:process";
@@ -532,10 +532,13 @@ class ParityCheck {
 
       let stat;
       try {
-        stat = statSync(this.path(rel));
+        // lstat, rather than stat, keeps an in-repository directory symlink
+        // from turning this bounded walk into a cycle through its target.
+        stat = lstatSync(this.path(rel));
       } catch {
         continue;
       }
+      if (stat.isSymbolicLink()) continue;
       if (stat.isDirectory()) {
         this.markdownFiles(rel, files);
       } else if (stat.isFile() && rel.endsWith(".md")) {
