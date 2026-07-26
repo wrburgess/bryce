@@ -238,6 +238,60 @@ describe("tag-scoped digest (#140)", () => {
     expect(scoped.batters.every((r) => r.agg.games === 1)).toBe(true);
   });
 
+  it("a doubleheader stays two rows in a 1d cohort window, and folds to one in 7d", async () => {
+    // Per-game identity (ADR 0029) is orthogonal to scoping, but a scope that
+    // accidentally collapsed or duplicated a game would show up here first.
+    const tagged = await insertPlayer(opened.db, { fullName: "Doubleheader Guy" });
+    await insertPlayerTag(opened.db, { playerId: tagged.id, namespace: "status", value: "rostered" });
+    await insertStatLine(opened.db, {
+      playerId: tagged.id,
+      gameId: 980001,
+      gameNumber: 1,
+      gameDate: "2026-07-18",
+      stats: { hits: 0, atBats: 3 },
+    });
+    await insertStatLine(opened.db, {
+      playerId: tagged.id,
+      gameId: 980002,
+      gameNumber: 2,
+      gameDate: "2026-07-18",
+      stats: { hits: 2, atBats: 4 },
+    });
+    // An untagged player with his own doubleheader must not bleed in.
+    const untagged = await insertPlayer(opened.db, { fullName: "Untagged Guy" });
+    await insertStatLine(opened.db, { playerId: untagged.id, gameId: 980003, gameNumber: 1, gameDate: "2026-07-18" });
+
+    const scope = { tagScope: resolveTagScope("status:rostered") };
+    const day = await assembleDigest(opened.db, { now: clock.now, tz: TEST_TZ, spec: "1d", ...scope });
+    expect(day.batters.map((r) => r.gameNumber)).toEqual([1, 2]);
+    expect(day.batters.map((r) => r.agg.counters.hits)).toEqual([0, 2]);
+    expect(rowNames(day)).toEqual(["Doubleheader Guy", "Doubleheader Guy"]);
+
+    const week = await assembleDigest(opened.db, { now: clock.now, tz: TEST_TZ, spec: "7d", ...scope });
+    expect(week.batters).toHaveLength(1);
+    expect(week.batters[0]?.agg.games).toBe(2);
+    expect(week.batters[0]?.agg.counters.hits).toBe(2);
+  });
+
+  it("an EMPTY named list intersected with a matching selector still selects nobody", async () => {
+    // Intersection must not degrade to a union when one side is empty.
+    const list = await createList(opened.db, "Empty", clock.now());
+    const tagged = await insertPlayer(opened.db, { fullName: "Tagged Unlisted" });
+    await insertPlayerTag(opened.db, { playerId: tagged.id, namespace: "status", value: "rostered" });
+    await insertStatLine(opened.db, { playerId: tagged.id, gameDate: "2026-07-18" });
+
+    const scoped = await assembleDigest(opened.db, {
+      now: clock.now,
+      tz: TEST_TZ,
+      spec: "1d",
+      listId: list.id,
+      listName: list.name,
+      tagScope: resolveTagScope("status:rostered"),
+    });
+    expect(rowNames(scoped)).toEqual([]);
+    expect(scoped.playerCount).toBe(0);
+  });
+
   describe("delivery-slot behavior", () => {
     async function sendTagged(): ReturnType<typeof runDigest> {
       const mailer = new CapturingMailer();
