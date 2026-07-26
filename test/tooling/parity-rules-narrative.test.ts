@@ -334,12 +334,32 @@ describe("parity check - a bullet is measured across its wrapped continuation li
     ["a blank line", `${SHORT}\n\n${LONG_TRAILER}`],
     ["a sibling bullet", `${SHORT}\n- **Another one** — ${LONG_TRAILER}`],
     ["a heading", `${SHORT}\n## A heading ${LONG_TRAILER}`],
+    ["a bare hash heading", `${SHORT}\n#\n${LONG_TRAILER}`],
     ["a fenced block", `${SHORT}\n\`\`\`\n${LONG_TRAILER}\n\`\`\``],
     ["a blockquote", `${SHORT}\n> ${LONG_TRAILER}`],
   ])("stops the bullet at %s", (_label, body) => {
     expect(SHORT.length + LONG_TRAILER.length).toBeGreaterThan(NARRATIVE_MAX_CHARS);
     withRuleBody("rules/testing.md", body, (errors) => {
       expect(errors).toEqual([]);
+    });
+  });
+
+  // `#` NOT followed by a space is literal text, not an ATX heading (CommonMark: `#5 bolt` renders as
+  // a paragraph). These files are made of issue references, so a wrap breaking before `#152` is the
+  // likeliest accident in the whole format -- and treating it as a block opener made the rest of the
+  // bullet count toward nothing at all. Found by the Reviewer on the delta.
+  it.each([
+    ["an issue reference", "#152"],
+    ["a hash-prefixed word", "#hashtag"],
+    ["seven hashes (too many for a heading)", "#######"],
+  ])("keeps consuming a continuation line beginning with %s", (_label, prefix) => {
+    const body = `${SHORT}\n${prefix} ${LONG_TRAILER}`;
+    withRuleBody("rules/testing.md", body, (errors) => {
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain('bullet "Never run away past the bullet"');
+      // The continuation must be COUNTED, not merely noticed: the reported length includes it.
+      const measured = Number(/is (\d+) characters/.exec(errors[0] as string)?.[1]);
+      expect(measured).toBeGreaterThan(SHORT.length + LONG_TRAILER.length);
     });
   });
 });

@@ -78,9 +78,16 @@ by accident, invisible in the rendered document:
   The set that *terminates* a bullet is kept in lockstep with the set that *starts* one, or a
   star-marked bullet gets absorbed as prose by its dash-marked neighbour.
 
+- The set of line shapes that **end** a bullet demands exactly the padding CommonMark demands. The ATX
+  heading rule is the one that bites: `#` *not* followed by a space, tab, or end-of-line is literal
+  text, not a heading — and these files are made of `#152`-style issue references, so treating a bare
+  `#` as a block opener ended the bullet at any wrap that happened to break before one, and counted the
+  remainder toward nothing at all.
+
 Today's rule files happen to write one bullet per line with one marker spelling, which is precisely what
-made both assumptions dangerous to encode. The first was caught by the Stage-4 adversarial pass; the
-second and the lazy-continuation flavor of the first were caught by the independent Reviewer.
+made these assumptions dangerous to encode. The first was caught by the Stage-4 adversarial pass; the
+lazy-continuation flavor and the marker spelling by the independent Reviewer; the ATX-padding gap by the
+Reviewer again, on the delta that answered its own first review.
 
 **Length is measured over the raw source, syntax included** — `- **`, backticks, emphasis and link
 markup all count. That is deliberate and not an oversight: the Lean Core is loaded **verbatim into every
