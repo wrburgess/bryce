@@ -46,8 +46,8 @@ import { resolve as resolvePath } from "node:path";
 import { argv, env } from "node:process";
 
 const USAGE =
-  "Usage: npx tsx scripts/summon-reviewer.ts --mode work --out FILE [--base BRANCH]\n" +
-  "       npx tsx scripts/summon-reviewer.ts --mode plan --input FILE --out FILE\n";
+  "Usage: npx tsx scripts/summon-reviewer.ts --mode work --out FILE --ac NAME --ac-model MODEL --reviewer-model MODEL [--base BRANCH]\n" +
+  "       npx tsx scripts/summon-reviewer.ts --mode plan --input FILE --out FILE --ac NAME --ac-model MODEL --reviewer-model MODEL\n";
 
 const MODES = ["plan", "work"];
 

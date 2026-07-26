@@ -516,6 +516,8 @@ expect_status "missing --mode -> usage error" 1 "usage error" \
   "$TSX" "$SCRIPT" --out "$TMP/nomode.md" --codex-bin "$FAKE_BIN"
 expect_status "--mode bogus -> usage error" 1 "usage error" \
   "$TSX" "$SCRIPT" --mode bogus --out "$TMP/bogus.md" --codex-bin "$FAKE_BIN"
+expect_status "usage synopsis includes mandatory reviewer identity flags" 1 "--reviewer-model MODEL" \
+  "$TSX" "$SCRIPT" --mode bogus --out "$TMP/bogus-models.md" --codex-bin "$FAKE_BIN"
 expect_status "missing --out -> usage error" 1 "usage error" \
   "$TSX" "$SCRIPT" --mode work --codex-bin "$FAKE_BIN"
 expect_status "plan mode without --input -> usage error" 1 "usage error" \
