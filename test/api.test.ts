@@ -82,6 +82,21 @@ describe("REST API", () => {
 
   const app = () => createApp(deps);
 
+  it("returns a read-only player card by internal id or canonical exact name", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "José Test" });
+    await insertStatLine(opened.db, { playerId: player.id, stats: { hits: 2, atBats: 4 } });
+    const before = await opened.db.select().from(statLines);
+    const byId = await app().request(`/api/reports/player/${player.id}?windows=last10`, { headers: AUTH });
+    expect(byId.status).toBe(200);
+    expect(await byId.json()).toMatchObject({ player: { id: player.id }, windows: [{ spec: "last10", actualGames: 1 }] });
+    const byName = await app().request("/api/reports/player?name=Jose%CC%81%20Test&windows=ytd", { headers: AUTH });
+    expect(byName.status).toBe(200);
+    expect(await byName.json()).toMatchObject({ player: { id: player.id }, windows: [{ spec: "ytd" }] });
+    expect(await opened.db.select().from(statLines)).toEqual(before);
+    expect((await app().request("/api/reports/player/99999", { headers: AUTH })).status).toBe(404);
+    expect((await app().request(`/api/reports/player/${player.id}?windows=oops`, { headers: AUTH })).status).toBe(400);
+  });
+
   it("returns the explicit targeted deferral contract while a whole refresh owns the lease", async () => {
     await insertPlayer(opened.db, { externalId: 691185 });
     expect(claimRefreshRun(opened.db, { now: clock.now(), playersTotal: 1 }).claimed).toBe(true);

@@ -39,6 +39,7 @@ const ALL_TOOLS = [
   "watchlist_deactivate",
   "player_search",
   "stat_lines",
+  "report_player",
   "digest_preview",
   "send_digest",
   "run_refresh",
@@ -434,6 +435,19 @@ describe("MCP server over Streamable HTTP", () => {
 
     expect(mailer.sent).toHaveLength(0);
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
+  });
+
+  it("report_player returns the read-only card and rejects typed-json coercion", async () => {
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id, stats: { hits: 2, atBats: 4 } });
+    const before = await opened.db.select().from(statLines);
+    const result = await call("report_player", { id: player.id, windows: ["last10"] });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ player: { id: player.id }, windows: [{ spec: "last10", actualGames: 1 }] });
+    expect(await opened.db.select().from(statLines)).toEqual(before);
+    const invalid = await call("report_player", { id: String(player.id) });
+    expect(invalid.isError).toBe(true);
+    expect(invalid.content[0]?.text).toContain("Input validation");
   });
 
   it("both digest tools accept a window, and reject an unsupported one", async () => {

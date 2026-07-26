@@ -68,6 +68,23 @@ state, so re-running a Window always sends the same content.
   A named-list send is **on-demand only** (it takes no daily slot); an unknown list **fails closed**
   (exit `1`, `error: no list named "…"`, nothing sent).
 
+## `report player` — a read-only single-player card
+
+```sh
+sk report player --id 42 --windows last10,last30,ytd
+sk report player --name "José Test" --windows last10,ytd
+npm run report -- player --id 42
+```
+
+Use exactly one internal Bryce `--id` or canonical exact `--name`. `--windows`
+is optional and defaults to `last10,last30,ytd`; its comma-separated values are
+case-insensitive tokens. `last10` and `last30` count distinct regular-season
+games, not stat-line rows; `ytd` uses the current Player sport's cached season
+start through the last completed host date. Output is one JSON card with
+level-split batting/pitching aggregates and actual game/date-span provenance.
+It never sends a Digest or writes database state. An unknown/ambiguous selector
+or invalid window writes `error: …` to stderr and exits `1`.
+
 ## `players:lists` — manage named player lists (`#70`)
 
 ```sh

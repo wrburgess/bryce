@@ -35,6 +35,17 @@ upstream failure all surface. An unexpected (non-domain) error is not swallowed 
 
 ## Tools
 
+### `report_player`
+
+Build a read-only multi-window card for exactly one tracked Player. Supply one
+typed `id` (internal `players.id`) or canonical exact `name`, plus an optional
+ordered `windows` array containing `last10`, `last30`, and/or `ytd`. Game-count
+windows select distinct regular-season games before companion stat lines, while
+`ytd` follows the Player sport's season calendar through the last completed host
+date. Results retain batting/pitching level splits and actual game/date-span
+provenance. Unknown or ambiguous Players and malformed typed inputs return the
+standard structured MCP error. The tool sends nothing and writes nothing.
+
 ### `watchlist_list`
 
 List Watch List players.

@@ -24,7 +24,7 @@ describe("Highlightly migration", () => {
     unlinkSync(join(oldMigrations, "meta", "0008_snapshot.json"));
     const journalPath = join(oldMigrations, "meta", "_journal.json");
     const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: unknown[] };
-    journal.entries.splice(-2);
+    journal.entries.splice(-3);
     writeFileSync(journalPath, JSON.stringify(journal));
 
     const dbPath = join(dir, "bryce.db");
@@ -56,7 +56,7 @@ describe("Highlightly migration", () => {
     unlinkSync(join(before0009, "meta", "0009_snapshot.json"));
     const journalPath = join(before0009, "meta", "_journal.json");
     const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: unknown[] };
-    journal.entries.splice(-1);
+    journal.entries.splice(-2);
     writeFileSync(journalPath, JSON.stringify(journal));
     const dbPath = join(dir, "bryce.db");
     const old = openDb(dbPath, { migrationsFolder: before0009 });
@@ -117,7 +117,7 @@ describe("Highlightly migration", () => {
     unlinkSync(join(before0009, "meta", "0009_snapshot.json"));
     const journalPath = join(before0009, "meta", "_journal.json");
     const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: unknown[] };
-    journal.entries.splice(-1);
+    journal.entries.splice(-2);
     writeFileSync(journalPath, JSON.stringify(journal));
 
     const dbPath = join(dir, "bryce.db");
@@ -163,7 +163,7 @@ describe("Highlightly migration", () => {
     unlinkSync(join(before0009, "meta", "0009_snapshot.json"));
     const journalPath = join(before0009, "meta", "_journal.json");
     const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: unknown[] };
-    journal.entries.splice(-1);
+    journal.entries.splice(-2);
     writeFileSync(journalPath, JSON.stringify(journal));
 
     const dbPath = join(dir, "bryce.db");

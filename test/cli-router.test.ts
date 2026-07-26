@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { COMMANDS, type Command, preflight, preflightDirect, renderHelp, resolve, runRouter } from "../src/cli/router.js";
 
 const validArgs: Record<string, string[]> = {
+  "report player": ["--id", "1"],
   "players lists create": ["--name", "Prospects"],
   "players lists rename": ["--name", "Prospects", "--to", "Top 30"],
   "players lists delete": ["--name", "Prospects"],
@@ -351,7 +352,7 @@ describe("CLI router metadata", () => {
     const work = mkdtempSync(join(tmpdir(), "bryce-compat-"));
     try {
       const entrypoints = [
-        "src/cli/backup.ts", "src/cli/batch-add.ts", "src/cli/connector-smoke.ts", "src/cli/digest.ts",
+        "src/cli/backup.ts", "src/cli/batch-add.ts", "src/cli/connector-smoke.ts", "src/cli/digest.ts", "src/cli/report.ts",
         "src/cli/lists.ts", "src/cli/migrate.ts", "src/cli/players-backup.ts",
         "src/cli/players-restore.ts", "src/cli/refresh.ts", "src/cli/restore.ts", "src/cli/seed.ts", "src/server.ts",
       ];

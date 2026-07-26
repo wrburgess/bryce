@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { WINDOW_SPECS } from "../domain/window.js";
+import { PLAYER_CARD_WINDOWS } from "../reports/player-card.js";
 import { StatLineFilterShape, StatLineQuerySchema, refineFromTo } from "../queries/statLines.js";
 
 /**
@@ -26,6 +27,43 @@ export const NcaaPlayerSeqSchema = z.coerce.number().int().positive();
 export const StrictPersonIdSchema = z.number().int().positive();
 export const StrictHighlightlyPlayerIdSchema = z.number().int().positive();
 export const StrictNcaaPlayerSeqSchema = z.number().int().positive();
+
+const PlayerCardWindowToken = z.enum(PLAYER_CARD_WINDOWS);
+
+/** Parse the common comma-list grammar used by REST and the direct CLI. */
+export function parsePlayerCardWindows(value: string | undefined): (typeof PLAYER_CARD_WINDOWS)[number][] {
+  if (value === undefined) return [...PLAYER_CARD_WINDOWS];
+  const tokens = value.split(",").map((token) => token.trim().toLowerCase());
+  if (tokens.length === 0 || tokens.some((token) => !PLAYER_CARD_WINDOWS.includes(token as (typeof PLAYER_CARD_WINDOWS)[number]))) {
+    throw new z.ZodError([{ code: "custom", path: ["windows"], message: `windows must be a comma-separated subset of ${PLAYER_CARD_WINDOWS.join(", ")}` }]);
+  }
+  if (new Set(tokens).size !== tokens.length) {
+    throw new z.ZodError([{ code: "custom", path: ["windows"], message: "windows must not contain duplicates" }]);
+  }
+  return tokens as (typeof PLAYER_CARD_WINDOWS)[number][];
+}
+
+/** REST query form: window tokens are strings, player names remain canonical exact. */
+const PlayerCardWindowsQuery = z.string().optional().transform(parsePlayerCardWindows);
+export const PlayerCardQuerySchema = z.object({ windows: PlayerCardWindowsQuery }).strict();
+
+export const PlayerCardNameQuerySchema = z.object({
+  name: z.string().refine((value) => value.trim().length > 0, "name must be non-blank"),
+  windows: PlayerCardWindowsQuery,
+}).strict();
+
+/** MCP receives typed JSON, so it does not coerce IDs or accept a CSV string. */
+export const PlayerCardInputShape = {
+  id: StrictPersonIdSchema.optional().describe("Internal Bryce player id (players.id), not an external provider ID."),
+  name: z.string().refine((value) => value.trim().length > 0, "name must be non-blank").optional().describe("Canonical exact player name; case-sensitive after NFC/whitespace canonicalization."),
+  windows: z.array(PlayerCardWindowToken).min(1).refine((values) => new Set(values).size === values.length, "windows must not contain duplicates").optional().describe("Ordered subset of last10, last30, ytd; omitted returns all three."),
+};
+
+export const PlayerCardInputSchema = z.object(PlayerCardInputShape).strict().superRefine((value, ctx) => {
+  if ((value.id === undefined) === (value.name === undefined)) {
+    ctx.addIssue({ code: "custom", path: ["id"], message: "provide exactly one of id or name" });
+  }
+});
 
 export const AddPlayerInputSchema = z.object({
   personId: PersonIdSchema.describe(

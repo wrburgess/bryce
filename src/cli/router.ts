@@ -134,6 +134,7 @@ const tagSelector = (candidate: string): string | null => {
 
 /** Canonical built-in syntax/help metadata. Operational detail belongs in docs/cli. */
 export const COMMANDS: readonly Command[] = [
+  leaf(["report", "player"], "Build a read-only single-player card.", "sk report player (--id ID|--name NAME) [--windows SPECS]", "sk report player --id 1 --windows last10,last30,ytd", () => import("./report.js"), [value("id", "Internal Bryce player id.", undefined, undefined, positiveInteger), value("name", "Canonical exact player name."), inlineValue("windows", "Comma-separated card windows.")], { exactlyOneOf: [["id", "name"]] }),
   leaf(["digest"], "Build and send a digest.", "sk digest [--window SPEC|-w SPEC] [--list NAME] [--force|-f]", "sk digest -w 7d", () => import("./digest.js"), [inlineValue("window", "Digest window.", ["1d", "7d", "14d", "21d", "28d", "35d", "60d", "ytd"], ["w"]), inlineValue("list", "Named player list."), flag("force", "Replay the daily slot when allowed.", ["f"])]),
   leaf(["refresh"], "Refresh the active watch list.", "sk refresh", "sk refresh", () => import("./refresh.js")),
   leaf(["players", "lists", "create"], "Create a named player list.", "sk players lists create --name NAME", "sk players lists create --name Prospects", () => import("./lists.js"), [value("name", "List name.")], { required: ["name"] }),
