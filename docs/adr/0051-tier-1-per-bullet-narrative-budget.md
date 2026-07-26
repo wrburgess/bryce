@@ -63,12 +63,29 @@ Five of the eight grandfathered bullets are `rules/backend.md` bullets that #151
 the check rediscovered that list from shape alone, which is the evidence that it tracks the real
 invariant rather than a proxy.
 
-**The measurement is wrap-invariant.** A bullet is measured across its wrapped continuation lines,
-joined the way markdown renders them. Measuring only the first line was the original implementation and
-it was wrong: any prose-wrapper — an editor reflow, a formatter with `proseWrap` enabled — would have
-silently disabled the guard for the **entire tree at once**, by a routine and well-intentioned edit.
-Today's rule files happen to write one bullet per line, which is precisely what made that assumption
-dangerous to encode. Caught by the Stage-4 adversarial pass, not by the plan.
+**The measurement is wrap-invariant, and the marker is matched as CommonMark defines it.** Both of
+these were wrong in the first implementation, and both were false greens of the worst kind — reachable
+by accident, invisible in the rendered document:
+
+- A bullet is measured across its wrapped continuation lines, joined the way markdown renders them,
+  **including CommonMark's *lazy* continuation at column zero**. Measuring only the first line meant any
+  prose-wrapper — an editor reflow, `gq`, a formatter with `proseWrap` on — would have silently disabled
+  the guard for the **entire tree at once**. Requiring the continuation to be *indented* (the first fix)
+  still left the plain hard-wrap flavor wide open while looking closed.
+- The marker is `/^\s*[-*+][ \t]+/`, not the literal four bytes `- **` today's files use. CommonMark
+  treats one-to-four spaces or a tab after any of `-`/`*`/`+` as identical padding, so `-  **Never …**`
+  — one accidental keystroke — rendered as an ordinary bullet while being wholly invisible to the check.
+  The set that *terminates* a bullet is kept in lockstep with the set that *starts* one, or a
+  star-marked bullet gets absorbed as prose by its dash-marked neighbour.
+
+Today's rule files happen to write one bullet per line with one marker spelling, which is precisely what
+made both assumptions dangerous to encode. The first was caught by the Stage-4 adversarial pass; the
+second and the lazy-continuation flavor of the first were caught by the independent Reviewer.
+
+**Length is measured over the raw source, syntax included** — `- **`, backticks, emphasis and link
+markup all count. That is deliberate and not an oversight: the Lean Core is loaded **verbatim into every
+agent session**, so raw characters are the actual context cost this guard exists to bound. Rendered
+reading length is the wrong unit for the thing being protected.
 
 ## Rejected sub-decisions
 
@@ -119,6 +136,15 @@ domain.
   belongs to which bullet, which is a heuristic on a heuristic; the deep doc's own structural test
   (`test/tooling/parity-rules-pointers.test.ts` does this for `testing-postmortems.md`) is the better
   place for that pressure.
+- **Known limitation, inherited:** an unclosed or length-mismatched code fence leaves the scanner inside
+  a fence for the remainder of the file, so every later bullet is skipped. This is `checkRulesPointers`'s
+  fence handling, mirrored deliberately so the two checks agree on what is code; fixing it belongs in one
+  place, for both. It is loud rather than silent — an unclosed fence renders visibly wrong.
+- **The exemption requires the bare backticked path** (`` `docs/rules/backend-postmortems.md` ``), not a
+  `../`-relative spelling. That is not an oversight either: `checkRulesPointers` deliberately *ignores*
+  traversal forms, so it never verifies that a `../` target exists. Accepting one here would create an
+  exemption backed by a path nothing validates — trading a small false red, which the error message
+  tells the contributor how to fix, for a silent false green.
 - Completing #151 becomes a **measurable** ratchet step: five allowlist entries must be deleted, and the
   gate enforces it.
 - Documented for contributors in `docs/rules/README.md` → *Convention: a Tier-1 bullet carries the

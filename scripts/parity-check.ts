@@ -95,7 +95,17 @@ export const NARRATIVE_MAX_CHARS = 600;
 
 // Group 1 is the bolded imperative, used verbatim as the allowlist key. `exec`-based (no /g) so there
 // is no shared-lastIndex hazard across the lines it is applied to.
-const RULE_BULLET = /^- \*\*(.+?)\*\*/;
+//
+// The marker is matched the way CommonMark defines it, NOT as the literal four bytes `- **` today's
+// files happen to use: any of `-`/`*`/`+`, one or more spaces or a tab, and optional leading indent.
+// A regex demanding exactly one space makes `-  **Never ...**` -- one accidental keystroke, rendering
+// identically for a reader -- completely invisible to this guard, which is a silent false green
+// reachable without any adversarial intent. Matching more marker spellings can only add coverage.
+const RULE_BULLET = /^\s*[-*+][ \t]+\*\*(.+?)\*\*/;
+
+// A line that opens a new block ends the preceding bullet. Kept in lockstep with RULE_BULLET's marker
+// set, so a spelling this guard measures is also a spelling that terminates its predecessor.
+const RULE_BLOCK_OPENER = /^\s*(?:[-*+][ \t]|\d+\.[ \t]|#|```|>)/;
 
 // Each Tier-1 rule's own domain deep doc, or `null` for a rule that has none BY DESIGN
 // (docs/rules/README.md records self-review as "(none - the checklist is the whole rule)").
@@ -504,15 +514,17 @@ class ParityCheck {
       const match = RULE_BULLET.exec(line);
       if (match === null) continue;
 
-      // Consume wrapped continuation lines: indented, non-blank, and not the start of another block.
-      // Anything that opens a new block (a list item, a heading, a fence, a quote) ends this bullet
-      // and is re-examined by the outer loop, so a fence can never be swallowed as prose.
+      // Consume wrapped continuation lines. A continuation is any non-blank line that does not open a
+      // new block; the opener is re-examined by the outer loop, so a fence can never be swallowed as
+      // prose. Indentation is deliberately NOT required: CommonMark's *lazy* continuation lets a
+      // list item's paragraph continue at column zero, which is what a plain hard-wrap (`gq`, a hand
+      // edit, a formatter that does not re-indent list bodies) produces -- so requiring indentation
+      // would leave the cheapest flavor of the wrap bypass wide open while looking closed.
       const parts = [line];
       while (i + 1 < lines.length) {
         const next = lines[i + 1] as string;
         if (next === "") break;
-        if (!/^\s+\S/.test(next)) break;                       // not indented -> not a continuation
-        if (/^\s*(?:[-*+]\s|\d+\.\s|#|```|>)/.test(next)) break;   // opens a new block
+        if (RULE_BLOCK_OPENER.test(next)) break;
         parts.push(strip(next));
         i++;
       }

@@ -45,8 +45,8 @@ function withRuleBody(
  * Callers assert the length before using it -- a boundary case built one char off would pass for the
  * wrong reason (rules/testing.md: never test a limit with an input that is not the input you meant).
  */
-function longBullet(length: number, key = "Never do the bad thing"): string {
-  const bullet = `- **${key}** — because reasons. `;
+function longBullet(length: number, key = "Never do the bad thing", marker = "- "): string {
+  const bullet = `${marker}**${key}** — because reasons. `;
   if (bullet.length > length) throw new Error(`longBullet: prefix is already ${bullet.length} chars`);
   return bullet + "x".repeat(length - bullet.length);
 }
@@ -261,15 +261,21 @@ describe("parity check - the narrative allowlist is itself checked", () => {
 // guard for the whole tree at once, by a routine and well-intentioned edit. Today's files happen to
 // write one bullet per line, which is exactly what made the assumption dangerous to encode.
 describe("parity check - a bullet is measured across its wrapped continuation lines", () => {
-  /** The same content as `oneLine`, re-flowed at ~95 columns the way a prose-wrapper would write it. */
-  function wrap(oneLine: string): string {
+  /**
+   * The same content as `oneLine`, re-flowed at ~95 columns. `indent` distinguishes the two flavors a
+   * real wrap produces: an indented body (a formatter that re-indents list contents) and CommonMark's
+   * LAZY continuation at column zero (`gq`, a hand edit, a formatter that does not). Both render as one
+   * bullet, so both must measure the same -- the lazy flavor is the cheaper bypass and was the one the
+   * Reviewer found still open after the first fix.
+   */
+  function wrap(oneLine: string, indent = "  "): string {
     const words = oneLine.split(" ");
     const lines: string[] = [];
     let current = words.shift() as string;
     for (const word of words) {
       if (current.length + 1 + word.length > 95) {
         lines.push(current);
-        current = `  ${word}`;
+        current = `${indent}${word}`;
       } else {
         current += ` ${word}`;
       }
@@ -280,46 +286,104 @@ describe("parity check - a bullet is measured across its wrapped continuation li
 
   const OVER = longBullet(NARRATIVE_MAX_CHARS + 210, "Never write the case study inline");
 
-  it("rejects a wrapped over-limit bullet", () => {
-    const wrapped = wrap(OVER);
+  it.each([
+    ["indented continuation lines", "  "],
+    ["lazy continuation lines at column zero", ""],
+  ])("rejects an over-limit bullet wrapped with %s", (_label, indent) => {
+    const wrapped = wrap(OVER, indent);
     expect(wrapped).toContain("\n");   // the fixture must actually be wrapped, or this proves nothing
+    if (indent === "") expect(wrapped).toMatch(/\n\S/);   // ...and actually be flush-left
     withRuleBody("rules/testing.md", wrapped, (errors) => {
       expect(errors).toHaveLength(1);
       expect(errors[0]).toContain("carries no case-study pointer");
     });
   });
 
-  // Wrap-invariance: the reported length must not depend on where the line breaks fell.
-  it("reports the same length whether the bullet is wrapped or not", () => {
+  // Wrap-invariance: the reported length must not depend on where the breaks fell OR on how the
+  // continuation lines were indented. All three spellings are the same bullet to a reader.
+  it("reports the same length however the bullet is wrapped", () => {
     const lengths: number[] = [];
-    for (const body of [OVER, wrap(OVER)]) {
+    for (const body of [OVER, wrap(OVER, "  "), wrap(OVER, "")]) {
       withRuleBody("rules/testing.md", body, (errors) => {
         expect(errors).toHaveLength(1);
         lengths.push(Number(/is (\d+) characters/.exec(errors[0] as string)?.[1]));
       });
     }
     expect(lengths[0]).toBe(NARRATIVE_MAX_CHARS + 210);
-    expect(lengths[1]).toBe(lengths[0]);
+    expect(new Set(lengths).size).toBe(1);
   });
 
-  it("accepts a wrapped bullet whose case-study pointer sits on a continuation line", () => {
-    const body = `${wrap(OVER)}\n  *(Host case study: \`docs/rules/testing-postmortems.md\`.)*`;
-    withRuleBody("rules/testing.md", body, (errors) => {
-      expect(errors).toEqual([]);
-    });
-  });
+  it.each([["indented", "  "], ["lazy", ""]])(
+    "accepts a %s-wrapped bullet whose case-study pointer sits on a continuation line",
+    (_label, indent) => {
+      const body = `${wrap(OVER, indent)}\n${indent}*(Host case study: \`docs/rules/testing-postmortems.md\`.)*`;
+      withRuleBody("rules/testing.md", body, (errors) => {
+        expect(errors).toEqual([]);
+      });
+    },
+  );
 
-  // The continuation scan must not run away past the bullet: a blank line, a sibling bullet, and a
-  // fence each end it. Otherwise a short bullet would absorb the rest of the file and trip.
+  // The continuation scan must not run away past the bullet: a blank line, a sibling bullet, a
+  // heading, and a fence each end it. Every trailer below is long enough that ABSORBING it would push
+  // the bullet over the limit, so each case fails if its terminator is dropped -- "no errors" on a
+  // short bullet with a short trailer would pass either way.
+  const SHORT = longBullet(NARRATIVE_MAX_CHARS - 100, "Never run away past the bullet");
+  const LONG_TRAILER = "x".repeat(200);
+
   it.each([
-    ["a blank line", `- **A short one** — fine.\n\n${"x".repeat(NARRATIVE_MAX_CHARS + 100)}`],
-    ["a sibling bullet", `- **A short one** — fine.\n- **Another short one** — also fine.`],
-    ["a fenced block", `- **A short one** — fine.\n  \`\`\`\n  ${"x".repeat(NARRATIVE_MAX_CHARS + 100)}\n  \`\`\``],
+    ["a blank line", `${SHORT}\n\n${LONG_TRAILER}`],
+    ["a sibling bullet", `${SHORT}\n- **Another one** — ${LONG_TRAILER}`],
+    ["a heading", `${SHORT}\n## A heading ${LONG_TRAILER}`],
+    ["a fenced block", `${SHORT}\n\`\`\`\n${LONG_TRAILER}\n\`\`\``],
+    ["a blockquote", `${SHORT}\n> ${LONG_TRAILER}`],
   ])("stops the bullet at %s", (_label, body) => {
+    expect(SHORT.length + LONG_TRAILER.length).toBeGreaterThan(NARRATIVE_MAX_CHARS);
     withRuleBody("rules/testing.md", body, (errors) => {
       expect(errors).toEqual([]);
     });
   });
+});
+
+// Also from the Reviewer. `RULE_BULLET` originally demanded the literal four bytes `- **`, so a bullet
+// written with any other CommonMark-valid marker spelling was not merely unmeasured -- it was invisible.
+// `-  **Never ...**` is one accidental keystroke, renders identically, and silently exempted itself.
+describe("parity check - every CommonMark bullet-marker spelling is measured", () => {
+  it.each([
+    ["one space after a dash (the house style)", "- "],
+    ["two spaces after a dash", "-  "],
+    ["four spaces after a dash", "-    "],
+    ["a tab after a dash", "-\t"],
+    ["a star marker", "* "],
+    ["a plus marker", "+ "],
+    ["an indented dash", "  - "],
+  ])("measures a bullet written with %s", (_label, marker) => {
+    const bullet = longBullet(NARRATIVE_MAX_CHARS + 60, "Never hide behind a marker spelling", marker);
+    expect(bullet).toHaveLength(NARRATIVE_MAX_CHARS + 60);
+    withRuleBody("rules/testing.md", bullet, (errors) => {
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain('bullet "Never hide behind a marker spelling"');
+      expect(errors[0]).toContain(`is ${NARRATIVE_MAX_CHARS + 60} characters`);
+    });
+  });
+
+  // The marker set that TERMINATES a bullet must stay in lockstep with the set that STARTS one --
+  // otherwise a star-marked bullet is absorbed as prose by the dash-marked bullet above it, and two
+  // legitimate bullets are reported as one over-length one.
+  //
+  // Each half is deliberately just under the limit and the pair is well over it, so this FAILS if the
+  // terminator set is narrowed. Asserting "no errors" on two short bullets would pass either way --
+  // a false green, which is what an earlier draft of this test actually was.
+  it.each([["a dash", "- "], ["a star", "* "], ["a plus", "+ "], ["an ordered marker", "1. "]])(
+    "ends the preceding bullet at a sibling written with %s",
+    (_label, marker) => {
+      const first = longBullet(NARRATIVE_MAX_CHARS - 100, "Never do the first bad thing");
+      const second = longBullet(NARRATIVE_MAX_CHARS - 100, "Never do the second bad thing", marker);
+      expect(first.length + second.length).toBeGreaterThan(NARRATIVE_MAX_CHARS);
+      withRuleBody("rules/testing.md", `${first}\n${second}`, (errors) => {
+        expect(errors).toEqual([]);
+      });
+    },
+  );
 });
 
 describe("parity check - narrative guard structural edge cases", () => {
