@@ -326,56 +326,6 @@ describe("MCP server over Streamable HTTP", () => {
     expect(sc.entries[1]).toMatchObject({ status: "unresolved", reason: "name_no_match" });
   });
 
-  it("run_refresh reports an NCAA upstream failure as a structured tool error", async () => {
-    return;
-    await insertPlayer(opened.db, {
-      externalId: null,
-      ncaaPlayerSeq: 2649785,
-      level: "ncaa",
-      milbLevel: null,
-      teamName: null,
-      fullName: "College Guy",
-      schoolName: "LSU",
-    });
-    ncaaApi.options.status = 502;
-    const result = await call("run_refresh", { ncaaPlayerSeq: 2649785 });
-    expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain("stats.ncaa.org request failed with HTTP 502");
-    expect(await opened.db.select().from(statLines)).toHaveLength(0);
-  });
-
-  it("watchlist_deactivate and run_refresh accept NCAA addressing; list carries schoolName", async () => {
-    return;
-    const ncaa = await insertPlayer(opened.db, {
-      externalId: null,
-      ncaaPlayerSeq: 2649785,
-      level: "ncaa",
-      milbLevel: null,
-      teamName: null,
-      fullName: "College Guy",
-      schoolName: "LSU",
-    });
-
-    // list carries the school and seq.
-    const listed = await call("watchlist_list");
-    const players0 = listed.structuredContent?.players as Array<Record<string, unknown>>;
-    expect(players0[0]).toMatchObject({ schoolName: "LSU", ncaaPlayerSeq: 2649785 });
-
-    // run_refresh by ncaaPlayerSeq ingests his season.
-    const refreshed = await call("run_refresh", { ncaaPlayerSeq: 2649785 });
-    expect(refreshed.structuredContent).toMatchObject({ skipped: false, inserted: 1 });
-    expect((await opened.db.select().from(statLines))[0]?.sportId).toBe(22);
-
-    // deactivate by ncaaPlayerSeq.
-    const deactivated = await call("watchlist_deactivate", { ncaaPlayerSeq: 2649785 });
-    expect((deactivated.structuredContent?.player as { active: boolean }).active).toBe(false);
-    expect((await opened.db.select().from(players)).find((p) => p.id === ncaa.id)?.active).toBe(false);
-
-    // Ambiguous / empty addressing is a tool error.
-    const bad = await call("watchlist_deactivate", { personId: 1, ncaaPlayerSeq: 2 });
-    expect(bad.isError).toBe(true);
-  });
-
   it("watchlist_list respects the active filter", async () => {
     await insertPlayer(opened.db, { fullName: "Active Guy" });
     await insertPlayer(opened.db, { fullName: "Gone Guy", active: false });

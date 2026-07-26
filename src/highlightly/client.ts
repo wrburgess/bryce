@@ -153,9 +153,14 @@ export class HighlightlyClient {
     this.fetchImpl = options.fetchImpl ?? ((url, init) => fetch(url, init));
   }
 
+  /** Fail before any caller performs local writes for an NCAA refresh. */
+  assertConfigured(): void {
+    if (!this.options.apiKey?.trim()) throw new HighlightlyNotConfiguredError();
+  }
+
   private async request(path: string): Promise<HighlightlyResponse<unknown>> {
-    const key = this.options.apiKey?.trim();
-    if (!key) throw new HighlightlyNotConfiguredError();
+    this.assertConfigured();
+    const key = this.options.apiKey!.trim();
     let response: Awaited<ReturnType<HighlightlyFetch>>;
     try {
       response = await this.fetchImpl(`${this.baseUrl}${path}`, {
