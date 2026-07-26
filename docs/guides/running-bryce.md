@@ -261,6 +261,7 @@ the safety Snapshot, and integrity. Substitute the chosen absolute production Sn
 in `PRODUCTION_SNAPSHOT`; the commands never write back to it.
 
 ```sh
+(
 set -euo pipefail
 
 PRODUCTION_SNAPSHOT="/absolute/path/to/backups/bryce-YYYYMMDDTHHMMSSZ-NNN.db"
@@ -292,12 +293,14 @@ test -n "$SAFETY_SNAPSHOT"
 test "$(sqlite3 "$SAFETY_SNAPSHOT" 'SELECT count(*) FROM players;')" = 0
 
 # The EXIT trap removes only the directory created by mktemp above, on success or failure.
+)
 ```
 
 The assertions fail the shell unless `PRAGMA integrity_check` returns `ok`, the restored sentinel
 equals the source Player's name, and the safety Snapshot count remains `0`. The automated restore
 drill uses the same source/target distinction and additionally verifies that a corrupt candidate
-leaves its target unchanged.
+leaves its target unchanged. The enclosing subshell contains its strict-mode settings and traps, so
+pasting the drill does not alter the caller's interactive shell.
 
 ## Backup: Litestream to Cloudflare R2
 
