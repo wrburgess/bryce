@@ -62,11 +62,12 @@ skipped: stop and recheck.
      fix, that fold moves `HEAD` again — so **repeat this step** (re-anchor: reviewed SHA ← the newly
      reviewed commit, compare to `HEAD`) until `HEAD` equals the last reviewed SHA. Each re-summon
      replaces the evidence block with a new request marker, its delta baseline, and the new artifact
-     URL. **Treat every delta review like the first one:** take its findings back through Step 3 and
-     [`listen`](../../skills/listen/SKILL.md), resolving all Critical and High findings before its
-     evidence is accepted — `disposition: ok` attests that the summon *returned a review*, never that
-     the review was clean, so a validated block is not by itself a resolved one. No commit reaches the
-     SOW that some Reviewer pass did not see, and no finding reaches it unresolved.
+     URL. **Treat every delta review like the first one:** take its findings back through Step 3's
+     severity resolution — in place, without a new human gate, since merge remains the sole one
+     ([`PROJECT.md`](../../PROJECT.md) → *Human Gates*) — and resolve all Critical and High findings
+     before its evidence is accepted. `disposition: ok` attests that the summon *returned a review*,
+     never that the review was clean, so a validated block is not by itself a resolved one. No commit
+     reaches the SOW that some Reviewer pass did not see, and no finding reaches it unresolved.
    - **The chain is exhausted** (no Reviewer answers, through the whole fallback order) → the
      [`PROJECT.md`](../../PROJECT.md) *Reviewer degradation floor* applies: it is `stop-and-ask` and is
      **not configurable**, so an unreviewed PR does **not** reach a SOW. Stop and ask the HC instead of
