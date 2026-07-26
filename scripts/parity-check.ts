@@ -58,7 +58,9 @@ const ADR_DIR = "docs/adr";
 const ADR_FILENAME = /^(\d+)-.+\.md$/;
 const ADR_LINK_LABEL = /^ADR (\d{4})$/;
 const ADR_LINK_TARGET = /^(\d{4})-[^/]+\.md$/;
-const MARKDOWN_LINK = /\[([^\]]*)\]\(([^)]+)\)/g;
+// Inline links cannot cross a line boundary. Keeping this deliberately narrow
+// means a malformed opening link cannot consume and misclassify a later line.
+const MARKDOWN_LINK = /\[([^\]\r\n]*)\]\(([^)\r\n]+)\)/g;
 const MARKDOWN_SCAN_EXCLUDED_DIRS = new Set([".git", "node_modules", ".claude/worktrees", ".codex-worktrees"]);
 
 const RULES_DIR = "rules";

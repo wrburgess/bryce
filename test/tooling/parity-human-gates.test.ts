@@ -53,7 +53,7 @@ const LINK_CHECKED = [
   "docs/mcp/README.md",
 ];
 
-const MARKDOWN_LINK = /\[[^\]]*\]\(([^)]+)\)/g;
+const MARKDOWN_LINK = /\[[^\]\r\n]*\]\(([^)\r\n]+)\)/g;
 const CLAUDE_WORKTREES = join(REPO_ROOT, ".claude", "worktrees");
 const ADR_0039 = "0039-repo-tooling-unifies-on-typescript-remove-ruby.md";
 const ADR_0041 = "0041-normalize-player-names-nfc-at-ingestion.md";
@@ -459,6 +459,17 @@ describe("parity check - local ADR link labels", () => {
           "",
           "[tooling]: adr/0039-repo-tooling-unifies-on-typescript-remove-ruby.md",
         ].join("\n"),
+      );
+      expect(runParityCheck(root)).toMatchObject({ status: 0, errors: [] });
+    });
+  });
+
+  it("does not let a malformed link consume a following valid ADR link", () => {
+    withBundleCopy((root) => {
+      writeMarkdown(
+        root,
+        "docs/adr-link-malformed-followed-by-valid.md",
+        `[ADR 0041](adr/broken.md\n[ADR 0041](adr/${ADR_0041})\n`,
       );
       expect(runParityCheck(root)).toMatchObject({ status: 0, errors: [] });
     });
