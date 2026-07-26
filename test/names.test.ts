@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { canonicalizeName } from "../src/domain/names.js";
 
 /*
- * #65 / ADR 0039. Each pair is derived from ONE base literal and then forced to
+ * #65 / ADR 0041. Each pair is derived from ONE base literal and then forced to
  * a normalization form with `.normalize()`, so the fixtures are guaranteed
  * genuinely-NFD vs genuinely-NFC regardless of how an editor or formatter
  * stores the source bytes (Reviewer SC4 — do not depend on the literal's form).
@@ -13,7 +13,7 @@ const NFC_ACUNA = "Ronald Acuña Jr.".normalize("NFC");
 const NFD_ACUNA = "Ronald Acuña Jr.".normalize("NFD");
 const KANA = "鈴木"; // 鈴木 (Suzuki) — East-Asian wide glyphs, no combining marks
 
-describe("canonicalizeName (#65 / ADR 0039)", () => {
+describe("canonicalizeName (#65 / ADR 0041)", () => {
   it("guards its own premise: the NFD and NFC fixtures really are different bytes", () => {
     expect(NFD_PENA).not.toBe(NFC_PENA);
     expect(NFD_PENA.length).toBe(5);

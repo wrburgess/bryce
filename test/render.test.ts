@@ -523,7 +523,7 @@ describe("renderHeartbeat", () => {
   });
 });
 
-describe("renderDigest — non-ASCII name fidelity (#65 / ADR 0039)", () => {
+describe("renderDigest — non-ASCII name fidelity (#65 / ADR 0041)", () => {
   it("preserves an accent and an apostrophe in the rendered name, HTML and text", () => {
     // Accent in the RETAINED surname so the by-design first-name abbreviation
     // ("Ronald" -> "R") does not drop it (Reviewer MF1).

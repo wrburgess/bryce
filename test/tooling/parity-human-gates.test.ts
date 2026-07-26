@@ -55,6 +55,8 @@ const LINK_CHECKED = [
 
 const MARKDOWN_LINK = /\[[^\]]*\]\(([^)]+)\)/g;
 const CLAUDE_WORKTREES = join(REPO_ROOT, ".claude", "worktrees");
+const ADR_0039 = "0039-repo-tooling-unifies-on-typescript-remove-ruby.md";
+const ADR_0041 = "0041-normalize-player-names-nfc-at-ingestion.md";
 
 // Worktree directories are agent runtime state, not part of the shipped bundle. Rejecting their
 // root prevents cpSync from descending into arbitrary generated worktree names.
@@ -223,6 +225,12 @@ function appendDuplicateHumanGates(root: string): void {
 function expectFailure(result: ReturnType<typeof runParityCheck>, message: string): void {
   expect(result.status).toBe(1);
   expect(result.errors.join("\n")).toContain(message);
+}
+
+function writeMarkdown(root: string, rel: string, body: string): void {
+  const file = join(root, rel);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, body);
 }
 
 describe("parity check - Human Gates fixture bundles", () => {
@@ -414,4 +422,45 @@ describe("parity check - Human Gates fixture bundles", () => {
     },
     SPAWN_TIMEOUT_MS,
   );
+});
+
+describe("parity check - local ADR link labels", () => {
+  it("rejects a local ADR link whose displayed number disagrees with its target", () => {
+    withBundleCopy((root) => {
+      writeMarkdown(root, "docs/adr-link-mismatch.md", `[ADR 0041](adr/${ADR_0039})\n`);
+      expectFailure(
+        runParityCheck(root),
+        "ADR link number mismatch in docs/adr-link-mismatch.md: label ADR 0041 targets ADR 0039",
+      );
+    });
+  });
+
+  it("accepts matching same-directory and parent-relative ADR links, including fragments", () => {
+    withBundleCopy((root) => {
+      writeMarkdown(root, "docs/adr/adr-link-same-directory.md", `[ADR 0041](${ADR_0041}#decision)\n`);
+      writeMarkdown(root, "docs/adr-link-parent-relative.md", `[ADR 0041](adr/${ADR_0041})\n`);
+      expect(runParityCheck(root)).toMatchObject({ status: 0, errors: [] });
+    });
+  });
+
+  it("ignores link forms outside the local numbered-ADR grammar", () => {
+    withBundleCopy((root) => {
+      writeMarkdown(
+        root,
+        "docs/adr-link-ignored-forms.md",
+        [
+          `[ADR 0041](https://example.com/${ADR_0039})`,
+          `[ADR 0041](#${ADR_0039})`,
+          `[ADR 0041](adr%2F${ADR_0039})`,
+          `[Ordinary link](adr/${ADR_0039})`,
+          `[ADR 0041](adr/${ADR_0039}`,
+          `[ADR 0041][tooling]`,
+          `[ADR 0041](adr/not-numbered.md)`,
+          "",
+          "[tooling]: adr/0039-repo-tooling-unifies-on-typescript-remove-ruby.md",
+        ].join("\n"),
+      );
+      expect(runParityCheck(root)).toMatchObject({ status: 0, errors: [] });
+    });
+  });
 });
