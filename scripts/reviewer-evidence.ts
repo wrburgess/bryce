@@ -99,8 +99,9 @@ export function validateReviewerEvidence(
  * Platform success is usable only when it attests exactly to the reviewed SHA.
  */
 export function classifyFallbackEvidence(input: FallbackEvidenceInput): FallbackClassification {
-  if (!input.requestCreated || !validArtifactUrl(input.artifactUrl)) return "unreachable";
+  if (!input.requestCreated) return "unreachable";
   if (!input.responseReceived) return "timed-out";
+  if (!validArtifactUrl(input.artifactUrl)) return "unreachable";
   if (!nonEmpty(input.commitId) || input.commitId !== input.reviewedSha) return "unattested";
   return "ok";
 }

@@ -100,7 +100,6 @@ artifact-url: ${evidence.artifactUrl}
   it("classifies a requested fallback with no response as timed-out", () => {
     expect(classifyFallbackEvidence({
       requestCreated: true,
-      artifactUrl: evidence.artifactUrl,
       responseReceived: false,
       reviewedSha: SHA,
     })).toBe("timed-out");
