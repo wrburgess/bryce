@@ -1,10 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { runParityCheck } from "../../scripts/parity-check.js";
+import { REPO_ROOT, withBundleCopy } from "./parity-fixture.js";
 
 // Self-test for the Human Gates parity check (scripts/parity-check.ts -> checkHumanGates), driven the
 // way docs/guides/authoring-the-bundle.md requires: a fixture bundle behind `--root`, one GENUINELY
@@ -15,95 +14,14 @@ import { runParityCheck } from "../../scripts/parity-check.js";
 // Fixture semantics run in-process. Two narrow CLI-contract examples below retain coverage of the
 // executable's output and status without paying a tsx startup cost for every mutation.
 
-const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const SPAWN_TIMEOUT_MS = 60_000;
 
-// The parity-relevant tree. Determined empirically: this is the top-level set for which
-// `npx tsx scripts/parity-check.ts --root <copy>` reports nothing missing.
-const BUNDLE_ENTRIES = [
-  "AGENTS.md",
-  "CLAUDE.md",
-  "GEMINI.md",
-  "PROJECT.md",
-  "README.md",
-  "CONTEXT.md",
-  ".github",
-  ".claude",
-  ".githooks",
-  "bin",
-  "docs",
-  "rules",
-  "scripts",
-  "skills",
-];
-
-// Mirrors LINK_CHECKED in scripts/parity-check.ts — the files whose relative links parity resolves.
-const LINK_CHECKED = [
-  "AGENTS.md",
-  "CLAUDE.md",
-  "GEMINI.md",
-  "PROJECT.md",
-  ".github/copilot-instructions.md",
-  "README.md",
-  "docs/standards/development-lifecycle.md",
-  "docs/guides/usage.md",
-  "docs/guides/branch-protection.md",
-  "docs/cli/README.md",
-  "docs/api/README.md",
-  "docs/mcp/README.md",
-];
-
-const MARKDOWN_LINK = /\[[^\]\r\n]*\]\(([^)\r\n]+)\)/g;
+// The bundle copier — its entry list, its worktree exclusion, and the dead-link healing that keeps
+// the copy green — lives in ./parity-fixture.ts so this file and parity-attribution.test.ts build
+// their fixtures the same way (issue #139).
 const CLAUDE_WORKTREES = join(REPO_ROOT, ".claude", "worktrees");
 const ADR_0039 = "0039-repo-tooling-unifies-on-typescript-remove-ruby.md";
 const ADR_0041 = "0041-normalize-player-names-nfc-at-ingestion.md";
-
-// Worktree directories are agent runtime state, not part of the shipped bundle. Rejecting their
-// root prevents cpSync from descending into arbitrary generated worktree names.
-function isParityFixtureSource(source: string): boolean {
-  return source !== CLAUDE_WORKTREES;
-}
-
-// Make the COPY green so the happy path can assert exit 0. A bundle mid-PR legitimately links to a
-// doc a later commit adds (this PR's prose half authors ADR 0044), and a link that has not landed
-// yet is not what this self-test is about. Self-healing: once the target exists, nothing is created.
-function healDeadLinks(root: string): void {
-  for (const rel of LINK_CHECKED) {
-    const file = join(root, rel);
-    if (!existsSync(file)) continue;
-
-    for (const match of readFileSync(file, "utf-8").matchAll(MARKDOWN_LINK)) {
-      const raw = (match[2] ?? "").trim();
-      if (raw === "" || /^(?:https?:|mailto:|#)/.test(raw)) continue;
-
-      const target = raw.split("#")[0] ?? "";
-      if (target === "") continue;
-
-      const resolved = resolve(dirname(file), target);
-      if (existsSync(resolved)) continue;
-
-      mkdirSync(dirname(resolved), { recursive: true });
-      writeFileSync(resolved, "# fixture stub\n\nCreated by the parity self-test so the base bundle is green.\n");
-    }
-  }
-}
-
-/** Copy the parity-relevant tree into an OS tmpdir, hand it to `fn`, then always remove it. */
-function withBundleCopy(fn: (root: string) => void): void {
-  const root = mkdtempSync(join(tmpdir(), "parity-bundle-"));
-  try {
-    for (const entry of BUNDLE_ENTRIES) {
-      cpSync(join(REPO_ROOT, entry), join(root, entry), {
-        recursive: true,
-        filter: isParityFixtureSource,
-      });
-    }
-    healDeadLinks(root);
-    fn(root);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
-}
 
 it("does not copy arbitrary agent worktree runtime state", () => {
   mkdirSync(CLAUDE_WORKTREES, { recursive: true });
