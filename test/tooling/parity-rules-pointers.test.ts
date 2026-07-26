@@ -14,6 +14,7 @@ import { REPO_ROOT, withBundleCopy } from "./parity-fixture.js";
 
 const RULE = "rules/testing.md";
 const DEEP_DOC = "docs/rules/testing-postmortems.md";
+const ABSENT_DEEP_DOC = "docs/rules/absent-postmortems.md";
 const POINTER_ERROR = /^Rules pointer /;
 
 /** Replace `rules/testing.md` in the copied bundle with a synthetic file, then run parity. */
@@ -33,9 +34,10 @@ describe("parity check - Tier-2 deep-doc pointers", () => {
 
   // The case that catches a botched trim: the bullet survives, the content it points at does not.
   it("rejects a body pointer whose deep doc does not exist", () => {
-    withRuleBody("- **Never x** — because y. *(Host case study: `docs/rules/absent-postmortems.md`.)*", (errors) => {
+    withRuleBody(`- **Never x** — because y. *(Host case study: \`${ABSENT_DEEP_DOC}\`.)*`, (errors) => {
       expect(errors).toEqual([
-        "Rules pointer rules/testing.md: case-study pointer `docs/rules/absent-postmortems.md` does not exist",
+        "Rules pointer rules/testing.md: case-study pointer `docs/rules/absent-postmortems.md` does not exist; " +
+        "a deep doc that is not written yet is forward-referenced from the `**Deep doc:**` header, not from a body bullet",
       ]);
     });
   });
@@ -43,34 +45,79 @@ describe("parity check - Tier-2 deep-doc pointers", () => {
   // docs/rules/README.md: a deep doc stays "absent until a host has a real postmortem to record".
   // rules/frontend.md, rules/security.md and rules/scripting.md all rely on this today.
   it("accepts a `**Deep doc:**` header that forward-references an absent deep doc", () => {
-    withRuleBody("**Deep doc:** `docs/rules/absent-postmortems.md` (Tier 2 — deferred)", (errors) => {
+    withRuleBody(`**Deep doc:** \`${ABSENT_DEEP_DOC}\` (Tier 2 — deferred)`, (errors) => {
       expect(errors).toEqual([]);
     });
   });
 
-  it("rejects an inline markdown link to a deep doc even when the target exists", () => {
-    withRuleBody(`- **Never x** — because y. See [the deep doc](${DEEP_DOC}).`, (errors) => {
+  // Issue #154: docs/rules/README.md instructs a contributor to promote a backticked path to a real
+  // link "only once the target file exists". Before this, the checker rejected EVERY link, so the
+  // documented promotion step could not be followed without reddening the gate.
+  it("accepts a promoted link, written relative to the rule file, once the deep doc exists", () => {
+    withRuleBody(`- **Never x** — because y. See [the deep doc](../${DEEP_DOC}).`, (errors) => {
+      expect(errors).toEqual([]);
+    });
+  });
+
+  it("accepts a promoted link carrying an anchor fragment", () => {
+    withRuleBody(`- **Never x** — because y. See [the case](../${DEEP_DOC}#a-case-study).`, (errors) => {
+      expect(errors).toEqual([]);
+    });
+  });
+
+  it("accepts a promoted reference-style definition that resolves", () => {
+    withRuleBody(`- **Never x** — because y. See [deep doc][dd].\n\n[dd]: ../${DEEP_DOC}`, (errors) => {
+      expect(errors).toEqual([]);
+    });
+  });
+
+  // The other half of the promotion rule, and the reason it is not a false green: the target
+  // EXISTING is not enough — the href has to reach it from `rules/`, the way markdown resolves it.
+  // The bare `docs/rules/...` spelling names a real file and still renders as a 404 on GitHub.
+  it.each([
+    ["no prefix (repo-root spelling)", ""],
+    ["./", "./"],
+    ["/", "/"],
+    ["../../ (climbs out of the repo)", "../../"],
+  ])("rejects a promoted link whose href does not resolve from rules/: %s", (_label, prefix) => {
+    withRuleBody(`- **Never x** — because y. See [the deep doc](${prefix}${DEEP_DOC}).`, (errors) => {
       expect(errors).toEqual([
-        "Rules pointer rules/testing.md: `docs/rules/testing-postmortems.md` is written as a markdown link; " +
-        "a deep-doc path must be a backticked path (docs/rules/README.md) so it cannot redden the dead-link " +
-        "check before its target lands",
+        `Rules pointer rules/testing.md: markdown link \`${prefix}${DEEP_DOC}\` does not resolve from rules/; ` +
+        "a promoted link is relative to the referring file",
       ]);
     });
   });
 
   // The spelling a contributor writing from `rules/` would actually reach for. An earlier draft of
   // this check skipped it as an unresolvable `../` path and never applied the link rule at all.
-  it.each(["../", "./", "/"])("rejects a markdown link whose target is prefixed with %s", (prefix) => {
-    withRuleBody(`- **Never x** — because y. See [the deep doc](${prefix}${DEEP_DOC}).`, (errors) => {
+  it.each(["../", "./", "/"])("rejects a markdown link to an ABSENT deep doc, prefixed with %s", (prefix) => {
+    withRuleBody(`- **Never x** — because y. See [the deep doc](${prefix}${ABSENT_DEEP_DOC}).`, (errors) => {
+      expect(errors).toEqual([
+        "Rules pointer rules/testing.md: `docs/rules/absent-postmortems.md` is written as a markdown link; " +
+        "a deep-doc path must be a backticked path (docs/rules/README.md) so it cannot redden the dead-link " +
+        "check before its target lands",
+      ]);
+    });
+  });
+
+  it("rejects a reference-style link definition for an absent deep doc", () => {
+    withRuleBody(`- **Never x** — because y. See [deep doc][dd].\n\n[dd]: ${ABSENT_DEEP_DOC}`, (errors) => {
       expect(errors).toHaveLength(1);
       expect(errors[0]).toContain("is written as a markdown link");
     });
   });
 
-  it("rejects a reference-style link definition for a deep doc", () => {
-    withRuleBody(`- **Never x** — because y. See [deep doc][dd].\n\n[dd]: ${DEEP_DOC}`, (errors) => {
+  // The header exemption is about the BARE form only — a dead link in a header is still dead.
+  it("rejects a `**Deep doc:**` header written as a link to an absent deep doc", () => {
+    withRuleBody(`**Deep doc:** [deferred](../${ABSENT_DEEP_DOC})`, (errors) => {
       expect(errors).toHaveLength(1);
       expect(errors[0]).toContain("is written as a markdown link");
+    });
+  });
+
+  it("accepts a `**Deep doc:**` header promoted to a link that resolves", () => {
+    withRuleBody(`**Deep doc:** [the deep doc](../${DEEP_DOC}) (Tier 2)`, (errors) => {
+      expect(errors).toEqual([]);
     });
   });
 
