@@ -28,7 +28,13 @@ export default defineConfig({
       // reports them as 0% forever and they would drag the aggregate down for no signal.
       exclude: [...coverageConfigDefaults.exclude, "src/mailer/types.ts", "src/server/deps.ts"],
       // Default is false: a single failing test would otherwise suppress the whole
-      // report, leaving the post-run floor check with nothing to read.
+      // report. This is for DIAGNOSIS, not for the gate -- `test:coverage` chains with
+      // `&&`, so a red suite short-circuits and scripts/coverage-floors.ts never runs.
+      // What the setting actually buys is that the human-readable `text` report still
+      // prints and coverage/coverage-summary.json still lands on disk after a failing
+      // run, so the numbers are there to inspect while fixing it. The honest cost: a
+      // floor regression that lands alongside an unrelated test failure is not reported
+      // until that failure is fixed and the suite is green enough to reach the check.
       reportOnFailure: true,
       // `text` is the human-readable CI log view; `json-summary` writes
       // coverage/coverage-summary.json for scripts/coverage-floors.ts to consume.

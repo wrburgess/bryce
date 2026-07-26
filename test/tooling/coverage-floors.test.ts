@@ -1,5 +1,6 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,11 +10,15 @@ import { FLOORS, METRICS, evaluate, main, relativeKey, type Floors, type Summary
 
 // Tests for the per-file coverage floor gate (scripts/coverage-floors.ts, issue #28).
 //
-// Two jobs here. First, pin the manifest itself: the gate is only as strong as the
+// Three jobs here. First, pin the manifest itself: the gate is only as strong as the
 // numbers in FLOORS, and silently deleting or weakening an entry must fail by name.
 // Second, prove the checker fails on every shape of "the floor stopped being enforced"
 // -- a path missing from the summary, an empty manifest, a summary that was never
 // written -- because each of those is a silent pass in Vitest's own thresholds.
+// Third, pin the gate's CALLERS. A checker nothing invokes is not a gate: deleting
+// `&& tsx scripts/coverage-floors.ts` from package.json, or swapping the CI Test step
+// back to plain `npm test`, would leave every check in this repo green with zero floors
+// enforced. Those two invocations are asserted against the real files.
 //
 // Summaries are built programmatically (rules/testing.md: no schema-coupled static
 // fixture), matching the json-summary reporter's shape.
@@ -24,7 +29,7 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 // edit can tell an intentional floor change from an accidental one.
 const EXPECTED_FLOORS: Floors = {
   "src/cli/main.ts": { statements: 42, branches: 50 },
-  "src/cli/seed.ts": { statements: 53, branches: 61 },
+  "src/cli/seed.ts": { statements: 54, branches: 61 },
   "src/server.ts": { statements: 56, branches: 76 },
   "src/cli/batch-add.ts": { statements: 66, branches: 54 },
   "src/cli/migrate.ts": { statements: 70, branches: 33 },
@@ -101,6 +106,18 @@ describe("relativeKey", () => {
   it("does not treat a sibling directory with a shared prefix as inside the root", () => {
     expect(relativeKey("/repo/root-other/src/a.ts", "/repo/root")).toBe("/repo/root-other/src/a.ts");
   });
+
+  // Normalization must not depend on the separator of the machine READING the summary.
+  // Keying off the runtime `sep` leaves backslashes intact on POSIX, so a Windows-shaped
+  // key stops matching its floor and the gate blames a file that never regressed.
+  it("folds backslash separators even when the runtime separator is /", () => {
+    expect(relativeKey("src\\cli\\main.ts", "/repo/root")).toBe("src/cli/main.ts");
+    expect(relativeKey(".\\src\\cli\\main.ts", "/repo/root")).toBe("src/cli/main.ts");
+  });
+
+  it("folds a backslash-spelled root when matching an absolute key", () => {
+    expect(relativeKey("/repo/root/src/cli/main.ts", "\\repo\\root")).toBe("src/cli/main.ts");
+  });
 });
 
 describe("evaluate", () => {
@@ -159,7 +176,7 @@ describe("evaluate", () => {
     const violations = evaluate(summary, FLOORS, REPO_ROOT);
 
     expect(violations).toEqual([
-      "src/cli/seed.ts statements -> 10 is below floor 53",
+      "src/cli/seed.ts statements -> 10 is below floor 54",
       "src/cli/seed.ts branches -> 20 is below floor 61",
     ]);
   });
@@ -221,9 +238,66 @@ describe("evaluate", () => {
 
   it("does not mistake the aggregate `total` row for a file", () => {
     const summary = passingSummary();
-    summary["total"] = entry(0, 0);
+    // A weak aggregate with every floored file healthy. `total` carries no floor and is
+    // not a path, so it must contribute nothing -- note it is 1% covered, not 0%: an
+    // all-zero aggregate is the partial-run signal asserted separately below.
+    summary["total"] = entry(1, 1);
 
     expect(evaluate(summary, FLOORS, REPO_ROOT)).toEqual([]);
+  });
+
+  // Case 13 -- a partial/filtered run must be diagnosed as such. With `coverage.all`,
+  // `vitest run --coverage <one-file>` still enumerates every src/ file, at 0%. Without
+  // this sentinel the gate goes red naming seven files that never regressed, which is a
+  // FALSE diagnosis handed to whoever is iterating -- worse than no gate at all.
+  it("names a partial or filtered run instead of blaming every floored file", () => {
+    const summary: Summary = {
+      total: { ...entry(0, 0), statements: { total: 9529, covered: 0, pct: 0 } },
+    };
+    for (const path of Object.keys(FLOORS)) summary[path] = entry(0, 0);
+
+    const violations = evaluate(summary, FLOORS, REPO_ROOT);
+
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toContain("0 of 9529 statements covered overall");
+    expect(violations[0]).toContain("partial, filtered, or failed run");
+    expect(violations[0]).toContain("npm run test:coverage");
+    // The whole point: no per-file line, because no per-file number here is meaningful.
+    for (const path of Object.keys(FLOORS)) {
+      expect(violations[0], `partial run should not blame ${path}`).not.toContain(path);
+    }
+  });
+
+  // The sentinel must not become an escape hatch: a run that genuinely covered almost
+  // nothing, but covered SOMETHING, is a real regression and gets the per-file report.
+  it("does not fire the partial-run sentinel for a legitimately low but nonzero run", () => {
+    const summary: Summary = {
+      total: { ...entry(1, 1), statements: { total: 9529, covered: 1, pct: 0.01 } },
+    };
+    for (const path of Object.keys(FLOORS)) summary[path] = entry(0.5, 0.5);
+
+    const violations = evaluate(summary, FLOORS, REPO_ROOT);
+
+    expect(violations.some((v) => v.includes("partial, filtered, or failed run"))).toBe(false);
+    expect(violations).toContain("src/cli/seed.ts statements -> 0.5 is below floor 54");
+    expect(violations).toHaveLength(Object.keys(FLOORS).length * METRICS.length);
+  });
+
+  it("does not fire the partial-run sentinel when the summary carries no total row", () => {
+    expect(evaluate(passingSummary(), FLOORS, REPO_ROOT)).toEqual([]);
+  });
+
+  // Case 14 -- two summary keys folding to one relative path would last-write-wins, and
+  // the survivor may be the healthy spelling while the real, lower measurement vanishes.
+  it("reports two summary keys that fold to the same relative path", () => {
+    const summary = passingSummary();
+    // Same file, two spellings the reporter could plausibly emit across runs.
+    summary[`${REPO_ROOT}/src/cli/restore.ts`] = entry(2, 2);
+
+    const violations = evaluate(summary, FLOORS, REPO_ROOT);
+
+    expect(violations.some((v) => v.startsWith("src/cli/restore.ts -> duplicate key"))).toBe(true);
+    expect(violations[0]).toContain("one measurement is masked");
   });
 
   it("reports a floored entry whose metric has no percentage", () => {
@@ -286,6 +360,20 @@ describe("main (CLI)", () => {
     expect(io.out()).toContain("src/cli/migrate.ts branches -> 10 is below floor 33");
   });
 
+  // A partial run gets its own headline and its own remedy: "raise the covering tests"
+  // would point the reader at code that is not broken.
+  it("exits 1 with the partial-run headline, not the floor-regression remedy", () => {
+    const summary = passingSummary(FLOORS, `${REPO_ROOT}/`);
+    summary["total"] = { ...entry(0, 0), statements: { total: 9529, covered: 0, pct: 0 } };
+    const path = summaryFile(JSON.stringify(summary));
+    const io = capture();
+
+    expect(main(["--summary", path])).toBe(1);
+    expect(io.out()).toContain("coverage_floors: FAIL - coverage report is not from a full-suite run");
+    expect(io.out()).toContain("partial, filtered, or failed run");
+    expect(io.out()).not.toContain("Raise the covering tests");
+  });
+
   // Case 11 -- absence of evidence is never a pass. If the report was not written the
   // gate must go red, not shrug and exit 0.
   it("exits 1 when the summary file is missing", () => {
@@ -328,6 +416,37 @@ describe("main (CLI)", () => {
     expect(io.err()).toContain("coverage_floors: usage error - missing argument: --summary");
   });
 
+  // Case 15 -- a mis-invocation must land on the usage channel, not masquerade as a
+  // coverage failure. `--summary --nope` swallowing the next flag as a path exits 1
+  // with "cannot read coverage summary", which sends the reader hunting a report that
+  // was never the problem.
+  it("exits 2 rather than 1 when --summary swallows a following flag", () => {
+    const io = capture();
+
+    expect(main(["--summary", "--nope"])).toBe(2);
+    expect(io.err()).toContain("coverage_floors: usage error - --summary requires a path, got an option: --nope");
+    expect(io.err()).not.toContain("cannot read coverage summary");
+    expect(io.out()).toBe("");
+  });
+
+  // An empty value resolves to the repo root and dies on EISDIR -- again exit 1 for what
+  // is plainly a typo.
+  it("exits 2 on an empty --summary= value instead of resolving to the repo root", () => {
+    const io = capture();
+
+    expect(main(["--summary="])).toBe(2);
+    expect(io.err()).toContain("coverage_floors: usage error - --summary= requires a non-empty path");
+    expect(io.err()).not.toContain("cannot read coverage summary");
+    expect(io.out()).toBe("");
+  });
+
+  it("exits 2 on an option-shaped --summary= value", () => {
+    const io = capture();
+
+    expect(main(["--summary=--nope"])).toBe(2);
+    expect(io.err()).toContain("coverage_floors: usage error - --summary= requires a path, got an option: --nope");
+  });
+
   it("emits ASCII-only output on both streams", () => {
     const summary = passingSummary(FLOORS, `${REPO_ROOT}/`);
     summary[`${REPO_ROOT}/src/server.ts`] = entry(1, 1);
@@ -339,6 +458,104 @@ describe("main (CLI)", () => {
     // rules/scripting.md / ADR 0011: a non-UTF-8 CI locale must be able to read this.
     // eslint-disable-next-line no-control-regex
     expect(io.out() + io.err()).toMatch(/^[\x00-\x7F]*$/);
+  });
+});
+
+// Case 16 -- every test above calls the exported main(), which BYPASSES the
+// `import.meta.url === resolve(process.argv[1])` guard at the foot of the script. That
+// guard is what makes the file an executable gate: if the comparison ever goes false
+// (a path-resolution change, a loader that rewrites argv, a move of the file), the
+// script runs, does nothing, and exits 0 -- green CI, zero enforcement. One real
+// subprocess proves the wiring end to end. Bounded, offline, and cleaned up.
+describe("direct invocation (real subprocess)", () => {
+  const TSX_BIN = join(REPO_ROOT, "node_modules", ".bin", "tsx");
+  const SCRIPT = join(REPO_ROOT, "scripts", "coverage-floors.ts");
+  const SPAWN_TIMEOUT_MS = 60_000;
+
+  it(
+    "exits non-zero and prints the greppable prefix when run as a script",
+    () => {
+      const dir = mkdtempSync(join(tmpdir(), "cov-floors-spawn-"));
+      try {
+        const summary = passingSummary(FLOORS, `${REPO_ROOT}/`);
+        summary[`${REPO_ROOT}/src/watchlist/service.ts`] = entry(1, 1);
+        const path = join(dir, "coverage-summary.json");
+        writeFileSync(path, JSON.stringify(summary));
+
+        const res = spawnSync(TSX_BIN, [SCRIPT, "--summary", path], {
+          cwd: REPO_ROOT,
+          encoding: "utf8",
+          timeout: SPAWN_TIMEOUT_MS,
+          // No network, no inherited app config: PATH only (SystemRoot for Windows spawn).
+          env: { PATH: process.env["PATH"], SystemRoot: process.env["SystemRoot"] },
+        });
+
+        // A sandbox that forbids process-spawn is surfaced, never silently skipped.
+        if (res.error) throw res.error;
+        expect(res.status, `unexpected exit\nstdout: ${res.stdout}\nstderr: ${res.stderr}`).toBe(1);
+        expect(res.stdout).toContain("coverage_floors: FAIL -");
+        expect(res.stdout).toContain("src/watchlist/service.ts statements -> 1 is below floor 86");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    SPAWN_TIMEOUT_MS,
+  );
+});
+
+// Case 17 -- the gate's CALLERS. Nothing else in this repo runs the checker, so deleting
+// `&& tsx scripts/coverage-floors.ts` from package.json, or reverting the CI Test step to
+// plain `npm test`, is a silently-green edit: tests, lint, typecheck and CI all stay green
+// with zero floors enforced. Assert the real files, so that edit fails here by name.
+describe("gate invocation", () => {
+  const pkg = JSON.parse(readFileSync(join(REPO_ROOT, "package.json"), "utf8")) as {
+    scripts?: Record<string, string>;
+  };
+
+  it("wires scripts/coverage-floors.ts into the test:coverage npm script", () => {
+    const script = pkg.scripts?.["test:coverage"];
+
+    expect(script, "package.json has no `test:coverage` script; the floor gate has no caller").toBeTypeOf("string");
+    expect(
+      script,
+      "`test:coverage` no longer invokes scripts/coverage-floors.ts: the floors are declared but never checked, and every check in this repo stays green",
+    ).toContain("scripts/coverage-floors.ts");
+    // The checker reads the report that run produced, so the run must produce one.
+    expect(script, "`test:coverage` must produce the coverage report the checker reads").toContain("--coverage");
+  });
+
+  it("runs the checker through the project's own tsx, not a bare PATH lookup", () => {
+    // rules/scripting.md: a dev-dependency binary is not on PATH in a fresh CI shell.
+    // npm run puts node_modules/.bin on PATH, which is why the bare name is safe HERE
+    // and only here -- pin that it stays inside an npm script rather than drifting into
+    // a raw CI `run:` line.
+    expect(pkg.scripts?.["test:coverage"]).toMatch(/tsx\s+scripts\/coverage-floors\.ts/);
+  });
+
+  it("runs npm run test:coverage as the CI Test step", () => {
+    // Targeted line scan, not a YAML parser: this repo adds no dependency for one assertion
+    // (rules/scripting.md), and check-action-pins.ts scans these workflows the same way.
+    const lines = readFileSync(join(REPO_ROOT, ".github/workflows/app.yml"), "utf8").split("\n");
+    const stepIndex = lines.findIndex((line) => /^\s*-\s+name:\s+Test\s*$/.test(line));
+
+    expect(stepIndex, "no `- name: Test` step in .github/workflows/app.yml").toBeGreaterThan(-1);
+
+    // The step's own `run:`, stopping at the next list item so a later step cannot satisfy this.
+    let command: string | undefined;
+    for (let i = stepIndex + 1; i < lines.length; i++) {
+      const line = lines[i] ?? "";
+      if (/^\s*-\s/.test(line)) break;
+      const match = /^\s*run:\s*(.+?)\s*$/.exec(line);
+      if (match) {
+        command = match[1];
+        break;
+      }
+    }
+
+    expect(
+      command,
+      "the CI Test step must run `npm run test:coverage`; plain `npm test` runs the same suite with the coverage report and the per-file floor check silently dropped",
+    ).toBe("npm run test:coverage");
   });
 });
 
@@ -355,9 +572,13 @@ describe("vitest.config.ts coverage block", () => {
     expect(coverage["include"]).toEqual(["src/**/*.ts"]);
   });
 
-  it("keeps reportOnFailure on, so a red suite still leaves a summary to check", () => {
+  it("keeps reportOnFailure on, so a failing run still leaves a report to diagnose from", () => {
     // Vitest defaults this to false: without it, one failing test suppresses the whole
-    // report and the floor check has nothing to read.
+    // report. This does NOT keep the gate running through a red suite -- `test:coverage`
+    // chains with `&&`, so vitest failing short-circuits before the checker is reached,
+    // and a floor regression alongside an unrelated failure goes unreported until that
+    // failure is fixed. What it buys is the `text` output and the on-disk coverage/
+    // artifact surviving a failing run, so the numbers are there while debugging.
     expect(coverage["reportOnFailure"]).toBe(true);
   });
 
