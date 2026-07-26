@@ -102,7 +102,9 @@ interface GameKey { source: string; gameId: number; gameDate: string }
 export function assemblePlayerCard(db: Db, input: PlayerCardInput): PlayerCard {
   const sqlite = (db as SqliteDb).$client;
   const specs = input.windows === undefined ? [...PLAYER_CARD_WINDOWS] : [...input.windows];
-  const today = hostDate(input.now(), input.tz);
+  // A card is a completed-game report like the Digest: including the current
+  // host date would expose a partial day and make results depend on run hour.
+  const lastCompletedDate = shiftDate(hostDate(input.now(), input.tz), -1);
 
   return sqlite.transaction(() => {
     const player = resolvePlayer(sqlite, input);
@@ -116,7 +118,7 @@ export function assemblePlayerCard(db: Db, input: PlayerCardInput): PlayerCard {
     };
     return {
       player: cardPlayer,
-      windows: specs.map((spec) => assembleWindow(sqlite, player, spec, today)),
+      windows: specs.map((spec) => assembleWindow(sqlite, player, spec, lastCompletedDate)),
     };
   })();
 }
@@ -138,9 +140,9 @@ function assembleWindow(
   sqlite: Database.Database,
   player: RawPlayer,
   spec: PlayerCardWindowSpec,
-  today: string,
+  lastCompletedDate: string,
 ): PlayerCardWindow {
-  const bounds = ytdBounds(sqlite, player, today, spec);
+  const bounds = ytdBounds(sqlite, player, lastCompletedDate, spec);
   const games = selectGames(sqlite, player.id, spec === "last10" ? 10 : spec === "last30" ? 30 : null, bounds);
   if (games.length === 0) {
     return { spec, requestedGames: requestedGames(spec), actualGames: 0, from: null, to: null, empty: true, batters: [], pitchers: [] };
@@ -153,7 +155,7 @@ function assembleWindow(
     from: games.reduce((min, game) => game.gameDate < min ? game.gameDate : min, games[0]!.gameDate),
     to: games.reduce((max, game) => game.gameDate > max ? game.gameDate : max, games[0]!.gameDate),
     empty: false,
-    ...buildRows(lines, player.position),
+    ...buildRows(lines),
   };
 }
 
@@ -161,14 +163,14 @@ function requestedGames(spec: PlayerCardWindowSpec): number | null {
   return spec === "last10" ? 10 : spec === "last30" ? 30 : null;
 }
 
-function ytdBounds(sqlite: Database.Database, player: RawPlayer, today: string, spec: PlayerCardWindowSpec): { from: string; to: string } | null {
+function ytdBounds(sqlite: Database.Database, player: RawPlayer, lastCompletedDate: string, spec: PlayerCardWindowSpec): { from: string; to: string } | null {
   if (spec !== "ytd") return null;
   const sportId = sportIdForPlayer({ level: player.level as "mlb" | "milb" | "ncaa", milbLevel: player.milb_level });
-  const season = today.slice(0, 4);
+  const season = lastCompletedDate.slice(0, 4);
   const start = sportId === null
     ? undefined
     : (sqlite.prepare("SELECT regular_season_start FROM season_calendar WHERE sport_id = ? AND season = ?").get(sportId, season) as { regular_season_start: string | null } | undefined)?.regular_season_start ?? undefined;
-  return { from: start ?? `${season}-01-01`, to: today };
+  return { from: start ?? `${season}-01-01`, to: lastCompletedDate };
 }
 
 function selectGames(sqlite: Database.Database, playerId: number, limit: number | null, bounds: { from: string; to: string } | null): GameKey[] {
@@ -198,7 +200,7 @@ function loadLines(sqlite: Database.Database, playerId: number, games: readonly 
   return sqlite.prepare(`SELECT id, source, game_id, stat_type, game_date, game_number, sport_id, league_name, stats FROM stat_lines WHERE player_id = ? AND game_type = 'R' AND (${identitySql})`).all(...params) as RawLine[];
 }
 
-function buildRows(lines: RawLine[], position: string | null): Pick<PlayerCardWindow, "batters" | "pitchers"> {
+function buildRows(lines: RawLine[]): Pick<PlayerCardWindow, "batters" | "pitchers"> {
   const parsed = lines.map((line) => ({ ...line, stats: jsonRecord(line.stats) }));
   const batting = new Map<string, { line: ParsedLine; stats: Record<string, unknown> }>();
   const pitched = new Set(parsed.filter((line) => line.stat_type === "pitching").map(gameKey));
@@ -209,8 +211,11 @@ function buildRows(lines: RawLine[], position: string | null): Pick<PlayerCardWi
     if (target !== undefined) target.stats.errors = numberOr0(line.stats.errors);
     else if (!pitched.has(key) && line.source !== "highlightly_ncaa") batting.set(key, { line, stats: { errors: numberOr0(line.stats.errors) } });
   }
-  const batters = position === "P" ? [] : groupRows([...batting.values()], "batting");
-  const pitchers = position === "P" ? groupRows(parsed.filter((line) => line.stat_type === "pitching").map((line) => ({ line, stats: line.stats })), "pitching") : [];
+  // A player-card reports the stat types actually present. In particular,
+  // Highlightly NCAA rows can have no reliable `players.position`; routing a
+  // null position as a batter would silently discard real pitching lines.
+  const batters = groupRows([...batting.values()], "batting");
+  const pitchers = groupRows(parsed.filter((line) => line.stat_type === "pitching").map((line) => ({ line, stats: line.stats })), "pitching");
   return { batters, pitchers };
 }
 
@@ -240,4 +245,12 @@ function withPlateAppearances(stats: Record<string, unknown>, statType: "batting
   if (statType !== "batting" || numberOr0(stats.plateAppearances) > 0) return stats;
   const plateAppearances = numberOr0(stats.atBats) + numberOr0(stats.baseOnBalls) + numberOr0(stats.hitByPitch);
   return plateAppearances === 0 ? stats : { ...stats, plateAppearances };
+}
+
+/** Calendar-date arithmetic stays correct at host-timezone DST boundaries. */
+function shiftDate(isoDate: string, days: number): string {
+  const [year, month, day] = isoDate.split("-").map(Number);
+  const date = new Date(Date.UTC(year!, month! - 1, day!, 12));
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }

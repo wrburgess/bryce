@@ -43,11 +43,44 @@ describe("single-player card", () => {
       const player = await insertPlayer(opened.db, { fullName: "José Test", active: false });
       await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-02-01", stats: { hits: 8, atBats: 8 } });
       await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-03-27", stats: { hits: 1, atBats: 4 } });
+      // July 19 is the host's current date at MID_SEASON, so it is incomplete
+      // and must not appear in the YTD card until the following day.
+      await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-19", stats: { hits: 9, atBats: 9 } });
       const ytd = assemblePlayerCard(opened.db, { name: "Jose\u0301  Test", windows: ["ytd"], now: clock.now, tz: TEST_TZ }).windows[0]!;
       expect(ytd).toMatchObject({ actualGames: 1, from: "2026-03-27", to: "2026-03-27", empty: false });
       const idle = await insertPlayer(opened.db, { fullName: "No Games" });
       const empty = assemblePlayerCard(opened.db, { id: idle.id, windows: ["last10"], now: () => new Date("2026-01-02T12:00:00Z"), tz: TEST_TZ }).windows[0]!;
       expect(empty).toMatchObject({ actualGames: 0, empty: true, from: null, to: null });
+    } finally { opened.close(); }
+  });
+
+  it("keeps pitching rows for a player whose stored position is unknown", async () => {
+    const opened = testDb();
+    const clock = fakeClock(MID_SEASON);
+    try {
+      const player = await insertPlayer(opened.db, {
+        externalId: null,
+        ncaaPlayerSeq: 8181,
+        highlightlyPlayerId: null,
+        highlightlyTeamId: null,
+        ncaaSourceState: "legacy_html",
+        fullName: "Unknown Position Pitcher",
+        level: "ncaa",
+        milbLevel: null,
+        position: null,
+      });
+      await insertStatLine(opened.db, {
+        playerId: player.id,
+        source: "ncaa_html_legacy",
+        gameId: 45,
+        statType: "pitching",
+        sportId: 22,
+        stats: { inningsPitched: "5.0", strikeOuts: 7, hits: 3, earnedRuns: 1 },
+      });
+      const card = assemblePlayerCard(opened.db, { id: player.id, windows: ["last10"], now: clock.now, tz: TEST_TZ });
+      expect(card.windows[0]?.pitchers).toHaveLength(1);
+      expect(card.windows[0]?.pitchers[0]?.aggregate.counters.strikeOuts).toBe(7);
+      expect(card.windows[0]?.batters).toEqual([]);
     } finally { opened.close(); }
   });
 
