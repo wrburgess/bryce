@@ -2,6 +2,10 @@
 
 **Status:** accepted
 
+> **Superseded in part by [ADR 0049](0049-runtime-actual-attribution-supersedes-mutable-model-defaults.md):**
+> the mutable Project Config model-default mechanism described below is historical. Model-bearing
+> artifact attribution remains accepted.
+
 Agent attribution on commits, PRs, and comments records **both the tool and its model version** (e.g. `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`, footer `— Claude Code (Opus 4.8)`). The model indicator is deliberately retained — over time it is the **audit trail for quality and pricing** across the four agents.
 
 This reverses the tempting "version-free" simplification. A version string does risk going stale, but the audit value outweighs the upkeep — provided staleness is contained:

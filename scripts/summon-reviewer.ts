@@ -12,18 +12,18 @@
 // Runs on the app's own Node/TS toolchain via `tsx` (ADR 0039).
 //
 // Usage:
-//   npx tsx scripts/summon-reviewer.ts --mode work --out FILE [--base BRANCH]
-//   npx tsx scripts/summon-reviewer.ts --mode plan --input FILE --out FILE
+//   npx tsx scripts/summon-reviewer.ts --mode work --out FILE --ac NAME --ac-model MODEL --reviewer-model MODEL [--base BRANCH]
+//   npx tsx scripts/summon-reviewer.ts --mode plan --input FILE --out FILE --ac NAME --ac-model MODEL --reviewer-model MODEL
 //     --mode plan|work    plan = critique the plan text in --input; work = review the branch's diff
 //     --input FILE        plan mode only: the plan text to critique (required in plan mode)
 //     --base BRANCH       work mode only: the branch to review against (default: main)
 //     --out FILE          where to write the reviewer's body, raw bytes (required)
 //     --codex-bin PATH    the Codex CLI to summon (default: codex, resolved on PATH)
 //     --timeout SECONDS   wall-clock cap on the review (default: 900)
-//     --ac NAME           the acting harness, so a same-model review can be refused (default: claude)
-//     --ac-model MODEL    the acting model (required when --ac codex)
+//     --ac NAME           the acting harness (required)
+//     --ac-model MODEL    the acting model (required)
 //     --reviewer-model MODEL
-//                         Codex model to use for this review (required when --ac codex)
+//                         Codex model to use for this review (required)
 //     --min-bytes N       substance floor on the review body (default: 200; 0 disables)
 //
 // Output (stdout, ASCII only — rules/scripting.md / ADR 0011), exactly two shapes:
@@ -46,18 +46,16 @@ import { resolve as resolvePath } from "node:path";
 import { argv, env } from "node:process";
 
 const USAGE =
-  "Usage: npx tsx scripts/summon-reviewer.ts --mode work --out FILE [--base BRANCH]\n" +
-  "       npx tsx scripts/summon-reviewer.ts --mode plan --input FILE --out FILE\n";
+  "Usage: npx tsx scripts/summon-reviewer.ts --mode work --out FILE --ac NAME --ac-model MODEL --reviewer-model MODEL [--base BRANCH]\n" +
+  "       npx tsx scripts/summon-reviewer.ts --mode plan --input FILE --out FILE --ac NAME --ac-model MODEL --reviewer-model MODEL\n";
 
 const MODES = ["plan", "work"];
 
 const DEFAULT_BASE = "main";
 const DEFAULT_CODEX_BIN = "codex";
-const DEFAULT_AC = "claude";
 const DEFAULT_TIMEOUT = 900;
 
 const PREFLIGHT_TIMEOUT = 30;
-const CODEX_AC = "codex";
 const POLL_INTERVAL = 0.025;
 const TERM_GRACE = 2.0;
 const DRAIN_TIMEOUT = 5.0;
@@ -155,7 +153,7 @@ interface Options {
   out: string | null;
   codexBin: string;
   timeout: number;
-  ac: string;
+  ac: string | null;
   acModel: string | null;
   reviewerModel: string | null;
   minBytes: number;
@@ -172,9 +170,9 @@ class SummonReviewer {
     const problem = this.usageProblem();
     if (problem) return this.usageError(problem);
 
-    if (this.selfReview()) {
+    if (this.invalidIndependence()) {
       return this.failed("self_review", [
-        `acting model \`${ascii(this.opts.acModel as string)}\` matches Codex reviewer model - the Reviewer must be a different model`,
+        "acting and reviewer models must be known, distinct identifiers - the Reviewer must be a different model",
       ]);
     }
 
@@ -248,14 +246,9 @@ class SummonReviewer {
     if (o.out === null || o.out === "") return "missing required --out FILE";
     if (!(o.timeout > 0)) return "--timeout must be greater than zero";
     if (o.minBytes < 0) return "--min-bytes must be zero or greater";
-    if (String(o.ac).trim().toLowerCase() === CODEX_AC &&
-      (o.acModel === null || o.acModel.trim() === "")) {
-      return "--ac codex requires --ac-model MODEL";
-    }
-    if (String(o.ac).trim().toLowerCase() === CODEX_AC &&
-      (o.reviewerModel === null || o.reviewerModel.trim() === "")) {
-      return "--ac codex requires --reviewer-model MODEL";
-    }
+    if (o.ac === null || o.ac.trim() === "") return "missing required --ac NAME";
+    if (o.acModel === null || o.acModel.trim() === "") return "missing required --ac-model MODEL";
+    if (o.reviewerModel === null || o.reviewerModel.trim() === "") return "missing required --reviewer-model MODEL";
 
     if (o.mode === "plan") {
       if (o.input === null || o.input === "") return "--mode plan requires --input FILE (the plan text to critique)";
@@ -265,10 +258,12 @@ class SummonReviewer {
     return null;
   }
 
-  private selfReview(): boolean {
-    return String(this.opts.ac).trim().toLowerCase() === CODEX_AC &&
-      this.opts.acModel !== null && this.opts.reviewerModel !== null &&
-      this.opts.acModel.trim().toLowerCase() === this.opts.reviewerModel.trim().toLowerCase();
+  private invalidIndependence(): boolean {
+    const acModel = this.opts.acModel as string;
+    const reviewerModel = this.opts.reviewerModel as string;
+    return acModel.trim().toLowerCase() === "unknown" ||
+      reviewerModel.trim().toLowerCase() === "unknown" ||
+      acModel.trim().toLowerCase() === reviewerModel.trim().toLowerCase();
   }
 
   private outPathProblem(): string | null {
@@ -509,7 +504,7 @@ function parseArgs(args: string[]): Options {
     out: null,
     codexBin: DEFAULT_CODEX_BIN,
     timeout: DEFAULT_TIMEOUT,
-    ac: DEFAULT_AC,
+    ac: null,
     acModel: null,
     reviewerModel: null,
     minBytes: DEFAULT_MIN_BYTES,

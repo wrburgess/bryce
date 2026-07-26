@@ -73,7 +73,12 @@ report() {  # report <name> <0-if-ok> [detail]
 # ASCII-purity assertions are about stdout alone, so they must not be merged).
 run_summon() {  # run_summon <cmd...>
   STDOUT_FILE="$TMP/last.stdout"; STDERR_FILE="$TMP/last.stderr"
-  "$@" >"$STDOUT_FILE" 2>"$STDERR_FILE"
+  local args=" $* "
+  if [[ "$args" == *" --ac "* ]]; then
+    "$@" >"$STDOUT_FILE" 2>"$STDERR_FILE"
+  else
+    "$@" --ac claude --ac-model claude-opus --reviewer-model gpt-5.6-terra >"$STDOUT_FILE" 2>"$STDERR_FILE"
+  fi
   RUN_EXIT=$?
   OUT_TEXT="$(cat "$STDOUT_FILE")"
   ERR_TEXT="$(cat "$STDERR_FILE")"
@@ -85,7 +90,12 @@ run_summon() {  # run_summon <cmd...>
 run_summon_bounded() {  # run_summon_bounded <limit-seconds> <cmd...>
   local limit="$1"; shift
   STDOUT_FILE="$TMP/last.stdout"; STDERR_FILE="$TMP/last.stderr"
-  "$@" >"$STDOUT_FILE" 2>"$STDERR_FILE" &
+  local args=" $* "
+  if [[ "$args" == *" --ac "* ]]; then
+    "$@" >"$STDOUT_FILE" 2>"$STDERR_FILE" &
+  else
+    "$@" --ac claude --ac-model claude-opus --reviewer-model gpt-5.6-terra >"$STDOUT_FILE" 2>"$STDERR_FILE" &
+  fi
   local pid=$! waited=0
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge "$((limit * 10))" ]; then
@@ -249,8 +259,27 @@ expect_status "Codex AC -> same reviewer model is refused" 1 "FAILED (self_revie
   "$TSX" "$SCRIPT" --mode work --out "$TMP/codex-same-model.md" --codex-bin "$FAKE_BIN" \
   --ac codex --ac-model gpt-5.6 --reviewer-model gpt-5.6
 
-expect_status "Codex AC -> missing acting model is a usage error" 1 "--ac codex requires --ac-model MODEL" \
+expect_status "Codex AC -> missing acting model is a usage error" 1 "missing required --ac-model MODEL" \
   "$TSX" "$SCRIPT" --mode work --out "$TMP/codex-missing-acting-model.md" --codex-bin "$FAKE_BIN" --ac codex
+
+expect_status "every AC -> missing acting harness is a usage error" 1 "missing required --ac NAME" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/missing-ac.md" --codex-bin "$FAKE_BIN" \
+  --ac "" --ac-model claude-opus --reviewer-model gpt-5.6-terra
+
+expect_status "every AC -> missing reviewer model is a usage error" 1 "missing required --reviewer-model MODEL" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/missing-reviewer-model.md" --codex-bin "$FAKE_BIN" --ac claude --ac-model claude-opus
+
+expect_status "every AC -> unknown acting model is refused before spawn" 1 "FAILED (self_review)" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/unknown-acting.md" --codex-bin /nonexistent/codex \
+  --ac claude --ac-model unknown --reviewer-model gpt-5.6-terra
+
+expect_status "every AC -> unknown reviewer model is refused before spawn" 1 "FAILED (self_review)" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/unknown-reviewer.md" --codex-bin /nonexistent/codex \
+  --ac claude --ac-model claude-opus --reviewer-model UNKNOWN
+
+expect_status "every AC -> matching models are refused before spawn" 1 "FAILED (self_review)" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/matching-claude.md" --codex-bin /nonexistent/codex \
+  --ac claude --ac-model Claude-Opus --reviewer-model claude-opus
 
 make_fake_codex echo_stdin
 PLAN="$TMP/plan.md"
@@ -260,8 +289,8 @@ expect_status "plan mode -> exit 0, OK status line" 0 "summon_reviewer: OK - pla
   "$TSX" "$SCRIPT" --mode plan --input "$PLAN" --out "$OUT" --codex-bin "$FAKE_BIN"
 grep -qF "Add the widget reaper." "$OUT"
 report "plan mode -> plan text reached the CLI on stdin" $?
-grep -qxF "exec" "$FAKE_LOG"
-report "plan mode -> CLI invoked as 'exec'" $?
+grep -qF -- "--model gpt-5.6-terra exec" "$FAKE_LOG"
+report "plan mode -> CLI invoked as '--model MODEL exec'" $?
 
 # ---------------------------------------------------------------------------
 echo "Failure ladder (each classification distinct and reachable):"
@@ -487,6 +516,8 @@ expect_status "missing --mode -> usage error" 1 "usage error" \
   "$TSX" "$SCRIPT" --out "$TMP/nomode.md" --codex-bin "$FAKE_BIN"
 expect_status "--mode bogus -> usage error" 1 "usage error" \
   "$TSX" "$SCRIPT" --mode bogus --out "$TMP/bogus.md" --codex-bin "$FAKE_BIN"
+expect_status "usage synopsis includes mandatory reviewer identity flags" 1 "--reviewer-model MODEL" \
+  "$TSX" "$SCRIPT" --mode bogus --out "$TMP/bogus-models.md" --codex-bin "$FAKE_BIN"
 expect_status "missing --out -> usage error" 1 "usage error" \
   "$TSX" "$SCRIPT" --mode work --codex-bin "$FAKE_BIN"
 expect_status "plan mode without --input -> usage error" 1 "usage error" \
@@ -536,6 +567,9 @@ if [ ! -f "$PROJECT_MD" ]; then
 else
   report "PROJECT.md is readable" 0
 
+  ! grep -qF "PROJECT.md" "$SCRIPT"
+  report "reviewer invocation does not derive models from attribution data" $?
+
   make_fake_codex ok
   DOC_PLAN="$TMP/doc-plan.md"
   DOC_OUT="$TMP/doc-review.md"
@@ -547,7 +581,8 @@ else
   # shellcheck disable=SC2086
   PLAN_ARGS="$(printf '%s' "$PLAN_CMD" |
     sed -e "s#^npx tsx scripts/summon-reviewer.ts##" \
-        -e "s#PLAN_FILE#$DOC_PLAN#" -e "s#OUT_FILE#$DOC_OUT#" -e "s#AC_NAME#claude#")"
+        -e "s#PLAN_FILE#$DOC_PLAN#" -e "s#OUT_FILE#$DOC_OUT#" -e "s#AC_NAME#claude#" \
+        -e "s#AC_MODEL#claude-opus#" -e "s#REVIEWER_MODEL#gpt-5.6-terra#")"
   expect_status "PROJECT.md's plan-mode command runs (exit 0, not a usage error)" 0 \
     "summon_reviewer: OK - plan review" \
     "$TSX" "$SCRIPT" $PLAN_ARGS --codex-bin "$FAKE_BIN"
@@ -560,16 +595,20 @@ else
   # shellcheck disable=SC2086
   WORK_ARGS="$(printf '%s' "$WORK_CMD" |
     sed -e "s#^npx tsx scripts/summon-reviewer.ts##" \
-        -e "s#OUT_FILE#$DOC_OUT#" -e "s#AC_NAME#claude#" -e "s#BRANCH#main#")"
+        -e "s#OUT_FILE#$DOC_OUT#" -e "s#AC_NAME#claude#" -e "s#BRANCH#main#" \
+        -e "s#AC_MODEL#claude-opus#" -e "s#REVIEWER_MODEL#gpt-5.6-terra#")"
   expect_status "PROJECT.md's work-mode command runs (exit 0, not a usage error)" 0 \
     "summon_reviewer: OK - work review" \
     "$TSX" "$SCRIPT" $WORK_ARGS --codex-bin "$FAKE_BIN"
 
-  # The `--ac` guard only ever fires when the AC is Codex, which is exactly the
-  # case an undocumented flag would leave unreachable: default `--ac claude`
-  # would let Codex review its own work. So the documented command must carry it.
+  # All three identity arguments are mandatory, so documented commands cannot
+  # silently fall back to an unverified acting or reviewer model.
   printf '%s\n%s\n' "$PLAN_CMD" "$WORK_CMD" | grep -qF -- "--ac "
-  report "the documented invocations pass --ac (the self-review guard is reachable)" $?
+  report "the documented invocations pass --ac" $?
+  printf '%s\n%s\n' "$PLAN_CMD" "$WORK_CMD" | grep -qF -- "--ac-model "
+  report "the documented invocations pass --ac-model" $?
+  printf '%s\n%s\n' "$PLAN_CMD" "$WORK_CMD" | grep -qF -- "--reviewer-model "
+  report "the documented invocations pass --reviewer-model" $?
   printf '%s\n%s\n' "$PLAN_CMD" "$WORK_CMD" | grep -qF -- "--out "
   report "the documented invocations pass --out (it is required)" $?
 

@@ -28,6 +28,7 @@ import {
   asciiSafe as asciiSafeGateValue,
   DEFAULTS as DEFAULT_HUMAN_GATES,
 } from "./human-gates.js";
+import { fromFile as attributionFromFile } from "./attribution.js";
 
 const CANONICAL = "AGENTS.md";
 
@@ -148,6 +149,7 @@ class ParityCheck {
     this.checkCopilotAdapter();
     this.checkRenderedRegions();
     this.checkProjectSections();
+    this.checkAttribution();
     this.checkHumanGates();
     this.checkRules();
     this.checkSkills();
@@ -314,6 +316,11 @@ class ParityCheck {
         );
       }
     }
+  }
+
+  private checkAttribution(): void {
+    if (!this.exists(PROJECT_CONFIG)) return;
+    for (const error of attributionFromFile(this.path(PROJECT_CONFIG)).errors) this.err(error);
   }
 
   private checkRules(): void {
