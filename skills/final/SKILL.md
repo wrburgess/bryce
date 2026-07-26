@@ -48,10 +48,40 @@ skipped: stop and recheck.
 3. **Resolve remaining Reviewer findings** by the [`PROJECT.md`](../../PROJECT.md) → *Review Severity
    Framework*: **all Critical and High findings must be resolved before the SOW.** Don't argue a
    finding unless it is factually incorrect — if the Reviewer flagged it, treat it as a real gap.
-4. **Confirm the faithfulness backstop covers the CURRENT diff.** Fetch or save the exact markdown
-   body of the PR comment containing the `Reviewer Evidence` block as `REVIEWER_EVIDENCE_FILE`, then
-   run this required, fail-closed validation before preparing the SOW (use the actual repository and
-   PR number):
+4. **Confirm the faithfulness backstop covers the CURRENT diff.** Read the `reviewed-sha` recorded in
+   the PR comment carrying the `Reviewer Evidence` block and **compare it to `HEAD` first** — the
+   validator below is the last step of this gate, not its entry point, because a fold in Step 1
+   legitimately makes those SHAs differ and that mismatch must route to a re-summon rather than to a
+   stop:
+   - **Equal** (`reviewed-sha` = `HEAD`) → the PR-gate review stands; validate the evidence below, then
+     record the reviewer identity, model, disposition, artifact URL, and reviewed SHA in the SOW's
+     *Reviewer Backstop* line and continue.
+   - **Different** (Step 1 folded something after `verify`) → **re-summon the Reviewer on the delta**
+     (`--mode work --base <reviewed_sha>`, per [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* →
+     *Reviewer*) so only the folded diff is re-reviewed. If that re-review makes you fold a new must-fix
+     fix, that fold moves `HEAD` again — so **repeat this step** (re-anchor: reviewed SHA ← the newly
+     reviewed commit, compare to `HEAD`) until `HEAD` equals the last reviewed SHA. Each re-summon
+     replaces the evidence block with a new request marker, its delta baseline, and the new artifact
+     URL. **Treat every delta review like the first one:** take its findings back through Step 3's
+     severity resolution — in place, without a new human gate, since merge remains the sole one
+     ([`PROJECT.md`](../../PROJECT.md) → *Human Gates*) — and resolve all Critical and High findings
+     before its evidence is accepted. Resolve each one the way [`listen`](../../skills/listen/SKILL.md)
+     resolves a review thread, minus its human pause: fix it, re-run every
+     [`PROJECT.md`](../../PROJECT.md) → *Quality Check* to green, commit and **push** to the PR branch,
+     and answer the finding on the PR — a fix that lives only in a local `HEAD` is not resolved, and
+     the SHA the next summon reviews must be the one the PR carries. `disposition: ok` attests that the
+     summon *returned a review*, never that the review was clean, so a validated block is not by itself
+     a resolved one. No commit reaches the SOW that some Reviewer pass did not see, and no finding
+     reaches it unresolved.
+   - **The chain is exhausted** (no Reviewer answers, through the whole fallback order) → the
+     [`PROJECT.md`](../../PROJECT.md) *Reviewer degradation floor* applies: it is `stop-and-ask` and is
+     **not configurable**, so an unreviewed PR does **not** reach a SOW. Stop and ask the HC instead of
+     delivering with a footnote. Reaching this step with no reviewer response at all means `verify`'s
+     floor was skipped: stop and recheck.
+
+   Once the evidence block names the current `HEAD`, fetch or save the exact markdown body of that PR
+   comment as `REVIEWER_EVIDENCE_FILE` and run this required, fail-closed validation before preparing
+   the SOW (use the actual repository and PR number):
    ```sh
    npx tsx scripts/reviewer-evidence.ts --evidence REVIEWER_EVIDENCE_FILE --head "$(git rev-parse HEAD)" --repo OWNER/REPO --pr PR_NUMBER
    ```
@@ -59,24 +89,10 @@ skipped: stop and recheck.
    non-pending fields — `request-marker`, `reviewed-sha`, `baseline`, `reviewer`, `reviewer-model`,
    `disposition`, and `artifact-url` — and requires `artifact-url` to be the HTTPS GitHub PR-comment
    URL for that exact repository and PR. Also confirm the URL resolves to the distinct Reviewer's
-   posted body, the marker identifies that request, and `disposition` is `ok`. A local output file, a
-   request without an artifact, an unverifiable asynchronous result, or any malformed evidence is no
-   evidence: stop and ask the HC.
-   - **Equal** (`reviewed-sha` = `HEAD`) → the PR-gate review stands; record the reviewer identity,
-     model, disposition, artifact URL, and reviewed SHA in the SOW's *Reviewer Backstop* line and
-     continue.
-   - **Different** (Step 1 folded something after `verify`) → **re-summon the Reviewer on the delta**
-     (`--mode work --base <reviewed_sha>`, per [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* →
-     *Reviewer*) so only the folded diff is re-reviewed. If that re-review makes you fold a new must-fix
-     fix, that fold moves `HEAD` again — so **repeat this step** (re-anchor: reviewed SHA ← the newly
-     reviewed commit, compare to `HEAD`) until `HEAD` equals the last reviewed SHA. Each re-summon
-     replaces the evidence block with a new request marker, its delta baseline, and the new artifact
-     URL. No commit reaches the SOW that some Reviewer pass did not see.
-   - **The chain is exhausted** (no Reviewer answers, through the whole fallback order) → the
-     [`PROJECT.md`](../../PROJECT.md) *Reviewer degradation floor* applies: it is `stop-and-ask` and is
-     **not configurable**, so an unreviewed PR does **not** reach a SOW. Stop and ask the HC instead of
-     delivering with a footnote. Reaching this step with no reviewer response at all means `verify`'s
-     floor was skipped: stop and recheck.
+   posted body, the marker identifies that request, and `disposition` is `ok`. A `stale reviewed SHA`
+   failure means the diff moved again after the evidence was written — return to the re-summon path
+   above rather than stopping. A local output file, a request without an artifact, an unverifiable
+   asynchronous result, or any other malformed evidence is no evidence: stop and ask the HC.
 5. **Generate the Statement of Work** and post it as a PR comment via the lifecycle host:
    ```markdown
    ## Statement of Work
