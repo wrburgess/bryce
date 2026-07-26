@@ -261,7 +261,7 @@ function loadFixtureFirstPerson(): Record<string, unknown> {
   return person;
 }
 
-describe("MlbClient — identity name canonicalized to NFC at the boundary (#65 / ADR 0039)", () => {
+describe("MlbClient — identity name canonicalized to NFC at the boundary (#65 / ADR 0041)", () => {
   // NFD spelling forced from a literal, so the fixture is genuinely NFD
   // regardless of the source byte form (Reviewer SC3/SC4). Injection is at the
   // FETCH layer so the PersonSchema transform actually runs.
