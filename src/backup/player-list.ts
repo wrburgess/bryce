@@ -22,14 +22,14 @@ import { fsyncDir } from "./snapshot.js";
  */
 
 /**
- * The version `createPlayerListBackup` EMITS. Bumped to 3 for explicit NCAA
- * Highlightly identity/source state while retaining v1/v2 import compatibility.
+ * The version `createPlayerListBackup` EMITS. Version 4 adds Highlightly
+ * identity as an explicit membership selector while retaining v1-v3 imports.
  * (issue #70 / ADR 0046): a v2 payload adds optional `lists` (live list
  * definitions) and `members` (each referencing a player by natural id and a list
  * by name). The parser still accepts a v1 payload (no lists/members) — the bump
  * is backward compatible.
  */
-export const PLAYER_BACKUP_VERSION = 3 as const;
+export const PLAYER_BACKUP_VERSION = 4 as const;
 
 /** Refuse absurd inputs before Zod even runs — a cheap denial-of-service guard. */
 export const MAX_BACKUP_BYTES = 16 * 1024 * 1024;
@@ -97,14 +97,15 @@ const playerEntrySchema = z
     }
     const hasExternal = row.externalId != null;
     const hasSeq = row.ncaaPlayerSeq != null;
-    if (!hasExternal && !hasSeq && row.highlightlyPlayerId == null) {
+    const hasHighlightlyIdentity = row.highlightlyPlayerId != null;
+    if (!hasExternal && !hasSeq && !hasHighlightlyIdentity) {
       ctx.addIssue({
         code: "custom",
         message: "a player must carry at least one natural identity",
       });
     }
     if (row.level === "ncaa") {
-      if (!hasSeq && row.highlightlyPlayerId == null) {
+      if (!hasSeq && !hasHighlightlyIdentity) {
         ctx.addIssue({
           code: "custom",
           path: ["ncaaPlayerSeq"],
@@ -116,6 +117,13 @@ const playerEntrySchema = z
           code: "custom",
           path: ["externalId"],
           message: "an ncaa player must not carry externalId (ADR 0032)",
+        });
+      }
+      if (row.ncaaSourceState === "highlightly_active" && !hasHighlightlyIdentity) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["highlightlyPlayerId"],
+          message: "an active Highlightly player requires highlightlyPlayerId",
         });
       }
     } else if (!hasExternal) {
@@ -151,23 +159,23 @@ const backupListSchema = z
   });
 
 /**
- * A membership in a v2 backup: a list (by name) plus a player (by natural id —
- * exactly one of externalId or ncaaPlayerSeq, mirroring a player row's identity
- * rule). Resolved against the just-restored players on import.
+ * A membership in a v4 backup: a list plus exactly one current natural identity
+ * (externalId, legacy ncaaPlayerSeq, or highlightlyPlayerId).
  */
 const backupMemberSchema = z
   .object({
     list: z.string().min(1),
     externalId: z.number().int().positive().nullable().default(null),
     ncaaPlayerSeq: z.number().int().positive().nullable().default(null),
+    highlightlyPlayerId: z.number().int().positive().nullable().optional(),
   })
   .strict()
   .superRefine((row, ctx) => {
-    const present = (row.externalId != null ? 1 : 0) + (row.ncaaPlayerSeq != null ? 1 : 0);
+    const present = (row.externalId != null ? 1 : 0) + (row.ncaaPlayerSeq != null ? 1 : 0) + (row.highlightlyPlayerId != null ? 1 : 0);
     if (present !== 1) {
       ctx.addIssue({
         code: "custom",
-        message: "a member must carry exactly one natural id (externalId or ncaaPlayerSeq)",
+        message: "a member must carry exactly one natural id (externalId, ncaaPlayerSeq, or highlightlyPlayerId)",
       });
     }
     if (row.list.trim().length === 0) {
@@ -184,7 +192,7 @@ const backupMemberSchema = z
 export const playerListBackupSchema = z
   .object({
     // v1 or v2: a v1 payload (no lists/members) still restores (ADR 0046).
-    version: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+    version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
     exportedAt: isoTimestamp.optional(),
     players: z.array(playerEntrySchema),
     lists: z.array(backupListSchema).optional(),
@@ -201,11 +209,59 @@ export const playerListBackupSchema = z
         message: "version 1 backups must not carry lists or members (use version 2)",
       });
     }
+    if (env.version < 4 && env.members?.some((member) => member.highlightlyPlayerId != null)) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["members"],
+        message: "Highlightly membership identity requires version 4",
+      });
+    }
+    env.players.forEach((player, index) => {
+      if (player.level !== "ncaa") return;
+      if (env.version >= 3 && player.ncaaSourceState == null) {
+        ctx.addIssue({ code: "custom", path: ["players", index, "ncaaSourceState"], message: "an NCAA player requires ncaaSourceState in version 3+" });
+      }
+      if (env.version < 3 && player.highlightlyPlayerId != null) {
+        ctx.addIssue({ code: "custom", path: ["players", index, "highlightlyPlayerId"], message: "Highlightly NCAA identity requires version 3+" });
+      }
+    });
+
+    // v1-v3 could serialize the then-supported NCAA -> pro promotion state as
+    // a professional row with both externalId and ncaaPlayerSeq. Preserve that
+    // narrow historical import contract so restore can find the old local NCAA
+    // row and convert it without orphaning its Stat Lines. v4 is emitted after
+    // the explicit transition redesign, so it must contain one current identity
+    // only. Do not generalize this compatibility exception to Highlightly state
+    // or malformed mixed identities.
+    env.players.forEach((player, index) => {
+      if (player.level === "ncaa") return;
+      const carriesNcaaState =
+        player.ncaaPlayerSeq != null ||
+        player.highlightlyPlayerId != null ||
+        player.highlightlyTeamId != null ||
+        player.ncaaSourceState != null;
+      if (!carriesNcaaState) return;
+      const isLegacyPromotion =
+        env.version < 4 &&
+        player.externalId != null &&
+        player.ncaaPlayerSeq != null &&
+        player.highlightlyPlayerId == null &&
+        player.highlightlyTeamId == null &&
+        player.ncaaSourceState == null;
+      if (!isLegacyPromotion) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["players", index],
+          message: "a professional player must not carry NCAA identity or state",
+        });
+      }
+    });
 
     // Natural-id uniqueness WITHIN the payload — two rows sharing an identity
     // would fight over the same DB row on import.
     const seenExternal = new Set<number>();
     const seenSeq = new Set<number>();
+    const seenHighlightly = new Set<number>();
     env.players.forEach((p, i) => {
       if (p.externalId != null) {
         if (seenExternal.has(p.externalId)) {
@@ -227,6 +283,10 @@ export const playerListBackupSchema = z
         }
         seenSeq.add(p.ncaaPlayerSeq);
       }
+      if (p.highlightlyPlayerId != null) {
+        if (seenHighlightly.has(p.highlightlyPlayerId)) ctx.addIssue({ code: "custom", path: ["players", i, "highlightlyPlayerId"], message: `duplicate highlightlyPlayerId ${p.highlightlyPlayerId} in payload` });
+        seenHighlightly.add(p.highlightlyPlayerId);
+      }
     });
   });
 
@@ -244,7 +304,7 @@ export class PlayerBackupParseError extends Error {
 
 /**
  * Serialize every Player row into a versioned, re-importable backup envelope
- * (version 3). LIVE named lists and their memberships are included so the HC's
+ * (version 4). LIVE named lists and their memberships are included so the HC's
  * roster choices survive a restore (soft-deleted lists are excluded — a deleted
  * list is not a roster choice to preserve). Each membership references its player
  * by natural id and its list by name.
@@ -266,6 +326,7 @@ export async function createPlayerListBackup(
       listName: playerLists.name,
       externalId: players.externalId,
       ncaaPlayerSeq: players.ncaaPlayerSeq,
+      highlightlyPlayerId: players.highlightlyPlayerId,
     })
     .from(listMembers)
     .innerJoin(playerLists, eq(listMembers.listId, playerLists.id))
@@ -319,12 +380,13 @@ export async function createPlayerListBackup(
       createdAt: l.createdAt,
       updatedAt: l.updatedAt,
     })),
-    // Prefer externalId when a player carries both (a promoted NCAA -> pro row);
-    // either resolves to the same player id on import.
+    // Each current player has exactly one operational natural identity.
     members: memberRows.map((m) =>
       m.externalId != null
-        ? { list: m.listName, externalId: m.externalId, ncaaPlayerSeq: null }
-        : { list: m.listName, externalId: null, ncaaPlayerSeq: m.ncaaPlayerSeq },
+        ? { list: m.listName, externalId: m.externalId, ncaaPlayerSeq: null, highlightlyPlayerId: null }
+        : m.ncaaPlayerSeq != null
+          ? { list: m.listName, externalId: null, ncaaPlayerSeq: m.ncaaPlayerSeq, highlightlyPlayerId: null }
+          : { list: m.listName, externalId: null, ncaaPlayerSeq: null, highlightlyPlayerId: m.highlightlyPlayerId },
     ),
   };
 }
@@ -353,6 +415,16 @@ export function parsePlayerListBackup(json: string): PlayerListBackup {
       })
       .join("; ");
     throw new PlayerBackupParseError(detail);
+  }
+  // v1/v2 predate source-state serialization. Their only NCAA representation
+  // was the legacy stats_player_seq, so make that historical contract explicit
+  // once at the parsing seam; v3+ must carry state and never gets a silent fix.
+  if (result.data.version < 3) {
+    for (const player of result.data.players) {
+      if (player.level === "ncaa" && player.ncaaPlayerSeq != null && player.ncaaSourceState == null) {
+        player.ncaaSourceState = "legacy_html";
+      }
+    }
   }
   return result.data;
 }

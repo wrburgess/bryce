@@ -40,7 +40,7 @@ export const players = sqliteTable("players", {
   // Keep identity state meaningful in the database as well as in services.
   check(
     "players_ncaa_identity_state_ck",
-    sql`(${t.level} = 'ncaa' and ${t.externalId} is null and ${t.ncaaSourceState} in ('legacy_html', 'highlightly_pending', 'highlightly_active')) or (${t.level} <> 'ncaa' and ${t.highlightlyPlayerId} is null and ${t.ncaaSourceState} is null)`,
+    sql`(${t.level} = 'ncaa' and ${t.externalId} is null and (${t.ncaaPlayerSeq} is not null or ${t.highlightlyPlayerId} is not null) and ${t.ncaaSourceState} in ('legacy_html', 'highlightly_pending', 'highlightly_active')) or (${t.level} in ('mlb', 'milb') and ${t.externalId} is not null and ${t.ncaaPlayerSeq} is null and ${t.highlightlyPlayerId} is null and ${t.highlightlyTeamId} is null and ${t.ncaaSourceState} is null)`,
   ),
   check(
     "players_highlightly_active_identity_ck",

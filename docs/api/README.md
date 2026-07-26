@@ -55,12 +55,18 @@ updated.
 Add an NCAA Player by explicit Highlightly identity. Body `{ "playerId": N, "canonicalName": "Name", "teamId": N }`; Bryce validates the selected provider ID against the supplied canonical name and team before writing. Legacy `stats_player_seq` values are historical migration metadata only and are not accepted by operational API routes.
 from his game-log page. Returns **201** on add, **200** on update — same convention as the MLB add.
 
+### `POST /api/players/ncaa/promote`
+
+Promote `{ "highlightlyPlayerId": N, "personId": N }` atomically. It preserves the local Player ID,
+Stat Lines, list memberships, and tags, clears NCAA identity/state and cursor state, then assigns the
+MLB/MiLB identity. A missing NCAA row or a person ID owned by another Player changes nothing.
+
 ### `POST /api/players/batch`
 
 Batch-add up to **25** Players in one call ([#68](https://github.com/wrburgess/bryce/issues/68),
 [ADR 0045](../adr/0045-batch-add-stages-by-identity-best-effort-defers-backfill.md)). Body
 `{ "entries": [ ... ], "list"?: NAME }`, where each entry is a **typed identity** — **exactly one** of
-`{ "personId": N }`, `{ "ncaaPlayerSeq": N }`, or `{ "name": "..." }` (an MLB-only people-search
+`{ "personId": N }`, `{ "highlightlyPlayerId": N, "canonicalName": "Name", "teamId": N }`, or `{ "name": "..." }` (an MLB-only people-search
 convenience that must resolve to exactly one Player). `list` (optional) adds every staged Player to an
 **existing** named list ([#70](https://github.com/wrburgess/bryce/issues/70)); batch-add never
 *creates* a list, so an unknown `list` **fails the whole call closed (404)** before any write.
@@ -71,15 +77,15 @@ convenience that must resolve to exactly one Player). `list` (optional) adds eve
   carries a `reason` and a display `message`. A **soft** per-entry failure stays inside this 200 body;
   it never takes the 404/502 seam.
 - **400** when the batch **shape** is bad — empty, over the 25 cap, an untyped/multi-key entry, an
-  unknown key, or an in-batch duplicate (a `personId` N and an `ncaaPlayerSeq` N are *different*
+  unknown key, or an in-batch duplicate (a `personId` N and a `highlightlyPlayerId` N are *different*
   Players) — rejected before any network or write. **413** when the request body exceeds **64 KB**.
 - **Deferred backfill (unlike `POST /api/players`):** each Player is staged by **identity** now, but
   **no first Refresh runs inline** — his Stat Lines appear at the next Refresh (or an explicit
   `POST /api/refresh`), which sweeps the active Watch List. Batch-add records no freshness run.
 
-### `POST /api/players/ncaa/:seq/deactivate`
+### `POST /api/players/ncaa/:highlightlyPlayerId/deactivate`
 
-Deactivate an NCAA Player, addressed by `stats_player_seq` in the path. His row and full history are
+Deactivate an NCAA Player, addressed by Highlightly player ID in the path. His row and full history are
 kept. Returns `{ "player": {...} }`.
 
 ### `POST /api/players/:id/deactivate`
@@ -94,8 +100,8 @@ level. Query: `q=NAME` (required, non-blank). Returns `{ "results": [...] }`.
 
 ### Player tags
 
-Manual-tag management, addressed by **personId** (`:id`) for MLB/MiLB or **`stats_player_seq`**
-(`:seq`) for NCAA — the same external addressing as the sibling player routes. Tag semantics live in
+Manual-tag management, addressed by **personId** (`:id`) for MLB/MiLB or **Highlightly player ID**
+(`:highlightlyPlayerId`) for NCAA — the same external addressing as the sibling player routes. Tag semantics live in
 the service: a manual write to a derived namespace (`level`/`pos`/`prospect`), or an unknown
 namespace/value, is a **400**; an unknown Player is a **404**. See the
 [Player tag model reference](../domain/tags.md) for the namespace vocabulary, the derived values, and
@@ -103,9 +109,9 @@ the `?tags=` selector grammar.
 
 | Route | Meaning |
 |---|---|
-| `GET /api/players/:id/tags`, `GET /api/players/ncaa/:seq/tags` | List **every** tag (derived + manual), ordered by namespace, value, source. Returns `{ "tags": [...] }`. |
-| `POST /api/players/:id/tags`, `POST /api/players/ncaa/:seq/tags` | Add a manual tag. Body `{ "namespace": "status", "value": "rostered" }`. Idempotent; returns **201** `{ "tag": {...} }`. |
-| `DELETE /api/players/:id/tags/:namespace/:value`, `DELETE /api/players/ncaa/:seq/tags/:namespace/:value` | Remove a manual tag (no-op if absent). Returns `{ "removed": true }`. |
+| `GET /api/players/:id/tags`, `GET /api/players/ncaa/:highlightlyPlayerId/tags` | List **every** tag (derived + manual), ordered by namespace, value, source. Returns `{ "tags": [...] }`. |
+| `POST /api/players/:id/tags`, `POST /api/players/ncaa/:highlightlyPlayerId/tags` | Add a manual tag. Body `{ "namespace": "status", "value": "rostered" }`. Idempotent; returns **201** `{ "tag": {...} }`. |
+| `DELETE /api/players/:id/tags/:namespace/:value`, `DELETE /api/players/ncaa/:highlightlyPlayerId/tags/:namespace/:value` | Remove a manual tag (no-op if absent). Returns `{ "removed": true }`. |
 
 ### `GET /api/stat-lines`
 
@@ -176,7 +182,7 @@ case-sensitively unique among **live** lists.
 ### `POST /api/refresh`
 
 Run a Refresh now. Body is optional: empty or absent refreshes **every** active Player; otherwise
-`{ "personId"?: N }` or `{ "ncaaPlayerSeq"?: N }` to refresh one. Malformed JSON is a client error
+`{ "personId"?: N }` or `{ "highlightlyPlayerId"?: N }` to refresh one. Malformed JSON is a client error
 (**400**), never a full refresh. A whole-watch-list Refresh returns its structured summary even when
 some players fail: `ok`, `partial`, and `skipped` results are **200**; a `failed` result (no player
 could be refreshed) is **502** with that same summary body. A single-player Refresh returns its

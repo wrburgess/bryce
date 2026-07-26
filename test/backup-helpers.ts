@@ -106,6 +106,9 @@ export interface BackupEntryOverrides {
   id?: number;
   externalId?: number | null;
   ncaaPlayerSeq?: number | null;
+  highlightlyPlayerId?: number | null;
+  highlightlyTeamId?: number | null;
+  ncaaSourceState?: "legacy_html" | "highlightly_pending" | "highlightly_active" | null;
   fullName?: string;
   level?: "mlb" | "milb" | "ncaa";
   milbLevel?: string | null;

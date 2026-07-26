@@ -66,13 +66,22 @@ Add an NCAA Player by explicit Highlightly identity. The tool validates `playerI
   then the same first Refresh as `watchlist_add` (skipped during Offseason Sleep); re-adding a Player
   already on the Watch List is a no-op update (`refresh: null`) with no Refresh.
 
+### `watchlist_promote_ncaa_player`
+
+Convert a Highlightly NCAA Player to an explicit MLB/MiLB `personId` without creating a second Player.
+The transaction preserves its local ID, Stat Lines, lists, and tags, clears NCAA identity and cursor
+state, and rejects a missing source or already-owned person ID without partial conversion.
+
+- **Inputs:** `highlightlyPlayerId`, `personId`.
+- **Success:** `{ "player": {...} }` with professional identity only.
+
 ### `watchlist_batch_add`
 
 Batch-add up to **25** Players in one call ([#68](https://github.com/wrburgess/bryce/issues/68),
 [ADR 0045](../adr/0045-batch-add-stages-by-identity-best-effort-defers-backfill.md)).
 
 - **Inputs:** `entries` — an array of 1 to 25 **typed identity entries**, each **exactly one** of
-  `personId` (MLB/MiLB), `ncaaPlayerSeq` (NCAA), or `name` (an MLB-only people-search convenience that
+  `personId` (MLB/MiLB), explicit `highlightlyPlayerId` + `canonicalName` + `teamId` (NCAA), or `name` (an MLB-only people-search convenience that
   must resolve to *exactly one* Player — there is no NCAA name search). An optional `list` adds every
   staged Player to an **existing** named list ([#70](https://github.com/wrburgess/bryce/issues/70));
   batch-add never *creates* a list, so an unknown `list` fails the whole call closed before any write.
@@ -87,7 +96,7 @@ Batch-add up to **25** Players in one call ([#68](https://github.com/wrburgess/b
   **no** freshness run, so it does not affect the digest freshness gate. Run `run_refresh` afterward to
   backfill early.
 - **Shape is strict, resolution is soft:** a bad **shape** — empty, over the 25 cap, an untyped or
-  multi-key entry, an unknown key, or an **in-batch duplicate** (a `personId` N and an `ncaaPlayerSeq`
+  multi-key entry, an unknown key, or an **in-batch duplicate** (a `personId` N and a `highlightlyPlayerId`
   N are *different* Players, never a duplicate) — is rejected as an input error **before any network or
   write**, and is the *only* thing that fails the whole call. Every other problem is a per-entry
   outcome; one entry failing never aborts the others (batch-add is deliberately non-transactional).
@@ -100,7 +109,7 @@ Batch-add up to **25** Players in one call ([#68](https://github.com/wrburgess/b
 
 Deactivate a Player, keeping his row and full Stat Line history.
 
-- **Inputs:** exactly one of `personId` (MLB/MiLB) or `ncaaPlayerSeq` (NCAA). Providing both or
+- **Inputs:** exactly one of `personId` (MLB/MiLB) or `highlightlyPlayerId` (NCAA). Providing both or
   neither is an input error.
 - **Success:** `{ "player": {...} }` with `active: false`.
 - **Side effects:** flips the Watch List `active` flag; no history is removed.
@@ -165,7 +174,7 @@ Run the Digest job now for a Window.
 
 Re-ingest the current season now.
 
-- **Inputs:** `personId` (MLB/MiLB) or `ncaaPlayerSeq` (NCAA) to refresh one Player; omit both to
+- **Inputs:** `personId` (MLB/MiLB) or `highlightlyPlayerId` (NCAA) to refresh one Player; omit both to
   refresh **every** active Player.
 - **Success:** a per-player result such as `{ skipped, inserted, updated }` when a Player is
   specified; otherwise a whole-watch-list result with `status` (`ok`, `partial`, or `failed`),
@@ -176,10 +185,10 @@ Re-ingest the current season now.
 
 ### `player_tag_add`
 
-Add a **manual** tag to a Player, addressed by `personId` (MLB/MiLB) or `ncaaPlayerSeq` (NCAA) —
+Add a **manual** tag to a Player, addressed by `personId` (MLB/MiLB) or `highlightlyPlayerId` (NCAA) —
 exactly one.
 
-- **Inputs:** `personId` or `ncaaPlayerSeq`; `namespace` and `value`. Manual tags live in the
+- **Inputs:** `personId` or `highlightlyPlayerId`; `namespace` and `value`. Manual tags live in the
   `status` namespace (`rostered` or `scouted`); a write to a derived namespace (`level`/`pos`/`prospect`)
   or an unknown namespace/value is an error result.
 - **Success:** `{ tag: { id, playerId, namespace, value, source, createdAt } }`.
@@ -187,18 +196,18 @@ exactly one.
 
 ### `player_tag_remove`
 
-Remove a **manual** tag from a Player, addressed by `personId` or `ncaaPlayerSeq` — exactly one.
+Remove a **manual** tag from a Player, addressed by `personId` or `highlightlyPlayerId` — exactly one.
 
-- **Inputs:** `personId` or `ncaaPlayerSeq`; `namespace` and `value`. A derived namespace is rejected.
+- **Inputs:** `personId` or `highlightlyPlayerId`; `namespace` and `value`. A derived namespace is rejected.
 - **Success:** `{ removed: true }` (removing an absent manual tag is a no-op).
 - **Side effects:** deletes the matching `source='manual'` row, if any.
 
 ### `player_tags_list`
 
-List **every** tag (derived and manual) for a Player, addressed by `personId` or `ncaaPlayerSeq` —
+List **every** tag (derived and manual) for a Player, addressed by `personId` or `highlightlyPlayerId` —
 exactly one.
 
-- **Inputs:** `personId` or `ncaaPlayerSeq`.
+- **Inputs:** `personId` or `highlightlyPlayerId`.
 - **Success:** `{ tags: [...] }`, ordered by namespace, value, source.
 - **Side effects:** none (read-only).
 

@@ -1,5 +1,10 @@
 # NCAA identity is stats_player_seq in its own column, sourced by an isolated scrape adapter
 
+> Superseded in part by issue #35: active NCAA identity is Highlightly's explicit player ID
+> (with `stats_player_seq` retained only for legacy history). A promotion preserves `players.id`
+> and source-qualified Stat Lines, then clears every NCAA-native identity/state before assigning
+> the MLB `external_id`; a Player never has simultaneous NCAA and professional identities.
+
 NCAA baseball has no MLB Stats API `personId`, so Phase 3 gives it a source-native identity of its
 own: the stats.ncaa.org `stats_player_seq`, stored in a new nullable, unique `players.ncaa_player_seq`
 column. `external_id` stays MLB-only; the two identity columns live side by side so one human is still

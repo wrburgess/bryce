@@ -25,6 +25,7 @@ Seed the watch list, then run the jobs by hand once:
 ```sh
 sk seed add --search "acosta" --pick 1   # or: add --person-id 691185
 sk seed add --highlightly-player-id 501 --canonical-name "C Guy" --team-id 10
+sk seed promote --highlightly-player-id 501 --person-id 691185
 sk seed list
 sk refresh
 sk digest
@@ -241,10 +242,10 @@ sk players backup --out backups/players.json     # write every Player row (netwo
 sk players restore --in  backups/players.json     # re-import, all-or-nothing, network-free
 ```
 
-Restore upserts on each Player's natural identity (MLB `external_id` or NCAA `stats_player_seq`), so
-existing rows keep their `id` and their **Stat Line** history is untouched; a promotion (NCAA -> pro)
-stays one row and gains `external_id` without losing its `ncaa_player_seq`. It never re-pulls from the
-sources.
+Restore uses exactly one current natural identity: MLB `external_id`, legacy NCAA
+`stats_player_seq`, or Highlightly NCAA player ID. Existing matching rows keep their `id` and
+**Stat Line** history. Promotion is an explicit live operation: it retains the local row ID while
+retiring NCAA-native identity/state before assigning `external_id`. It never re-pulls from sources.
 
 ### Restore runbook
 
@@ -588,6 +589,11 @@ sk seed add --highlightly-player-id 501 --canonical-name "C Guy" --team-id 10
 
 - **REST:** `POST /api/players/ncaa` with `{"playerId":501,"canonicalName":"C Guy","teamId":10}`.
 - **MCP:** `watchlist_add_ncaa` with the same three fields.
+
+When the player enters MLB/MiLB, promote the same local row with `sk seed promote
+--highlightly-player-id 501 --person-id 691185`, REST `POST /api/players/ncaa/promote`, or MCP
+`watchlist_promote_ncaa_player`. It preserves Stat Lines, lists, and tags, clears NCAA identity/state
+and its cursor, and rejects an already-owned MLB person ID without changing either row.
 
 The former stats.ncaa.org HTML scraper, sequence identity, and host probe are removed. Historical
 source markers remain only to migrate existing rows and preserve stat-line provenance.
