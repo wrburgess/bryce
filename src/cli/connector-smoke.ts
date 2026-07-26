@@ -25,6 +25,7 @@ export const ALL_TOOLS = [
   "watchlist_list",
   "watchlist_add",
   "watchlist_add_ncaa",
+  "watchlist_promote_ncaa_player",
   "watchlist_batch_add",
   "watchlist_deactivate",
   "player_search",

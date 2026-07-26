@@ -16,6 +16,7 @@ const validArgs: Record<string, string[]> = {
   "players batch-add": ["--person-ids", "1"],
   "db restore": ["--from", "snapshot.db"],
   "seed add": ["--person-id", "1"],
+  "seed promote": ["--highlightly-player-id", "1", "--person-id", "2"],
   "seed deactivate": ["--person-id", "1"],
   "seed tag add": ["--person-id", "1", "--tag", "status:rostered"],
   "seed tag remove": ["--person-id", "1", "--tag", "status:rostered"],

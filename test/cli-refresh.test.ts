@@ -73,13 +73,12 @@ describe("refresh CLI (#23, MF6)", () => {
     expect(errors).toEqual([]);
   });
 
-  it("exits 0 on a `partial` (skip-only) run", async () => {
+  it("exits 0 on a safe `partial` run", async () => {
     await insertPlayer(opened.db, { externalId: 691185 });
-    await insertPlayer(opened.db, { externalId: null, level: "mlb", milbLevel: null, fullName: "No Id Guy" });
+    await insertPlayer(opened.db, { externalId: null, ncaaPlayerSeq: 700005, ncaaSourceState: "legacy_html", level: "ncaa", milbLevel: null, fullName: "Legacy Guy", schoolName: "State" });
     expect(await runRefreshCli(deps())).toBe(0);
     expect(output[0]).toContain("status=partial");
     expect(output[0]).toContain("skipped=1");
-    // No collected failures → no failure line.
     expect(errors).toEqual([]);
   });
 
