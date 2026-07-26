@@ -686,8 +686,11 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
  *
  * Identity (ADR 0032 / ADR 0041): each row is matched on its one current
  * natural id (MLB, legacy NCAA, or Highlightly NCAA). A cross-identity match is
- * treated as corruption and aborts the transaction. Names are canonicalized on
- * this direct write path.
+ * treated as corruption and aborts the transaction. The sole compatibility
+ * exception is a parser-vetted v1-v3 pro row with externalId + ncaaPlayerSeq:
+ * both identities are used to find its old local row, then the retired NCAA
+ * identity is cleared as the row becomes professional. Names are canonicalized
+ * on this direct write path.
  *
  * Authority (ADR 0042 matrix): natural ids + level + milbLevel + teamName +
  * position + schoolName + notes + active come from the backup; the source-local
@@ -786,7 +789,10 @@ export function restorePlayerListBackup(
           .insert(players)
           .values({
             externalId: row.externalId ?? null,
-            ncaaPlayerSeq: row.ncaaPlayerSeq ?? null,
+            // A parser-vetted legacy promotion can carry both identities solely
+            // so Phase 1 can retain the existing NCAA row and its history. It
+            // must never create a new mixed-identity row.
+            ncaaPlayerSeq: row.level === "ncaa" ? row.ncaaPlayerSeq ?? null : null,
             highlightlyPlayerId,
             highlightlyTeamId,
             ncaaSourceState,

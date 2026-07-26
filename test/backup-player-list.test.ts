@@ -232,6 +232,53 @@ describe("restorePlayerListBackup: import semantics", () => {
     expect(stored[0]?.level).toBe("mlb");
   });
 
+  it("restores v1-v3 promoted dual-identity backups by retaining the local NCAA row and its history", async () => {
+    for (const [offset, version] of [1, 2, 3].entries()) {
+      const externalId = 810000 + offset;
+      const ncaaPlayerSeq = 2600000 + offset;
+      const existing = await insertPlayer(opened.db, {
+        externalId: null,
+        ncaaPlayerSeq,
+        level: "ncaa",
+        milbLevel: null,
+        teamName: null,
+        fullName: `Legacy Prospect ${version}`,
+        schoolName: "LSU",
+      });
+      await insertStatLine(opened.db, { playerId: existing.id, gameId: 9000 + offset });
+
+      const backup = parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([
+        makeBackupEntry({
+          externalId,
+          ncaaPlayerSeq,
+          level: "milb",
+          milbLevel: "Single-A",
+          fullName: `Legacy Prospect ${version}`,
+          schoolName: null,
+          notes: `restored v${version}`,
+        }),
+      ], { version })));
+      expect(restorePlayerListBackup(opened.db, backup.players, NOW)).toEqual({
+        inserted: 0,
+        updated: 1,
+        total: 1,
+      });
+
+      const restored = opened.db.select().from(players).where(eq(players.externalId, externalId)).all()[0];
+      expect(restored).toMatchObject({
+        id: existing.id,
+        externalId,
+        ncaaPlayerSeq: null,
+        highlightlyPlayerId: null,
+        highlightlyTeamId: null,
+        ncaaSourceState: null,
+        level: "milb",
+        notes: `restored v${version}`,
+      });
+      expect(opened.db.select().from(statLines).where(eq(statLines.playerId, existing.id)).all()).toHaveLength(1);
+    }
+  });
+
   it("canonicalizes fullName and schoolName (ADR 0041): NFD -> NFC, whitespace collapsed", async () => {
     const nfd = "José   Ramírez "; // decomposed accents + messy whitespace
     const nfdSchool = " Universidad  dé  Prueba ";
@@ -389,7 +436,7 @@ describe("parsePlayerListBackup: strict validation", () => {
     ).toThrow(PlayerBackupParseError);
   });
 
-  it("keeps v1-v3 current-identity imports compatible but rejects every combined pro/NCAA shape", () => {
+  it("accepts only the historical v1-v3 promoted dual identity and rejects all other mixed pro/NCAA shapes", () => {
     for (const version of [1, 2, 3]) {
       const legacy = makeBackupEntry({ externalId: null, ncaaPlayerSeq: 2649785, level: "ncaa", milbLevel: null, teamName: null, schoolName: "LSU" });
       if (version === 3) legacy.ncaaSourceState = "legacy_html";
@@ -399,8 +446,11 @@ describe("parsePlayerListBackup: strict validation", () => {
       ], { version })))).not.toThrow();
       expect(() => parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([
         makeBackupEntry({ externalId: 691185, ncaaPlayerSeq: 2649785, level: "milb" }),
-      ], { version })))).toThrow(PlayerBackupParseError);
+      ], { version })))).not.toThrow();
     }
+    expect(() => parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([
+      makeBackupEntry({ externalId: 691185, ncaaPlayerSeq: 2649785, level: "milb" }),
+    ], { version: 4 })))).toThrow(PlayerBackupParseError);
     const combinedIdentityExtras: BackupEntryOverrides[] = [
       { highlightlyPlayerId: 501 },
       { highlightlyTeamId: 10 },

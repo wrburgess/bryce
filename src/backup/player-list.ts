@@ -132,8 +132,6 @@ const playerEntrySchema = z
         path: ["externalId"],
         message: `a ${row.level} player requires externalId`,
       });
-    } else if (hasSeq || row.highlightlyPlayerId != null || row.highlightlyTeamId != null || row.ncaaSourceState != null) {
-      ctx.addIssue({ code: "custom", message: "a professional player must not carry NCAA identity or state" });
     }
   });
 
@@ -225,6 +223,37 @@ export const playerListBackupSchema = z
       }
       if (env.version < 3 && player.highlightlyPlayerId != null) {
         ctx.addIssue({ code: "custom", path: ["players", index, "highlightlyPlayerId"], message: "Highlightly NCAA identity requires version 3+" });
+      }
+    });
+
+    // v1-v3 could serialize the then-supported NCAA -> pro promotion state as
+    // a professional row with both externalId and ncaaPlayerSeq. Preserve that
+    // narrow historical import contract so restore can find the old local NCAA
+    // row and convert it without orphaning its Stat Lines. v4 is emitted after
+    // the explicit transition redesign, so it must contain one current identity
+    // only. Do not generalize this compatibility exception to Highlightly state
+    // or malformed mixed identities.
+    env.players.forEach((player, index) => {
+      if (player.level === "ncaa") return;
+      const carriesNcaaState =
+        player.ncaaPlayerSeq != null ||
+        player.highlightlyPlayerId != null ||
+        player.highlightlyTeamId != null ||
+        player.ncaaSourceState != null;
+      if (!carriesNcaaState) return;
+      const isLegacyPromotion =
+        env.version < 4 &&
+        player.externalId != null &&
+        player.ncaaPlayerSeq != null &&
+        player.highlightlyPlayerId == null &&
+        player.highlightlyTeamId == null &&
+        player.ncaaSourceState == null;
+      if (!isLegacyPromotion) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["players", index],
+          message: "a professional player must not carry NCAA identity or state",
+        });
       }
     });
 
@@ -387,7 +416,7 @@ export function parsePlayerListBackup(json: string): PlayerListBackup {
       .join("; ");
     throw new PlayerBackupParseError(detail);
   }
-  // v1/v2 predate source-state serialization.  Their only NCAA representation
+  // v1/v2 predate source-state serialization. Their only NCAA representation
   // was the legacy stats_player_seq, so make that historical contract explicit
   // once at the parsing seam; v3+ must carry state and never gets a silent fix.
   if (result.data.version < 3) {
