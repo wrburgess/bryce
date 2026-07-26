@@ -84,11 +84,10 @@ function toPosix(value: string): string {
   return value.replace(/\\/g, "/");
 }
 
-// A Windows drive-letter root ("C:/..."), already separator-normalized.
+// A Windows drive-letter root ("C:/..."), already separator-normalized. This is the ONLY
+// shape treated as Windows, because it is the only one a POSIX path can never take: no
+// POSIX absolute path begins with a letter and a colon.
 const DRIVE_ABSOLUTE = /^[A-Za-z]:\//;
-
-// A UNC root ("//server/share/..."), already separator-normalized.
-const UNC_ABSOLUTE = /^\/\/[^/]/;
 
 // Absoluteness must be decided from the path's OWN shape, not the host's. `isAbsolute` is
 // platform-bound: on POSIX it calls "C:\\repo\\src\\cli\\main.ts" relative, so the
@@ -98,15 +97,22 @@ function looksAbsolute(original: string, posix: string): boolean {
   return isAbsolute(original) || posix.startsWith("/") || DRIVE_ABSOLUTE.test(posix);
 }
 
-// Windows compares paths case-insensitively for their WHOLE length, not just the drive
-// letter -- "C:/Repo/Root/src/a.ts" and "c:/repo/root" name the same location, and folding
-// only the drive would leave the root unstripped and the file falsely reported absent.
-// POSIX paths are case-SENSITIVE, so this must never apply to them: "/repo/Root" and
-// "/repo/root" are genuinely different directories there. Only the comparison is folded;
-// the returned slice keeps the summary's own spelling.
+// Windows compares paths case-insensitively for their whole length, so "C:/Repo/Root" and
+// "c:/repo/root" name one location; without folding, the root goes unstripped and the file
+// is falsely reported absent. Applied to drive-letter paths ONLY, deliberately:
+//
+//   - POSIX is case-SENSITIVE. "/repo/Root" and "/repo/root" are different directories, so
+//     folding them together could strip a root that does not match and let a WRONG entry
+//     satisfy a floor -- a false green, the one outcome this file exists to prevent.
+//   - UNC ("//server/share") is intentionally NOT folded. Its forward-slash spelling is
+//     indistinguishable from a POSIX path with two leading slashes, so folding it would
+//     silently make those POSIX paths case-insensitive too. A UNC root spelled in a
+//     different case therefore just fails to match, which surfaces as a loud "absent"
+//     violation -- the safe direction to be wrong in.
+//
+// Only the comparison is folded; the returned slice keeps the summary's own spelling.
 function comparable(posix: string): string {
-  const windowsShaped = DRIVE_ABSOLUTE.test(posix) || UNC_ABSOLUTE.test(posix);
-  return windowsShaped ? posix.toLowerCase() : posix;
+  return DRIVE_ABSOLUTE.test(posix) ? posix.toLowerCase() : posix;
 }
 
 // The json-summary reporter keys files by ABSOLUTE path. Fold a key to the repo-relative,

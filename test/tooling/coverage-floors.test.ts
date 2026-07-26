@@ -140,14 +140,23 @@ describe("relativeKey", () => {
     expect(relativeKey("C:/repo/root/src/cli/main.ts", "C:/REPO/ROOT")).toBe("src/cli/main.ts");
   });
 
-  it("applies the same case folding to a UNC root", () => {
-    expect(relativeKey("\\\\Server\\Share\\src\\cli\\main.ts", "\\\\server\\share")).toBe("src/cli/main.ts");
-  });
-
   // The counterpart that must NOT change: POSIX paths are case-sensitive, so /repo/Root
   // and /repo/root are genuinely different directories and must not be folded together.
   it("keeps POSIX root matching case-sensitive", () => {
     expect(relativeKey("/repo/Root/src/cli/main.ts", "/repo/root")).toBe("/repo/Root/src/cli/main.ts");
+  });
+
+  // Reviewer follow-up (PR #138): a UNC root's forward-slash spelling is indistinguishable
+  // from a POSIX path with two leading slashes, so case-folding it would silently make
+  // those POSIX paths case-insensitive — stripping a root that does not match and letting a
+  // WRONG entry satisfy a floor. UNC is therefore compared case-sensitively like any other
+  // path; a case-differing UNC root simply fails to match, which is the safe direction.
+  it("keeps a two-leading-slash path case-sensitive rather than treating it as UNC", () => {
+    expect(relativeKey("//repo/Root/src/cli/main.ts", "//repo/root")).toBe("//repo/Root/src/cli/main.ts");
+  });
+
+  it("still strips a UNC root spelled in matching case", () => {
+    expect(relativeKey("\\\\server\\share\\src\\cli\\main.ts", "\\\\server\\share")).toBe("src/cli/main.ts");
   });
 
   it("does not rewrite a drive-letter key from outside the root", () => {
