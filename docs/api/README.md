@@ -153,7 +153,11 @@ Query: `window=` (one of `1d`/`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`, default 
 `false`). **`force` is accepted but a no-op here** — a preview never claims or sends, and window
 selection makes its content identical either way. `list=NAME`
 ([#70](https://github.com/wrburgess/bryce/issues/70)) scopes the preview to a named list's active
-members; an unknown list is rejected (**404**). For `format=json` (the default) returns
+members; an unknown list is rejected (**404**). `tags=SELECTOR`
+([#140](https://github.com/wrburgess/bryce/issues/140)) scopes the preview to a **cohort** — the
+Players matching every token of a [tag selector](../domain/tags.md#selector-grammar); with `list=`
+the two **intersect**. A cohort matching no Players is an empty **200**; a malformed selector is
+rejected (**400**). For `format=json` (the default) returns
 `{ window, statLineCount, playerCount, batters, pitchers, unknownFields, mail }`.
 
 `format` ([ADR 0037](../adr/0037-presentation-export-formats-digest-and-tabular.md)) is one of
@@ -167,10 +171,13 @@ download — `Content-Type: text/html|text/markdown|text/csv` with `Content-Disp
 
 Run the Digest job now. Body is optional: an empty or absent body means "no force, default window"
 (so every pre-`force` caller keeps working); otherwise `{ "force"?: boolean, "window"?: spec,
-"list"?: NAME }`. A `list` ([#70](https://github.com/wrburgess/bryce/issues/70)) scopes the send to a
-named list's active members; a named-list send is **on-demand only** — it takes no daily slot,
-whatever its window — and an unknown list is rejected (**404**). Malformed JSON is a client error
-(**400**). On success returns **200** with the run result. **When the run's `action` is `"failed"`
+"list"?: NAME, "tags"?: SELECTOR }`. A `list` ([#70](https://github.com/wrburgess/bryce/issues/70))
+scopes the send to a named list's active members; a named-list send is **on-demand only** — it takes
+no daily slot, whatever its window — and an unknown list is rejected (**404**). A `tags`
+([#140](https://github.com/wrburgess/bryce/issues/140)) scopes the send to a **cohort** and is
+likewise **on-demand only** (the delivery-slot key has no tag dimension); with `list` the two
+**intersect**, and a malformed selector is rejected (**400**) with nothing sent. Malformed JSON is a
+client error (**400**). On success returns **200** with the run result. **When the run's `action` is `"failed"`
 the status is 502** and the body is the normal result object (not an error envelope) — a failed send
 is reported as data, so the caller sees the run detail.
 

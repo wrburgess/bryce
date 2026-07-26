@@ -74,12 +74,44 @@ interface DigestPresentation {
   heading: string;
 }
 
+/**
+ * Name the cohort the digest covers. Four cases, because a report the HC cannot
+ * tell apart from the default digest in an inbox is a hazard of its own:
+ *
+ * | list | tags | subject scope        | heading scope              |
+ * |------|------|----------------------|----------------------------|
+ * | —    | —    | `Default`            | `Default List`             |
+ * | yes  | —    | `<list>`             | `<list> List`              |
+ * | —    | yes  | `Tags: <sel>`        | `Tags: <sel>`              |
+ * | yes  | yes  | `<list> + Tags: <sel>` | `<list> List + Tags: <sel>` |
+ *
+ * The selector reaches an SMTP subject header, an HTML heading, and a Markdown
+ * heading. Its safety in all three is established at the BOUNDARY — the tag
+ * grammar admits only `[a-z0-9-]`, so no CR/LF, no `<`, no Markdown
+ * metacharacters can get this far (#140 / ADR 0050). The HTML path still escapes
+ * (defense in depth); a list NAME, whose charset is not so constrained, is why
+ * that escaping cannot be dropped.
+ */
 function digestPresentation(assembly: DigestAssembly): DigestPresentation {
-  const listName = assembly.listName ?? "Default";
+  const listName = assembly.listName;
+  const tags = assembly.tagSelector;
   const windowTitle = digestWindowTitle(assembly.window);
+  const tagPart = tags === undefined ? null : `Tags: ${tags}`;
+  const subjectScope =
+    tagPart === null
+      ? (listName ?? "Default")
+      : listName === undefined
+        ? tagPart
+        : `${listName} + ${tagPart}`;
+  const headingScope =
+    tagPart === null
+      ? `${listName ?? "Default"} List`
+      : listName === undefined
+        ? tagPart
+        : `${listName} List + ${tagPart}`;
   return {
-    subject: `ScoreKeeps Baseball (${listName}) - ${windowTitle}`,
-    heading: `ScoreKeeps Baseball - ${listName} List - ${windowTitle}`,
+    subject: `ScoreKeeps Baseball (${subjectScope}) - ${windowTitle}`,
+    heading: `ScoreKeeps Baseball - ${headingScope} - ${windowTitle}`,
   };
 }
 

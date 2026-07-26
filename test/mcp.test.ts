@@ -18,6 +18,7 @@ import {
   insertCalendars2026,
   insertDelivery,
   insertPlayer,
+  insertPlayerTag,
   insertRefreshRun,
   insertStatLine,
   makeGameLogBody,
@@ -434,6 +435,49 @@ describe("MCP server over Streamable HTTP", () => {
     expect((result.structuredContent?.mail as { subject: string }).subject).toBe("ScoreKeeps Baseball (Default) - Sat, July 18, 2026");
 
     expect(mailer.sent).toHaveLength(0);
+    expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
+  });
+
+  it("digest_preview scopes to a tag cohort and rejects a malformed selector (#140)", async () => {
+    const tagged = await insertPlayer(opened.db, { fullName: "Tagged Cohortguy" });
+    await insertStatLine(opened.db, { playerId: tagged.id, gameDate: "2026-07-18" });
+    await insertPlayerTag(opened.db, { playerId: tagged.id, namespace: "status", value: "rostered" });
+    const untagged = await insertPlayer(opened.db, { fullName: "Untagged Otherguy" });
+    await insertStatLine(opened.db, { playerId: untagged.id, gameDate: "2026-07-18" });
+
+    const scoped = await call("digest_preview", { tags: "status:rostered" });
+    expect(scoped.isError).not.toBe(true);
+    expect(scoped.structuredContent).toMatchObject({ statLineCount: 1, playerCount: 1 });
+    expect((scoped.structuredContent?.mail as { subject: string }).subject).toBe(
+      "ScoreKeeps Baseball (Tags: status:rostered) - Sat, July 18, 2026",
+    );
+
+    // Unscoped still sees both — the scope is real, not cosmetic.
+    const unscoped = await call("digest_preview");
+    expect(unscoped.structuredContent).toMatchObject({ playerCount: 2 });
+
+    // A malformed selector is an error, never a silently unscoped report.
+    const bad = await call("digest_preview", { tags: "level:AAA" });
+    expect(bad.isError).toBe(true);
+    expect(bad.content[0]?.text).toContain("malformed tag token");
+
+    // Still read-only.
+    expect(mailer.sent).toHaveLength(0);
+    expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
+  });
+
+  it("send_digest with tags sends on-demand: no delivery row, cohort-only content (#140)", async () => {
+    const tagged = await insertPlayer(opened.db, { fullName: "Tagged Cohortguy" });
+    await insertStatLine(opened.db, { playerId: tagged.id, gameDate: "2026-07-18" });
+    await insertPlayerTag(opened.db, { playerId: tagged.id, namespace: "status", value: "rostered" });
+    await insertPlayer(opened.db, { fullName: "Untagged Otherguy" });
+
+    const result = await call("send_digest", { tags: "status:rostered" });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ action: "sent", playerCount: 1 });
+    expect(mailer.sent).toHaveLength(1);
+    expect(`${mailer.sent[0]?.html}\n${mailer.sent[0]?.text}`).not.toContain("Otherguy");
+    // The slot key has no tag dimension, so a cohort send records nothing.
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
   });
 

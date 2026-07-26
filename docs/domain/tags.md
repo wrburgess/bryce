@@ -81,19 +81,54 @@ tags are also round-tripped by the Player List Backup.
 
 ## Selector grammar
 
-The same selector works on every surface (CLI `list --tags`, MCP `watchlist_list` `tags`, REST
-`GET /api/players?tags=`):
+The same selector works on every surface that filters Players (CLI `list --tags`, MCP
+`watchlist_list` `tags`, REST `GET /api/players?tags=`) **and** on every surface that scopes a
+**report** to a cohort — see [Selecting a report cohort](#selecting-a-report-cohort) below.
 
 - **Comma-separated tokens are AND** — `level:aaa,status:rostered` = AAA Players who are also rostered.
 - **Token forms:** `namespace:value` (exact, e.g. `level:aaa`) **or** a **bare namespace** that matches
   any value in it (e.g. `prospect`, or `pos` for "has any position tag"). Overlapping tokens resolve
   correctly (`pos,pos:ss` is satisfiable by a single `pos:ss` tag).
+- **Character set:** a namespace and a value each match `^[a-z0-9][a-z0-9-]*$` — lowercase
+  alphanumerics with internal hyphens (`level:high-a`, `pos:1b`). This is the shape every stored tag
+  already has, and it is **load-bearing for safety**, not style: a parsed selector is rendered back
+  into an email **subject header**, an HTML heading, and a Markdown heading when it labels a cohort
+  report, so constraining it here makes the label safe in every sink by construction
+  ([ADR 0050](../adr/0050-tag-scoped-cohort-reports.md)).
 - **Bounds:** duplicate tokens are de-duplicated; at most **16** tokens.
-- **Malformed input is rejected, never silently ignored** — a token like `:foo` or a value with stray
-  colons, and a provided expression that normalizes to **zero** tokens (e.g. `,,,` or whitespace),
-  return a validation error (REST **400** / MCP `isError` / CLI exit `1`). An **absent** `tags` argument
-  means "no filter" (the full list); a *present-but-empty* one is an error.
+- **Malformed input is rejected, never silently ignored** — a token like `:foo`, a value with stray
+  colons (`foo:bar:baz`), an uppercase token (`level:AAA`, which could never match a lowercase stored
+  value), anything outside the character set above, and a provided expression that normalizes to
+  **zero** tokens (e.g. `,,,` or whitespace) all return a validation error (REST **400** / MCP
+  `isError` / CLI exit `1`). An **absent** `tags` argument means "no filter" (the full list); a
+  *present-but-empty* one is an error.
+- **An unknown but well-formed value** (`status:banana`) is a valid query that matches nobody — the
+  selector is not coupled to the derived-value catalogue.
 - There is **no OR/NOT grammar** — deferred until a real need appears.
+
+## Selecting a report cohort
+
+Beyond filtering the Watch List, a selector scopes the **Digest** itself to a cohort
+([#140](https://github.com/wrburgess/bryce/issues/140) /
+[ADR 0050](../adr/0050-tag-scoped-cohort-reports.md)) — the report axis the tag model was built for:
+
+| Surface | Preview | Send |
+|---|---|---|
+| **CLI** | — | `sk digest --tags level:dsl -w 28d` |
+| **MCP** | `digest_preview` (`tags`) | `send_digest` (`tags`) |
+| **REST** | `GET /api/digest/preview?tags=level:dsl&window=28d` | `POST /api/digest/send` `{ "tags": "level:dsl" }` |
+
+Three rules govern a cohort report:
+
+- **A tag scope and a [named list](../adr/0046-named-player-lists-scoped-digests.md) intersect.** With
+  both, the report covers Players in the list **and** matching every token. A list is curated
+  membership; a tag is a queryable attribute; they compose rather than compete.
+- **An empty cohort is an empty report, not an error.** A well-formed selector matching nobody renders
+  empty, exactly as an empty named list does. A *malformed* one is rejected, so a typo can never
+  masquerade as an honest empty cohort.
+- **A tag-scoped send is on-demand only.** The delivery-slot key `(kind, date_covered)` has no tag
+  dimension, so a cohort send takes no daily slot and records no delivery row, whatever its window.
+  The scheduler passes no tags, so the daily `1d` artifact is unaffected.
 
 ## How derived tags stay current
 

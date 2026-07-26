@@ -458,6 +458,26 @@ const DigestListSchema = ListNameSchema.optional().describe(
   "Named player list (issue #70) to scope the digest to its active members; an unknown list is rejected. Omit for all active players. A named-list send is on-demand only (it takes no daily slot).",
 );
 
+/**
+ * Tag-selector scope for a digest (#140 / ADR 0050). Omit ⇒ no tag scope. When
+ * set, the digest covers only the players matching EVERY token; combined with
+ * `list` the two INTERSECT. A cohort matching nobody is an empty report, not an
+ * error — but a MALFORMED selector is rejected, so a typo cannot masquerade as
+ * an honest empty cohort.
+ *
+ * Syntax only here: the grammar itself stays owned by `parseTagSelector`
+ * (`src/tags/service.ts`), whose ZodError every surface already maps to 400 /
+ * MCP isError / CLI exit 1. Two parsers would be two grammars.
+ */
+const DigestTagsSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .optional()
+  .describe(
+    "Optional tag selector scoping the report to a cohort: comma-separated tags are AND (e.g. 'level:aaa,status:rostered'). A bare namespace (e.g. 'prospect') matches any value in it. Combined with list, the two intersect. A selector matching no players returns an empty report; a malformed one is rejected. A tag-scoped send is on-demand only (it takes no daily slot).",
+  );
+
 export const DigestInputShape = {
   force: z
     .boolean()
@@ -467,6 +487,7 @@ export const DigestInputShape = {
     ),
   window: WindowSchema,
   list: DigestListSchema,
+  tags: DigestTagsSchema,
 };
 
 export const DigestInputSchema = z.object(DigestInputShape);
@@ -484,6 +505,7 @@ export const DigestQueryInputSchema = z.object({
     .describe("Accepted for symmetry with POST /digest/send but a no-op here: a preview never claims or sends."),
   window: WindowSchema,
   list: DigestListSchema,
+  tags: DigestTagsSchema,
 });
 
 export const SqlQueryInputSchema = z.object({

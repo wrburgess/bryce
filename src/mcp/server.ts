@@ -27,6 +27,7 @@ import {
   addManualTag,
   listTags,
   removeManualTag,
+  resolveTagScope,
 } from "../tags/service.js";
 import type { PlayerRef } from "../watchlist/service.js";
 import {
@@ -317,18 +318,20 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "digest_preview",
     {
       description:
-        "Preview the digest for a date window, as the Batters and Pitchers tables the email would carry. window (default '1d') is one of 1d, 7d, 14d, 21d, 28d, 35d, 60d, ytd; an unsupported value is rejected. Every window ends on the last COMPLETED host date — yesterday, not today — so the result does not depend on the hour you ask. Rows group by player and by the LEVEL each game was played at, so a player promoted mid-window gets one row per level; a 1d window groups by game instead, so a doubleheader stays two rows. Regular season only. Read-only: sends nothing, claims nothing, and writes nothing — re-running a window always returns the same content. format (default 'json') is one of json, html, md, csv: json is the structured preview; html/md render the WHOLE digest (both tables) as a document; csv exports ONE table, chosen by table (default 'batters', ignored for html/md).",
+        "Preview the digest for a date window, as the Batters and Pitchers tables the email would carry. window (default '1d') is one of 1d, 7d, 14d, 21d, 28d, 35d, 60d, ytd; an unsupported value is rejected. Every window ends on the last COMPLETED host date — yesterday, not today — so the result does not depend on the hour you ask. Rows group by player and by the LEVEL each game was played at, so a player promoted mid-window gets one row per level; a 1d window groups by game instead, so a doubleheader stays two rows. Regular season only. Read-only: sends nothing, claims nothing, and writes nothing — re-running a window always returns the same content. format (default 'json') is one of json, html, md, csv: json is the structured preview; html/md render the WHOLE digest (both tables) as a document; csv exports ONE table, chosen by table (default 'batters', ignored for html/md). tags scopes the preview to a cohort (e.g. 'level:dsl' or 'level:aaa,status:rostered'); with list, the two intersect. A cohort matching no players is an empty report; a malformed selector is rejected.",
       inputSchema: DigestPreviewInputShape,
     },
     (args) =>
       guarded(async () => {
         const input = DigestPreviewInputSchema.parse(args);
         const list = input.list !== undefined ? await resolveListByName(deps.db, input.list) : undefined;
+        const tagScope = input.tags !== undefined ? resolveTagScope(input.tags) : undefined;
         const assembly = await assembleDigest(deps.db, {
           ...deps,
           spec: input.window,
           listId: list?.id,
           listName: list?.name,
+          tagScope,
         });
         if (input.format === "html") return textResult(renderDigestHtmlDocument(assembly));
         if (input.format === "md") return textResult(renderDigestMarkdown(assembly));
@@ -352,13 +355,14 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "send_digest",
     {
       description:
-        "Run the digest job now for a date window. window (default '1d') is one of 1d, 7d, 14d, 21d, 28d, 35d, 60d, ytd; an unsupported value is rejected and nothing is sent. The report writes NO stat-line state, so re-running a window is always safe and sends the same content. The daily '1d' window is the SCHEDULED artifact: it claims a once-per-date slot (so it never double-sends for a covered date, and a failed prior day is recovered on the next run), and during Offseason Sleep it becomes the weekly heartbeat. Any OTHER window (7d/14d/21d/28d/35d/60d/ytd) is an on-demand report: it takes no slot, and it answers even during Offseason Sleep — an explicit 'season to date' is a question, not the daily liveness signal. force (default false) applies only to the daily slot: it is a TEST send overriding the already-sent-today guard and the heartbeat's weekly rule. Overriding one of those makes the send a write-free replay that records nothing; forcing with no slot yet today, or over a failed slot, sends and records a delivery row normally. It does NOT override an in-flight claim held by another run — that still returns claimed-by-another-run.",
+        "Run the digest job now for a date window. window (default '1d') is one of 1d, 7d, 14d, 21d, 28d, 35d, 60d, ytd; an unsupported value is rejected and nothing is sent. The report writes NO stat-line state, so re-running a window is always safe and sends the same content. The daily '1d' window is the SCHEDULED artifact: it claims a once-per-date slot (so it never double-sends for a covered date, and a failed prior day is recovered on the next run), and during Offseason Sleep it becomes the weekly heartbeat. Any OTHER window (7d/14d/21d/28d/35d/60d/ytd) is an on-demand report: it takes no slot, and it answers even during Offseason Sleep — an explicit 'season to date' is a question, not the daily liveness signal. force (default false) applies only to the daily slot: it is a TEST send overriding the already-sent-today guard and the heartbeat's weekly rule. Overriding one of those makes the send a write-free replay that records nothing; forcing with no slot yet today, or over a failed slot, sends and records a delivery row normally. It does NOT override an in-flight claim held by another run — that still returns claimed-by-another-run. tags scopes the send to a cohort (e.g. 'level:dsl'); with list, the two intersect. A tag-scoped send is on-demand by definition — it takes no daily slot and records no delivery row, whatever the window — because the slot key has no tag dimension.",
       inputSchema: DigestInputShape,
     },
     (args) =>
       guarded(async () => {
         const input = DigestInputSchema.parse(args);
         const list = input.list !== undefined ? await resolveListByName(deps.db, input.list) : undefined;
+        const tagScope = input.tags !== undefined ? resolveTagScope(input.tags) : undefined;
         const result = await runDigest({
           db: deps.db,
           mailer: deps.mailer,
@@ -370,6 +374,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
           force: input.force,
           listId: list?.id,
           listName: list?.name,
+          tagScope,
         });
         return jsonResult({ ...result });
       }),

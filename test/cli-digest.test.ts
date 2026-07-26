@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import type { DigestCliDeps } from "../src/cli/digest.js";
-import { parseForce, parseList, parseWindow, runDigestCli } from "../src/cli/digest.js";
+import { parseForce, parseList, parseTags, parseWindow, runDigestCli } from "../src/cli/digest.js";
 import { addToList, createList } from "../src/lists/service.js";
 import {
   CapturingMailer,
@@ -10,6 +10,7 @@ import {
   fakeClock,
   insertCalendars2026,
   insertPlayer,
+  insertPlayerTag,
   insertStatLine,
   testDb,
 } from "./factories.js";
@@ -70,6 +71,26 @@ describe("digest CLI", () => {
     it("normalizes case and surrounding whitespace", () => {
       expect(parseWindow(["--window", "7D"])).toBe("7d");
       expect(parseWindow(["--window", " ytd "])).toBe("ytd");
+    });
+  });
+
+  describe("parseTags (#140)", () => {
+    it("is undefined when the flag is absent", () => {
+      expect(parseTags([])).toBeUndefined();
+      expect(parseTags(["--force"])).toBeUndefined();
+      expect(parseTags(["--list", "L"])).toBeUndefined();
+    });
+
+    it("accepts --tags <selector> and --tags=<selector>, trimming", () => {
+      expect(parseTags(["--tags", "level:aaa"])).toBe("level:aaa");
+      expect(parseTags(["--tags=level:aaa,status:rostered"])).toBe("level:aaa,status:rostered");
+      expect(parseTags(["--tags", "  prospect  "])).toBe("prospect");
+    });
+
+    it("is null (fail closed) when the flag is present but its value is missing", () => {
+      expect(parseTags(["--tags"])).toBeNull();
+      expect(parseTags(["--tags="])).toBeNull();
+      expect(parseTags(["--tags", "--force"])).toBeNull();
     });
   });
 
@@ -227,6 +248,74 @@ describe("digest CLI", () => {
       expect(await runDigestCli(["--list", "ghost"], deps())).toBe(1);
       expect(mailer.sent).toHaveLength(0);
       expect(errors[0]).toContain('no list named "ghost"');
+    });
+
+    it("--tags reaches runDigest: only the cohort is sent (#140)", async () => {
+      // beforeEach seeded "Maximo Acosta" (untagged). Add a tagged player; the
+      // scoped send must cover only him — the parse is not the risk, the WIRING is.
+      const tagged = await insertPlayer(opened.db, { fullName: "Tagged Guy" });
+      await insertStatLine(opened.db, { playerId: tagged.id, gameDate: "2026-07-18" });
+      await insertPlayerTag(opened.db, { playerId: tagged.id, namespace: "status", value: "rostered" });
+
+      expect(await runDigestCli(["--tags", "status:rostered"], deps())).toBe(0);
+      expect(output[0]).toContain("players=1");
+      expect(mailer.sent).toHaveLength(1);
+      const body = `${mailer.sent[0]?.html}\n${mailer.sent[0]?.text}`;
+      expect(body).toContain("Guy"); // surname (renderer abbreviates the first name)
+      expect(body).not.toContain("Acosta");
+      expect(mailer.sent[0]?.subject).toBe(
+        "ScoreKeeps Baseball (Tags: status:rostered) - Sat, July 18, 2026",
+      );
+    });
+
+    it("--tags and --list INTERSECT through the CLI (#140)", async () => {
+      const clock = fakeClock(MID_SEASON);
+      // Listed AND tagged -> the only content.
+      const both = await insertPlayer(opened.db, { fullName: "Both Qualified" });
+      await insertStatLine(opened.db, { playerId: both.id, gameDate: "2026-07-18" });
+      await insertPlayerTag(opened.db, { playerId: both.id, namespace: "status", value: "rostered" });
+      // Listed but untagged -> excluded by the tag half.
+      const listedOnly = await insertPlayer(opened.db, { fullName: "Listedonly Untagged" });
+      await insertStatLine(opened.db, { playerId: listedOnly.id, gameDate: "2026-07-18" });
+      await createList(opened.db, "L", clock.now());
+      await addToList(opened.db, "L", [both.externalId!, listedOnly.externalId!], clock.now());
+
+      expect(await runDigestCli(["--list", "L", "--tags", "status:rostered"], deps())).toBe(0);
+      expect(output[0]).toContain("players=1");
+      const body = `${mailer.sent[0]?.html}\n${mailer.sent[0]?.text}`;
+      expect(body).toContain("Qualified");
+      expect(body).not.toContain("Untagged");
+      expect(mailer.sent[0]?.subject).toBe(
+        "ScoreKeeps Baseball (L + Tags: status:rostered) - Sat, July 18, 2026",
+      );
+    });
+
+    it("--tags fails closed on a malformed selector: exits 1 BEFORE the mailer is touched (#140)", async () => {
+      expect(await runDigestCli(["--tags", "level:AAA"], deps())).toBe(1);
+      expect(await runDigestCli(["--tags", ":foo"], deps())).toBe(1);
+      expect(await runDigestCli(["--tags", "level:a\r\nBcc: x@y"], deps())).toBe(1);
+      expect(mailer.sent).toHaveLength(0);
+      expect(errors[0]).toContain("malformed tag token");
+    });
+
+    it("--tags requires a value: every missing/blank form exits 1 and sends nothing (#140)", async () => {
+      // Router preflight rejects these before `parseTags` is reached (the same
+      // layering `--list` has); `runDigestCli` keeps its own null guard as the
+      // fail-closed backstop for a caller that bypasses preflight. What matters
+      // to the operator is the contract asserted here: exit 1, nothing sent.
+      for (const argv of [["--tags"], ["--tags="], ["--tags", "--force"], ["--tags", "  "]]) {
+        errors.length = 0;
+        expect(await runDigestCli(argv, deps())).toBe(1);
+        expect(errors[0]).toContain("--tags");
+      }
+      expect(mailer.sent).toHaveLength(0);
+    });
+
+    it("a selector matching NOBODY is an empty report, not a failure (#140)", async () => {
+      // The seeded player has stats but no tags: exit 0, a mail, and zero players.
+      expect(await runDigestCli(["--tags", "status:scouted"], deps())).toBe(0);
+      expect(output[0]).toContain("players=0");
+      expect(mailer.sent).toHaveLength(1);
     });
   });
 });

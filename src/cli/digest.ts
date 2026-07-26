@@ -1,3 +1,4 @@
+import { ZodError } from "zod";
 import { loadConfig } from "../config.js";
 import { loadDotEnv } from "../env.js";
 import type { Db } from "../db/client.js";
@@ -8,6 +9,8 @@ import type { Mailer } from "../mailer/types.js";
 import { runDigest } from "../jobs/digest.js";
 import { UnknownListError, resolveListByName } from "../lists/service.js";
 import { createMailer } from "../mailer/index.js";
+import type { TagScope } from "../tags/service.js";
+import { resolveTagScope } from "../tags/service.js";
 import { exitAfterDrain, isMain } from "./main.js";
 import { preflightDirect } from "./router.js";
 
@@ -82,6 +85,28 @@ export function parseList(argv: string[]): string | null | undefined {
     : value.trim();
 }
 
+/**
+ * `--tags <selector>` / `--tags=<selector>`, scoping the report to the players
+ * matching every token (#140). Same three-state contract as `parseList`:
+ * undefined when absent (no tag scope), null when the flag is present but its
+ * value is missing — so a malformed flag fails closed rather than silently
+ * widening the report to every active player. The selector's GRAMMAR is not
+ * checked here; `resolveTagScope` owns it, so the CLI cannot drift from REST/MCP.
+ */
+export function parseTags(argv: string[]): string | null | undefined {
+  const inline = argv.find((a) => a.startsWith("--tags="));
+  if (inline !== undefined) {
+    const value = inline.slice("--tags=".length).trim();
+    return value.length === 0 ? null : value;
+  }
+  const at = argv.indexOf("--tags");
+  if (at === -1) return undefined;
+  const value = argv[at + 1];
+  return value === undefined || value.startsWith("--") || value.trim().length === 0
+    ? null
+    : value.trim();
+}
+
 export async function runDigestCli(argv: string[], deps: DigestCliDeps): Promise<number> {
   const writeError = deps.writeError ?? deps.write;
   const syntaxFailure = preflightDirect(["digest"], argv);
@@ -117,6 +142,26 @@ export async function runDigestCli(argv: string[], deps: DigestCliDeps): Promise
       throw err;
     }
   }
+  const tagsExpr = parseTags(argv);
+  if (tagsExpr === null) {
+    writeError("error: --tags requires a non-blank selector");
+    return 1;
+  }
+  // Parse the selector BEFORE the mailer is touched: a malformed selector must
+  // fail closed with nothing sent, exactly like an unsupported --window. The
+  // grammar's ZodError carries the operator-facing message.
+  let tagScope: TagScope | undefined;
+  if (tagsExpr !== undefined) {
+    try {
+      tagScope = resolveTagScope(tagsExpr);
+    } catch (err) {
+      if (err instanceof ZodError) {
+        writeError(`error: ${err.issues.map((i) => i.message).join("; ")}`);
+        return 1;
+      }
+      throw err;
+    }
+  }
   const result = await runDigest({
     db: deps.db,
     mailer: deps.mailer,
@@ -128,6 +173,7 @@ export async function runDigestCli(argv: string[], deps: DigestCliDeps): Promise
     force: parseForce(argv),
     listId,
     listName: resolvedListName,
+    tagScope,
   });
   deps.write(
     `digest kind=${result.kind} action=${result.action} statLines=${result.statLineCount} players=${result.playerCount}${

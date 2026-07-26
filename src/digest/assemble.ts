@@ -7,6 +7,8 @@ import { hostDate, isInSeason, sportIdForPlayer } from "../domain/season.js";
 import type { ResolvedWindow, WindowSpec } from "../domain/window.js";
 import { resolveWindow } from "../domain/window.js";
 import { listMemberIds } from "../lists/service.js";
+import type { TagScope } from "../tags/service.js";
+import { playerIdsMatchingTags, tagScopeCondition } from "../tags/service.js";
 import { levelAbbrev, levelRank } from "../mlb/levels.js";
 import type { Aggregate } from "../stats/aggregate.js";
 import { aggregate } from "../stats/aggregate.js";
@@ -53,6 +55,13 @@ export interface DigestAssembly {
    * canonical and list naming does not need to be reconstructed by renderers.
    */
   listName?: string;
+  /**
+   * Normalized tag-selector label for presentation, when this is a tag-scoped
+   * digest (#140). Same contract as `listName`: the renderer names the cohort
+   * from this rather than reconstructing it, and it is the PARSER's output, never
+   * the operator's raw input — see `resolveTagScope`.
+   */
+  tagSelector?: string;
   batters: DigestRow[];
   pitchers: DigestRow[];
   /** Distinct players with lines in the window (zero rows are not counted). */
@@ -86,6 +95,13 @@ export interface AssembleDeps {
   listId?: number;
   /** Display name paired with `listId`, carried to the public presentation. */
   listName?: string;
+  /**
+   * Scope the digest to the players matching a tag selector (#140 / ADR 0050).
+   * Undefined ⇒ no tag scope. Scoped exactly like `listId`: BOTH selection sites
+   * are filtered, so an off-cohort player can never leak as a zero row. A tag
+   * scope and a list scope INTERSECT when both are present.
+   */
+  tagScope?: TagScope;
 }
 
 interface Split {
@@ -104,8 +120,16 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
   // is filtered by memberIds, and the idle/season set is `activePlayers` below.
   const memberIds = deps.listId !== undefined ? await listMemberIds(db, deps.listId) : null;
   const memberSet = memberIds === null ? null : new Set(memberIds);
-  const activePlayers =
-    memberSet === null ? allActive : allActive.filter((p) => memberSet.has(p.id));
+  // The tag scope filters the SAME resolved set, for the same reason (#140): the
+  // idle/zero-row tail and `seasonStartFor` both read `activePlayers`, so an
+  // off-cohort player scoped out of the join alone would still leak as a zero row
+  // AND could move a `ytd` window's start date. Filtering by an id SET here (not
+  // an `IN (...)` bind) keeps the parameter cap out of it — rules/backend.md.
+  const taggedSet =
+    deps.tagScope === undefined ? null : new Set(playerIdsMatchingTags(db, deps.tagScope.tokens));
+  const activePlayers = allActive.filter(
+    (p) => (memberSet === null || memberSet.has(p.id)) && (taggedSet === null || taggedSet.has(p.id)),
+  );
 
   const calendars = await loadCalendars(db);
   const window = resolveWindow(
@@ -133,6 +157,12 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
             ),
         );
 
+  // The tag scope's half of the same join filter. Correlated EXISTS per token,
+  // built by the tag service so this site and the id-set site above are one
+  // implementation (rules/backend.md: no materialized id list in the SQL).
+  const tagCondition =
+    deps.tagScope === undefined ? undefined : tagScopeCondition(db, deps.tagScope.tokens);
+
   // One join, not one query per player (rules/backend.md).
   const rows = await db
     .select({ line: statLines, player: players })
@@ -142,6 +172,7 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
       and(
         eq(players.active, true),
         ...(scopeCondition !== undefined ? [scopeCondition] : []),
+        ...(tagCondition !== undefined ? [tagCondition] : []),
         // Regular season only: ingestion also allows postseason types, and a
         // YTD line blending playoff and regular-season stats is not a season line.
         eq(statLines.gameType, "R"),
@@ -198,6 +229,7 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
   return {
     window,
     listName: deps.listName,
+    tagSelector: deps.tagScope?.label,
     batters,
     pitchers,
     playerCount: playersWithLines.size,

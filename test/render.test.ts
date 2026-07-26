@@ -115,6 +115,46 @@ describe("Digest public presentation", () => {
     expect(renderDigestMarkdown(assembly).startsWith("# ScoreKeeps Baseball - Prospects List - YTD")).toBe(true);
     expect(renderDigestHtmlDocument(assembly)).toContain("<title>ScoreKeeps Baseball (Prospects) - YTD</title>");
   });
+
+  // The cohort label (#140 / ADR 0050). Four scope cases across every sink, because
+  // a cohort report the HC cannot tell apart from the default digest in an inbox is
+  // a hazard of its own.
+  describe("cohort label (#140)", () => {
+    const TAGS = "level:aaa, status:rostered";
+
+    it("no scope: unchanged Default labels (regression guard)", () => {
+      const assembly = assemblyWith({ spec: "ytd" });
+      expect(renderDigest(assembly).subject).toBe("ScoreKeeps Baseball (Default) - YTD");
+      expect(renderDigest(assembly).text).toContain("ScoreKeeps Baseball - Default List - YTD");
+      expect(renderDigestMarkdown(assembly).startsWith("# ScoreKeeps Baseball - Default List - YTD")).toBe(true);
+    });
+
+    it("tags only: names the cohort in email, Markdown, and standalone HTML", () => {
+      const assembly = { ...assemblyWith({ spec: "ytd" }), tagSelector: TAGS };
+      expect(renderDigest(assembly).subject).toBe(`ScoreKeeps Baseball (Tags: ${TAGS}) - YTD`);
+      expect(renderDigest(assembly).text).toContain(`ScoreKeeps Baseball - Tags: ${TAGS} - YTD`);
+      expect(renderDigestMarkdown(assembly).startsWith(`# ScoreKeeps Baseball - Tags: ${TAGS} - YTD`)).toBe(true);
+      expect(renderDigestHtmlDocument(assembly)).toContain(`<title>ScoreKeeps Baseball (Tags: ${TAGS}) - YTD</title>`);
+    });
+
+    it("list AND tags: names both, in that order", () => {
+      const assembly = { ...assemblyWith({ spec: "ytd" }), listName: "Prospects", tagSelector: TAGS };
+      expect(renderDigest(assembly).subject).toBe(`ScoreKeeps Baseball (Prospects + Tags: ${TAGS}) - YTD`);
+      expect(renderDigest(assembly).text).toContain(`ScoreKeeps Baseball - Prospects List + Tags: ${TAGS} - YTD`);
+      expect(renderDigestMarkdown(assembly).startsWith(`# ScoreKeeps Baseball - Prospects List + Tags: ${TAGS} - YTD`)).toBe(true);
+    });
+
+    it("HTML still escapes the heading — defense in depth behind the parser's charset", () => {
+      // A tagSelector can never contain '<' (the grammar admits only [a-z0-9-]),
+      // so this drives the sink through the LIST name, which shares it and is not
+      // so constrained. The escaping this asserts is what protects the tag path
+      // too if the grammar were ever loosened.
+      const assembly = { ...assemblyWith({ spec: "ytd" }), listName: "<script>x</script>", tagSelector: TAGS };
+      const html = renderDigestHtmlDocument(assembly);
+      expect(html).not.toContain("<script>x</script>");
+      expect(html).toContain("&lt;script&gt;");
+    });
+  });
 });
 
 describe("renderDigest — tables", () => {

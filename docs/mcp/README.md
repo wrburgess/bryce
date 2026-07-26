@@ -153,7 +153,10 @@ Preview the Digest for a Window as the Batters and Pitchers tables the email wou
 - **Inputs:** `window` (`1d`/`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`, default `1d`; an unsupported value is rejected),
   `force` — **accepted but ignored here**, because a preview never claims or sends — `list` (a named
   list to scope to its active members, [#70](https://github.com/wrburgess/bryce/issues/70); an unknown
-  list is rejected) and `format` (`json` default, or `html`/`md`/`csv`) with `table` (`batters`
+  list is rejected), `tags` (a [tag selector](../domain/tags.md#selector-grammar) scoping the preview
+  to a **cohort**, [#140](https://github.com/wrburgess/bryce/issues/140); with `list` the two
+  **intersect**, a cohort matching no Players is an empty preview, and a malformed selector is
+  rejected) and `format` (`json` default, or `html`/`md`/`csv`) with `table` (`batters`
   default, or `pitchers`; used only by `csv`).
 - **Success:** for `json`, `{ window, statLineCount, playerCount, batters, pitchers, unknownFields, mail }`.
   For `html`/`md` a whole-Digest **Presentation** (both tables) and for `csv` a one-table **Export**
@@ -169,7 +172,11 @@ Run the Digest job now for a Window.
 - **Inputs:** `window` (as above; an unsupported value is rejected and nothing is sent), `force`
   (default `false`), and `list` — a named list ([#70](https://github.com/wrburgess/bryce/issues/70))
   that scopes the send to its active members. A named-list send is **on-demand only** (it takes no
-  daily slot, whatever its window); an unknown list is rejected. `force` applies only to the daily
+  daily slot, whatever its window); an unknown list is rejected. `tags`
+  ([#140](https://github.com/wrburgess/bryce/issues/140)) scopes the send to a **cohort** and is
+  on-demand for the same reason — the delivery-slot key `(kind, date_covered)` has no tag dimension,
+  so a cohort send takes no slot and records no delivery row; with `list` the two **intersect**, and a
+  malformed selector is rejected with nothing sent. `force` applies only to the daily
   `1d` slot: it overrides the already-sent-today
   guard (and, in Offseason Sleep, the weekly-heartbeat rule). Overriding one of those makes the send a
   **write-free replay**; but forcing when today's slot does not exist yet, or over a failed/expired

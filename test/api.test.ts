@@ -16,6 +16,7 @@ import {
   fakeClock,
   insertCalendars2026,
   insertPlayer,
+  insertPlayerTag,
   insertStatLine,
   makeGameLogBody,
   makeMlbTeam,
@@ -626,6 +627,54 @@ describe("REST API", () => {
       expect(await bogus.json()).toMatchObject({ error: "invalid-input" });
     });
 
+    it("scopes by ?tags, intersects with ?list, and rejects a malformed selector (#140)", async () => {
+      const tagged = await insertPlayer(opened.db, { fullName: "Tagged Cohortguy" });
+      await insertStatLine(opened.db, { playerId: tagged.id, gameDate: "2026-07-18" });
+      await insertPlayerTag(opened.db, { playerId: tagged.id, namespace: "status", value: "rostered" });
+      const untagged = await insertPlayer(opened.db, { fullName: "Untagged Otherguy" });
+      await insertStatLine(opened.db, { playerId: untagged.id, gameDate: "2026-07-18" });
+
+      const read = async (url: string) => {
+        const res = await app().request(url, { headers: AUTH });
+        expect(res.status).toBe(200);
+        return (await res.json()) as {
+          playerCount: number;
+          statLineCount: number;
+          mail: { subject: string; text: string };
+        };
+      };
+
+      const scoped = await read("/api/digest/preview?tags=status:rostered");
+      expect(scoped.playerCount).toBe(1);
+      expect(scoped.mail.text).toContain("Cohortguy");
+      expect(scoped.mail.text).not.toContain("Otherguy");
+      expect(scoped.mail.subject).toBe(
+        "ScoreKeeps Baseball (Tags: status:rostered) - Sat, July 18, 2026",
+      );
+
+      // Unscoped still sees both — the scope is real, not cosmetic.
+      expect((await read("/api/digest/preview")).playerCount).toBe(2);
+
+      // A cohort matching nobody is an empty 200, not an error.
+      const empty = await read("/api/digest/preview?tags=status:scouted");
+      expect(empty.playerCount).toBe(0);
+      expect(empty.statLineCount).toBe(0);
+
+      // A malformed selector fails closed with a 400, never an unscoped report.
+      for (const expr of ["level:AAA", ":foo", "foo:bar:baz", ",,,"]) {
+        const bogus = await app().request(
+          `/api/digest/preview?tags=${encodeURIComponent(expr)}`,
+          { headers: AUTH },
+        );
+        expect(bogus.status).toBe(400);
+        expect(await bogus.json()).toMatchObject({ error: "invalid-input" });
+      }
+
+      // Read-only throughout.
+      expect(mailer.sent).toHaveLength(0);
+      expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
+    });
+
     it("is unchanged by ?force, which a window makes meaningless — but still validates it", async () => {
       // The coercion trap survives even though force no longer changes the
       // content: under z.coerce.boolean() the STRING "false" is truthy, so
@@ -838,6 +887,36 @@ describe("REST API", () => {
       const deliveries = await opened.db.select().from(digestDeliveries);
       expect(deliveries).toHaveLength(1);
       expect(deliveries[0]).toMatchObject({ kind: "digest", status: "sent", dateCovered: "2026-07-19" });
+    });
+
+    it("{tags} sends on-demand: cohort-only content, no delivery row, malformed rejected (#140)", async () => {
+      const tagged = await insertPlayer(opened.db, { fullName: "Tagged Cohortguy" });
+      await insertStatLine(opened.db, { playerId: tagged.id, gameDate: "2026-07-18" });
+      await insertPlayerTag(opened.db, { playerId: tagged.id, namespace: "status", value: "rostered" });
+      const untagged = await insertPlayer(opened.db, { fullName: "Untagged Otherguy" });
+      await insertStatLine(opened.db, { playerId: untagged.id, gameDate: "2026-07-18" });
+
+      const res = await app().request("/api/digest/send", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ tags: "status:rostered" }),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ action: "sent", playerCount: 1 });
+      expect(mailer.sent).toHaveLength(1);
+      expect(mailer.sent[0]?.text).toContain("Cohortguy");
+      expect(mailer.sent[0]?.text).not.toContain("Otherguy");
+      // The slot key has no tag dimension, so a cohort send takes no slot.
+      expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
+
+      // Malformed fails closed: 400 and nothing further sent.
+      const bogus = await app().request("/api/digest/send", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ tags: "level:AAA" }),
+      });
+      expect(bogus.status).toBe(400);
+      expect(mailer.sent).toHaveLength(1);
     });
 
     it("sends the requested {window}, and rejects an unsupported one without sending", async () => {
