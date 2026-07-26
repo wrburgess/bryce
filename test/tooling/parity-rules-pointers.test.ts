@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runParityCheck } from "../../scripts/parity-check.js";
 import { REPO_ROOT, withBundleCopy } from "./parity-fixture.js";
