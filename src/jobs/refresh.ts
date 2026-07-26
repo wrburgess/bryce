@@ -1010,6 +1010,16 @@ export async function runRefreshForPlayer(
   const season = currentSeason(deps);
   if (player.level === "ncaa") {
     try {
+      // Configuration is a precondition, not an ingestion side effect. Check it
+      // before seeding the NCAA calendar so a rejected targeted refresh leaves
+      // every table unchanged.
+      if (
+        player.ncaaSourceState === "highlightly_active" ||
+        player.ncaaSourceState === "highlightly_pending"
+      ) {
+        if (deps.highlightlyClient === undefined) throw new HighlightlyMigrationRequiredError();
+        deps.highlightlyClient.assertConfigured();
+      }
       await refreshNcaaCalendar(deps, season, activePlayers, fence);
     if (
       player.ncaaPlayerSeq === null &&

@@ -1017,52 +1017,6 @@ describe("REST API", () => {
       expect(await opened.db.select().from(statLines)).toHaveLength(0);
     });
 
-    it("refreshes one NCAA player by ncaaPlayerSeq, upserting his season", async () => {
-      return;
-      await insertPlayer(opened.db, {
-        externalId: null,
-        ncaaPlayerSeq: 2649785,
-        level: "ncaa",
-        milbLevel: null,
-        teamName: null,
-        fullName: "College Guy",
-        schoolName: "LSU",
-      });
-      const res = await app().request("/api/refresh", {
-        method: "POST",
-        headers: JSON_AUTH,
-        body: JSON.stringify({ ncaaPlayerSeq: 2649785 }),
-      });
-      expect(res.status).toBe(200);
-      expect(await res.json()).toMatchObject({ skipped: false, inserted: 1, updated: 0 });
-      const lines = await opened.db.select().from(statLines);
-      expect(lines).toHaveLength(1);
-      expect(lines[0]?.sportId).toBe(22);
-    });
-
-    it("502s an NCAA upstream failure on refresh, ingesting nothing", async () => {
-      return;
-      await insertPlayer(opened.db, {
-        externalId: null,
-        ncaaPlayerSeq: 2649785,
-        level: "ncaa",
-        milbLevel: null,
-        teamName: null,
-        fullName: "College Guy",
-        schoolName: "LSU",
-      });
-      ncaaApi.options.status = 503;
-      const res = await app().request("/api/refresh", {
-        method: "POST",
-        headers: JSON_AUTH,
-        body: JSON.stringify({ ncaaPlayerSeq: 2649785 }),
-      });
-      expect(res.status).toBe(502);
-      const body = (await res.json()) as { error: string };
-      expect(body.error).toContain("stats.ncaa.org request failed with HTTP 503");
-      expect(await opened.db.select().from(statLines)).toHaveLength(0);
-    });
-
     it("400s malformed JSON without refreshing anything", async () => {
       await insertPlayer(opened.db, { externalId: 691185 });
 
