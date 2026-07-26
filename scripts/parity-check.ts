@@ -71,6 +71,18 @@ const REQUIRED_RULES = [
 ];
 const RULE_REQUIRED_SECTIONS = ["## Patterns", "## Anti-Patterns"];
 
+// Tier-2 deep docs referenced from a Tier-1 rule file (issue #148). The token is matched only in
+// its bare form so an absolute path, a `../` traversal, or a URL containing it is ignored by the
+// caller; `DEEP_DOC_LINKED` recognizes the two markdown-link shapes — inline `](path)` and a
+// reference definition `[label]: path` — that the convention forbids for these paths.
+const DEEP_DOC_LABEL = "**Deep doc:**";
+const DEEP_DOC_TOKEN = /docs\/rules\/[a-z0-9-]+-postmortems\.md(?:#[A-Za-z0-9._-]+)?/g;
+// A link opener may be followed by a relative prefix before the token — `](../docs/rules/x.md)` is
+// the spelling a contributor writing from `rules/` would actually reach for, so the link form must
+// be recognized THROUGH `./`, `../`, and `/` rather than mistaken for an unresolvable path.
+const DEEP_DOC_LINKED = /\]\(\s*(?:\.{0,2}\/)*$|\]:\s*(?:\.{0,2}\/)*$/;
+const RULES_DEEP_DOC_README = "docs/rules/README.md";
+
 const SKILLS_DIR = "skills";
 const CLAUDE_COMMANDS_DIR = ".claude/commands";
 const LIFECYCLE_SKILLS = ["assess", "devise", "invoke", "verify", "listen", "final"];
@@ -152,6 +164,7 @@ class ParityCheck {
     this.checkAttribution();
     this.checkHumanGates();
     this.checkRules();
+    this.checkRulesPointers();
     this.checkSkills();
     this.checkGuardrails();
     this.checkGuides();
@@ -339,6 +352,60 @@ class ParityCheck {
       for (const section of RULE_REQUIRED_SECTIONS) {
         if (!headings.includes(section)) {
           this.err(`Tier-1 rule ${rel} missing required section: \`${section}\``);
+        }
+      }
+    }
+  }
+
+  // A Tier-1 bullet that points at a Tier-2 deep doc stands in for content that was MOVED there
+  // (issue #148), so the pointer must resolve — a broken one silently loses the case study, and
+  // nothing else would notice: these paths are deliberately backticked rather than linked, so
+  // checkLinks() never sees them.
+  //
+  // The `**Deep doc:**` header is exempt from the existence check on purpose: docs/rules/README.md
+  // declares that a deep doc stays "absent until a host has a real postmortem to record", and
+  // rules/frontend.md, rules/security.md and rules/scripting.md all forward-reference one today.
+  // The link-form rule below still applies to it — a markdown link to a not-yet-existing file is
+  // exactly what reddens the dead-link validator, which is why that convention exists.
+  private checkRulesPointers(): void {
+    if (!this.dirExists(RULES_DIR)) return;
+
+    for (const rel of REQUIRED_RULES) {
+      if (!this.exists(rel)) continue;   // already reported by checkRules()
+
+      let fenced = false;
+      for (const raw of this.read(rel).split("\n")) {
+        const line = rstrip(raw);
+        if (/^\s*```/.test(line)) {
+          fenced = !fenced;
+          continue;
+        }
+        if (fenced) continue;
+
+        const isHeader = strip(line).startsWith(DEEP_DOC_LABEL);
+        for (const match of line.matchAll(DEEP_DOC_TOKEN)) {
+          const before = line.slice(0, match.index);
+          const target = (match[0] as string).split("#")[0] as string;
+
+          // The link-form rule is checked FIRST and independently of the path's shape: a relative
+          // link (`](../docs/rules/x.md)`) is still a link, and skipping it as "unresolvable" would
+          // let the likeliest real spelling through.
+          if (DEEP_DOC_LINKED.test(before)) {
+            this.err(
+              `Rules pointer ${rel}: \`${target}\` is written as a markdown link; a deep-doc path must be a ` +
+              `backticked path (${RULES_DEEP_DOC_README}) so it cannot redden the dead-link check before its target lands`,
+            );
+            continue;
+          }
+
+          // Not a pointer this check can resolve: an absolute path, a `../` traversal, or a URL that
+          // merely contains the path.
+          if (/[./]$|:\/\/\S*$/.test(before)) continue;
+
+          if (isHeader) continue;   // a declaration, not a stand-in for moved content
+          if (!this.exists(target)) {
+            this.err(`Rules pointer ${rel}: case-study pointer \`${target}\` does not exist`);
+          }
         }
       }
     }
