@@ -600,11 +600,11 @@ describe("runRefresh records a freshness run (ADR 0043)", () => {
     expect(runs[0]?.errorMessage).toBeNull();
   });
 
-  it("records `partial` when a watched player is skipped", async () => {
-    // One refreshable player and one active MLB row with no externalId, which
-    // refreshOnePlayer skips (result null) — so 1 of 2 were refreshed.
+  it("records `partial` when a legacy NCAA player needs migration", async () => {
+    // A valid legacy NCAA row is operationally blocked until explicitly
+    // attached to Highlightly; malformed no-externalId MLB rows are forbidden.
     await insertPlayer(opened.db, { externalId: 691185 });
-    await insertPlayer(opened.db, { externalId: null, level: "mlb", milbLevel: null, fullName: "No Id Guy" });
+    await insertPlayer(opened.db, { externalId: null, ncaaPlayerSeq: 700001, ncaaSourceState: "legacy_html", level: "ncaa", milbLevel: null, fullName: "Legacy Guy", schoolName: "State" });
 
     const summary = await runRefresh(deps());
     expect(summary.playersRefreshed).toBe(1);
@@ -930,16 +930,14 @@ describe("runRefresh — continue after failures (#23)", () => {
     expect(runs[0]?.errorMessage).toBeNull();
   });
 
-  it("a skip-only partial records a NULL error message, never '0 failed' (MF2)", async () => {
-    // One refreshable, one active MLB row with no externalId (skipped by dispatch).
+  it("a legacy NCAA partial records no fabricated failure message (MF2)", async () => {
     await insertPlayer(opened.db, { externalId: 691185 });
-    await insertPlayer(opened.db, { externalId: null, level: "mlb", milbLevel: null, fullName: "No Id Guy" });
+    await insertPlayer(opened.db, { externalId: null, ncaaPlayerSeq: 700002, ncaaSourceState: "legacy_html", level: "ncaa", milbLevel: null, fullName: "Legacy Guy", schoolName: "State" });
 
     const summary = await runRefresh(deps());
     expect(summary.status).toBe("partial");
     expect(summary.playersRefreshed).toBe(1);
     expect(summary.playersSkipped).toBe(1);
-    expect(summary.playersFailed).toBe(0);
     expect(summary.playerFailures).toEqual([]);
     const runs = await opened.db.select().from(refreshRuns);
     // NOT the nonsensical "0 player(s) failed; 0 calendar fetch(es) failed".

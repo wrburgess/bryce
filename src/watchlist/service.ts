@@ -3,7 +3,7 @@ import type { BatchAddEntry } from "../api/schemas.js";
 import { BatchAddInputSchema } from "../api/schemas.js";
 import type { Db } from "../db/client.js";
 import type { PlayerRow } from "../db/schema.js";
-import { listMembers, playerLists, playerTags, players } from "../db/schema.js";
+import { highlightlyPlayerCursors, listMembers, playerLists, playerTags, players } from "../db/schema.js";
 import type {
   PlayerBackupEntry,
   PlayerBackupList,
@@ -77,6 +77,14 @@ export class PlayerNotFoundError extends Error {
     );
     this.name = "PlayerNotFoundError";
     this.ref = ref;
+  }
+}
+
+/** A requested NCAA-to-professional transition is no longer safe to perform. */
+export class PlayerPromotionConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "PlayerPromotionConflictError";
   }
 }
 
@@ -252,6 +260,81 @@ export async function upsertMlbPlayer(
     throw new Error("insert failed");
   }
   return { action: "added", player: inserted };
+}
+
+/**
+ * Convert an explicitly-addressed Highlightly NCAA row to its MLB/MiLB identity.
+ * The local Player id is deliberately the only identity that survives; every
+ * record attached to it (lines, lists, tags, notes) therefore remains attached.
+ */
+export async function promoteHighlightlyNcaaPlayer(
+  deps: WatchlistDeps,
+  input: { highlightlyPlayerId: number; personId: number },
+): Promise<PlayerRow> {
+  const person = await deps.client.findPerson(input.personId);
+  if (person === null) throw new UnknownPersonError(input.personId);
+  const location = await resolveLocation(person, deps.client, new Map());
+  const now = deps.now();
+  const nowIso = now.toISOString();
+
+  try {
+    return deps.db.transaction((tx) => {
+      // The source must still be an active, fully attached Highlightly NCAA
+      // row.  Include every precondition in both the read and guarded write:
+      // a deactivate or source-state change cannot be accidentally promoted.
+      const source = tx.select().from(players)
+        .where(and(
+          eq(players.highlightlyPlayerId, input.highlightlyPlayerId),
+          eq(players.level, "ncaa"),
+          eq(players.ncaaSourceState, "highlightly_active"),
+          eq(players.active, true),
+        )).get();
+      if (source === undefined) {
+        throw new PlayerNotFoundError({ kind: "highlightly", playerId: input.highlightlyPlayerId });
+      }
+      const owner = tx.select().from(players).where(eq(players.externalId, input.personId)).get();
+      if (owner !== undefined && owner.id !== source.id) {
+        throw new PlayerPromotionConflictError(`personId=${input.personId} is already owned by player id ${owner.id}`);
+      }
+      const changed = tx.update(players).set({
+        externalId: input.personId,
+        ncaaPlayerSeq: null,
+        highlightlyPlayerId: null,
+        highlightlyTeamId: null,
+        ncaaSourceState: null,
+        fullName: person.fullName,
+        level: location.level,
+        milbLevel: location.milbLevel,
+        teamName: location.teamName,
+        position: person.primaryPosition?.abbreviation ?? null,
+        schoolName: null,
+        active: true,
+        updatedAt: nowIso,
+      }).where(and(
+        eq(players.id, source.id),
+        eq(players.level, "ncaa"),
+        eq(players.ncaaSourceState, "highlightly_active"),
+        eq(players.active, true),
+        eq(players.highlightlyPlayerId, input.highlightlyPlayerId),
+      )).run();
+      if (changed.changes !== 1) {
+        throw new PlayerPromotionConflictError(`NCAA player ${input.highlightlyPlayerId} changed during promotion`);
+      }
+      // Nested savepoint; only derived tags are replaced, never manual tags.
+      syncDerivedTags(tx, source.id, now);
+      tx.delete(highlightlyPlayerCursors).where(eq(highlightlyPlayerCursors.playerId, source.id)).run();
+      const promoted = tx.select().from(players).where(eq(players.id, source.id)).get();
+      if (promoted === undefined) throw new Error(`promoted player ${source.id} disappeared`);
+      return promoted;
+    }, { behavior: "immediate" });
+  } catch (err) {
+    // SQLite reports unique-index races as a generic constraint error. Present
+    // the stable domain conflict without exposing driver-specific details.
+    if (err instanceof Error && /UNIQUE constraint failed: players\.external_id/.test(err.message)) {
+      throw new PlayerPromotionConflictError(`personId=${input.personId} is already owned by another player`);
+    }
+    throw err;
+  }
 }
 
 /**
@@ -547,10 +630,10 @@ export async function listPlayers(
  * an ambiguity no upsert can safely reconcile, so the whole import is aborted.
  */
 export class SplitIdentityConflictError extends Error {
-  constructor(externalId: number, ncaaPlayerSeq: number, externalRowId: number, ncaaRowId: number) {
+  constructor(left: string, right: string, leftRowId: number, rightRowId: number) {
     super(
-      `split identity: externalId=${externalId} resolves to player id ${externalRowId} ` +
-        `but ncaaPlayerSeq=${ncaaPlayerSeq} resolves to player id ${ncaaRowId}`,
+      `split identity: ${left} resolves to player id ${leftRowId} ` +
+        `but ${right} resolves to player id ${rightRowId}`,
     );
     this.name = "SplitIdentityConflictError";
   }
@@ -601,11 +684,10 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 /**
  * Re-import a Player List Backup, network-free and all-or-nothing (ADR 0042).
  *
- * Identity (ADR 0032 / ADR 0041): each row is matched on EITHER natural id; when
- * both are present they must resolve to the SAME existing row (a promotion
- * NCAA -> pro keeps one row and gains external_id WITHOUT losing ncaa_player_seq)
- * — a split-row conflict fails the whole transaction. Names are canonicalized on
- * this new direct write path.
+ * Identity (ADR 0032 / ADR 0041): each row is matched on its one current
+ * natural id (MLB, legacy NCAA, or Highlightly NCAA). A cross-identity match is
+ * treated as corruption and aborts the transaction. Names are canonicalized on
+ * this direct write path.
  *
  * Authority (ADR 0042 matrix): natural ids + level + milbLevel + teamName +
  * position + schoolName + notes + active come from the backup; the source-local
@@ -634,16 +716,22 @@ export function restorePlayerListBackup(
         row.ncaaPlayerSeq != null
           ? tx.select().from(players).where(eq(players.ncaaPlayerSeq, row.ncaaPlayerSeq)).all()[0]
           : undefined;
+      const byHighlightly =
+        row.highlightlyPlayerId != null
+          ? tx.select().from(players).where(eq(players.highlightlyPlayerId, row.highlightlyPlayerId)).all()[0]
+          : undefined;
 
-      if (byExternal !== undefined && byNcaa !== undefined && byExternal.id !== byNcaa.id) {
+      const resolvedRows = [byExternal, byNcaa, byHighlightly].filter((r): r is PlayerRow => r !== undefined);
+      if (resolvedRows.some((r) => r.id !== resolvedRows[0]!.id)) {
+        const first = resolvedRows[0]!;
+        const other = resolvedRows.find((r) => r.id !== first.id)!;
+        const firstRef = byExternal?.id === first.id ? `externalId=${row.externalId}` : byNcaa?.id === first.id ? `ncaaPlayerSeq=${row.ncaaPlayerSeq}` : `highlightlyPlayerId=${row.highlightlyPlayerId}`;
+        const otherRef = byExternal?.id === other.id ? `externalId=${row.externalId}` : byNcaa?.id === other.id ? `ncaaPlayerSeq=${row.ncaaPlayerSeq}` : `highlightlyPlayerId=${row.highlightlyPlayerId}`;
         throw new SplitIdentityConflictError(
-          row.externalId as number,
-          row.ncaaPlayerSeq as number,
-          byExternal.id,
-          byNcaa.id,
+          firstRef, otherRef, first.id, other.id,
         );
       }
-      return { row, existing: byExternal ?? byNcaa };
+      return { row, existing: byExternal ?? byNcaa ?? byHighlightly };
     });
 
     // Two distinct payload rows resolving to the same existing player would have
@@ -667,20 +755,17 @@ export function restorePlayerListBackup(
           : canonicalizeName(row.schoolName);
 
       let playerId: number;
-      const ncaaSourceState =
-        row.level === "ncaa" ? (row.ncaaSourceState ?? "legacy_html") : null;
+      const ncaaSourceState = row.level === "ncaa" ? row.ncaaSourceState : null;
       const highlightlyPlayerId = row.level === "ncaa" ? row.highlightlyPlayerId ?? null : null;
       const highlightlyTeamId = row.level === "ncaa" ? row.highlightlyTeamId ?? null : null;
       if (existing !== undefined) {
-        // Coalesce natural ids so a backup can ADD an id without erasing one the
-        // existing row already holds (the promotion case keeps ncaa_player_seq).
         tx
           .update(players)
           .set({
-            externalId: row.externalId ?? existing.externalId,
-            ncaaPlayerSeq: row.ncaaPlayerSeq ?? existing.ncaaPlayerSeq,
-            highlightlyPlayerId: highlightlyPlayerId ?? existing.highlightlyPlayerId,
-            highlightlyTeamId: highlightlyTeamId ?? existing.highlightlyTeamId,
+            externalId: row.level === "ncaa" ? null : row.externalId,
+            ncaaPlayerSeq: row.level === "ncaa" ? row.ncaaPlayerSeq ?? null : null,
+            highlightlyPlayerId: row.level === "ncaa" ? highlightlyPlayerId : null,
+            highlightlyTeamId: row.level === "ncaa" ? highlightlyTeamId : null,
             ncaaSourceState,
             fullName,
             level: row.level,
@@ -810,9 +895,11 @@ export function restorePlayerListBackup(
       const allPlayers = tx.select().from(players).all();
       const byExternal = new Map<number, number>();
       const byNcaa = new Map<number, number>();
+      const byHighlightly = new Map<number, number>();
       for (const p of allPlayers) {
         if (p.externalId != null) byExternal.set(p.externalId, p.id);
         if (p.ncaaPlayerSeq != null) byNcaa.set(p.ncaaPlayerSeq, p.id);
+        if (p.highlightlyPlayerId != null) byHighlightly.set(p.highlightlyPlayerId, p.id);
       }
 
       // Resolve every membership FIRST (a bad list name or player id aborts the
@@ -842,12 +929,12 @@ export function restorePlayerListBackup(
             ? byExternal.get(member.externalId)
             : member.ncaaPlayerSeq != null
               ? byNcaa.get(member.ncaaPlayerSeq)
-              : undefined;
+              : member.highlightlyPlayerId != null ? byHighlightly.get(member.highlightlyPlayerId) : undefined;
         if (playerId === undefined) {
           const ref =
             member.externalId != null
               ? `externalId=${member.externalId}`
-              : `ncaaPlayerSeq=${member.ncaaPlayerSeq}`;
+              : member.ncaaPlayerSeq != null ? `ncaaPlayerSeq=${member.ncaaPlayerSeq}` : `highlightlyPlayerId=${member.highlightlyPlayerId}`;
           throw new UnresolvedBackupMemberError(`no player with ${ref} for list "${listName}"`);
         }
         memberValues.push({ listId, playerId, createdAt: nowIso });

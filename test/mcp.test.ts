@@ -34,6 +34,7 @@ const ALL_TOOLS = [
   "watchlist_list",
   "watchlist_add",
   "watchlist_add_ncaa",
+  "watchlist_promote_ncaa_player",
   "watchlist_batch_add",
   "watchlist_deactivate",
   "player_search",
@@ -242,6 +243,37 @@ describe("MCP server over Streamable HTTP", () => {
     const rows = await opened.db.select().from(players);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ externalId: null, highlightlyPlayerId: 501 });
+  });
+
+  it("watchlist_promote_ncaa_player promotes one explicit row and rejects the strict input matrix or stale addressing", async () => {
+    const added = await call("watchlist_add_ncaa", { playerId: 501, canonicalName: "C Guy", teamId: 10 });
+    const source = (added.structuredContent as { player: { id: number } }).player;
+    const promoted = await call("watchlist_promote_ncaa_player", { highlightlyPlayerId: 501, personId: 691185 });
+    expect(promoted.isError).toBeUndefined();
+    expect(promoted.structuredContent).toMatchObject({ player: { id: source.id, externalId: 691185, level: "milb", highlightlyPlayerId: null } });
+    for (const input of [
+      {},
+      { highlightlyPlayerId: 501 },
+      { personId: 691185 },
+      { highlightlyPlayerId: "501", personId: 691185 },
+      { highlightlyPlayerId: 501, personId: 691185, extra: true },
+    ]) {
+      const invalid = await call("watchlist_promote_ncaa_player", input);
+      expect(invalid.isError, JSON.stringify(input)).toBe(true);
+      expect(invalid.content[0]?.text).toContain("Input validation error");
+    }
+    const stale = await call("watchlist_promote_ncaa_player", { highlightlyPlayerId: 501, personId: 691185 });
+    expect(stale.isError).toBe(true);
+    expect(stale.content[0]?.text).toContain("no player with highlightlyPlayerId=501");
+  });
+
+  it("watchlist_promote_ncaa_player returns an identity collision as a structured tool error", async () => {
+    await call("watchlist_add_ncaa", { playerId: 501, canonicalName: "C Guy", teamId: 10 });
+    await insertPlayer(opened.db, { externalId: 691185 });
+    const conflict = await call("watchlist_promote_ncaa_player", { highlightlyPlayerId: 501, personId: 691185 });
+    expect(conflict.isError).toBe(true);
+    expect(conflict.content[0]?.text).toContain("already owned");
+    expect(conflict.structuredContent).toMatchObject({ error: expect.stringContaining("already owned") });
   });
 
   it("watchlist_add_ncaa reports an unresolvable seq as a tool error", async () => {
@@ -599,12 +631,12 @@ describe("MCP server over Streamable HTTP", () => {
   });
 
   it("run_refresh surfaces the #23 status + failure arrays verbatim (no output-shape issue)", async () => {
-    // One refreshable player and one active MLB row with no externalId (skipped)
+    // One refreshable player and one valid legacy NCAA row requiring migration
     // → a `partial` whole-list run. The new fields must pass through the tool's
     // structuredContent unchanged — the tool declares no outputSchema, so there
     // is no zod shape to reject them.
     await insertPlayer(opened.db, { externalId: 691185 });
-    await insertPlayer(opened.db, { externalId: null, level: "mlb", milbLevel: null, fullName: "No Id Guy" });
+    await insertPlayer(opened.db, { externalId: null, ncaaPlayerSeq: 700004, ncaaSourceState: "legacy_html", level: "ncaa", milbLevel: null, fullName: "Legacy Guy", schoolName: "State" });
 
     const all = await call("run_refresh");
     expect(all.isError).toBeUndefined();

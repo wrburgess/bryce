@@ -30,12 +30,14 @@ import {
 import type { PlayerRef } from "../watchlist/service.js";
 import {
   PlayerNotFoundError,
+  PlayerPromotionConflictError,
   UnknownPersonError,
   addHighlightlyNcaaPlayer,
   addPlayer,
   batchAddPlayers,
   deactivatePlayer,
   listPlayers,
+  promoteHighlightlyNcaaPlayer,
   searchPlayers,
 } from "../watchlist/service.js";
 import {
@@ -54,6 +56,7 @@ import {
 import {
   AddNcaaPlayerInputSchema,
   AddPlayerInputSchema,
+  PromoteHighlightlyNcaaPlayerInputSchema,
   BatchAddInputBase,
   DeactivateInputSchema,
   DeactivateInputShape,
@@ -120,6 +123,7 @@ function errorResult(err: unknown): CallToolResult {
       ? `invalid input: ${err.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`
       : err instanceof UnknownPersonError ||
           err instanceof PlayerNotFoundError ||
+          err instanceof PlayerPromotionConflictError ||
           err instanceof UnknownListError ||
           err instanceof DuplicateListNameError ||
           err instanceof BlankListNameError ||
@@ -131,7 +135,13 @@ function errorResult(err: unknown): CallToolResult {
         ? err.message
         : null;
   if (known === null) throw err instanceof Error ? err : new Error(String(err));
-  return { content: [{ type: "text", text: `error: ${known}` }], isError: true };
+  return {
+    content: [{ type: "text", text: `error: ${known}` }],
+    // Tool clients should not have to scrape the display text to classify a
+    // domain conflict. Keep the human-readable text for compatibility.
+    structuredContent: { error: known },
+    isError: true,
+  };
 }
 
 async function guarded(run: () => Promise<CallToolResult>): Promise<CallToolResult> {
@@ -175,6 +185,18 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
           query.active === "all" ? "all" : query.active === "true" ? "active" : "inactive";
         return jsonResult({ players: await listPlayers(deps.db, filter, query.tags) });
       }),
+  );
+
+  server.registerTool(
+    "watchlist_promote_ncaa_player",
+    {
+      description: "Promote an active Highlightly NCAA player to an MLB/MiLB person without changing the local Player row or its history.",
+      inputSchema: PromoteHighlightlyNcaaPlayerInputSchema,
+    },
+    (args) => guarded(async () => {
+      const input = PromoteHighlightlyNcaaPlayerInputSchema.parse(args);
+      return jsonResult({ player: await promoteHighlightlyNcaaPlayer(deps, input) });
+    }),
   );
 
   server.registerTool(

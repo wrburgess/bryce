@@ -228,6 +228,58 @@ describe("REST API", () => {
       expect(res.status).toBe(201);
       expect(await res.json()).toMatchObject({ player: { highlightlyPlayerId: 501, level: "ncaa" } });
     });
+
+    it("promotes by both explicit identities, rejects loose input, and makes the old NCAA address unusable", async () => {
+      const added = await app().request("/api/players/ncaa", {
+        method: "POST", headers: JSON_AUTH,
+        body: JSON.stringify({ playerId: 501, canonicalName: "C Guy", teamId: 10 }),
+      });
+      const source = (await added.json()) as { player: { id: number } };
+      const promoted = await app().request("/api/players/ncaa/promote", {
+        method: "POST", headers: JSON_AUTH,
+        body: JSON.stringify({ highlightlyPlayerId: 501, personId: 691185 }),
+      });
+      expect(promoted.status).toBe(200);
+      expect(await promoted.json()).toMatchObject({ player: { id: source.player.id, externalId: 691185, level: "milb", highlightlyPlayerId: null } });
+      // The player is immediately addressable through the professional surface.
+      const postCutover = await app().request("/api/players/691185/tags", { headers: AUTH });
+      expect(postCutover.status).toBe(200);
+      expect(await postCutover.json()).toMatchObject({ tags: expect.any(Array) });
+      for (const body of [
+        {},
+        { highlightlyPlayerId: 501 },
+        { personId: 691185 },
+        { highlightlyPlayerId: "501", personId: 691185 },
+        { highlightlyPlayerId: 501, personId: 691185, extra: true },
+      ]) {
+        const bad = await app().request("/api/players/ncaa/promote", {
+          method: "POST", headers: JSON_AUTH, body: JSON.stringify(body),
+        });
+        expect(bad.status, JSON.stringify(body)).toBe(400);
+      }
+      const again = await app().request("/api/players/ncaa/promote", {
+        method: "POST", headers: JSON_AUTH,
+        body: JSON.stringify({ highlightlyPlayerId: 501, personId: 691185 }),
+      });
+      expect(again.status).toBe(404);
+      expect(await opened.db.select().from(players)).toHaveLength(1);
+    });
+
+    it("maps a professional identity collision to HTTP 409 without changing the NCAA row", async () => {
+      await app().request("/api/players/ncaa", {
+        method: "POST", headers: JSON_AUTH,
+        body: JSON.stringify({ playerId: 501, canonicalName: "C Guy", teamId: 10 }),
+      });
+      await insertPlayer(opened.db, { externalId: 691185 });
+      const conflict = await app().request("/api/players/ncaa/promote", {
+        method: "POST", headers: JSON_AUTH,
+        body: JSON.stringify({ highlightlyPlayerId: 501, personId: 691185 }),
+      });
+      expect(conflict.status).toBe(409);
+      expect((await conflict.json()) as { error: string }).toMatchObject({ error: expect.stringContaining("already owned") });
+      expect((await opened.db.select().from(players).where(eq(players.highlightlyPlayerId, 501)))[0])
+        .toMatchObject({ externalId: null, level: "ncaa" });
+    });
     return;
     it("adds an NCAA player by seq, backfills, and returns 201", async () => {
       const res = await app().request("/api/players/ncaa", {
@@ -982,10 +1034,10 @@ describe("REST API", () => {
     });
 
     it("returns 200 with a structured body for a whole-list `partial` run (#23, MF6)", async () => {
-      // One refreshable player and one active MLB row with no externalId (skipped
-      // by dispatch) → status `partial`, which is safe partial success → 200.
+      // A valid legacy NCAA row needs explicit Highlightly attachment, producing
+      // a safe partial success; invalid no-externalId MLB fixtures are forbidden.
       await insertPlayer(opened.db, { externalId: 691185 });
-      await insertPlayer(opened.db, { externalId: null, level: "mlb", milbLevel: null, fullName: "No Id Guy" });
+      await insertPlayer(opened.db, { externalId: null, ncaaPlayerSeq: 700003, ncaaSourceState: "legacy_html", level: "ncaa", milbLevel: null, fullName: "Legacy Guy", schoolName: "State" });
 
       const res = await app().request("/api/refresh", { method: "POST", headers: AUTH });
       expect(res.status).toBe(200);

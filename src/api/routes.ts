@@ -52,6 +52,7 @@ import {
 import type { PlayerRef } from "../watchlist/service.js";
 import {
   PlayerNotFoundError,
+  PlayerPromotionConflictError,
   UnknownPersonError,
   addHighlightlyNcaaPlayer,
   addPlayer,
@@ -59,11 +60,13 @@ import {
   batchAddPlayers,
   deactivatePlayer,
   listPlayers,
+  promoteHighlightlyNcaaPlayer,
   searchPlayers,
 } from "../watchlist/service.js";
 import {
   AddNcaaPlayerInputSchema,
   AddPlayerInputSchema,
+  PromoteHighlightlyNcaaPlayerInputSchema,
   HighlightlyNcaaIdentitySchema,
   DigestInputSchema,
   DigestPreviewQueryInputSchema,
@@ -120,7 +123,7 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     ) {
       return c.json({ error: err.message }, 404);
     }
-    if (err instanceof DuplicateListNameError) {
+    if (err instanceof DuplicateListNameError || err instanceof PlayerPromotionConflictError) {
       return c.json({ error: err.message }, 409);
     }
     // Stable provider code is intentionally distinct from display prose, so
@@ -237,6 +240,11 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     const body = AddNcaaPlayerInputSchema.parse(await c.req.json());
     const result = await addHighlightlyNcaaPlayer(deps, body);
     return c.json(result, result.action === "added" ? 201 : 200);
+  });
+
+  api.post("/players/ncaa/promote", async (c) => {
+    const body = PromoteHighlightlyNcaaPlayerInputSchema.parse(await c.req.json());
+    return c.json({ player: await promoteHighlightlyNcaaPlayer(deps, body) });
   });
 
   api.post("/players/ncaa/:seq/attach-highlightly", async (c) => {

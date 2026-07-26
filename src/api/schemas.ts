@@ -43,6 +43,12 @@ export const HighlightlyNcaaIdentitySchema = z.object({
 /** NCAA operational identity is Highlightly-only; legacy sequences only attach history. */
 export const AddNcaaPlayerInputSchema = HighlightlyNcaaIdentitySchema;
 
+/** Explicitly promote an active Highlightly NCAA row; neither ID is inferred. */
+export const PromoteHighlightlyNcaaPlayerInputSchema = z.object({
+  highlightlyPlayerId: StrictHighlightlyPlayerIdSchema.describe("Explicit Highlightly NCAA player ID to promote."),
+  personId: StrictPersonIdSchema.describe("MLB Stats API personId that becomes the player's professional identity."),
+}).strict();
+
 /**
  * Batch-add (issue #68 / ADR 0045). A batch of *typed identity entries* staged
  * in ONE call. A personId and an ncaaPlayerSeq are indistinguishable positive

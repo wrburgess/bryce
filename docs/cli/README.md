@@ -93,6 +93,7 @@ fails closed. (Distinct from `seed list`, which prints players.)
 ```sh
 sk seed add --person-id 691185
 sk seed add --highlightly-player-id 501 --canonical-name "Gavin Kelly" --team-id 10
+sk seed promote --highlightly-player-id 501 --person-id 691185
 sk seed add --ncaa --name "Roch Cholowsky"
 sk seed add --search "acosta"            # prints a numbered list if several match
 sk seed add --search "smith" --pick 2    # choose from that list (1-based)
@@ -106,12 +107,13 @@ sk seed tag list --person-id 691185
 sk seed tag rebuild                              # re-derive every player's derived tags
 ```
 
-One required subcommand (`add` | `deactivate` | `list` | `tag`), then flags:
+One required subcommand (`add` | `promote` | `deactivate` | `list` | `tag`), then flags:
 
 | Subcommand | Flags | Notes |
 |---|---|---|
 | `add` | `--person-id N` | Add an MLB/MiLB Player by MLB Stats API personId. |
 | `add` | `--highlightly-player-id N --canonical-name NAME --team-id N` | Add an NCAA Player by explicit Highlightly identity. |
+| `promote` | `--highlightly-player-id N --person-id N` | Atomically convert a Highlightly NCAA Player to MLB/MiLB while preserving its local history, lists, and tags. |
 | `add` | `--ncaa --name "NAME"` | Search Highlightly for NCAA players by name and add the sole match; ambiguous results print the explicit identity needed to retry. |
 | `add` | `--search "NAME" [--pick I]` | Name search; `--pick I` is **one-based** and **search-only**. With one match and no `--pick`, it adds that Player; with several and no `--pick`, it prints a numbered list and exits `1`. |
 | `deactivate` | `--person-id N` \| `--highlightly-player-id N` | Remove a Player from the Watch List; his row and full history are kept. |
@@ -210,9 +212,9 @@ sk players restore --in backups/players.json
 ```
 
 Re-imports a Player List Backup **network-free and all-or-nothing**, upserting on each Player's natural
-identity (MLB `external_id` or NCAA `stats_player_seq`) so existing rows keep their `id` and their
+identity (MLB `external_id`, legacy NCAA `stats_player_seq`, or Highlightly player ID) so existing rows keep their `id` and their
 **Stat Line** history stays intact. Reports `player-list restored inserted=N updated=M total=T`. An
-invalid payload or a split-identity conflict fails the whole import with a non-zero exit.
+invalid payload or an identity conflict fails the whole import with a non-zero exit.
 
 | Flag | Required | Notes |
 |---|---|---|
@@ -244,7 +246,7 @@ line. All flags and the file merge into one batch.
 
 | Line | Becomes |
 |---|---|
-| `ncaa:<n>` | An NCAA `stats_player_seq` (a non-numeric `ncaa:` value is a usage error). |
+| `highlightly:<playerId>\|<canonicalName>\|<teamId>` | An explicit Highlightly NCAA identity (all three fields are required). |
 | `name:<x>` | An explicit name — the escape hatch for a name that is all digits. |
 | `<digits>` | An MLB personId. |
 | anything else | A name. |
@@ -253,7 +255,7 @@ line. All flags and the file merge into one batch.
 or `failed`* — those are per-entry outcomes, not a run failure. It exits **1** on a **usage error**:
 an unknown flag, a non-integer id token, an unreadable file, a file over the **64 KB** ceiling, or a
 **shape rejection** — an empty batch, over the 25 cap, or an in-batch duplicate (a `personId` N and an
-`ncaaPlayerSeq` N are *different* Players, never a duplicate). A shape rejection writes nothing.
+`highlightlyPlayerId` N are *different* Players, never a duplicate). A shape rejection writes nothing.
 
 ## `server` — start the HTTP server
 

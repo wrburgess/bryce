@@ -20,11 +20,13 @@ import {
 } from "../tags/service.js";
 import {
   PlayerNotFoundError,
+  PlayerPromotionConflictError,
   UnknownPersonError,
   addHighlightlyNcaaPlayer,
   addPlayer,
   deactivatePlayer,
   listPlayers,
+  promoteHighlightlyNcaaPlayer,
 } from "../watchlist/service.js";
 import { exitAfterDrain, isMain } from "./main.js";
 import { preflightDirect } from "./router.js";
@@ -66,6 +68,8 @@ export async function runSeed(argv: string[], deps: SeedDeps): Promise<number> {
   switch (command) {
     case "add":
       return runAdd(flags, deps);
+    case "promote":
+      return runPromote(flags, deps);
     case "deactivate":
       return runDeactivate(flags, deps);
     case "list":
@@ -74,9 +78,33 @@ export async function runSeed(argv: string[], deps: SeedDeps): Promise<number> {
       return runTag(rest, flags, deps);
     default:
       deps.write(
-        "error: usage: seed <add|deactivate|list|tag> [--person-id N] [--highlightly-player-id N] [--search NAME] [--pick I] [--tags EXPR] [--tag ns:value]",
+        "error: usage: seed <add|promote|deactivate|list|tag> [--person-id N] [--highlightly-player-id N] [--search NAME] [--pick I] [--tags EXPR] [--tag ns:value]",
       );
       return 1;
+  }
+}
+
+async function runPromote(flags: Map<string, string>, deps: SeedDeps): Promise<number> {
+  if (flags.size !== 2 || !flags.has("highlightly-player-id") || !flags.has("person-id")) {
+    deps.write("error: promote requires --highlightly-player-id N --person-id N");
+    return 1;
+  }
+  const highlightlyPlayerId = Number(flags.get("highlightly-player-id"));
+  const personId = Number(flags.get("person-id"));
+  if (!Number.isInteger(highlightlyPlayerId) || highlightlyPlayerId <= 0 || !Number.isInteger(personId) || personId <= 0) {
+    deps.write("error: promote requires positive integer --highlightly-player-id and --person-id");
+    return 1;
+  }
+  try {
+    const player = await promoteHighlightlyNcaaPlayer(deps, { highlightlyPlayerId, personId });
+    deps.write(`promoted player id=${player.id} personId=${player.externalId} name=${player.fullName}`);
+    return 0;
+  } catch (err) {
+    if (err instanceof UnknownPersonError || err instanceof PlayerNotFoundError || err instanceof PlayerPromotionConflictError) {
+      deps.write(`error: ${err.message}`);
+      return 1;
+    }
+    throw err;
   }
 }
 
