@@ -132,6 +132,24 @@ describe("relativeKey", () => {
     expect(relativeKey("C:\\repo\\root\\src\\cli\\main.ts", "c:\\repo\\root")).toBe("src/cli/main.ts");
   });
 
+  // Reviewer follow-up (PR #138): Windows compares the WHOLE path case-insensitively, not
+  // just the drive. Folding only the drive left a root whose directory casing differed
+  // unstripped, so the file was again falsely reported absent.
+  it("matches a Windows root whose directory casing differs", () => {
+    expect(relativeKey("C:\\Repo\\Root\\src\\cli\\main.ts", "c:\\repo\\root")).toBe("src/cli/main.ts");
+    expect(relativeKey("C:/repo/root/src/cli/main.ts", "C:/REPO/ROOT")).toBe("src/cli/main.ts");
+  });
+
+  it("applies the same case folding to a UNC root", () => {
+    expect(relativeKey("\\\\Server\\Share\\src\\cli\\main.ts", "\\\\server\\share")).toBe("src/cli/main.ts");
+  });
+
+  // The counterpart that must NOT change: POSIX paths are case-sensitive, so /repo/Root
+  // and /repo/root are genuinely different directories and must not be folded together.
+  it("keeps POSIX root matching case-sensitive", () => {
+    expect(relativeKey("/repo/Root/src/cli/main.ts", "/repo/root")).toBe("/repo/Root/src/cli/main.ts");
+  });
+
   it("does not rewrite a drive-letter key from outside the root", () => {
     expect(relativeKey("D:\\other\\src\\cli\\main.ts", "C:\\repo\\root")).toBe("D:/other/src/cli/main.ts");
     // A sibling sharing a textual prefix is still outside the root.

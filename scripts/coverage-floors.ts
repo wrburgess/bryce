@@ -87,6 +87,9 @@ function toPosix(value: string): string {
 // A Windows drive-letter root ("C:/..."), already separator-normalized.
 const DRIVE_ABSOLUTE = /^[A-Za-z]:\//;
 
+// A UNC root ("//server/share/..."), already separator-normalized.
+const UNC_ABSOLUTE = /^\/\/[^/]/;
+
 // Absoluteness must be decided from the path's OWN shape, not the host's. `isAbsolute` is
 // platform-bound: on POSIX it calls "C:\\repo\\src\\cli\\main.ts" relative, so the
 // root-stripping below would be skipped and every floored file reported absent despite
@@ -95,10 +98,15 @@ function looksAbsolute(original: string, posix: string): boolean {
   return isAbsolute(original) || posix.startsWith("/") || DRIVE_ABSOLUTE.test(posix);
 }
 
-// Windows drive letters are case-insensitive, so "c:/repo" and "C:/repo" name one root.
-// Only the comparison is folded; the returned slice keeps the summary's own spelling.
+// Windows compares paths case-insensitively for their WHOLE length, not just the drive
+// letter -- "C:/Repo/Root/src/a.ts" and "c:/repo/root" name the same location, and folding
+// only the drive would leave the root unstripped and the file falsely reported absent.
+// POSIX paths are case-SENSITIVE, so this must never apply to them: "/repo/Root" and
+// "/repo/root" are genuinely different directories there. Only the comparison is folded;
+// the returned slice keeps the summary's own spelling.
 function comparable(posix: string): string {
-  return DRIVE_ABSOLUTE.test(posix) ? posix[0]!.toUpperCase() + posix.slice(1) : posix;
+  const windowsShaped = DRIVE_ABSOLUTE.test(posix) || UNC_ABSOLUTE.test(posix);
+  return windowsShaped ? posix.toLowerCase() : posix;
 }
 
 // The json-summary reporter keys files by ABSOLUTE path. Fold a key to the repo-relative,
