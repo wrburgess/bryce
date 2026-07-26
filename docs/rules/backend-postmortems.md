@@ -243,13 +243,13 @@ review comments land on every file except one; an editor that mangles a file on 
 reports "binary file matches" instead of a line. The classic trap is precisely this one — a composite
 dedup or index key that joins fields with a NUL *because* NUL cannot appear in the data.
 
-**It has already recurred once.** PR #150, months later, wrote a new dependency-free
-`src/tags/selector.ts` whose composite dedup key again joined its fields with a literal NUL. git again
-classified the file binary and again hid its diff from every Reviewer summon on that PR. It surfaced
-only because `grep` went silent on a line `sed` could print — noticed by the author mid-task, not by any
-of the eight reviews that PR ran. Two independent authors reached for the same construct for the same
-reason, and in both cases the failure hid the code that contained it. That is what makes this a
-resident Tier-1 rule rather than a footnote in one PR's history.
+**It has already recurred once.** PR #150 wrote a new dependency-free `src/tags/selector.ts` whose
+composite dedup key again joined its fields with a literal NUL; git again classified the file binary
+and, in that PR's own words, hid its diff "from every reviewer". It surfaced only because `grep` went
+silent on a line `sed` could print, and it was found by the author while fixing an unrelated finding —
+not by any review. Two separate pieces of work, months apart, reached for the same construct for the
+same reason, and in both cases the failure concealed the code that contained it. That is what makes
+this a resident Tier-1 rule rather than a footnote in one PR's history.
 
 _(Reference: issue #30 / PR #85; finding 3 of the PR's own Stage-4 adversarial pass, graded Medium and
 fixed before the Reviewer summon. The lesson was folded into Tier 1 in that same PR under the
