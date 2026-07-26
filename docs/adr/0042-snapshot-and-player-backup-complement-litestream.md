@@ -22,8 +22,11 @@ verified by test" requirement.
   all under a keep-last-N retention policy in a local `backups/` directory. **Restore** is a guarded
   operation (integrity-check the incoming file and confirm the expected tables, take a safety-Snapshot
   of the current database, then atomically swap and clear stale WAL sidecars); the **Player List
-  Backup** re-imports network-free by upserting on each Player's natural identity (MLB `external_id`
-  or NCAA `ncaa_player_seq`), never re-pulling from the sources.
+  Backup** re-imports network-free by upserting on each Player's current natural identity (MLB
+  `external_id`, legacy NCAA `ncaa_player_seq`, or Highlightly NCAA player ID), never re-pulling
+  from the sources. For compatibility, v1-v3 backups that recorded the former NCAA-to-pro promotion
+  shape with both `external_id` and `ncaa_player_seq` are recognized only as a conversion: restore
+  retains the local Player row and its Stat Lines, then clears the retired NCAA identity.
 
 ## Consequences
 

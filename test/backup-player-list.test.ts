@@ -24,7 +24,7 @@ import {
   listLists,
   listMembersOf,
 } from "../src/lists/service.js";
-import { makeBackupEntry, makeBackupEnvelope, makeTempDir } from "./backup-helpers.js";
+import { makeBackupEntry, makeBackupEnvelope, makeTempDir, type BackupEntryOverrides } from "./backup-helpers.js";
 import {
   InjectedFault,
   fakeClock,
@@ -58,6 +58,7 @@ describe("createPlayerListBackup", () => {
     await insertPlayer(opened.db, {
       externalId: null,
       ncaaPlayerSeq: 2649785,
+      ncaaSourceState: "legacy_html",
       level: "ncaa",
       milbLevel: null,
       teamName: null,
@@ -67,12 +68,13 @@ describe("createPlayerListBackup", () => {
     });
 
     const backup = await createPlayerListBackup(opened.db, fakeClock("2026-07-22T12:00:00Z").now);
-    expect(backup.version).toBe(3);
+    expect(backup.version).toBe(4);
     expect(backup.exportedAt).toBe("2026-07-22T12:00:00.000Z");
     expect(backup.players).toHaveLength(2);
     expect(backup.players[1]).toMatchObject({
       externalId: null,
       ncaaPlayerSeq: 2649785,
+      ncaaSourceState: "legacy_html",
       level: "ncaa",
       schoolName: "LSU",
       active: false,
@@ -198,20 +200,20 @@ describe("restorePlayerListBackup: import semantics", () => {
     });
   });
 
-  it("promotion: a backup with BOTH ids matches the NCAA row and gains external_id without losing the seq", async () => {
+  it("professional backup updates a matching professional row without NCAA state", async () => {
     const existing = await insertPlayer(opened.db, {
-      externalId: null,
-      ncaaPlayerSeq: 2649785,
-      level: "ncaa",
+      externalId: 800001,
+      ncaaPlayerSeq: null,
+      level: "mlb",
       milbLevel: null,
       teamName: null,
       fullName: "Prospect",
-      schoolName: "LSU",
+      schoolName: null,
     });
     const rows = parse([
       makeBackupEntry({
         externalId: 800001,
-        ncaaPlayerSeq: 2649785,
+        ncaaPlayerSeq: null,
         level: "mlb",
         milbLevel: null,
         teamName: "The Show",
@@ -226,8 +228,55 @@ describe("restorePlayerListBackup: import semantics", () => {
     expect(stored).toHaveLength(1);
     expect(stored[0]?.id).toBe(existing.id); // one row, kept
     expect(stored[0]?.externalId).toBe(800001); // gained
-    expect(stored[0]?.ncaaPlayerSeq).toBe(2649785); // kept
+    expect(stored[0]?.ncaaPlayerSeq).toBeNull(); // retired
     expect(stored[0]?.level).toBe("mlb");
+  });
+
+  it("restores v1-v3 promoted dual-identity backups by retaining the local NCAA row and its history", async () => {
+    for (const [offset, version] of [1, 2, 3].entries()) {
+      const externalId = 810000 + offset;
+      const ncaaPlayerSeq = 2600000 + offset;
+      const existing = await insertPlayer(opened.db, {
+        externalId: null,
+        ncaaPlayerSeq,
+        level: "ncaa",
+        milbLevel: null,
+        teamName: null,
+        fullName: `Legacy Prospect ${version}`,
+        schoolName: "LSU",
+      });
+      await insertStatLine(opened.db, { playerId: existing.id, gameId: 9000 + offset });
+
+      const backup = parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([
+        makeBackupEntry({
+          externalId,
+          ncaaPlayerSeq,
+          level: "milb",
+          milbLevel: "Single-A",
+          fullName: `Legacy Prospect ${version}`,
+          schoolName: null,
+          notes: `restored v${version}`,
+        }),
+      ], { version })));
+      expect(restorePlayerListBackup(opened.db, backup.players, NOW)).toEqual({
+        inserted: 0,
+        updated: 1,
+        total: 1,
+      });
+
+      const restored = opened.db.select().from(players).where(eq(players.externalId, externalId)).all()[0];
+      expect(restored).toMatchObject({
+        id: existing.id,
+        externalId,
+        ncaaPlayerSeq: null,
+        highlightlyPlayerId: null,
+        highlightlyTeamId: null,
+        ncaaSourceState: null,
+        level: "milb",
+        notes: `restored v${version}`,
+      });
+      expect(opened.db.select().from(statLines).where(eq(statLines.playerId, existing.id)).all()).toHaveLength(1);
+    }
   });
 
   it("canonicalizes fullName and schoolName (ADR 0041): NFD -> NFC, whitespace collapsed", async () => {
@@ -251,60 +300,70 @@ describe("restorePlayerListBackup: import semantics", () => {
     expect(stored?.schoolName).toBe("Universidad dé Prueba");
   });
 
-  it("is transactional: a later split-identity conflict rolls the WHOLE import back", async () => {
-    // Two existing rows whose identities a later backup row straddles.
-    await insertPlayer(opened.db, { externalId: 500001, fullName: "MLB Row" });
-    await insertPlayer(opened.db, {
-      externalId: null,
-      ncaaPlayerSeq: 600001,
-      level: "ncaa",
-      milbLevel: null,
-      teamName: null,
-      fullName: "NCAA Row",
-      schoolName: "State",
+  it("round-trips a v4 Highlightly member by its current NCAA identity", async () => {
+    const ncaa = await insertPlayer(opened.db, {
+      externalId: null, ncaaPlayerSeq: null, highlightlyPlayerId: 600002,
+      highlightlyTeamId: 10, ncaaSourceState: "highlightly_active", level: "ncaa",
+      milbLevel: null, fullName: "Highlightly Guy", schoolName: "State",
     });
-
-    const rows = parse([
-      makeBackupEntry({ externalId: 700003, fullName: "Would Insert First" }),
-      // externalId -> MLB Row, ncaaPlayerSeq -> NCAA Row: two different rows.
-      makeBackupEntry({ externalId: 500001, ncaaPlayerSeq: 600001, level: "mlb", milbLevel: null }),
-    ]);
-
-    expect(() => restorePlayerListBackup(opened.db, rows, NOW)).toThrow(SplitIdentityConflictError);
-    // The earlier row was NOT persisted — the whole transaction rolled back.
-    expect(await opened.db.select().from(players).where(eq(players.externalId, 700003))).toHaveLength(0);
+    const list = await createList(opened.db, "NCAA", NOW);
+    await opened.db.insert(listMembers).values({ listId: list.id, playerId: ncaa.id, createdAt: NOW.toISOString() });
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+    expect(backup.members).toContainEqual({ list: "NCAA", externalId: null, ncaaPlayerSeq: null, highlightlyPlayerId: 600002 });
+    const target = testDb();
+    try {
+      const parsed = parsePlayerListBackup(JSON.stringify(backup));
+      restorePlayerListBackup(target.db, parsed.players, NOW, { lists: parsed.lists, members: parsed.members });
+      const restored = (await target.db.select().from(players).where(eq(players.highlightlyPlayerId, 600002)))[0];
+      expect(restored).toBeDefined();
+      expect((await target.db.select().from(listMembers).where(eq(listMembers.playerId, restored!.id)))).toHaveLength(1);
+    } finally { target.close(); }
   });
 
-  it("rejects two payload rows that resolve to ONE existing player, writing nothing (finding #3)", async () => {
-    // An existing row combines external_id A and ncaa X (a promoted player).
-    const combined = await insertPlayer(opened.db, {
-      externalId: 500002,
-      ncaaPlayerSeq: 600002,
-      level: "mlb",
-      milbLevel: null,
-      fullName: "Combined Row",
+  it("restores members through each current-identity selector", async () => {
+    const pro = await insertPlayer(opened.db, { externalId: 600100, fullName: "Pro" });
+    const legacy = await insertPlayer(opened.db, {
+      externalId: null, ncaaPlayerSeq: 600101, ncaaSourceState: "legacy_html", level: "ncaa",
+      milbLevel: null, fullName: "Legacy", schoolName: "State",
     });
-    const before = await opened.db.select().from(players);
+    const highlightly = await insertPlayer(opened.db, {
+      externalId: null, ncaaPlayerSeq: null, highlightlyPlayerId: 600102, highlightlyTeamId: 10,
+      ncaaSourceState: "highlightly_active", level: "ncaa", milbLevel: null, fullName: "Highlightly", schoolName: "State",
+    });
+    for (const [name, player] of [["Pro list", pro], ["Legacy list", legacy], ["Highlightly list", highlightly]] as const) {
+      const list = await createList(opened.db, name, NOW);
+      await opened.db.insert(listMembers).values({ listId: list.id, playerId: player.id, createdAt: NOW.toISOString() });
+    }
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+    expect(backup.members).toEqual(expect.arrayContaining([
+      { list: "Pro list", externalId: 600100, ncaaPlayerSeq: null, highlightlyPlayerId: null },
+      { list: "Legacy list", externalId: null, ncaaPlayerSeq: 600101, highlightlyPlayerId: null },
+      { list: "Highlightly list", externalId: null, ncaaPlayerSeq: null, highlightlyPlayerId: 600102 },
+    ]));
+    const target = testDb();
+    try {
+      const parsed = parsePlayerListBackup(JSON.stringify(backup));
+      restorePlayerListBackup(target.db, parsed.players, NOW, { lists: parsed.lists, members: parsed.members });
+      expect(await target.db.select().from(listMembers)).toHaveLength(3);
+    } finally { target.close(); }
+  });
 
-    // A-only resolves to `combined` (by external_id); B+X ALSO resolves to it (by
-    // ncaa). The second update would silently overwrite the first and drop a
-    // backed-up player — reject the whole import.
-    const rows = parse([
-      makeBackupEntry({ externalId: 500002, fullName: "First Target", level: "mlb", milbLevel: null }),
-      makeBackupEntry({
-        externalId: 999001,
-        ncaaPlayerSeq: 600002,
-        fullName: "Second Target",
-        level: "mlb",
-        milbLevel: null,
-      }),
-    ]);
+  it("rolls back when a pending backup identity splits across two live NCAA rows", async () => {
+    await insertPlayer(opened.db, { externalId: null, ncaaPlayerSeq: 600010, ncaaSourceState: "legacy_html", level: "ncaa", milbLevel: null, fullName: "Legacy", schoolName: "State" });
+    await insertPlayer(opened.db, { externalId: null, ncaaPlayerSeq: null, highlightlyPlayerId: 600011, highlightlyTeamId: 10, ncaaSourceState: "highlightly_active", level: "ncaa", milbLevel: null, fullName: "Active", schoolName: "State" });
+    const rows = parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry({ externalId: null, ncaaPlayerSeq: 600010, highlightlyPlayerId: 600011, highlightlyTeamId: 10, ncaaSourceState: "highlightly_pending", level: "ncaa", milbLevel: null, fullName: "Would Split", schoolName: "State" })], { version: 4 }))).players;
+    expect(() => restorePlayerListBackup(opened.db, rows, NOW)).toThrow(SplitIdentityConflictError);
+    expect((await opened.db.select().from(players).where(eq(players.ncaaPlayerSeq, 600010)))[0]?.fullName).toBe("Legacy");
+  });
 
+  it("rolls back when two payload rows resolve to one pending cutover row", async () => {
+    const pending = await insertPlayer(opened.db, { externalId: null, ncaaPlayerSeq: 600020, highlightlyPlayerId: 600021, highlightlyTeamId: 10, ncaaSourceState: "highlightly_pending", level: "ncaa", milbLevel: null, fullName: "Pending", schoolName: "State" });
+    const rows = parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([
+      makeBackupEntry({ externalId: null, ncaaPlayerSeq: 600020, ncaaSourceState: "legacy_html", level: "ncaa", milbLevel: null, fullName: "Legacy Version", schoolName: "State" }),
+      makeBackupEntry({ externalId: null, ncaaPlayerSeq: null, highlightlyPlayerId: 600021, highlightlyTeamId: 10, ncaaSourceState: "highlightly_active", level: "ncaa", milbLevel: null, fullName: "Highlightly Version", schoolName: "State" }),
+    ], { version: 4 }))).players;
     expect(() => restorePlayerListBackup(opened.db, rows, NOW)).toThrow(AmbiguousImportTargetError);
-    // Nothing was written — the combined row is byte-for-byte unchanged.
-    const after = await opened.db.select().from(players);
-    expect(after).toEqual(before);
-    expect(after.find((p) => p.id === combined.id)?.fullName).toBe("Combined Row");
+    expect((await opened.db.select().from(players).where(eq(players.id, pending.id)))[0]?.fullName).toBe("Pending");
   });
 });
 
@@ -322,20 +381,23 @@ describe("writePlayerListBackupFile", () => {
 });
 
 describe("parsePlayerListBackup: strict validation", () => {
-  it("rejects an absent or wrong version (v1/v2/v3 are accepted)", () => {
+  it("rejects an absent or wrong version (v1-v4 are accepted)", () => {
     expect(() =>
       parsePlayerListBackup(JSON.stringify({ players: [makeBackupEntry()] })),
     ).toThrow(PlayerBackupParseError);
-    // v4 is not a known version.
+    // v5 is not a known version.
     expect(() =>
-      parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 4 }))),
+      parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 5 }))),
     ).toThrow(PlayerBackupParseError);
-    // v1/v2 remain compatible and v3 is the current envelope.
+    // v1-v3 remain compatible and v4 is the current envelope.
     expect(() =>
       parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 1 }))),
     ).not.toThrow();
     expect(() =>
       parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 2 }))),
+    ).not.toThrow();
+    expect(() =>
+      parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 4 }))),
     ).not.toThrow();
     expect(() =>
       parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 3 }))),
@@ -357,6 +419,57 @@ describe("parsePlayerListBackup: strict validation", () => {
     expect(() =>
       parse([makeBackupEntry({ level: "ncaa", externalId: 1, ncaaPlayerSeq: 2, milbLevel: null })]),
     ).toThrow(PlayerBackupParseError);
+  });
+
+  it("rejects an active Highlightly NCAA row without its Highlightly identity before restore", () => {
+    expect(() =>
+      parse([
+        makeBackupEntry({
+          externalId: null,
+          ncaaPlayerSeq: 2649785,
+          highlightlyPlayerId: null,
+          ncaaSourceState: "highlightly_active",
+          level: "ncaa",
+          milbLevel: null,
+        }),
+      ]),
+    ).toThrow(PlayerBackupParseError);
+  });
+
+  it("accepts only the historical v1-v3 promoted dual identity and rejects all other mixed pro/NCAA shapes", () => {
+    for (const version of [1, 2, 3]) {
+      const legacy = makeBackupEntry({ externalId: null, ncaaPlayerSeq: 2649785, level: "ncaa", milbLevel: null, teamName: null, schoolName: "LSU" });
+      if (version === 3) legacy.ncaaSourceState = "legacy_html";
+      expect(() => parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([
+        makeBackupEntry({ externalId: 691185, ncaaPlayerSeq: null, level: "milb" }),
+        legacy,
+      ], { version })))).not.toThrow();
+      expect(() => parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([
+        makeBackupEntry({ externalId: 691185, ncaaPlayerSeq: 2649785, level: "milb" }),
+      ], { version })))).not.toThrow();
+    }
+    expect(() => parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([
+      makeBackupEntry({ externalId: 691185, ncaaPlayerSeq: 2649785, level: "milb" }),
+    ], { version: 4 })))).toThrow(PlayerBackupParseError);
+    const combinedIdentityExtras: BackupEntryOverrides[] = [
+      { highlightlyPlayerId: 501 },
+      { highlightlyTeamId: 10 },
+      { ncaaSourceState: "highlightly_active" },
+      { highlightlyPlayerId: 501, highlightlyTeamId: 10, ncaaSourceState: "highlightly_active" },
+    ];
+    for (const extra of combinedIdentityExtras) {
+      expect(() => parse([makeBackupEntry({ externalId: 691185, level: "mlb", ...extra })])).toThrow(PlayerBackupParseError);
+    }
+  });
+
+  it("accepts legacy v1-v3 membership shapes but reserves Highlightly members for v4", () => {
+    const legacyMember = { list: "Prospects", externalId: 691185, ncaaPlayerSeq: null };
+    for (const version of [2, 3]) {
+      expect(() => parsePlayerListBackup(JSON.stringify({ ...makeBackupEnvelope([makeBackupEntry()], { version }), lists: [{ name: "Prospects" }], members: [legacyMember] }))).not.toThrow();
+    }
+    const highlightlyMember = { list: "NCAA", externalId: null, ncaaPlayerSeq: null, highlightlyPlayerId: 501 };
+    expect(() => parsePlayerListBackup(JSON.stringify({ ...makeBackupEnvelope([makeBackupEntry()], { version: 3 }), lists: [{ name: "NCAA" }], members: [highlightlyMember] }))).toThrow(PlayerBackupParseError);
+    expect(() => parsePlayerListBackup(JSON.stringify({ ...makeBackupEnvelope([makeBackupEntry()], { version: 4 }), lists: [{ name: "NCAA" }], members: [highlightlyMember] }))).not.toThrow();
   });
 
   it("rejects a non-positive natural id", () => {
@@ -472,6 +585,7 @@ describe("named lists in the backup (v2, #70 / ADR 0046)", () => {
     const ncaa = await insertPlayer(opened.db, {
       externalId: null,
       ncaaPlayerSeq: 555,
+      ncaaSourceState: "legacy_html",
       level: "ncaa",
       milbLevel: null,
       teamName: null,
@@ -483,7 +597,7 @@ describe("named lists in the backup (v2, #70 / ADR 0046)", () => {
     await opened.db.insert(listMembers).values({ listId: list.id, playerId: ncaa.id, createdAt: NOW.toISOString() });
 
     const backup = await createPlayerListBackup(opened.db, () => NOW);
-    expect(backup.version).toBe(3);
+    expect(backup.version).toBe(4);
     expect(backup.lists).toEqual([{ name: "Prospects", createdAt: expect.any(String), updatedAt: expect.any(String) }]);
     expect(backup.members).toHaveLength(2);
     // The envelope round-trips through the strict parser.
