@@ -115,4 +115,27 @@ artifact-url: ${evidence.artifactUrl}
     expect(classifyFallbackEvidence(base)).toBe("unattested");
     expect(classifyFallbackEvidence({ ...base, commitId: "b".repeat(40) })).toBe("unattested");
   });
+
+  it.each([undefined, "local-review.md", "https://example.invalid/review"])(
+    "classifies an answered fallback without a host artifact URL as unreachable: %s",
+    (artifactUrl) => {
+      expect(classifyFallbackEvidence({
+        requestCreated: true,
+        artifactUrl,
+        responseReceived: true,
+        commitId: SHA,
+        reviewedSha: SHA,
+      })).toBe("unreachable");
+    },
+  );
+
+  it("accepts a fallback answered with a host artifact attesting the reviewed SHA", () => {
+    expect(classifyFallbackEvidence({
+      requestCreated: true,
+      artifactUrl: evidence.artifactUrl,
+      responseReceived: true,
+      commitId: SHA,
+      reviewedSha: SHA,
+    })).toBe("ok");
+  });
 });
