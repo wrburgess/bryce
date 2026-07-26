@@ -150,8 +150,12 @@ Query stored per-game Stat Lines, newest first.
 
 Preview the Digest for a Window as the Batters and Pitchers tables the email would carry.
 
-- **Inputs:** `window` (`1d`/`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`, default `1d`; an unsupported value is rejected),
-  `force` — **accepted but ignored here**, because a preview never claims or sends — `list` (a named
+- **Inputs:** `window` (a date window `1d`/`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`, or a per-player
+  game-count window `last10games`/`last30games` — #153; default `1d`; an unsupported value is rejected).
+  A game-count window reports each Player over his own last N distinct regular-season games, so each row
+  carries its real `agg.games` and a `spanFrom`/`spanTo` (two Players cover different date spans; the
+  `window` is the cohort envelope). Then `force` — **accepted but ignored here**, because a preview never
+  claims or sends — `list` (a named
   list to scope to its active members, [#70](https://github.com/wrburgess/bryce/issues/70); an unknown
   list is rejected), `tags` (a [tag selector](../domain/tags.md#selector-grammar) scoping the preview
   to a **cohort**, [#140](https://github.com/wrburgess/bryce/issues/140); with `list` the two
@@ -169,7 +173,9 @@ Preview the Digest for a Window as the Batters and Pitchers tables the email wou
 
 Run the Digest job now for a Window.
 
-- **Inputs:** `window` (as above; an unsupported value is rejected and nothing is sent), `force`
+- **Inputs:** `window` (as above, including the game-count windows `last10games`/`last30games` — #153,
+  which route to the on-demand path like a cohort scope; an unsupported value is rejected and nothing is
+  sent), `force`
   (default `false`), and `list` — a named list ([#70](https://github.com/wrburgess/bryce/issues/70))
   that scopes the send to its active members. A named-list send is **on-demand only** (it takes no
   daily slot, whatever its window); an unknown list is rejected. `tags`

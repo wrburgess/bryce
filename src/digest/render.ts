@@ -1,6 +1,6 @@
 import type { DigestAssembly, DigestRow } from "./assemble.js";
 import type { ResolvedWindow } from "../domain/window.js";
-import { isLongWindow } from "../domain/window.js";
+import { gameCountTitle, isGameCountSpec, isLongWindow, shortDate } from "../domain/window.js";
 import type { DigestFreshness } from "../jobs/refresh-run.js";
 import type { Level } from "../mlb/levels.js";
 import { deriveRate } from "../stats/aggregate.js";
@@ -64,6 +64,11 @@ export function formatSubjectDate(isoDate: string): string {
  * is titled July 18. The title names the content, not the run.
  */
 export function digestWindowTitle(window: ResolvedWindow): string {
+  // A per-player game-count window (issue #153) has no single date to title, so
+  // it names the count instead ("Last 10 Games"); the per-row Span column carries
+  // each player's real dates. Guarded FIRST so the date-only branches below never
+  // receive a game-count spec.
+  if (isGameCountSpec(window.spec)) return gameCountTitle(window.spec);
   if (window.spec === "1d") return formatSubjectDate(window.to);
   if (window.spec === "ytd") return "YTD";
   return `Prev ${window.spec.slice(0, -1)} Days`;
@@ -180,6 +185,11 @@ const PLAYER_COLUMNS: Column[] = [
  * The two layouts differ in exactly one way: a 1d window carries `Gm` (to tell
  * a doubleheader's two rows apart, since there is no opponent column) and no
  * `GP`, which would always be 1; an aggregated window carries `GP`.
+ *
+ * A game-count report (issue #153) adds a `Span` column after `GP`: the report
+ * has no single shared date range, so each row shows the REAL first–last date its
+ * own games cover — the provenance that keeps a "past 10" row for a 4-game player
+ * honest (GP says 4, Span says the two weeks those 4 games actually spanned).
  */
 function leadColumns(window: ResolvedWindow): Column[] {
   if (window.groupBy === "game") {
@@ -191,7 +201,20 @@ function leadColumns(window: ResolvedWindow): Column[] {
       },
     ];
   }
-  return [{ header: "GP", align: "right", value: (r) => String(r.agg.games) }];
+  const gp: Column = { header: "GP", align: "right", value: (r) => String(r.agg.games) };
+  if (!isGameCountSpec(window.spec)) return [gp];
+  return [
+    gp,
+    { header: "Span", align: "right", value: (r) => formatSpan(r.spanFrom, r.spanTo) },
+  ];
+}
+
+/** A row's real date span for a game-count report: a single date when both ends
+ * coincide, else `from–to` in the digest's short-date style. Empty when absent
+ * (a date-window row, which never renders this column). */
+function formatSpan(from: string | undefined, to: string | undefined): string {
+  if (from === undefined || to === undefined) return "";
+  return from === to ? shortDate(from) : `${shortDate(from)}–${shortDate(to)}`;
 }
 
 function battingColumns(window: ResolvedWindow): Column[] {

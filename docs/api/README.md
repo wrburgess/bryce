@@ -149,9 +149,13 @@ Returns `{ "statLines": [...] }` for `json`; a CSV file body for `csv`.
 ### `GET /api/digest/preview`
 
 Preview what a Digest would report for a Window, without sending or claiming anything (read-only).
-Query: `window=` (one of `1d`/`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`, default `1d`) and `force=true|false` (default
-`false`). **`force` is accepted but a no-op here** — a preview never claims or sends, and window
-selection makes its content identical either way. `list=NAME`
+Query: `window=` (a date window `1d`/`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`, or a per-player
+game-count window `last10games`/`last30games` — #153; default `1d`) and `force=true|false` (default
+`false`). A game-count window reports each Player over his own last N distinct regular-season games, so
+each row carries its real game count (`agg.games`) and a `spanFrom`/`spanTo` — two Players in one report
+cover different date spans, and `window.from`/`to` is the cohort envelope. **`force` is accepted but a
+no-op here** — a preview never claims or sends, and window selection makes its content identical either
+way. `list=NAME`
 ([#70](https://github.com/wrburgess/bryce/issues/70)) scopes the preview to a named list's active
 members; an unknown list is rejected (**404**). `tags=SELECTOR`
 ([#140](https://github.com/wrburgess/bryce/issues/140)) scopes the preview to a **cohort** — the
@@ -171,7 +175,9 @@ download — `Content-Type: text/html|text/markdown|text/csv` with `Content-Disp
 
 Run the Digest job now. Body is optional: an empty or absent body means "no force, default window"
 (so every pre-`force` caller keeps working); otherwise `{ "force"?: boolean, "window"?: spec,
-"list"?: NAME, "tags"?: SELECTOR }`. A `list` ([#70](https://github.com/wrburgess/bryce/issues/70))
+"list"?: NAME, "tags"?: SELECTOR }`. `window` accepts the date windows and the game-count windows
+`last10games`/`last30games` (#153); a game-count send is on-demand only, like a cohort scope. A `list`
+([#70](https://github.com/wrburgess/bryce/issues/70))
 scopes the send to a named list's active members; a named-list send is **on-demand only** — it takes
 no daily slot, whatever its window — and an unknown list is rejected (**404**). A `tags`
 ([#140](https://github.com/wrburgess/bryce/issues/140)) scopes the send to a **cohort** and is

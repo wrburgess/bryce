@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { WINDOW_SPECS } from "../domain/window.js";
+import { GAME_COUNT_WINDOW_SPECS, WINDOW_SPECS } from "../domain/window.js";
 import { PLAYER_CARD_WINDOWS } from "../reports/player-card.js";
 import { StatLineFilterShape, StatLineQuerySchema, refineFromTo } from "../queries/statLines.js";
 
@@ -431,16 +431,22 @@ export const RefreshInputSchema = z.object(RefreshInputShape).superRefine((input
 });
 
 /**
- * Which date window the report covers. An unsupported value is REJECTED rather
- * than defaulted, on every surface — the window is the content, so quietly
- * sending a different report than the operator asked for is the failure this
- * fails closed against. Absent means `1d`, the daily artifact.
+ * Which window the report covers — a DATE window or a per-player GAME-COUNT
+ * window (issue #153). An unsupported value is REJECTED rather than defaulted,
+ * on every surface — the window is the content, so quietly sending a different
+ * report than the operator asked for is the failure this fails closed against.
+ * Absent means `1d`, the daily artifact.
+ *
+ * The date windows apply ONE shared date range to every player; the game-count
+ * windows (`last10games` / `last30games`) apply a per-player ordered limit, so
+ * two players in one report can cover different date spans. The two token sets
+ * are deliberately disjoint (src/domain/window.ts).
  */
 const WindowSchema = z
-  .enum(WINDOW_SPECS)
+  .enum([...WINDOW_SPECS, ...GAME_COUNT_WINDOW_SPECS])
   .default("1d")
   .describe(
-    "Date window the report covers: 1d (default), 7d, 14d, 21d, 28d, 35d, 60d, or ytd; every window ends on the last completed host date.",
+    "Window the report covers. Date windows (one shared range for everyone): 1d (default), 7d, 14d, 21d, 28d, 35d, 60d, ytd. Per-player game-count windows (each player over his own last N regular-season games, so spans differ per player): last10games, last30games. Every window ends on the last completed host date.",
   );
 
 /**

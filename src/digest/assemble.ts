@@ -1,6 +1,6 @@
 import { and, eq, exists, gte, inArray, lte, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import type { PlayerRow, StatLineRow } from "../db/schema.js";
+import type { PlayerRow } from "../db/schema.js";
 import { listMembers, players, statLines } from "../db/schema.js";
 import type { CalendarEntry } from "../domain/season.js";
 import { hostDate, isInSeason, sportIdForPlayer } from "../domain/season.js";
@@ -12,10 +12,19 @@ import { playerIdsMatchingTags, tagScopeCondition } from "../tags/service.js";
 import { levelAbbrev, levelRank } from "../mlb/levels.js";
 import type { Aggregate } from "../stats/aggregate.js";
 import { aggregate } from "../stats/aggregate.js";
-import { classifyField } from "../stats/fields.js";
 import { loadActivePlayers, loadCalendars } from "../jobs/refresh.js";
-import { ipToOuts, qualityStart } from "./rates.js";
 import type { RenderPlayer } from "./render.js";
+import type { Split } from "./rows.js";
+import {
+  asRecord,
+  buildStatRowCore,
+  comparePlayerNames,
+  isBatter,
+  mergeFieldingIntoBatting,
+  toRenderPlayer,
+  unknownFieldsOf,
+  withPlateAppearances,
+} from "./rows.js";
 
 /**
  * Windowed Digest assembly. Selection is BY DATE WINDOW, not by novelty — the
@@ -45,6 +54,15 @@ export interface DigestRow {
   reliefWins: number;
   /** Count of losses charged in relief in the window; always 0 for batters. */
   reliefLosses: number;
+  /**
+   * Per-player PROVENANCE for a game-count report (issue #153): the real first /
+   * last game date this row's games span. A date-window row leaves them undefined
+   * — its span is the shared `window.from`/`.to`. A game-count row carries its own
+   * because two players' last-N games cover different dates; the renderer shows a
+   * Span column only when they are present.
+   */
+  spanFrom?: string;
+  spanTo?: string;
 }
 
 export interface DigestAssembly {
@@ -102,12 +120,6 @@ export interface AssembleDeps {
    * scope and a list scope INTERSECT when both are present.
    */
   tagScope?: TagScope;
-}
-
-interface Split {
-  line: StatLineRow;
-  player: PlayerRow;
-  stats: Record<string, unknown>;
 }
 
 export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<DigestAssembly> {
@@ -239,25 +251,6 @@ export async function assembleDigest(db: Db, deps: AssembleDeps): Promise<Digest
 }
 
 /**
- * Every unrecognised stat key across the RAW selected lines, deduped and sorted.
- *
- * Computed from the raw splits, NOT from the built rows: a fielding split is
- * projected down to its error count before aggregation, so an unknown fielding
- * key never reaches a DigestRow's aggregate and would be silently dropped —
- * the exact staleness the report exists to surface. Classifying each split by
- * its OWN statType catches batting, pitching and fielding alike.
- */
-function unknownFieldsOf(splits: Split[]): string[] {
-  const seen = new Set<string>();
-  for (const { line, stats } of splits) {
-    for (const key of Object.keys(stats)) {
-      if (classifyField(line.statType, key) === null) seen.add(key);
-    }
-  }
-  return [...seen].sort();
-}
-
-/**
  * Each idle player's most recently seen league, for the Lvl column.
  *
  * Deliberately NOT window-limited: an idle player has no line in the window by
@@ -302,94 +295,6 @@ async function lastKnownLeagues(
 }
 
 /**
- * Which table an IDLE player's zero row belongs in. Position is the only signal
- * available — he left no stat line to read a role from.
- *
- * A pitcher who did not pitch must not render as a batter: 0 PA / 0 H / 0 HR
- * reads as "he had a terrible week", not "he did not pitch", and three of the
- * watched players are pitchers. An unknown position falls to batting, which is
- * the larger population and the harmless default.
- *
- * This same position rule governs players with games in the window: a player
- * belongs to exactly one digest table, even if a game log has the other
- * stat-type.
- */
-function isBatter(player: PlayerRow): boolean {
-  return player.position !== "P";
-}
-
-/**
- * ADR 0033: a fielding row never renders standalone. Its error count merges
- * into the same (player, game) batting split, synthesizing an all-zero batting
- * split when the player has no batting row for that game.
- *
- * Only `errors` crosses over. The rest of a fielding row (putOuts, assists,
- * innings) is not a batting stat, and carrying it would leak fielding counters
- * into a batting aggregate.
- */
-function mergeFieldingIntoBatting(splits: Split[]): Split[] {
-  const batting = splits
-    .filter((s) => s.line.statType === "batting")
-    // Copied, not aliased: the merge below writes `errors` onto these, and
-    // `splits` is still read afterwards for statLineCount and playerCount.
-    .map((s) => ({ ...s, stats: { ...s.stats } }));
-  const byGame = new Map<string, Split>();
-  for (const split of batting) {
-    byGame.set(`${split.line.playerId}:${split.line.gameId}`, split);
-  }
-  // A pitcher's fielding row belongs to his PITCHING appearance, not to a
-  // batting one he never had. Synthesizing from it would put him in the Batters
-  // table hitting .000/.000/.000 — which reads as an appalling week rather than
-  // "he pitched", the same misreading the idle-pitcher routing exists to avoid.
-  // Under the old per-game prose format this was invisible; a table makes it a
-  // full slash line, so the synthesis has to know when to decline.
-  const pitchedInGame = new Set(
-    splits
-      .filter((s) => s.line.statType === "pitching")
-      .map((s) => `${s.line.playerId}:${s.line.gameId}`),
-  );
-  for (const split of splits) {
-    if (split.line.statType !== "fielding") continue;
-    // Highlightly deliberately provides no NCAA fielding contract. Historical
-    // HTML fielding rows are retained for audit/backup, but must not make the
-    // presentation claim a fielding value for NCAA players after this source
-    // cutover.
-    if (split.line.source === "highlightly_ncaa") continue;
-    const key = `${split.line.playerId}:${split.line.gameId}`;
-    const errors = numberOr0(split.stats.errors);
-    const target = byGame.get(key);
-    if (target !== undefined) {
-      target.stats.errors = errors;
-      continue;
-    }
-    if (pitchedInGame.has(key)) continue;
-    const synthesized: Split = { ...split, stats: { errors } };
-    byGame.set(key, synthesized);
-    batting.push(synthesized);
-  }
-  return batting;
-}
-
-/**
- * PA from the source when present, else AB + BB + HBP — computed PER GAME,
- * before aggregation. The fixed-format batting line carried this fallback at
- * display time, where one game was one row; a window SUMS, so it has to happen
- * at the grain the fallback is true at.
- *
- * Deriving it after summing would silently undercount a window whose games
- * disagree: if even one game reports plateAppearances the sum is non-zero, the
- * fallback never fires, and every game that omitted it contributes nothing.
- */
-function withPlateAppearances(split: Split): Split {
-  if (numberOr0(split.stats.plateAppearances) > 0) return split;
-  const derived =
-    numberOr0(split.stats.atBats) +
-    numberOr0(split.stats.baseOnBalls) +
-    numberOr0(split.stats.hitByPitch);
-  return derived === 0 ? split : { ...split, stats: { ...split.stats, plateAppearances: derived } };
-}
-
-/**
  * Group the window's splits into rows and aggregate each group.
  *
  * `idlePlayers` are the active players with no line in the window; each becomes
@@ -429,16 +334,8 @@ function buildRows(
       window.groupBy === "game" && (gamesPerPlayer.get(first.line.playerId)?.size ?? 0) > 1;
     rows.push({
       player: toRenderPlayer(first.player),
-      lvl: levelAbbrev(first.line.sportId, first.line.leagueName),
-      lvlRank: levelRank(first.line.sportId),
+      ...buildStatRowCore(bucket, statType),
       gameNumber: doubleheader ? first.line.gameNumber : null,
-      agg: aggregate(
-        statType,
-        bucket.map((s) => s.stats),
-      ),
-      qualityStarts: statType === "pitching" ? countQualityStarts(bucket) : 0,
-      reliefWins: statType === "pitching" ? countReliefWins(bucket) : 0,
-      reliefLosses: statType === "pitching" ? countReliefLosses(bucket) : 0,
     });
   }
 
@@ -464,48 +361,6 @@ function buildRows(
       comparePlayerNames(a.player.fullName, b.player.fullName) ||
       (a.gameNumber ?? 0) - (b.gameNumber ?? 0),
   );
-}
-
-/** Sort by surname, then first initial, matching the digest's displayed name. */
-function comparePlayerNames(a: string, b: string): number {
-  const nameParts = (fullName: string): [surname: string, firstInitial: string] => {
-    const parts = fullName.trim().split(/\s+/);
-    return parts.length < 2 ? [fullName, ""] : [parts.slice(1).join(" "), parts[0]![0]!];
-  };
-  const [aSurname, aInitial] = nameParts(a);
-  const [bSurname, bInitial] = nameParts(b);
-  return aSurname.localeCompare(bSurname) || aInitial.localeCompare(bInitial);
-}
-
-/**
- * QS is not a source field — it is computed per game and counted here, while
- * the per-game rows are still in hand. A window's QS is a COUNT of qualifying
- * games, never a flag: summed outs and summed earned runs cannot recover it.
- */
-function countQualityStarts(bucket: Split[]): number {
-  return bucket.filter((s) => {
-    const ip = s.stats.inningsPitched;
-    // Same coercion as src/stats/aggregate.ts, so this count and the summed
-    // outs it sits beside can never disagree about what an IP value means.
-    const outs = ipToOuts(typeof ip === "string" ? ip : String(ip));
-    return qualityStart(outs, numberOr0(s.stats.earnedRuns)) === 1;
-  }).length;
-}
-
-/** An appearance is relief only when gamesStarted is PRESENT and 0. A missing
- * value (NCAA rows have no gamesStarted) is unknown-not-relief, so a starter's
- * decision is never miscounted as relief. Starter decisions are never surfaced. */
-function isReliefAppearance(stats: Record<string, unknown>): boolean {
-  const gs = stats.gamesStarted;
-  return typeof gs === "number" && Number.isFinite(gs) && gs === 0;
-}
-
-function countReliefWins(bucket: Split[]): number {
-  return bucket.filter((s) => numberOr0(s.stats.wins) === 1 && isReliefAppearance(s.stats)).length;
-}
-
-function countReliefLosses(bucket: Split[]): number {
-  return bucket.filter((s) => numberOr0(s.stats.losses) === 1 && isReliefAppearance(s.stats)).length;
 }
 
 /**
@@ -542,26 +397,4 @@ function seasonStartFor(
     .map((c) => c.regularSeasonStart)
     .filter((d): d is string => d !== null);
   return starts.length === 0 ? null : starts.reduce((a, b) => (a < b ? a : b));
-}
-
-function toRenderPlayer(player: PlayerRow): RenderPlayer {
-  return {
-    fullName: player.fullName,
-    level: player.level,
-    milbLevel: player.milbLevel,
-    teamName: player.teamName,
-    schoolName: player.schoolName,
-  };
-}
-
-/** A stat value as a number; a missing or non-numeric value is 0. */
-function numberOr0(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
-  }
-  return {};
 }

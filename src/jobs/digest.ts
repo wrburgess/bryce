@@ -2,10 +2,11 @@ import { and, desc, eq } from "drizzle-orm";
 import { digestDeliveries } from "../db/schema.js";
 import type { DigestAssembly } from "../digest/assemble.js";
 import { assembleDigest } from "../digest/assemble.js";
+import { assembleGameWindow } from "../digest/game-window.js";
 import { renderDigest, renderHeartbeat } from "../digest/render.js";
 import { hostDate, sleepWindow } from "../domain/season.js";
-import type { WindowSpec } from "../domain/window.js";
-import { resolveWindow } from "../domain/window.js";
+import type { ReportWindowSpec } from "../domain/window.js";
+import { isGameCountSpec, resolveWindow } from "../domain/window.js";
 import type { DeliveryKind } from "../db/schema.js";
 import type { LookupResult, MailReceipt, Mailer } from "../mailer/types.js";
 import type { Db } from "../db/client.js";
@@ -31,8 +32,13 @@ export interface DigestDeps {
   tz: string;
   to: string;
   from: string;
-  /** Which date window this run reports. */
-  spec: WindowSpec;
+  /**
+   * Which window this run reports — a date window OR a per-player game-count
+   * window (issue #153). A game-count spec is always an on-demand report: it is
+   * never the daily "1d" slot, so it routes exactly like a list/tag scope (no
+   * claim, no delivery row).
+   */
+  spec: ReportWindowSpec;
   /**
    * Scope an ON-DEMAND send to a named list's active members (issue #70 /
    * ADR 0046). A named-list send is never the scheduled daily slot — the slot
@@ -163,9 +169,16 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   // A named-list send is on-demand by definition (ADR 0046 decision 4): it never
   // takes the daily slot, whose key has no list dimension. A TAG-scoped send is
   // on-demand for the identical reason (#140 / ADR 0050) — the slot key has no
-  // tag dimension, so two cohorts on one date would fight over one slot. Route
-  // any run with a list, a tag scope, or a non-1d window to the on-demand path.
-  if (deps.spec !== "1d" || deps.listId !== undefined || deps.tagScope !== undefined) {
+  // tag dimension, so two cohorts on one date would fight over one slot. A
+  // game-count report (issue #153) is likewise on-demand: it has no single date
+  // to key a daily slot on. Route any run with a list, a tag scope, a game-count
+  // window, or any non-1d date window to the on-demand path.
+  if (
+    deps.spec !== "1d" ||
+    isGameCountSpec(deps.spec) ||
+    deps.listId !== undefined ||
+    deps.tagScope !== undefined
+  ) {
     return runOnDemandReport(deps, warn);
   }
 
@@ -361,14 +374,26 @@ async function runOnDemandReport(
   warn: (message: string) => void,
 ): Promise<DigestResult> {
   const { db, now, tz } = deps;
-  const assembly = await assembleDigest(db, {
-    now,
-    tz,
-    spec: deps.spec,
-    listId: deps.listId,
-    listName: deps.listName,
-    tagScope: deps.tagScope,
-  });
+  // A game-count window is a genuinely different query shape (per-player ordered
+  // limit, not a shared date range), so it has its own assembly engine; both
+  // return the same DigestAssembly render contract (issue #153).
+  const assembly = isGameCountSpec(deps.spec)
+    ? await assembleGameWindow(db, {
+        now,
+        tz,
+        spec: deps.spec,
+        listId: deps.listId,
+        listName: deps.listName,
+        tagScope: deps.tagScope,
+      })
+    : await assembleDigest(db, {
+        now,
+        tz,
+        spec: deps.spec,
+        listId: deps.listId,
+        listName: deps.listName,
+        tagScope: deps.tagScope,
+      });
   reportUnknownFields(assembly, warn);
 
   const mail = renderDigest(assembly);

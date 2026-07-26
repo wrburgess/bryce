@@ -60,6 +60,12 @@ describe("digest CLI", () => {
       expect(parseWindow(["--window", "60d"])).toBe("60d");
     });
 
+    it("accepts the per-player game-count windows (issue #153)", () => {
+      expect(parseWindow(["--window", "last10games"])).toBe("last10games");
+      expect(parseWindow(["--window=last30games"])).toBe("last30games");
+      expect(parseWindow(["-w", "LAST10GAMES"])).toBe("last10games");
+    });
+
     it("returns null for an unsupported window so the CLI fails closed", () => {
       // Null is distinct from the 1d default: "you asked for something I do not
       // support" must not silently become "here is the daily report".
@@ -173,13 +179,24 @@ describe("digest CLI", () => {
       expect(output[1]).toContain("window=Jul 18");
     });
 
+    it("--window last10games reaches runDigest as an on-demand game-count report (issue #153)", async () => {
+      // The seeded player has a 2026-07-18 game; a game-count window reports it
+      // as a "Last 10 Games" report and, being on-demand, writes no delivery row.
+      expect(await runDigestCli(["--window", "last10games"], deps())).toBe(0);
+      expect(mailer.sent).toHaveLength(1);
+      expect(output[0]).toContain("window=Last 10 Games");
+      expect(output[0]).toContain("statLines=1");
+      const deliveries = (opened.sqlite.prepare("SELECT count(*) AS c FROM digest_deliveries").get() as { c: number }).c;
+      expect(deliveries).toBe(0); // on-demand: no slot claimed, no delivery row
+    });
+
     it("exits non-zero and sends nothing on an unsupported window", async () => {
       expect(await runDigestCli(["--window", "30d"], deps())).toBe(1);
       expect(mailer.sent).toHaveLength(0);
       // Nothing was claimed either: it failed closed before touching anything.
       expect(output).toEqual([]);
       expect(errors).toEqual([
-        "error: invalid value '30d' for '--window'; expected 1d, 7d, 14d, 21d, 28d, 35d, 60d, ytd",
+        "error: invalid value '30d' for '--window'; expected 1d, 7d, 14d, 21d, 28d, 35d, 60d, ytd, last10games, last30games",
       ]);
     });
 

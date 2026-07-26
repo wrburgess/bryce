@@ -143,17 +143,18 @@ describe("MCP server over Streamable HTTP", () => {
       expect(tool.description, tool.name).toBeTruthy();
     }
 
-    // Both digest tools enumerate all eight windows — including the three added
-    // in #54 — so a client sees them without reading the source.
+    // Both digest tools enumerate all eight date windows — including the three
+    // added in #54 — and both per-player game-count windows (#153), so a client
+    // sees them without reading the source.
     const descriptionOf = (name: string) => tools.find((t) => t.name === name)?.description ?? "";
     for (const name of ["digest_preview", "send_digest"]) {
-      for (const win of ["28d", "35d", "60d"]) {
+      for (const win of ["28d", "35d", "60d", "last10games", "last30games"]) {
         expect(descriptionOf(name), `${name} enumerates ${win}`).toContain(win);
       }
     }
-    // send_digest names the new windows among the on-demand ones (no daily slot).
+    // send_digest names a game-count window among the on-demand ones (no daily slot).
     expect(descriptionOf("send_digest")).toContain("on-demand");
-    expect(descriptionOf("send_digest")).toContain("28d/35d/60d");
+    expect(descriptionOf("send_digest")).toContain("last10games");
   });
 
   it("describes every input field of every exposed tool schema", async () => {
@@ -524,6 +525,28 @@ describe("MCP server over Streamable HTTP", () => {
       statLineCount: 2,
       window: "Last 7 Days (Jul 12-18)",
     });
+  });
+
+  it("both digest tools accept a per-player game-count window (issue #153)", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    await insertStatLine(opened.db, { playerId: player.id, gameId: 811, gameDate: "2026-07-12", stats: { hits: 1, atBats: 4 } });
+    await insertStatLine(opened.db, { playerId: player.id, gameId: 812, gameDate: "2026-07-18", stats: { hits: 2, atBats: 4 } });
+
+    const preview = await call("digest_preview", { window: "last10games" });
+    expect(preview.isError).not.toBe(true);
+    const body = preview.structuredContent as {
+      window: { spec: string; label: string };
+      batters: Array<{ agg: { games: number }; spanFrom?: string; spanTo?: string }>;
+    };
+    expect(body.window).toMatchObject({ spec: "last10games", label: "Last 10 Games" });
+    expect(body.batters[0]?.agg.games).toBe(2);
+    expect(body.batters[0]?.spanFrom).toBe("2026-07-12");
+
+    // send_digest routes a game-count window through the on-demand path: it sends
+    // but records NO delivery row (no daily slot).
+    const sent = await call("send_digest", { window: "last30games" });
+    expect(sent.structuredContent).toMatchObject({ action: "sent", window: "Last 30 Games" });
+    expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
   });
 
   it("send_digest sends, records the delivery, and stamps nothing", async () => {

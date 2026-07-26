@@ -45,7 +45,7 @@ state, so re-running a Window always sends the same content.
 
 | Flag | Default | Accepted values |
 |---|---|---|
-| `--window <spec>` / `--window=<spec>` | `1d` | `1d`, `7d`, `14d`, `21d`, `28d`, `35d`, `60d`, `ytd` |
+| `--window <spec>` / `--window=<spec>` | `1d` | date windows `1d`, `7d`, `14d`, `21d`, `28d`, `35d`, `60d`, `ytd`; per-player game-count windows `last10games`, `last30games` (#153) |
 | `--list <name>` / `--list=<name>` | off (all active) | any existing list name (#70) |
 | `--tags <selector>` / `--tags=<selector>` | off (no cohort scope) | any valid tag selector (#140) |
 | `--force` | off (boolean) | present or absent |
@@ -64,6 +64,16 @@ state, so re-running a Window always sends the same content.
 - The `1d` window is the scheduled daily artifact; any wider window (`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`) is an
   on-demand report that takes no slot and answers even during Offseason Sleep
   ([ADR 0035](../adr/0035-window-selected-digest.md)).
+- The **game-count** windows `last10games` / `last30games` report each Player over his own last N
+  distinct regular-season games — a per-player ordered limit, so two Players in one report cover
+  different date spans, and each row carries its real games count (`GP`) and first–last date (`Span`).
+  They are **on-demand only** (no daily slot), like a cohort scope, and compose with `--list` / `--tags`
+  ([#153](https://github.com/wrburgess/bryce/issues/153) / [ADR 0051](../adr/0051-cohort-game-count-windows.md)).
+
+  ```sh
+  sk digest -w last10games                             # all tracked, each over his last 10 games
+  sk digest --tags level:aaa -w last30games            # AAA cohort, each over his last 30 games
+  ```
 - `--list NAME` scopes the send to a named list's active members
   ([#70](https://github.com/wrburgess/bryce/issues/70) / [ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)).
   A named-list send is **on-demand only** (it takes no daily slot); an unknown list **fails closed**

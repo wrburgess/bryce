@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { isLongWindow, parseWindowSpec, resolveWindow } from "../src/domain/window.js";
+import {
+  GAME_COUNT_WINDOW_SPECS,
+  WINDOW_SPECS,
+  gameCountLimit,
+  gameCountTitle,
+  isGameCountSpec,
+  isLongWindow,
+  lastCompletedHostDate,
+  parseReportWindowSpec,
+  parseWindowSpec,
+  resolveWindow,
+  shiftDate,
+} from "../src/domain/window.js";
 
 const CHICAGO = "America/Chicago";
 
@@ -18,6 +30,55 @@ describe("parseWindowSpec", () => {
     for (const bad of ["", "3d", "30d", "week", "1", "d1"]) {
       expect(parseWindowSpec(bad)).toBeNull();
     }
+  });
+
+  it("rejects a game-count token — it is not a date WindowSpec (issue #153)", () => {
+    for (const spec of GAME_COUNT_WINDOW_SPECS) {
+      expect(parseWindowSpec(spec)).toBeNull();
+    }
+  });
+});
+
+describe("game-count windows (issue #153)", () => {
+  it("keeps the game-count tuple disjoint from the date tuple", () => {
+    for (const g of GAME_COUNT_WINDOW_SPECS) {
+      expect((WINDOW_SPECS as readonly string[]).includes(g)).toBe(false);
+    }
+    expect(GAME_COUNT_WINDOW_SPECS).toEqual(["last10games", "last30games"]);
+  });
+
+  it("isGameCountSpec narrows only the game-count tokens", () => {
+    expect(isGameCountSpec("last10games")).toBe(true);
+    expect(isGameCountSpec("last30games")).toBe(true);
+    for (const d of WINDOW_SPECS) expect(isGameCountSpec(d)).toBe(false);
+  });
+
+  it("gameCountLimit and gameCountTitle map to the counts", () => {
+    expect(gameCountLimit("last10games")).toBe(10);
+    expect(gameCountLimit("last30games")).toBe(30);
+    expect(gameCountTitle("last10games")).toBe("Last 10 Games");
+    expect(gameCountTitle("last30games")).toBe("Last 30 Games");
+  });
+
+  it("parseReportWindowSpec accepts date AND game-count tokens, normalizing, else null", () => {
+    for (const spec of [...WINDOW_SPECS, ...GAME_COUNT_WINDOW_SPECS]) {
+      expect(parseReportWindowSpec(spec)).toBe(spec);
+    }
+    expect(parseReportWindowSpec("  LAST10GAMES ")).toBe("last10games");
+    for (const bad of ["", "last5games", "10games", "last10"]) {
+      expect(parseReportWindowSpec(bad)).toBeNull();
+    }
+  });
+
+  it("isLongWindow: last30games is long (BB%/K% shown), last10games is not", () => {
+    expect(isLongWindow("last30games")).toBe(true);
+    expect(isLongWindow("last10games")).toBe(false);
+  });
+
+  it("lastCompletedHostDate is yesterday in the host timezone", () => {
+    // 2026-07-20 09:00 CDT → the last completed day is July 19.
+    expect(lastCompletedHostDate(new Date("2026-07-20T14:00:00Z"), CHICAGO)).toBe("2026-07-19");
+    expect(shiftDate("2026-03-09", -6)).toBe("2026-03-03");
   });
 });
 

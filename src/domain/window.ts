@@ -25,6 +25,47 @@ export const WINDOW_SPECS = ["1d", "7d", "14d", "21d", "28d", "35d", "60d", "ytd
 
 export type WindowSpec = (typeof WINDOW_SPECS)[number];
 
+/**
+ * Per-player GAME-COUNT windows (issue #153). Deliberately a SEPARATE tuple from
+ * `WINDOW_SPECS`, never merged: a date window is one range applied to every
+ * player, a game-count window is a per-player ordered limit, so two players in
+ * one report can cover different date spans. Keeping the two sets disjoint is the
+ * structural guard against implementing `last10games` as "roughly two weeks"
+ * (issue #31 — the most likely silent defect in the feature): the date engine
+ * (`resolveWindow`, `SPAN_DAYS`) can never receive a game-count token, because it
+ * is not in `WINDOW_SPECS`. These mirror the single-player card's counts
+ * (`PLAYER_CARD_WINDOWS = last10/last30`), spelled `…games` on the cohort surface
+ * so an operator can tell a cohort game-count report apart from the card.
+ */
+export const GAME_COUNT_WINDOW_SPECS = ["last10games", "last30games"] as const;
+
+export type GameCountWindowSpec = (typeof GAME_COUNT_WINDOW_SPECS)[number];
+
+/** The full report window vocabulary: a date window OR a per-player game count. */
+export type ReportWindowSpec = WindowSpec | GameCountWindowSpec;
+
+/** Narrow a report window to the game-count arm (and off it, for the date engine). */
+export function isGameCountSpec(spec: ReportWindowSpec): spec is GameCountWindowSpec {
+  return (GAME_COUNT_WINDOW_SPECS as readonly string[]).includes(spec);
+}
+
+/** How many distinct games a game-count window keeps per player. */
+export function gameCountLimit(spec: GameCountWindowSpec): number {
+  return spec === "last10games" ? 10 : 30;
+}
+
+/** Body-heading title for a game-count window, e.g. "Last 10 Games". */
+export function gameCountTitle(spec: GameCountWindowSpec): string {
+  return `Last ${gameCountLimit(spec)} Games`;
+}
+
+export function parseReportWindowSpec(raw: string): ReportWindowSpec | null {
+  const normalized = raw.trim().toLowerCase();
+  return (GAME_COUNT_WINDOW_SPECS as readonly string[]).includes(normalized)
+    ? (normalized as GameCountWindowSpec)
+    : parseWindowSpec(normalized);
+}
+
 /** Inclusive day counts; `ytd` is anchored on the season start instead. */
 const SPAN_DAYS: Readonly<Record<Exclude<WindowSpec, "ytd">, number>> = {
   "1d": 1,
@@ -36,14 +77,27 @@ const SPAN_DAYS: Readonly<Record<Exclude<WindowSpec, "ytd">, number>> = {
   "60d": 60,
 };
 
-/** True for windows >= 21 days (21d/28d/35d/60d/ytd), by spec identity — ytd is
- * long even when its from..to span is under 21 real days early in a season. */
-export function isLongWindow(spec: WindowSpec): boolean {
+/**
+ * True for windows the extra display-only rates (BB%/K%) are shown on: date
+ * windows >= 21 days (21d/28d/35d/60d/ytd), plus `last30games` — thirty games is
+ * a large enough sample for a rate to mean something, where ten is not (matching
+ * the digest's "a single week's plate appearances are too few" reasoning). ytd is
+ * long even when its from..to span is under 21 real days early in a season.
+ */
+export function isLongWindow(spec: ReportWindowSpec): boolean {
+  if (isGameCountSpec(spec)) return spec === "last30games";
   return spec === "ytd" || SPAN_DAYS[spec] >= 21;
 }
 
 export interface ResolvedWindow {
-  spec: WindowSpec;
+  /**
+   * The window this report covers — a date window OR a per-player game-count
+   * window (issue #153). For a game-count window `from`/`to` are the cohort
+   * ENVELOPE (the min/max game date across every selected game), an honest
+   * report-level span that is deliberately distinct from each ROW's own span
+   * (a game-count row carries its player's real `spanFrom`/`spanTo`).
+   */
+  spec: ReportWindowSpec;
   /** Inclusive host-timezone start date, YYYY-MM-DD. */
   from: string;
   /** Inclusive host-timezone end date — the last COMPLETED day. */
@@ -59,8 +113,10 @@ export function parseWindowSpec(raw: string): WindowSpec | null {
     : null;
 }
 
-/** Calendar-date arithmetic: "2026-03-09" minus 6 days → "2026-03-03". */
-function shiftDate(isoDate: string, days: number): string {
+/** Calendar-date arithmetic: "2026-03-09" minus 6 days → "2026-03-03".
+ * Exported as the one home for this arithmetic — the player card and the
+ * game-count engine share it rather than each keeping a private copy. */
+export function shiftDate(isoDate: string, days: number): string {
   const [y, m, d] = isoDate.split("-").map(Number);
   // Noon UTC keeps the arithmetic clear of any timezone's midnight.
   const anchor = new Date(Date.UTC(y ?? 1970, (m ?? 1) - 1, d ?? 1, 12));
@@ -68,8 +124,18 @@ function shiftDate(isoDate: string, days: number): string {
   return anchor.toISOString().slice(0, 10);
 }
 
+/**
+ * The last COMPLETED host date — yesterday, in the host timezone. Every report
+ * excludes the in-progress host date so results do not depend on the run hour
+ * and never expose a partial day (the windowed-digest and player-card rule,
+ * shared here instead of re-derived per caller).
+ */
+export function lastCompletedHostDate(now: Date, tz: string): string {
+  return shiftDate(hostDate(now, tz), -1);
+}
+
 /** "2026-07-13" → "Jul 13" */
-function shortDate(isoDate: string): string {
+export function shortDate(isoDate: string): string {
   const d = new Date(`${isoDate}T12:00:00Z`);
   return new Intl.DateTimeFormat("en-US", {
     timeZone: "UTC",

@@ -3,8 +3,12 @@ import { loadConfig } from "../config.js";
 import { loadDotEnv } from "../env.js";
 import type { Db } from "../db/client.js";
 import { startupDb } from "../db/startup.js";
-import type { WindowSpec } from "../domain/window.js";
-import { WINDOW_SPECS, parseWindowSpec } from "../domain/window.js";
+import type { ReportWindowSpec } from "../domain/window.js";
+import {
+  GAME_COUNT_WINDOW_SPECS,
+  WINDOW_SPECS,
+  parseReportWindowSpec,
+} from "../domain/window.js";
 import type { Mailer } from "../mailer/types.js";
 import { runDigest } from "../jobs/digest.js";
 import { UnknownListError, resolveListByName } from "../lists/service.js";
@@ -50,18 +54,18 @@ export function parseForce(argv: string[]): boolean {
  * silently send a different report than the operator asked for, and under
  * window selection the window IS the content.
  */
-export function parseWindow(argv: string[]): WindowSpec | null {
+export function parseWindow(argv: string[]): ReportWindowSpec | null {
   const shortAt = argv.indexOf("-w");
   if (shortAt !== -1) {
     const value = argv[shortAt + 1];
-    return value === undefined ? null : parseWindowSpec(value);
+    return value === undefined ? null : parseReportWindowSpec(value);
   }
   const inline = argv.find((a) => a.startsWith("--window="));
-  if (inline !== undefined) return parseWindowSpec(inline.slice("--window=".length));
+  if (inline !== undefined) return parseReportWindowSpec(inline.slice("--window=".length));
   const at = argv.indexOf("--window");
   if (at === -1) return "1d";
   const value = argv[at + 1];
-  return value === undefined ? null : parseWindowSpec(value);
+  return value === undefined ? null : parseReportWindowSpec(value);
 }
 
 /**
@@ -117,7 +121,9 @@ export async function runDigestCli(argv: string[], deps: DigestCliDeps): Promise
   const spec = parseWindow(argv);
   if (spec === null) {
     // Fail closed, BEFORE the mailer is touched: nothing is sent.
-    writeError(`error: unsupported --window value; supported: ${WINDOW_SPECS.join(", ")}`);
+    writeError(
+      `error: unsupported --window value; supported: ${[...WINDOW_SPECS, ...GAME_COUNT_WINDOW_SPECS].join(", ")}`,
+    );
     return 1;
   }
   const listName = parseList(argv);
