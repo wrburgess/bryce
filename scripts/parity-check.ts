@@ -77,7 +77,10 @@ const RULE_REQUIRED_SECTIONS = ["## Patterns", "## Anti-Patterns"];
 // reference definition `[label]: path` — that the convention forbids for these paths.
 const DEEP_DOC_LABEL = "**Deep doc:**";
 const DEEP_DOC_TOKEN = /docs\/rules\/[a-z0-9-]+-postmortems\.md(?:#[A-Za-z0-9._-]+)?/g;
-const DEEP_DOC_LINKED = /\]\($|\]:\s*$/;
+// A link opener may be followed by a relative prefix before the token — `](../docs/rules/x.md)` is
+// the spelling a contributor writing from `rules/` would actually reach for, so the link form must
+// be recognized THROUGH `./`, `../`, and `/` rather than mistaken for an unresolvable path.
+const DEEP_DOC_LINKED = /\]\(\s*(?:\.{0,2}\/)*$|\]:\s*(?:\.{0,2}\/)*$/;
 const RULES_DEEP_DOC_README = "docs/rules/README.md";
 
 const SKILLS_DIR = "skills";
@@ -382,10 +385,11 @@ class ParityCheck {
         const isHeader = strip(line).startsWith(DEEP_DOC_LABEL);
         for (const match of line.matchAll(DEEP_DOC_TOKEN)) {
           const before = line.slice(0, match.index);
-          // Ignore an absolute path, a `../` traversal, or a URL that merely contains the path.
-          if (/[./]$|:\/\/\S*$/.test(before)) continue;
-
           const target = (match[0] as string).split("#")[0] as string;
+
+          // The link-form rule is checked FIRST and independently of the path's shape: a relative
+          // link (`](../docs/rules/x.md)`) is still a link, and skipping it as "unresolvable" would
+          // let the likeliest real spelling through.
           if (DEEP_DOC_LINKED.test(before)) {
             this.err(
               `Rules pointer ${rel}: \`${target}\` is written as a markdown link; a deep-doc path must be a ` +
@@ -393,6 +397,10 @@ class ParityCheck {
             );
             continue;
           }
+
+          // Not a pointer this check can resolve: an absolute path, a `../` traversal, or a URL that
+          // merely contains the path.
+          if (/[./]$|:\/\/\S*$/.test(before)) continue;
 
           if (isHeader) continue;   // a declaration, not a stand-in for moved content
           if (!this.exists(target)) {

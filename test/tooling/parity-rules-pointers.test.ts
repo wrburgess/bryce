@@ -58,6 +58,15 @@ describe("parity check - Tier-2 deep-doc pointers", () => {
     });
   });
 
+  // The spelling a contributor writing from `rules/` would actually reach for. An earlier draft of
+  // this check skipped it as an unresolvable `../` path and never applied the link rule at all.
+  it.each(["../", "./", "/"])("rejects a markdown link whose target is prefixed with %s", (prefix) => {
+    withRuleBody(`- **Never x** — because y. See [the deep doc](${prefix}${DEEP_DOC}).`, (errors) => {
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain("is written as a markdown link");
+    });
+  });
+
   it("rejects a reference-style link definition for a deep doc", () => {
     withRuleBody(`- **Never x** — because y. See [deep doc][dd].\n\n[dd]: ${DEEP_DOC}`, (errors) => {
       expect(errors).toHaveLength(1);
