@@ -384,8 +384,10 @@ class ParityCheck {
   }
 
   // The invariant (issue #154, refining #148): EVERY Tier-2 deep-doc path named in a Tier-1 rule
-  // file must resolve. The single exception is a BARE-PATH `**Deep doc:**` header declaration,
-  // which may forward-reference a deep doc that does not exist yet.
+  // file must point at a file that is really there — a BARE path at the repo root (this.exists), a
+  // LINK at wherever the link actually leads (this.resolvesFrom). Two bases, one requirement; the
+  // paragraph below says why they differ. The single exception is a BARE-PATH `**Deep doc:**`
+  // header declaration, which may forward-reference a deep doc that does not exist yet.
   //
   // Why it matters here and nowhere else: `rules/*.md` is deliberately absent from LINK_CHECKED, so
   // checkLinks() never sees these files and this check is the ONLY validator they get. A Tier-1
