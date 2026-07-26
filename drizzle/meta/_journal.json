@@ -71,6 +71,13 @@
       "when": 1785031337739,
       "tag": "0009_dizzy_zodiak",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1785087074931,
+      "tag": "0010_player_card_indexes",
+      "breakpoints": true
     }
   ]
 }

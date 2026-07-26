@@ -41,6 +41,7 @@ import {
   HighlightlyUpstreamError,
 } from "../highlightly/client.js";
 import { queryStatLines } from "../queries/statLines.js";
+import { AmbiguousPlayerCardNameError, PlayerCardNotFoundError, assemblePlayerCard } from "../reports/player-card.js";
 import type { ServiceDeps } from "../server/deps.js";
 import {
   ManualWriteToDerivedNamespaceError,
@@ -76,6 +77,8 @@ import {
   HighlightlyPlayerIdSchema,
   NcaaPlayerSeqSchema,
   PersonIdSchema,
+  PlayerCardNameQuerySchema,
+  PlayerCardQuerySchema,
   PlayerSearchInputSchema,
   PlayersListInputSchema,
   RefreshInputSchema,
@@ -120,10 +123,12 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
       err instanceof UnknownPersonError ||
       err instanceof PlayerNotFoundError ||
       err instanceof UnknownListError
+      || err instanceof PlayerCardNotFoundError
     ) {
       return c.json({ error: err.message }, 404);
     }
-    if (err instanceof DuplicateListNameError || err instanceof PlayerPromotionConflictError) {
+    if (err instanceof DuplicateListNameError || err instanceof PlayerPromotionConflictError || err instanceof AmbiguousPlayerCardNameError) {
+      if (err instanceof AmbiguousPlayerCardNameError) return c.json({ error: err.message, candidates: err.candidates }, 409);
       return c.json({ error: err.message }, 409);
     }
     // Stable provider code is intentionally distinct from display prose, so
@@ -297,6 +302,27 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
       return fileResponse(c, statLinesToCsv(views), "text/csv", "bryce-stat-lines.csv");
     }
     return c.json({ statLines: views });
+  });
+
+  api.get("/reports/player/:id", async (c) => {
+    try {
+      const query = PlayerCardQuerySchema.parse(c.req.query());
+      const id = PersonIdSchema.parse(c.req.param("id"));
+      return c.json(assemblePlayerCard(deps.db, { id, windows: query.windows, now: deps.now, tz: deps.tz }));
+    } catch (err) {
+      if (err instanceof ZodError) return c.json({ error: "invalid-input", issues: err.issues }, 400);
+      throw err;
+    }
+  });
+
+  api.get("/reports/player", async (c) => {
+    try {
+      const query = PlayerCardNameQuerySchema.parse(c.req.query());
+      return c.json(assemblePlayerCard(deps.db, { name: query.name, windows: query.windows, now: deps.now, tz: deps.tz }));
+    } catch (err) {
+      if (err instanceof ZodError) return c.json({ error: "invalid-input", issues: err.issues }, 400);
+      throw err;
+    }
   });
 
   api.get("/digest/preview", async (c) => {

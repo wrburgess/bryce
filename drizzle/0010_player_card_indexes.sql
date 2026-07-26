@@ -1,0 +1,2 @@
+CREATE INDEX `players_full_name_idx` ON `players` (`full_name`);--> statement-breakpoint
+CREATE INDEX `stat_lines_player_regular_game_order_idx` ON `stat_lines` (`player_id`,`game_type`,`game_date`,`game_number`,`id`);

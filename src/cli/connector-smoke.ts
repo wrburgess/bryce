@@ -30,6 +30,7 @@ export const ALL_TOOLS = [
   "watchlist_deactivate",
   "player_search",
   "stat_lines",
+  "report_player",
   "digest_preview",
   "send_digest",
   "run_refresh",

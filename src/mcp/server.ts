@@ -18,6 +18,7 @@ import { runDigest } from "../jobs/digest.js";
 import { runRefresh, runRefreshForPlayer } from "../jobs/refresh.js";
 import { MlbApiError } from "../mlb/client.js";
 import { queryStatLines } from "../queries/statLines.js";
+import { AmbiguousPlayerCardNameError, PlayerCardNotFoundError, assemblePlayerCard } from "../reports/player-card.js";
 import type { ServiceDeps } from "../server/deps.js";
 import { healthSnapshot } from "../server/health.js";
 import {
@@ -71,6 +72,8 @@ import {
   ListRenameInputSchema,
   ListRenameInputShape,
   PlayerSearchInputSchema,
+  PlayerCardInputSchema,
+  PlayerCardInputShape,
   PlayersListInputSchema,
   RefreshInputSchema,
   RefreshInputShape,
@@ -132,6 +135,8 @@ function errorResult(err: unknown): CallToolResult {
           err instanceof ReadonlyQueryError ||
           err instanceof MlbApiError ||
           err instanceof HighlightlyError
+          || err instanceof PlayerCardNotFoundError
+          || err instanceof AmbiguousPlayerCardNameError
         ? err.message
         : null;
   if (known === null) throw err instanceof Error ? err : new Error(String(err));
@@ -291,6 +296,20 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
         return input.format === "csv"
           ? textResult(statLinesToCsv(views))
           : jsonResult({ statLines: views });
+      }),
+  );
+
+  server.registerTool(
+    "report_player",
+    {
+      description:
+        "Build a read-only multi-window card for exactly one tracked player. Address with internal Bryce id or canonical exact name (not an external provider id). windows is an ordered subset of last10, last30, ytd; last windows count distinct regular-season games, ytd runs from the player sport's calendar start through the last completed host date. Batting and pitching rows stay split by level; no digest is sent and no state is written.",
+      inputSchema: PlayerCardInputShape,
+    },
+    (args) =>
+      guarded(async () => {
+        const input = PlayerCardInputSchema.parse(args);
+        return jsonResult(assemblePlayerCard(deps.db, { ...input, now: deps.now, tz: deps.tz }) as unknown as JsonPayload);
       }),
   );
 

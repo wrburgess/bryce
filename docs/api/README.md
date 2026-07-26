@@ -117,6 +117,24 @@ the `?tags=` selector grammar.
 
 Query stored per-game Stat Lines, newest first. Query params (all optional except as noted):
 
+### `GET /api/reports/player/:id` and `GET /api/reports/player?name=NAME`
+
+Build a read-only multi-window card for one tracked Player. `:id` is the internal
+Bryce `players.id`; the name form is an exact canonical name match (NFC and
+collapsed whitespace, case-sensitive). Do not send both selectors. `windows` is
+an optional comma-separated, ordered subset of `last10`, `last30`, and `ytd`;
+omitting it returns all three.
+
+`last10` and `last30` select distinct regular-season game identities for that
+Player, newest first (`game_date`, `game_number`, then stored row id), then load
+batting, pitching, and fielding companion lines for those games. `ytd` starts at
+that Player sport's cached regular-season start (January 1 if absent) and ends on
+the last completed host date. Each window reports the actual game count and
+inclusive date span, plus batting/pitching aggregates split by game level. The
+route never sends a Digest or writes state. Unknown Players are **404**;
+ambiguous names are **409** with safe internal-id candidates; malformed input is
+**400**.
+
 | Param | Meaning |
 |---|---|
 | `playerId` | Internal Bryce player id (`players.id`, **not** the personId). |

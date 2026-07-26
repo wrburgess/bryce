@@ -37,6 +37,10 @@ export const players = sqliteTable("players", {
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull(),
 }, (t) => [
+  // Player-card exact-name resolution is a read-only, indexed lookup. Names are
+  // canonicalized at every write boundary (ADR 0041), but deliberately are not
+  // unique: two watched players may genuinely have the same name.
+  index("players_full_name_idx").on(t.fullName),
   // Keep identity state meaningful in the database as well as in services.
   check(
     "players_ncaa_identity_state_ck",
@@ -127,6 +131,15 @@ export const statLines = sqliteTable(
   (t) => [
     // ADR 0029: per-game identity — never date-keyed (doubleheaders are two games).
     uniqueIndex("stat_lines_player_source_game_type_uq").on(t.playerId, t.source, t.gameId, t.statType),
+    // The player card scans one player's regular-season games in deterministic
+    // recency order before it joins companion batting/pitching/fielding lines.
+    index("stat_lines_player_regular_game_order_idx").on(
+      t.playerId,
+      t.gameType,
+      t.gameDate,
+      t.gameNumber,
+      t.id,
+    ),
   ],
 );
 
