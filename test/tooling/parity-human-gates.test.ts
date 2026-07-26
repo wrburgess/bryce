@@ -481,4 +481,15 @@ describe("parity check - local ADR link labels", () => {
       expect(runParityCheck(root)).toMatchObject({ status: 0, errors: [] });
     });
   });
+
+  it("scans a symlinked Markdown file", () => {
+    withBundleCopy((root) => {
+      writeMarkdown(root, "docs/adr-link-target.txt", `[ADR 0041](adr/${ADR_0039})\n`);
+      symlinkSync("adr-link-target.txt", join(root, "docs", "adr-link-symlink.md"));
+      expectFailure(
+        runParityCheck(root),
+        "ADR link number mismatch in docs/adr-link-symlink.md: label ADR 0041 targets ADR 0039",
+      );
+    });
+  });
 });

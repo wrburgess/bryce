@@ -530,15 +530,23 @@ class ParityCheck {
       const rel = dir === "" ? child : join(dir, child);
       if (MARKDOWN_SCAN_EXCLUDED_DIRS.has(rel)) continue;
 
-      let stat;
+      let entry;
       try {
-        // lstat, rather than stat, keeps an in-repository directory symlink
-        // from turning this bounded walk into a cycle through its target.
-        stat = lstatSync(this.path(rel));
+        entry = lstatSync(this.path(rel));
       } catch {
         continue;
       }
-      if (stat.isSymbolicLink()) continue;
+      let stat = entry;
+      if (entry.isSymbolicLink()) {
+        try {
+          // Follow file links so shipped Markdown aliases remain covered, but
+          // never recurse into a directory link that could point back upward.
+          stat = statSync(this.path(rel));
+        } catch {
+          continue;
+        }
+        if (stat.isDirectory()) continue;
+      }
       if (stat.isDirectory()) {
         this.markdownFiles(rel, files);
       } else if (stat.isFile() && rel.endsWith(".md")) {
