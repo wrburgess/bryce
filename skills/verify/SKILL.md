@@ -122,27 +122,31 @@ from the drift-report:
 - [x] All quality checks pass (from PROJECT.md → Quality Checks)
 - [x] Self-review complete — summoning the Reviewer for an independent second-model review
 
-### Reviewer Backstop Evidence
-- Reviewed commit: `[git rev-parse HEAD at summon time]`
-- Reviewer: _summon pending_
-- Disposition: _summon pending_
+### Reviewer Evidence
+<!-- reviewer-evidence
+request-marker: reviewer-request-{UUID}
+reviewed-sha: {git rev-parse HEAD at summon time}
+baseline: origin/main
+reviewer: pending
+reviewer-model: pending
+disposition: pending
+artifact-url: pending
+-->
 
 Reviewer summoned; their findings will be answered on this PR.
 ```
 
-Record the **reviewed commit SHA** (`git rev-parse HEAD` at the moment you summon) in that block —
-this is known *before* the summon and is the load-bearing field: it is durable, machine-locatable
-evidence that survives context loss, and the deliver skill (`final`) compares it against `HEAD` to
-prove the PR-gate review covered the *delivered* diff. If a later `autonomous-fold` in `final` changes
-the diff, that mismatch is what triggers `final`'s delta re-summons
-([`PROJECT.md`](../../PROJECT.md) → *Human Gates* → *Rule-suggestion disposition*).
+Create a unique **request marker** and record the **reviewed commit SHA** (`git rev-parse HEAD` at
+the moment you summon) in this block. `baseline` is the actual base passed to the review (normally
+`origin/main`). These are durable, machine-locatable evidence that survives context loss. The deliver
+skill (`final`) compares `reviewed-sha` to `HEAD` and rejects stale evidence rather than assuming a
+prior review still covers the delivered diff.
 
-The **Reviewer** and **Disposition** fields are *not* yet known when this comment is posted (it is
-posted **before** the summon, so the Reviewer reads a PR the AC has already attacked). Leave them
-`_summon pending_`, then **once the failure ladder completes, edit this comment** to record which
-harness actually answered (primary or a fallback) and the disposition (`ok` / fell back to `<harness>`
-/ floor hit) — never guess the reviewer before the summon returns, since a fallback would make a
-pre-filled value wrong and `final` relies on it.
+The remaining fields are not known when the comment is posted. After a successful local CLI summon,
+post its saved body as a **new** PR comment, capture that new comment's URL in `artifact-url`, confirm
+`HEAD` has not changed since `reviewed-sha` was captured, then edit this block with the actual
+`reviewer`, `reviewer-model`, and disposition `ok`. For a fallback, record its actual harness/model
+and disposition. Never claim success from a local file alone.
 
 Sign with the attribution footer from [`PROJECT.md`](../../PROJECT.md) → *Attribution & Model
 Declaration*.
@@ -156,7 +160,10 @@ hardcode a command here. The order matters: the self-review comment is posted **
 Reviewer reads a PR the AC has already attacked and confirms rather than corrects.
 
 If the summon fails, follow the *Reviewer* failure ladder in the Project Config: fall back to the
-declared fallback Reviewer. If the **whole chain is exhausted** and no Reviewer returns a review, the
+declared fallback Reviewer. Record `unreachable` when a fallback cannot create a request or artifact;
+record `timed-out` when it was requested but does not answer by its deadline. An asynchronous response
+is acceptable only when trustworthy `commit_id` evidence matches `reviewed-sha`; otherwise fail closed.
+If the **whole chain is exhausted** and no Reviewer returns a review, the
 [`PROJECT.md`](../../PROJECT.md) *Reviewer degradation floor* applies — it is `stop-and-ask` and is
 **not configurable**: **stop and ask the HC.** A run that cannot obtain an independent review must not
 certify itself, so the lifecycle does not proceed to `final` with an unreviewed PR. The gate is never

@@ -20,10 +20,10 @@
 //     --out FILE          where to write the reviewer's body, raw bytes (required)
 //     --codex-bin PATH    the Codex CLI to summon (default: codex, resolved on PATH)
 //     --timeout SECONDS   wall-clock cap on the review (default: 900)
-//     --ac NAME           the acting harness, so a same-model review can be refused (default: claude)
-//     --ac-model MODEL    the acting model (required when --ac codex)
+//     --ac NAME           the acting harness (required; never inferred)
+//     --ac-model MODEL    the acting model (required; never inferred)
 //     --reviewer-model MODEL
-//                         Codex model to use for this review (required when --ac codex)
+//                         Codex model to use for this review (required; never inferred)
 //     --min-bytes N       substance floor on the review body (default: 200; 0 disables)
 //
 // Output (stdout, ASCII only — rules/scripting.md / ADR 0011), exactly two shapes:
@@ -53,7 +53,6 @@ const MODES = ["plan", "work"];
 
 const DEFAULT_BASE = "main";
 const DEFAULT_CODEX_BIN = "codex";
-const DEFAULT_AC = "claude";
 const DEFAULT_TIMEOUT = 900;
 
 const PREFLIGHT_TIMEOUT = 30;
@@ -155,7 +154,7 @@ interface Options {
   out: string | null;
   codexBin: string;
   timeout: number;
-  ac: string;
+  ac: string | null;
   acModel: string | null;
   reviewerModel: string | null;
   minBytes: number;
@@ -248,13 +247,10 @@ class SummonReviewer {
     if (o.out === null || o.out === "") return "missing required --out FILE";
     if (!(o.timeout > 0)) return "--timeout must be greater than zero";
     if (o.minBytes < 0) return "--min-bytes must be zero or greater";
-    if (String(o.ac).trim().toLowerCase() === CODEX_AC &&
-      (o.acModel === null || o.acModel.trim() === "")) {
-      return "--ac codex requires --ac-model MODEL";
-    }
-    if (String(o.ac).trim().toLowerCase() === CODEX_AC &&
-      (o.reviewerModel === null || o.reviewerModel.trim() === "")) {
-      return "--ac codex requires --reviewer-model MODEL";
+    if (o.ac === null || o.ac.trim() === "") return "missing required --ac NAME";
+    if (o.acModel === null || o.acModel.trim() === "") return "missing required --ac-model MODEL";
+    if (o.reviewerModel === null || o.reviewerModel.trim() === "") {
+      return "missing required --reviewer-model MODEL";
     }
 
     if (o.mode === "plan") {
@@ -509,7 +505,7 @@ function parseArgs(args: string[]): Options {
     out: null,
     codexBin: DEFAULT_CODEX_BIN,
     timeout: DEFAULT_TIMEOUT,
-    ac: DEFAULT_AC,
+    ac: null,
     acModel: null,
     reviewerModel: null,
     minBytes: DEFAULT_MIN_BYTES,
