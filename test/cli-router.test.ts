@@ -171,7 +171,10 @@ describe("CLI router metadata", () => {
       candidate.once("exit", (code) => { clearTimeout(timer); resolve(code); });
     });
     const stopChild = async (candidate: ReturnType<typeof spawn>): Promise<void> => {
-      if (candidate.exitCode !== null) return;
+      // signalCode covers a child already terminated by a signal, whose
+      // exitCode stays null — signalling that process again would burn both
+      // 5s waits below on an exit event that has already fired.
+      if (candidate.exitCode !== null || candidate.signalCode !== null) return;
       candidate.kill("SIGTERM");
       if (await waitForExit(candidate, 5_000) === null) {
         candidate.kill("SIGKILL");
@@ -216,8 +219,15 @@ describe("CLI router metadata", () => {
         });
         if (!ready) {
           expect(output).toContain("EADDRINUSE");
-          await stopChild(candidate);
-          expect(candidate.exitCode).toBe(1);
+          // Let the rejected child exit on its own. src/server.ts registers the
+          // SIGINT/SIGTERM handlers only AFTER a successful bind, so on this
+          // path Node's default terminate-on-signal still applies: a SIGTERM
+          // sent the instant EADDRINUSE reaches stderr races the self-exit and
+          // kills the process by signal (exitCode null, signalCode SIGTERM)
+          // instead of letting it settle at 1. Only escalate if it hangs.
+          const collided = candidate.exitCode ?? await waitForExit(candidate, 10_000);
+          if (collided === null) await stopChild(candidate);
+          expect(collided).toBe(1);
           child = undefined;
           continue;
         }
