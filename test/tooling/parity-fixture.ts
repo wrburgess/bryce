@@ -1,6 +1,6 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Shared fixture copier for the parity self-tests (issue #139). Both tooling tests hand
@@ -97,8 +97,14 @@ export function copyBundle(
  * Make the COPY green so a happy path can assert exit 0. A bundle mid-PR legitimately links to a doc
  * a later commit adds, and a link that has not landed yet is not what these self-tests are about.
  * Self-healing: once the target exists, nothing is created.
+ *
+ * Stub creation is CONTAINED to `root`: the target comes from file content, so a relative link that
+ * climbs out (`../../elsewhere.md`) would otherwise have this helper write into the real filesystem
+ * outside the throwaway copy. An escaping link is skipped, not healed.
  */
 export function healDeadLinks(root: string): void {
+  const contained = resolve(root);
+
   for (const rel of LINK_CHECKED) {
     const file = join(root, rel);
     if (!existsSync(file)) continue;
@@ -111,6 +117,7 @@ export function healDeadLinks(root: string): void {
       if (target === "") continue;
 
       const resolved = resolve(dirname(file), target);
+      if (resolved !== contained && !resolved.startsWith(contained + sep)) continue;
       if (existsSync(resolved)) continue;
 
       mkdirSync(dirname(resolved), { recursive: true });

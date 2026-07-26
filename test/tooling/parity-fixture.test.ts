@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BUNDLE_ENTRIES, copyBundle, withBundleCopy } from "./parity-fixture.js";
+import { BUNDLE_ENTRIES, copyBundle, healDeadLinks, withBundleCopy } from "./parity-fixture.js";
 
 // Regression cover for issue #139: the fixture copier used to reject sources by SUBSTRING
 // (`source.includes(".claude/worktrees")`), which matches the copy root itself whenever the checkout
@@ -92,6 +92,25 @@ describe("parity fixture copier", () => {
       expect(() => copyBundle(source, dest, ["PROJECT.md", "skills"]))
         .toThrow(expect.objectContaining({ code: "ENOENT" }));
     });
+  });
+
+  // healDeadLinks writes paths derived from FILE CONTENT, so an escaping relative link would have it
+  // create files outside the throwaway copy — in the real filesystem — where nothing ever cleans them
+  // up. The stub must land only for a link that stays inside the copy.
+  it("heals a link inside the copy but never writes outside it", () => {
+    const scratch = mkdtempSync(join(tmpdir(), "parity-fixture-heal-"));
+    try {
+      const root = join(scratch, "bundle");
+      mkdirSync(root, { recursive: true });
+      writeFileSync(join(root, "PROJECT.md"), "[inside](docs/added-later.md)\n[escape](../escaped.md)\n");
+
+      healDeadLinks(root);
+
+      expect(existsSync(join(root, "docs", "added-later.md"))).toBe(true);
+      expect(existsSync(join(scratch, "escaped.md"))).toBe(false);
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   });
 
   // The acceptance criterion itself, against the real repository: red from a worktree before the fix,
