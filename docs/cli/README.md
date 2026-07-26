@@ -157,7 +157,7 @@ Takes a **Snapshot** — a consistent, whole-database point-in-time copy — int
 malformed invocation fails loud. Output is two `key=value` lines:
 
 ```
-snapshot created name=sk-20260722T030000Z-000.db dir=backups
+snapshot created name=bryce-20260722T030000Z-000.db dir=backups
 retention keepLast=10 kept=10 deleted=1
 ```
 
@@ -169,7 +169,7 @@ Snapshot files are owner-only (`0600`). Schedule it nightly with launchd — see
 ## `db:restore` — swap a Snapshot into place
 
 ```sh
-sk db restore --from backups/sk-20260722T030000Z-000.db
+sk db restore --from backups/bryce-20260722T030000Z-000.db
 ```
 
 **Restore** is the destructive recovery op: it validates the candidate Snapshot (integrity check,

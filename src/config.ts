@@ -32,7 +32,9 @@ const EnvSchema = z
     MAILER_PROVIDER: z.enum(["postmark", "smtp", "console"]).default("postmark"),
     POSTMARK_SERVER_TOKEN: z.string().optional(),
     SMTP_HOST: z.string().optional(),
-    SMTP_PORT: z.coerce.number().int().positive().default(465),
+    // Node's socket APIs accept only the unsigned 16-bit port range. Keep this
+    // at the config boundary so a mailer cannot fail only after startup.
+    SMTP_PORT: z.coerce.number().int().min(1).max(65_535).default(465),
     SMTP_USER: z.string().optional(),
     SMTP_PASS: z.string().optional(),
     DIGEST_TO: z.string().optional(),
@@ -40,7 +42,9 @@ const EnvSchema = z
     MLB_API_DELAY_MS: z.coerce.number().int().nonnegative().default(500),
     /** RapidAPI credential for Highlightly's college-baseball JSON API. */
     HIGHLIGHTLY_API_KEY: z.string().optional(),
-    SERVER_PORT: z.coerce.number().int().positive().default(3000),
+    // Node rejects ports above 65535 synchronously. Validate before startup so
+    // a bad environment never gets as far as opening the database.
+    SERVER_PORT: z.coerce.number().int().min(1).max(65_535).default(3000),
     /** Bearer token guarding /api and /mcp; whitespace-only is treated as absent. */
     API_TOKEN: z.string().optional(),
   })

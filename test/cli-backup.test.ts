@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { players } from "../src/db/schema.js";
+import { openReadonlyDb } from "../src/db/readonly.js";
 import { createSnapshot, listSnapshots } from "../src/backup/snapshot.js";
 import { MAX_BACKUP_BYTES, parsePlayerListBackup } from "../src/backup/player-list.js";
 import { runBackup } from "../src/cli/backup.js";
@@ -223,15 +224,19 @@ describe("CLI logic in-process", () => {
 describe("CLI real subprocess", () => {
   const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
   const tsxBin = join(repoRoot, "node_modules", ".bin", "tsx");
+  const offlineFetch = join(repoRoot, "test", "helpers", "offline-fetch.mjs");
   let work: TempDir;
   let dbPath: string;
   let backupDir: string;
 
   const cliEnv = (): NodeJS.ProcessEnv => ({
-    ...process.env,
+    PATH: process.env.PATH,
+    SystemRoot: process.env.SystemRoot,
     MAILER_PROVIDER: "console",
     DATABASE_PATH: dbPath,
     BACKUP_DIR: backupDir,
+    BRYCE_TZ: "America/Chicago",
+    NODE_OPTIONS: `--import=${offlineFetch}`,
   });
 
   const runCli = (script: string, args: string[]) =>
@@ -258,6 +263,39 @@ describe("CLI real subprocess", () => {
     expect(readdirSync(backupDir).some((n) => /^bryce-.*\.db$/.test(n))).toBe(true);
   }, 30_000);
 
+  it("runs migrate, refresh, and digest through their real safe entrypoints", () => {
+    const migrate = runCli("migrate.ts", []);
+    expect(migrate.status).toBe(0);
+    expect(`${migrate.stdout}`).toContain(`migrations applied path=${dbPath}`);
+    expect(existsSync(dbPath)).toBe(true);
+    let opened = openReadonlyDb(dbPath);
+    try {
+      expect(opened.sqlite.prepare("select count(*) as count from __drizzle_migrations").get()).toMatchObject({ count: expect.any(Number) });
+      expect((opened.sqlite.prepare("select count(*) as count from __drizzle_migrations").get() as { count: number }).count).toBeGreaterThan(0);
+    } finally { opened.close(); }
+
+    // The fresh migrated database has no active players, and the child fixture
+    // makes any unexpected calendar fetch fail locally rather than egress.
+    const refresh = runCli("refresh.ts", []);
+    expect(refresh.status).toBe(0);
+    expect(`${refresh.stdout}`).toMatch(/refresh done status=ok players=0/);
+    expect(`${refresh.stderr}`).toContain("offline subprocess fixture forbids fetch");
+    opened = openReadonlyDb(dbPath);
+    try {
+      expect(opened.sqlite.prepare("select status, players_total from refresh_runs order by id desc limit 1").get()).toEqual({ status: "ok", players_total: 0 });
+    } finally { opened.close(); }
+
+    // Console mail is explicit in cliEnv, so this executes the scheduled
+    // digest presenter without a real recipient or delivery provider.
+    const digest = runCli("digest.ts", []);
+    expect(digest.status).toBe(0);
+    expect(`${digest.stdout}`).toMatch(/digest kind=(digest|heartbeat) action=sent/);
+    opened = openReadonlyDb(dbPath);
+    try {
+      expect(opened.sqlite.prepare("select status, kind from digest_deliveries order by id desc limit 1").get()).toMatchObject({ status: "sent" });
+    } finally { opened.close(); }
+  }, 30_000);
+
   it("db:restore swaps a snapshot the backup just wrote", () => {
     const backup = runCli("backup.ts", []);
     expect(backup.status).toBe(0);
@@ -266,6 +304,54 @@ describe("CLI real subprocess", () => {
     const restore = runCli("restore.ts", ["--from", join(backupDir, snapshot as string)]);
     expect(restore.status).toBe(0);
     expect(`${restore.stdout}`).toMatch(/^restored from=bryce-/m);
+  }, 30_000);
+
+  it("performs a disposable restore drill and refuses a corrupt candidate without changing its target", () => {
+    const sourcePath = join(work.path, "source.db");
+    const sourceBackups = join(work.path, "source-backups");
+    const targetPath = join(work.path, "target.db");
+    const targetBackups = join(work.path, "target-backups");
+    const sourceSeed = join(work.path, "source-sentinel.json");
+    const targetSeed = join(work.path, "target-sentinel.json");
+    writeFileSync(sourceSeed, JSON.stringify(makeBackupEnvelope([makeBackupEntry({ externalId: 424242, fullName: "Snapshot Sentinel" })])));
+    writeFileSync(targetSeed, JSON.stringify(makeBackupEnvelope([makeBackupEntry({ externalId: 525252, fullName: "Pre-restore Sentinel" })])));
+    const runAt = (path: string, backups: string, script: string, args: string[] = []) =>
+      spawnSync(tsxBin, [join(repoRoot, "src", "cli", script), ...args], {
+        encoding: "utf8",
+        cwd: work.path,
+        env: { ...cliEnv(), DATABASE_PATH: path, BACKUP_DIR: backups },
+      });
+
+    expect(runAt(sourcePath, sourceBackups, "players-restore.ts", ["--in", sourceSeed]).status).toBe(0);
+    expect(runAt(sourcePath, sourceBackups, "backup.ts").status).toBe(0);
+    const snapshot = readdirSync(sourceBackups).find((name) => /^bryce-.*\.db$/.test(name));
+    expect(snapshot).toBeDefined();
+
+    // A non-empty target proves restore does a safety Snapshot before its swap.
+    expect(runAt(targetPath, targetBackups, "players-restore.ts", ["--in", targetSeed]).status).toBe(0);
+    const restored = runAt(targetPath, targetBackups, "restore.ts", ["--from", join(sourceBackups, snapshot!)]);
+    expect(restored.status).toBe(0);
+    expect(`${restored.stdout}`).toMatch(/^restored from=bryce-.* safetySnapshot=bryce-/);
+    const opened = openReadonlyDb(targetPath);
+    try {
+      expect(opened.sqlite.pragma("integrity_check", { simple: true })).toBe("ok");
+      expect(opened.sqlite.prepare("select full_name from players where full_name = ?").get("Snapshot Sentinel")).toBeDefined();
+      expect(opened.sqlite.prepare("select full_name from players where full_name = ?").get("Pre-restore Sentinel")).toBeUndefined();
+    } finally { opened.close(); }
+    const safetySnapshot = `${restored.stdout}`.match(/safetySnapshot=(bryce-[^\s]+\.db)/)?.[1];
+    expect(safetySnapshot).toBeDefined();
+    const safety = openReadonlyDb(join(targetBackups, safetySnapshot!));
+    try { expect(safety.sqlite.prepare("select full_name from players where full_name = ?").get("Pre-restore Sentinel")).toBeDefined(); } finally { safety.close(); }
+
+    const corrupt = join(work.path, "corrupt.db");
+    writeFileSync(corrupt, "not a sqlite snapshot");
+    const rejected = runAt(targetPath, targetBackups, "restore.ts", ["--from", corrupt]);
+    expect(rejected.status).not.toBe(0);
+    const unchanged = openReadonlyDb(targetPath);
+    try {
+      expect(unchanged.sqlite.prepare("select full_name from players where full_name = ?").get("Snapshot Sentinel")).toBeDefined();
+      expect(unchanged.sqlite.prepare("select full_name from players where full_name = ?").get("Pre-restore Sentinel")).toBeUndefined();
+    } finally { unchanged.close(); }
   }, 30_000);
 
   it("db:restore fails loud (no stack trace) on a missing --from", () => {

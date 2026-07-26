@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { digestDeliveries } from "../src/db/schema.js";
-import { createApp, createShutdown } from "../src/server.js";
+import { closeFailedBind, createApp, createBoundListener, createShutdown } from "../src/server.js";
 import { vi } from "vitest";
 
 describe("server shutdown", () => {
@@ -20,6 +20,39 @@ describe("server shutdown", () => {
     closeCallback?.();
     await vi.waitFor(() => expect(release).toHaveBeenCalledTimes(1));
     expect(finish).toHaveBeenCalledWith(0);
+  });
+});
+
+describe("failed server bind cleanup", () => {
+  it("closes readonly then writable and releases the lock last", () => {
+    const calls: string[] = [];
+    closeFailedBind(
+      { close: () => { calls.push("readonly"); return undefined as never; } },
+      { close: () => { calls.push("writable"); } },
+      () => { calls.push("lock"); },
+    );
+    expect(calls).toEqual(["readonly", "writable", "lock"]);
+  });
+
+  it("still closes writable and releases the lock when readonly close throws", () => {
+    const calls: string[] = [];
+    expect(() => closeFailedBind(
+      { close: () => { calls.push("readonly"); throw new Error("readonly"); } },
+      { close: () => { calls.push("writable"); } },
+      () => { calls.push("lock"); },
+    )).toThrow("readonly");
+    expect(calls).toEqual(["readonly", "writable", "lock"]);
+  });
+
+  it("closes both handles before releasing the lock when listener creation throws synchronously", async () => {
+    const calls: string[] = [];
+    await expect(createBoundListener(
+      () => { throw new RangeError("port must be <= 65535"); },
+      { close: () => { calls.push("readonly"); return undefined as never; } },
+      { close: () => { calls.push("writable"); } },
+      () => { calls.push("lock"); },
+    )).rejects.toThrow("port must be <= 65535");
+    expect(calls).toEqual(["readonly", "writable", "lock"]);
   });
 });
 import {

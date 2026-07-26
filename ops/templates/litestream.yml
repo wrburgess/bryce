@@ -1,0 +1,7 @@
+dbs:
+  - path: BRYCE_DATA_DIR/bryce.db
+    replicas:
+      - type: s3
+        bucket: R2_BUCKET
+        path: bryce.db
+        endpoint: https://R2_ENDPOINT
