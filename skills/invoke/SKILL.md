@@ -9,7 +9,7 @@ Execute the approved implementation plan for the tracked issue named in the invo
 **Stage 3 (Implement)** of the [development lifecycle](../../docs/standards/development-lifecycle.md).
 
 Read host-specific values — the **quality-check commands** from [`PROJECT.md`](../../PROJECT.md) →
-*Quality Checks*, the branch/PR/issue-linking policy from *Branch & PR Policy*, the attribution/model
+*Quality Checks*, the branch/PR/issue-linking policy from *Branch & PR Policy*, the attribution format and identity email
 from *Attribution & Model Declaration*, and the lifecycle host / artifact map from *Lifecycle Host*.
 Never hardcode a stack's commands, branch names, or platform verbs here.
 
@@ -84,7 +84,7 @@ change with no code to lint) — checks are **not applicable, not skipped**; sta
    residue (if something seems untestable, research the stack before claiming it); all checks green.
 6. **Commit** — after reconciling the reported git state (see below), commit exactly the reported
    files with a detailed message + the `Co-Authored-By` trailer from [`PROJECT.md`](../../PROJECT.md)
-   → *Attribution & Model Declaration*.
+   → *Attribution & Model Declaration*, with the runtime-actual model or literal `unknown`.
 7. **Push and open the PR** via the lifecycle host ([`PROJECT.md`](../../PROJECT.md) → *Lifecycle
    Host*). Link the issue per *Branch & PR Policy*: `Closes #N` for a leaf issue; `Part of #N` with
    **no** closing keyword (even negated) for an umbrella/epic sub-PR — see

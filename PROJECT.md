@@ -42,27 +42,28 @@ are **not applicable, not skipped**, so rigor is unchanged.
 
 ## Attribution & Model Declaration
 
-Single source of truth for agent attribution ([ADR 0007](docs/adr/0007-attribution-includes-model-version-for-audits.md)).
-Bump the model here — in one place — when the host switches models. Skills sign with the
-**runtime-actual** model when determinable, reconciling against these declared defaults and recording
-the actual if they differ. Use human-readable names, never API ids.
+Identity-email mapping for agent attribution ([ADR 0007](docs/adr/0007-attribution-includes-model-version-for-audits.md),
+[ADR 0049](docs/adr/0049-runtime-actual-attribution-supersedes-mutable-model-defaults.md)). Skills sign
+with the human-readable **runtime-actual** model, never an API id. If it cannot be determined, record
+the literal `unknown`; never invent or fall back to a configured model.
 
-| Agent (harness) | Declared model | Identity email |
-|-----------------|----------------|----------------|
-| Claude Code | `Claude Opus 4.8` | `noreply@anthropic.com` |
-| Codex | `GPT-5.6` | `<host sets>` |
-| Copilot | `model varies (GPT / Claude / Gemini)` | `<host sets>` |
-| Antigravity | `Gemini Flash (host sets model)` | `<host sets>` |
-| Grok Build | `Grok (host sets model)` | `<host sets>` |
+| Agent (harness) | Identity email |
+|-----------------|----------------|
+| Claude Code | `noreply@anthropic.com` |
+| Codex | `<host sets>` |
+| Copilot | `<host sets>` |
+| Antigravity | `<host sets>` |
+| Grok Build | `<host sets>` |
 
-- **Commit trailer:** `Co-Authored-By: <Tool Model> <email>` — e.g.
-  `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`.
-- **PR / review / comment footer:** `— <Tool> (<Model>)` — e.g. `— Claude Code (Opus 4.8)`.
-- Attribution shows **per-agent identity** so provenance reflects which agent did the work. The
-  *Agent* column names the **harness** (Claude Code · Codex · Copilot · Antigravity · Grok Build); the *Declared
-  model* column names the **model** it runs — never the harness — per the naming convention in
-  [ADR 0024](docs/adr/0024-harness-model-naming-convention.md). Copilot's backing model is
-  variable/unknown, so its declared model reads `model varies (GPT / Claude / Gemini)`.
+- **Commit trailer:** `Co-Authored-By: HARNESS MODEL <EMAIL>` — e.g.
+  `Co-Authored-By: Claude Code Opus 4.8 <noreply@anthropic.com>`; an unavailable model is
+  `Co-Authored-By: Claude Code unknown <noreply@anthropic.com>`.
+- **PR / review / comment footer:** `— HARNESS (MODEL)` — e.g. `— Claude Code (Opus 4.8)` or
+  `— Claude Code (unknown)`.
+- Attribution shows **per-agent identity** so provenance reflects which harness did the work. The
+  table maps each **harness** (Claude Code · Codex · Copilot · Antigravity · Grok Build) to its identity
+  email; the model comes only from the runtime artifact, per the naming convention in
+  [ADR 0024](docs/adr/0024-harness-model-naming-convention.md).
 
 ## Branch & PR Policy
 
@@ -124,8 +125,8 @@ npx tsx scripts/summon-reviewer.ts --mode work --base BRANCH --out OUT_FILE --ac
     `BRANCH` — the base to review against (default `main`).
   - `AC_NAME` / `AC_MODEL` — the **acting harness and runtime-actual model** (for example,
     `codex` / `gpt-5.6`). `REVIEWER_MODEL` is the model the Codex CLI must use (normally
-    `gpt-5.6-terra`). **Always pass all three.** The script refuses only when a Codex AC names the
-    same model as its reviewer; same harness plus a distinct model is an independent review.
+    `gpt-5.6-terra`). **Always pass all three.** The script refuses unknown or matching models for
+    every AC harness; same harness plus known, distinct models is an independent review.
   - `--min-bytes N` (default 200) sets the substance floor below which stdout is not a review;
     `--timeout SECONDS` (default 900) caps the wall clock. Neither is normally passed.
 
@@ -151,7 +152,7 @@ npx tsx scripts/summon-reviewer.ts --mode work --base BRANCH --out OUT_FILE --ac
   selected model. For a plan, each runner must return a critique directly (a requested PR reviewer is
   not a valid plan fallback); for work, it may post or return a review. Record every failed rung and
   the harness/model that answered. Only after all available rungs fail does the degradation floor
-  apply. Copilot's declared model remains `model varies (GPT / Claude / Gemini)`.
+  apply. The invocation supplies the actual selected CLI model; no attribution table provides it.
 - **Reviewer degradation floor:** `stop-and-ask` — what happens when the whole Reviewer chain is
   exhausted. **This value is not configurable**: `stop-and-ask` is its only allowed value and the
   parity check hard-fails any other, on the same footing as the merge gate. A run that cannot obtain

@@ -30,18 +30,19 @@ keeps every Adapter resolving here.
 ## Project Config
 
 Host-specific values live in **one** place — [`PROJECT.md`](PROJECT.md) — so these instructions stay
-generic. Read it for: the quality-check commands, the attribution format and per-agent **model
-declaration**, the branch/PR policy, the review-severity framework, and the lifecycle host. Never
+generic. Read it for: the quality-check commands, the attribution format and per-agent identity-email
+mapping, the branch/PR policy, the review-severity framework, and the lifecycle host. Never
 hardcode any of those here; read them from `PROJECT.md`.
 
 ## Attribution
 
-Every agent signs with **both its tool and model version**, from the single declaration in
+Every agent signs with its **harness and runtime-actual model**, using the identity-email mapping in
 [`PROJECT.md`](PROJECT.md) → *Attribution & Model Declaration*
-([ADR 0007](docs/adr/0007-attribution-includes-model-version-for-audits.md)). Sign with your
-**runtime-actual** model (human-readable, e.g. `Claude Opus 4.8`, never an API id). Commits use a
-`Co-Authored-By: <Tool Model> <email>` trailer; PRs/reviews/comments use a footer, e.g.
-`— Claude Code (Opus 4.8)`.
+([ADR 0007](docs/adr/0007-attribution-includes-model-version-for-audits.md),
+[ADR 0049](docs/adr/0049-runtime-actual-attribution-supersedes-mutable-model-defaults.md)). Use a
+human-readable model (e.g. `Opus 4.8`, never an API id); if it cannot be determined, record literal
+`unknown`, never a prediction. Commits use `Co-Authored-By: HARNESS MODEL <EMAIL>`; PRs, reviews, and
+comments use `— HARNESS (MODEL)`.
 
 ## Branch & PR policy
 

@@ -8,7 +8,7 @@ description: Stage 1 of the development lifecycle. Research a tracked issue and 
 Review the tracked issue named in the invocation and prepare an assessment for the Human Contributor
 (HC). This is **Stage 1 (Assess)** of the [development lifecycle](../../docs/standards/development-lifecycle.md).
 
-Read host-specific values — the lifecycle host and its artifact map, the attribution/model, the review
+Read host-specific values — the lifecycle host and its artifact map, the attribution format and identity email, the review
 severities, the quality-check commands — from [`PROJECT.md`](../../PROJECT.md). Never hardcode them
 here. Name the lifecycle *verb* ("read the issue", "post the assessment to the issue"); the concrete
 mechanism (which platform, which command) is set in `PROJECT.md` → *Lifecycle Host* (GitHub is the
@@ -132,7 +132,8 @@ redirect at any time.
 ```
 
 Sign the comment with the attribution footer from [`PROJECT.md`](../../PROJECT.md) → *Attribution &
-Model Declaration* (e.g. `— Claude Code (Opus 4.8)`), using your runtime-actual model.
+Model Declaration* (e.g. `— Claude Code (Opus 4.8)`), using your runtime-actual model or literal
+`unknown` when it cannot be determined.
 
 **Terminal artifact:** the assessment posted on the issue.
 

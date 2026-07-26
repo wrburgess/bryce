@@ -37,7 +37,7 @@ The tool that carries the Config Bundle and runs the agent loop — **Claude Cod
 _Avoid_: naming a harness by its model ("Gemini" for Antigravity)
 
 **Model**:
-The LLM a Harness runs, and the thing attribution declares — **Opus** / **Fable** (Claude Code), **GPT** (Codex), **Gemini** / **Gemini Flash** (Antigravity), **Grok** (Grok Build); Copilot's varies. The second axis alongside Harness; the *Declared model* column of Project Config names this, never the harness.
+The LLM a Harness runs, and the runtime-actual value attribution records — **Opus** / **Fable** (Claude Code), **GPT** (Codex), **Gemini** / **Gemini Flash** (Antigravity), **Grok** (Grok Build); Copilot's varies. The second axis alongside Harness; when it cannot be determined, an artifact records literal `unknown`, never a Project Config prediction.
 _Avoid_: naming a model by its harness ("Codex" for GPT); API ids (use human-readable names)
 
 **Skill**:

@@ -9,7 +9,7 @@ A Skill is authored **once** as a canonical body at `skills/<name>/SKILL.md` and
 
 ## Patterns
 
-- **Read host values from `PROJECT.md`.** Quality-check commands, attribution/model, branch policy, review severities, and the lifecycle host all live in the Project Config. A skill body names the lifecycle *verb* ("post the assessment to the issue"), not a platform command.
+- **Read host values from `PROJECT.md`.** Quality-check commands, attribution format and identity-email mapping, branch policy, review severities, and the lifecycle host all live in the Project Config. Skills record the human-readable runtime-actual model, or literal `unknown` when unavailable; they never infer a configured model. A skill body names the lifecycle *verb* ("post the assessment to the issue"), not a platform command.
 - **Reference, don't restate.** A skill that composes others (e.g. an orchestrator) points at each phase's canonical body for its procedure; it never copies those steps. The procedure lives in exactly one place so an edit can't leave two copies to drift.
 - **Keep the shim thin.** An Invocation Shim carries no procedure — it points at `skills/<name>/SKILL.md`, the single source of truth. Only tool-specific *execution enhancements* degrade across tools; the procedure and quality gates never do.
 - **Use the portable Skill format.** YAML frontmatter with a `name` and `description`, a markdown body, and optional bundled files — so every configured tool can discover and run it.
