@@ -22,6 +22,7 @@ import {
 import { loadActivePlayers, loadCalendars } from "./refresh.js";
 import type { DigestFreshnessState } from "./refresh-run.js";
 import { digestFreshnessFor } from "./refresh-run.js";
+import type { TagScope } from "../tags/service.js";
 
 export interface DigestDeps {
   db: Db;
@@ -43,6 +44,14 @@ export interface DigestDeps {
   listId?: number;
   /** Validated named-list display name, preserved for the rendered Digest. */
   listName?: string;
+  /**
+   * Scope an ON-DEMAND send to the players matching a tag selector (#140 /
+   * ADR 0050). Routed exactly like `listId` and for the same reason: the slot
+   * key `(kind, date_covered)` has no tag dimension either, so two cohorts sent
+   * on one date would collide on one slot. The scheduler passes no tags, so the
+   * daily 1d slot is unaffected. A tag scope and a list scope intersect.
+   */
+  tagScope?: TagScope;
   /**
    * Operator override of the once-a-day / once-a-week bookkeeping (testing).
    * When force is what let the run proceed, the run is a REPLAY: it sends and
@@ -152,9 +161,11 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   // nothing every day for months. Answering an explicit "give me my season to
   // date" with a liveness heartbeat is not that, it is refusing the question.
   // A named-list send is on-demand by definition (ADR 0046 decision 4): it never
-  // takes the daily slot, whose key has no list dimension. Route any run with a
-  // list — or any non-1d window — to the on-demand path.
-  if (deps.spec !== "1d" || deps.listId !== undefined) {
+  // takes the daily slot, whose key has no list dimension. A TAG-scoped send is
+  // on-demand for the identical reason (#140 / ADR 0050) — the slot key has no
+  // tag dimension, so two cohorts on one date would fight over one slot. Route
+  // any run with a list, a tag scope, or a non-1d window to the on-demand path.
+  if (deps.spec !== "1d" || deps.listId !== undefined || deps.tagScope !== undefined) {
     return runOnDemandReport(deps, warn);
   }
 
@@ -356,6 +367,7 @@ async function runOnDemandReport(
     spec: deps.spec,
     listId: deps.listId,
     listName: deps.listName,
+    tagScope: deps.tagScope,
   });
   reportUnknownFields(assembly, warn);
 

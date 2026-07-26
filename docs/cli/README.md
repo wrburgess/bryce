@@ -47,6 +47,7 @@ state, so re-running a Window always sends the same content.
 |---|---|---|
 | `--window <spec>` / `--window=<spec>` | `1d` | `1d`, `7d`, `14d`, `21d`, `28d`, `35d`, `60d`, `ytd` |
 | `--list <name>` / `--list=<name>` | off (all active) | any existing list name (#70) |
+| `--tags <selector>` / `--tags=<selector>` | off (no cohort scope) | any valid tag selector (#140) |
 | `--force` | off (boolean) | present or absent |
 
 - Both `--window 7d` and `--window=7d` are accepted. An unsupported window (e.g. `30d`) **fails
@@ -67,6 +68,22 @@ state, so re-running a Window always sends the same content.
   ([#70](https://github.com/wrburgess/bryce/issues/70) / [ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)).
   A named-list send is **on-demand only** (it takes no daily slot); an unknown list **fails closed**
   (exit `1`, `error: no list named "…"`, nothing sent).
+- `--tags SELECTOR` scopes the send to a **cohort** — the Players matching every token
+  ([#140](https://github.com/wrburgess/bryce/issues/140) / [ADR 0050](../adr/0050-tag-scoped-cohort-reports.md)).
+  The grammar is the one in [Player Tags](../domain/tags.md#selector-grammar): comma-separated tokens
+  are AND, a bare namespace matches any value in it.
+
+  ```sh
+  sk digest --tags level:dsl                          # the DSL guys
+  sk digest --tags status:scouted -w 28d              # everyone scouted, past 28 days
+  sk digest --tags level:aaa,status:rostered -w ytd   # AAA and on the roster, season to date
+  sk digest --list "Top 30" --tags level:aaa          # in the list AND AAA (they intersect)
+  ```
+
+  Like a named-list send, a tag-scoped send is **on-demand only** — it takes no daily slot and
+  records no delivery row, whatever its window. A cohort matching **no** Players is an empty report
+  (exit `0`); a **malformed** selector **fails closed** (exit `1`, `error: malformed tag token '…'`,
+  nothing sent), so a typo never masquerades as an honest empty cohort.
 
 ## `report player` — a read-only single-player card
 

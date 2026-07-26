@@ -49,6 +49,7 @@ import {
   addManualTag,
   listTags,
   removeManualTag,
+  resolveTagScope,
 } from "../tags/service.js";
 import type { PlayerRef } from "../watchlist/service.js";
 import {
@@ -334,12 +335,26 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     const query = DigestPreviewQueryInputSchema.parse(c.req.query());
     // A `?list=` scopes the preview to that list's active members; an unknown
     // list fails closed (UnknownListError -> 404 via onError).
+    // A `?tags=` scopes the preview to the matching cohort. Shaped HERE rather
+    // than left to onError, for the reason documented on GET /players: a
+    // rejection raised past the first await in this static, middleware-less
+    // route does not reliably reach api.onError, so the ZodError would escape as
+    // an unhandled 500-class throw instead of the 400 a malformed selector owes
+    // the caller. Resolved BEFORE the list lookup so nothing is read first.
+    let tagScope;
+    try {
+      tagScope = query.tags !== undefined ? resolveTagScope(query.tags) : undefined;
+    } catch (err) {
+      if (err instanceof ZodError) return c.json({ error: "invalid-input", issues: err.issues }, 400);
+      throw err;
+    }
     const list = query.list !== undefined ? await resolveListByName(deps.db, query.list) : undefined;
     const assembly = await assembleDigest(deps.db, {
       ...deps,
       spec: query.window,
       listId: list?.id,
       listName: list?.name,
+      tagScope,
     });
     const spec = assembly.window.spec;
     if (query.format === "html") {
@@ -385,6 +400,16 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     const raw = await c.req.text();
     const body = DigestInputSchema.parse(raw.trim().length === 0 ? {} : JSON.parse(raw));
     // A `list` scopes an ON-DEMAND send to that list's members; unknown -> 404.
+    // `tags` scopes an ON-DEMAND send to the matching cohort (#140). Shaped here
+    // for the same dispatch reason as the preview above, and resolved before the
+    // list lookup so a malformed selector sends nothing.
+    let tagScope;
+    try {
+      tagScope = body.tags !== undefined ? resolveTagScope(body.tags) : undefined;
+    } catch (err) {
+      if (err instanceof ZodError) return c.json({ error: "invalid-input", issues: err.issues }, 400);
+      throw err;
+    }
     const list = body.list !== undefined ? await resolveListByName(deps.db, body.list) : undefined;
     const result = await runDigest({
       db: deps.db,
@@ -397,6 +422,7 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
       force: body.force,
       listId: list?.id,
       listName: list?.name,
+      tagScope,
     });
     return c.json(result, result.action === "failed" ? 502 : 200);
   });

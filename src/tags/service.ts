@@ -1,3 +1,4 @@
+import type { SQL } from "drizzle-orm";
 import { and, eq, exists, notExists, sql } from "drizzle-orm";
 import { ZodError } from "zod";
 import type { Db } from "../db/client.js";
@@ -5,6 +6,8 @@ import type { PlayerTagRow } from "../db/schema.js";
 import { playerTags, players, statLines } from "../db/schema.js";
 import { latestStatLineOrder } from "../queries/statLines.js";
 import { deriveTags } from "./derive.js";
+import type { TagToken } from "./selector.js";
+import { formatTagSelector, parseTagSelectorOrError } from "./selector.js";
 
 /**
  * The tag service (Phase A of #29): the one home for tag semantics, mirroring
@@ -32,9 +35,6 @@ export const DERIVED_NAMESPACES: ReadonlySet<string> = new Set(["level", "pos", 
 /** The one manual namespace and its closed value set. */
 export const MANUAL_NAMESPACE = "status";
 export const MANUAL_STATUS_VALUES = ["rostered", "scouted"] as const;
-
-/** The most tokens a selector may carry (a cheap denial-of-service bound). */
-export const MAX_SELECTOR_TOKENS = 16;
 
 /**
  * A non-throwing check: is `(namespace, value)` a valid MANUAL tag (the `status`
@@ -246,87 +246,100 @@ export function listTags(db: TagDb, playerId: number): PlayerTagRow[] {
     .all();
 }
 
-/** A parsed selector token: `ns:value`, or a bare `ns` (value=null → any value). */
-export interface TagToken {
-  namespace: string;
-  value: string | null;
-}
-
 function selectorError(message: string, input: unknown): ZodError {
   return new ZodError([{ code: "custom", path: ["tags"], message, input }]);
 }
 
 /**
- * Parse a comma-separated selector into distinct tokens. Each token is
- * `ns:value` or a bare `ns` (matching the namespace alone, e.g. `prospect`).
- * Whitespace is trimmed, empty segments dropped, duplicates deduped, and the
- * distinct count bounded to {@link MAX_SELECTOR_TOKENS}. A malformed token
- * (`:foo`, `foo:`) or an over-long list throws a ZodError — a boundary
- * validation error that every surface maps to 400 / exit 1.
+ * Re-exported from the dependency-free grammar module so every existing importer
+ * of the tag service keeps working, and there is still exactly ONE grammar. The
+ * split exists so `src/cli/router.ts` can validate a `--tags` value during
+ * preflight without importing service code — see `src/tags/selector.ts`.
+ */
+export type { TagToken } from "./selector.js";
+export {
+  MAX_SELECTOR_LABEL_LENGTH,
+  MAX_SELECTOR_TOKENS,
+  MAX_TAG_SEGMENT_LENGTH,
+  formatTagSelector,
+  validateTagSelector,
+} from "./selector.js";
+
+/**
+ * Parse a comma-separated selector into distinct tokens, throwing the typed
+ * boundary error on a malformed one — the throwing half of the grammar in
+ * `src/tags/selector.ts`, which owns every rule. A ZodError here is what each
+ * surface already maps to 400 / MCP isError / CLI exit 1.
  */
 export function parseTagSelector(expr: string): TagToken[] {
-  const segments = expr
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  const seen = new Set<string>();
-  const tokens: TagToken[] = [];
-  for (const segment of segments) {
-    const colon = segment.indexOf(":");
-    const namespace = colon === -1 ? segment : segment.slice(0, colon);
-    const value = colon === -1 ? null : segment.slice(colon + 1);
-    if (namespace.length === 0 || (value !== null && value.length === 0)) {
-      throw selectorError(`malformed tag token '${segment}'`, expr);
-    }
-    const key = `${namespace}\u0000${value ?? ""}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    tokens.push({ namespace, value });
-  }
-  // A PROVIDED expression that normalizes to zero tokens (only separators or
-  // whitespace, e.g. `,,,` or `  `) is malformed — NOT an absent filter. Left to
-  // fall through, an empty token list would read as "no filter" in
-  // `playerIdsMatchingTags` and return the whole roster, silently bypassing the
-  // validation error. An ABSENT `tags` param never reaches here (callers guard on
-  // undefined), so this only rejects a present-but-empty selector.
-  if (tokens.length === 0) {
-    throw selectorError(`tag selector '${expr}' has no tokens`, expr);
-  }
-  if (tokens.length > MAX_SELECTOR_TOKENS) {
-    throw selectorError(`too many tag tokens (max ${MAX_SELECTOR_TOKENS})`, expr);
-  }
-  return tokens;
+  const parsed = parseTagSelectorOrError(expr);
+  if ("error" in parsed) throw selectorError(parsed.error, expr);
+  return parsed.tokens;
 }
 
 /**
- * Player ids matching ALL tokens (AND semantics), via N correlated EXISTS
- * subqueries — one per distinct token — so a bare `pos` and a specific `pos:ss`
- * can each be satisfied by a DIFFERENT tag row (correct overlap handling). One
- * aggregate query, never a query per player. An empty token list returns every
- * player id.
+ * A resolved tag scope: the parsed tokens that select the cohort, paired with
+ * the normalized label that names it. ONE object rather than two independently
+ * optional fields, so "scoped but unlabeled" and "labeled but unscoped" are
+ * unrepresentable rather than merely undocumented (#140 plan review).
  */
-export function playerIdsMatchingTags(db: TagDb, tokens: TagToken[]): number[] {
-  if (tokens.length === 0) {
-    return db
-      .select({ id: players.id })
-      .from(players)
-      .all()
-      .map((r) => r.id);
-  }
-  const conditions = tokens.map((tok) => {
-    const filters = [eq(playerTags.playerId, players.id), eq(playerTags.namespace, tok.namespace)];
-    if (tok.value !== null) filters.push(eq(playerTags.value, tok.value));
-    return exists(
-      db
-        .select({ one: sql`1` })
-        .from(playerTags)
-        .where(and(...filters)),
-    );
-  });
+export interface TagScope {
+  tokens: TagToken[];
+  label: string;
+}
+
+/**
+ * The surface boundary: parse an operator's selector into a {@link TagScope},
+ * or throw the parser's ZodError (400 / MCP isError / CLI exit 1). Every surface
+ * calls THIS rather than parsing and formatting separately, so the tokens and
+ * the label are always derived from the same validated input.
+ */
+export function resolveTagScope(expr: string): TagScope {
+  const tokens = parseTagSelector(expr);
+  return { tokens, label: formatTagSelector(tokens) };
+}
+
+/**
+ * The tag scope as a single SQL condition correlated on `players.id`: N
+ * correlated EXISTS subqueries ANDed together — one per distinct token — so a
+ * bare `pos` and a specific `pos:ss` can each be satisfied by a DIFFERENT tag row
+ * (correct overlap handling).
+ *
+ * Exported so a caller that is ALREADY selecting from `players` (the digest's
+ * `stat_lines ⨝ players` join, #140) can scope in SQL instead of binding a
+ * materialized id list — `rules/backend.md`: never `IN (...)` an unbounded set,
+ * which trips SQLite's ~999-parameter cap for exactly the large cohorts the
+ * feature exists to serve. An empty token list returns `undefined` (no scope).
+ */
+export function tagScopeCondition(db: TagDb, tokens: readonly TagToken[]): SQL | undefined {
+  if (tokens.length === 0) return undefined;
+  return and(
+    ...tokens.map((tok) => {
+      const filters = [eq(playerTags.playerId, players.id), eq(playerTags.namespace, tok.namespace)];
+      if (tok.value !== null) filters.push(eq(playerTags.value, tok.value));
+      return exists(
+        db
+          .select({ one: sql`1` })
+          .from(playerTags)
+          .where(and(...filters)),
+      );
+    }),
+  );
+}
+
+/**
+ * Player ids matching ALL tokens (AND semantics), over the same condition
+ * {@link tagScopeCondition} builds — ONE implementation, two callers, so the
+ * SQL-scoped selection site and the id-set selection site can never diverge.
+ * One aggregate query, never a query per player. An empty token list returns
+ * every player id.
+ */
+export function playerIdsMatchingTags(db: TagDb, tokens: readonly TagToken[]): number[] {
+  const scope = tagScopeCondition(db, tokens);
   return db
     .select({ id: players.id })
     .from(players)
-    .where(and(...conditions))
+    .where(scope)
     .all()
     .map((r) => r.id);
 }
