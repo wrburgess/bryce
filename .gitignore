@@ -11,8 +11,21 @@ dist/
 *.db-wal
 *.db-shm
 
+# Timestamped database copies (backup + pre-migration), with their -wal/-shm sidecars.
+# The bare *.db rules above miss these: the suffix lands after the extension.
+*.db.bak-*
+*.db.premigrate-*
+
 # Local Snapshots + Player List Backups (recovery artifacts, never committed)
 backups/
+
+# Agent worktrees checked out inside the repo. Without these, `git add -A` stages
+# each one as a gitlink and the commit records a submodule that resolves nowhere.
+.claude/worktrees/
+.codex-worktrees/
+
+# Agent scratch output (plans, review notes) written to the repo root mid-run
+.ship*-plan*.md
 
 # Misc
 *.log
