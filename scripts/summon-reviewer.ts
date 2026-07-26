@@ -46,8 +46,8 @@ import { resolve as resolvePath } from "node:path";
 import { argv, env } from "node:process";
 
 const USAGE =
-  "Usage: npx tsx scripts/summon-reviewer.ts --mode work --out FILE --ac NAME --ac-model MODEL --reviewer-model MODEL [--base BRANCH]\n" +
-  "       npx tsx scripts/summon-reviewer.ts --mode plan --input FILE --out FILE --ac NAME --ac-model MODEL --reviewer-model MODEL\n";
+  "Usage: npx tsx scripts/summon-reviewer.ts --mode work --out FILE --ac claude --ac-model acting-model --reviewer-model reviewer-model [--base BRANCH]\n" +
+  "       npx tsx scripts/summon-reviewer.ts --mode plan --input FILE --out FILE --ac claude --ac-model acting-model --reviewer-model reviewer-model\n";
 
 const MODES = ["plan", "work"];
 
@@ -56,6 +56,19 @@ const DEFAULT_CODEX_BIN = "codex";
 const DEFAULT_TIMEOUT = 900;
 
 const PREFLIGHT_TIMEOUT = 30;
+// These are harnesses, not model families. Keep this list aligned with the declared
+// attribution harnesses. Aliases accept the short names agents use at the command line
+// while preserving one canonical value for policy checks.
+const HARNESS_ALIASES = new Map<string, string>([
+  ["claude", "claude"],
+  ["claude-code", "claude"],
+  ["codex", "codex"],
+  ["copilot", "copilot"],
+  ["antigravity", "antigravity"],
+  ["grok", "grok-build"],
+  ["grok-build", "grok-build"],
+]);
+const KNOWN_HARNESSES = ["claude", "codex", "copilot", "antigravity", "grok-build"];
 const POLL_INTERVAL = 0.025;
 const TERM_GRACE = 2.0;
 const DRAIN_TIMEOUT = 5.0;
@@ -247,8 +260,15 @@ class SummonReviewer {
     if (!(o.timeout > 0)) return "--timeout must be greater than zero";
     if (o.minBytes < 0) return "--min-bytes must be zero or greater";
     if (o.ac === null || o.ac.trim() === "") return "missing required --ac NAME";
+    const normalizedAc = normalizeHarness(o.ac);
+    if (normalizedAc === null) {
+      return `unknown --ac \`${ascii(o.ac)}\` (one of: ${KNOWN_HARNESSES.join(", ")})`;
+    }
+    o.ac = normalizedAc;
     if (o.acModel === null || o.acModel.trim() === "") return "missing required --ac-model MODEL";
-    if (o.reviewerModel === null || o.reviewerModel.trim() === "") return "missing required --reviewer-model MODEL";
+    if (o.reviewerModel === null || o.reviewerModel.trim() === "") {
+      return "missing required --reviewer-model MODEL";
+    }
 
     if (o.mode === "plan") {
       if (o.input === null || o.input === "") return "--mode plan requires --input FILE (the plan text to critique)";
@@ -494,6 +514,11 @@ function parseStrictInt(flag: string, value: string): number {
     throw new UsageError(`invalid argument: ${flag} ${value}`);
   }
   return parseInt(value, 10);
+}
+
+function normalizeHarness(value: string): string | null {
+  const key = value.trim().toLowerCase().replace(/[\s_]+/g, "-");
+  return HARNESS_ALIASES.get(key) ?? null;
 }
 
 function parseArgs(args: string[]): Options {

@@ -126,7 +126,10 @@ npx tsx scripts/summon-reviewer.ts --mode work --base BRANCH --out OUT_FILE --ac
   - `AC_NAME` / `AC_MODEL` — the **acting harness and runtime-actual model** (for example,
     `codex` / `gpt-5.6`). `REVIEWER_MODEL` is the model the Codex CLI must use (normally
     `gpt-5.6-terra`). **Always pass all three.** The script refuses unknown or matching models for
-    every AC harness; same harness plus known, distinct models is an independent review.
+    every AC harness; same harness plus known, distinct models is an independent review. The script
+    never defaults or infers an actor, accepts only the declared harnesses (`claude`, `codex`,
+    `copilot`, `antigravity`, or `grok-build`; `claude-code` is an alias), and normalizes their
+    spelling before checking independence.
   - `--min-bytes N` (default 200) sets the substance floor below which stdout is not a review;
     `--timeout SECONDS` (default 900) caps the wall clock. Neither is normally passed.
 
@@ -135,6 +138,14 @@ npx tsx scripts/summon-reviewer.ts --mode work --base BRANCH --out OUT_FILE --ac
   no lifecycle-host call** — it writes the review body to a file and classifies the outcome; the AC
   posts it. That keeps token handling out of the bundled script and makes every failure mode
   testable offline (`bash scripts/summon_reviewer.test.sh`).
+  - **Reviewer evidence.** A successful CLI summon is only an artifact body, not a PR review by
+    itself. The AC posts that body as a new PR comment, records its resulting comment URL, and verifies
+    that `HEAD` still equals the SHA captured immediately before the summon. The PR must then contain
+    one compact, machine-locatable `Reviewer Evidence` block with: `request-marker`, `reviewed-sha`,
+    `baseline`, `reviewer`, `reviewer-model`, `disposition`, and `artifact-url`. The request marker
+    identifies the particular summon attempt; the baseline is the exact review base (normally
+    `origin/main`, or the prior reviewed SHA for a delta). `final` rejects missing, malformed, or stale
+    evidence rather than treating a local transcript as sufficient provenance.
   - **Reviewer failure ladder.** The summon classifies its outcome as `ok` or one of eight failures —
   `not_found` (no Codex CLI on PATH), `not_authenticated` (`login status` did not confirm a
   session), `exit_nonzero` (the CLI failed), `empty_output` (exit 0 but no review text),
@@ -153,7 +164,10 @@ npx tsx scripts/summon-reviewer.ts --mode work --base BRANCH --out OUT_FILE --ac
   selected model. For a plan, each runner must return a critique directly (a requested PR reviewer is
   not a valid plan fallback); for work, it may post or return a review. Record every failed rung and
   the harness/model that answered. Only after all available rungs fail does the degradation floor
-  apply. The invocation supplies the actual selected CLI model; no attribution table provides it.
+  apply. The invocation supplies the actual selected CLI model; no attribution table provides it. A
+  runner with no request mechanism or artifact is `unreachable`; a request with no response by its
+  declared deadline is `timed-out`. An asynchronous success is usable only with trustworthy
+  `commit_id` evidence for the reviewed SHA; otherwise it fails closed.
 - **Reviewer degradation floor:** `stop-and-ask` — what happens when the whole Reviewer chain is
   exhausted. **This value is not configurable**: `stop-and-ask` is its only allowed value and the
   parity check hard-fails any other, on the same footing as the merge gate. A run that cannot obtain

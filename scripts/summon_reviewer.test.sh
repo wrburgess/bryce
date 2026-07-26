@@ -73,11 +73,14 @@ report() {  # report <name> <0-if-ok> [detail]
 # ASCII-purity assertions are about stdout alone, so they must not be merged).
 run_summon() {  # run_summon <cmd...>
   STDOUT_FILE="$TMP/last.stdout"; STDERR_FILE="$TMP/last.stderr"
-  local args=" $* "
-  if [[ "$args" == *" --ac "* ]]; then
-    "$@" >"$STDOUT_FILE" 2>"$STDERR_FILE"
+  # Most behavior tests are about the summon, not identity parsing. Give those a
+  # fully declared identity while identity-specific tests pass --ac themselves.
+  local has_ac=0 arg
+  for arg in "$@"; do [ "$arg" = "--ac" ] && has_ac=1; done
+  if [ "$has_ac" -eq 0 ]; then
+    "$@" --ac claude --ac-model opus-4.8 --reviewer-model gpt-5.6-terra >"$STDOUT_FILE" 2>"$STDERR_FILE"
   else
-    "$@" --ac claude --ac-model claude-opus --reviewer-model gpt-5.6-terra >"$STDOUT_FILE" 2>"$STDERR_FILE"
+    "$@" >"$STDOUT_FILE" 2>"$STDERR_FILE"
   fi
   RUN_EXIT=$?
   OUT_TEXT="$(cat "$STDOUT_FILE")"
@@ -90,11 +93,12 @@ run_summon() {  # run_summon <cmd...>
 run_summon_bounded() {  # run_summon_bounded <limit-seconds> <cmd...>
   local limit="$1"; shift
   STDOUT_FILE="$TMP/last.stdout"; STDERR_FILE="$TMP/last.stderr"
-  local args=" $* "
-  if [[ "$args" == *" --ac "* ]]; then
-    "$@" >"$STDOUT_FILE" 2>"$STDERR_FILE" &
+  local has_ac=0 arg
+  for arg in "$@"; do [ "$arg" = "--ac" ] && has_ac=1; done
+  if [ "$has_ac" -eq 0 ]; then
+    "$@" --ac claude --ac-model opus-4.8 --reviewer-model gpt-5.6-terra >"$STDOUT_FILE" 2>"$STDERR_FILE" &
   else
-    "$@" --ac claude --ac-model claude-opus --reviewer-model gpt-5.6-terra >"$STDOUT_FILE" 2>"$STDERR_FILE" &
+    "$@" >"$STDOUT_FILE" 2>"$STDERR_FILE" &
   fi
   local pid=$! waited=0
   while kill -0 "$pid" 2>/dev/null; do
@@ -261,13 +265,16 @@ expect_status "Codex AC -> same reviewer model is refused" 1 "FAILED (self_revie
 
 expect_status "Codex AC -> missing acting model is a usage error" 1 "missing required --ac-model MODEL" \
   "$TSX" "$SCRIPT" --mode work --out "$TMP/codex-missing-acting-model.md" --codex-bin "$FAKE_BIN" --ac codex
-
-expect_status "every AC -> missing acting harness is a usage error" 1 "missing required --ac NAME" \
-  "$TSX" "$SCRIPT" --mode work --out "$TMP/missing-ac.md" --codex-bin "$FAKE_BIN" \
-  --ac "" --ac-model claude-opus --reviewer-model gpt-5.6-terra
-
-expect_status "every AC -> missing reviewer model is a usage error" 1 "missing required --reviewer-model MODEL" \
-  "$TSX" "$SCRIPT" --mode work --out "$TMP/missing-reviewer-model.md" --codex-bin "$FAKE_BIN" --ac claude --ac-model claude-opus
+expect_status "missing acting harness is a usage error" 1 "missing required --ac NAME" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/missing-ac.md" --codex-bin "$FAKE_BIN" --ac ""
+expect_status "missing reviewer model is a usage error" 1 "missing required --reviewer-model MODEL" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/missing-reviewer-model.md" --codex-bin "$FAKE_BIN" --ac claude --ac-model opus-4.8
+expect_status "unknown acting harness is a usage error" 1 "unknown --ac \`unknown\`" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/unknown-ac.md" --codex-bin "$FAKE_BIN" \
+  --ac unknown --ac-model model --reviewer-model gpt-5.6-terra
+expect_status "Codex acting harness normalizes whitespace and case before self-review check" 1 "FAILED (self_review)" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/codex-normalized.md" --codex-bin "$FAKE_BIN" \
+  --ac "  CoDeX  " --ac-model gpt-5.6 --reviewer-model GPT-5.6
 
 expect_status "every AC -> unknown acting model is refused before spawn" 1 "FAILED (self_review)" \
   "$TSX" "$SCRIPT" --mode work --out "$TMP/unknown-acting.md" --codex-bin /nonexistent/codex \
@@ -516,7 +523,7 @@ expect_status "missing --mode -> usage error" 1 "usage error" \
   "$TSX" "$SCRIPT" --out "$TMP/nomode.md" --codex-bin "$FAKE_BIN"
 expect_status "--mode bogus -> usage error" 1 "usage error" \
   "$TSX" "$SCRIPT" --mode bogus --out "$TMP/bogus.md" --codex-bin "$FAKE_BIN"
-expect_status "usage synopsis includes mandatory reviewer identity flags" 1 "--reviewer-model MODEL" \
+expect_status "usage synopsis includes mandatory reviewer identity flags" 1 "--ac claude --ac-model acting-model --reviewer-model reviewer-model" \
   "$TSX" "$SCRIPT" --mode bogus --out "$TMP/bogus-models.md" --codex-bin "$FAKE_BIN"
 expect_status "missing --out -> usage error" 1 "usage error" \
   "$TSX" "$SCRIPT" --mode work --codex-bin "$FAKE_BIN"

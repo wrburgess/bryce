@@ -48,16 +48,30 @@ skipped: stop and recheck.
 3. **Resolve remaining Reviewer findings** by the [`PROJECT.md`](../../PROJECT.md) → *Review Severity
    Framework*: **all Critical and High findings must be resolved before the SOW.** Don't argue a
    finding unless it is factually incorrect — if the Reviewer flagged it, treat it as a real gap.
-4. **Confirm the faithfulness backstop covers the CURRENT diff.** Read the reviewed commit SHA that
-   [`verify`](../../skills/verify/SKILL.md) recorded on the PR, and compare it to `HEAD`:
-   - **Equal** → the PR-gate review stands; record the reviewer identity, disposition, and reviewed SHA
-     in the SOW's *Reviewer Backstop* line and continue.
+4. **Confirm the faithfulness backstop covers the CURRENT diff.** Fetch or save the exact markdown
+   body of the PR comment containing the `Reviewer Evidence` block as `REVIEWER_EVIDENCE_FILE`, then
+   run this required, fail-closed validation before preparing the SOW (use the actual repository and
+   PR number):
+   ```sh
+   npx tsx scripts/reviewer-evidence.ts --evidence REVIEWER_EVIDENCE_FILE --head "$(git rev-parse HEAD)" --repo OWNER/REPO --pr PR_NUMBER
+   ```
+   A non-zero result rejects the evidence and **blocks the SOW**. The validator requires all seven
+   non-pending fields — `request-marker`, `reviewed-sha`, `baseline`, `reviewer`, `reviewer-model`,
+   `disposition`, and `artifact-url` — and requires `artifact-url` to be the HTTPS GitHub PR-comment
+   URL for that exact repository and PR. Also confirm the URL resolves to the distinct Reviewer's
+   posted body, the marker identifies that request, and `disposition` is `ok`. A local output file, a
+   request without an artifact, an unverifiable asynchronous result, or any malformed evidence is no
+   evidence: stop and ask the HC.
+   - **Equal** (`reviewed-sha` = `HEAD`) → the PR-gate review stands; record the reviewer identity,
+     model, disposition, artifact URL, and reviewed SHA in the SOW's *Reviewer Backstop* line and
+     continue.
    - **Different** (Step 1 folded something after `verify`) → **re-summon the Reviewer on the delta**
      (`--mode work --base <reviewed_sha>`, per [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* →
      *Reviewer*) so only the folded diff is re-reviewed. If that re-review makes you fold a new must-fix
      fix, that fold moves `HEAD` again — so **repeat this step** (re-anchor: reviewed SHA ← the newly
-     reviewed commit, compare to `HEAD`) until `HEAD` equals the last reviewed SHA. No commit reaches
-     the SOW that some Reviewer pass did not see.
+     reviewed commit, compare to `HEAD`) until `HEAD` equals the last reviewed SHA. Each re-summon
+     replaces the evidence block with a new request marker, its delta baseline, and the new artifact
+     URL. No commit reaches the SOW that some Reviewer pass did not see.
    - **The chain is exhausted** (no Reviewer answers, through the whole fallback order) → the
      [`PROJECT.md`](../../PROJECT.md) *Reviewer degradation floor* applies: it is `stop-and-ask` and is
      **not configurable**, so an unreviewed PR does **not** reach a SOW. Stop and ask the HC instead of
@@ -90,7 +104,7 @@ skipped: stop and recheck.
    - Results: [each check from PROJECT.md → Quality Checks and its outcome]
 
    ### Reviewer Backstop
-   - [Reviewer identity · disposition · reviewed SHA · HEAD — confirming the review covered the delivered diff, or the floor was hit]
+   - [Reviewer identity/model · disposition · request marker · baseline · artifact URL · reviewed SHA · HEAD — confirming the review covered the delivered diff]
 
    ### Reviewer Findings
    | Finding | Severity | Resolution |
