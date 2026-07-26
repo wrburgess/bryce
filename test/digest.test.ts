@@ -95,7 +95,7 @@ describe("runDigest", () => {
     // the numbers are the WINDOW's — 3-for-9 with 6 total bases across two
     // games, derived from summed counters rather than averaged per game.
     expect(cells(mail?.text ?? "", "M Acosta")).toEqual(
-      ["M", "Acosta", "AAA", "2", "1.000", "9", "3", "0", "2", "0", "0", "1", "3", "0", "0", "0", "0"],
+      ["M", "Acosta", "AAA", "2", "9", "1.000", "3", "0", "2", "0", "0", "1", "3", "0", "0", "0", "0"],
     );
     expect(mail?.html).toContain("<td");
     expect(mail?.html).toContain("Acosta, M");
@@ -526,7 +526,7 @@ describe("runDigest", () => {
     clock.set("2026-07-21T17:00:00Z");
     const wide = await runDigest({ ...deps(), spec: "7d" });
     expect(wide.statLineCount).toBe(2);
-    expect(cells(mailer.sent[2]?.text ?? "", "M Acosta")[5]).toBe("8"); // PA 4 + 4
+    expect(cells(mailer.sent[2]?.text ?? "", "M Acosta")[4]).toBe("8"); // PA 4 + 4
   });
 
   it("orders rows by the level ladder and labels each with the level the GAME was played at", async () => {
@@ -660,7 +660,7 @@ describe("runDigest", () => {
     expect(week.statLineCount).toBe(2);
     const weekText = mailer.sent[1]?.text ?? "";
     expect(weekText.split("\n").filter((l) => l.startsWith("Acosta, M"))).toHaveLength(1);
-    expect(cells(weekText, "M Acosta").slice(2, 6)).toEqual(["AAA", "2", "1.000", "7"]);
+    expect(cells(weekText, "M Acosta").slice(2, 6)).toEqual(["AAA", "2", "7", "1.000"]);
   });
 
   it("keeps a position player's pitching line out of the pitchers table", async () => {
@@ -1476,7 +1476,7 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     expect(nextDay).toMatchObject({ action: "sent", statLineCount: 1 });
     expect(mailer.sent).toHaveLength(2);
     expect(cells(mailer.sent[1]?.text ?? "", "M Acosta")).toEqual(
-      ["M", "Acosta", "AAA", "1", "1.750", "4", "2", "0", "0", "0", "0", "1", "3", "0", "0", "0", "0"],
+      ["M", "Acosta", "AAA", "1", "4", "1.750", "2", "0", "0", "0", "0", "1", "3", "0", "0", "0", "0"],
     );
   });
 
