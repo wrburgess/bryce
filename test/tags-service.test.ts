@@ -4,6 +4,7 @@ import { ZodError } from "zod";
 import type { OpenedDb } from "../src/db/client.js";
 import { players } from "../src/db/schema.js";
 import {
+  MAX_SELECTOR_LABEL_LENGTH,
   MAX_SELECTOR_TOKENS,
   MAX_TAG_SEGMENT_LENGTH,
   ManualWriteToDerivedNamespaceError,
@@ -275,9 +276,26 @@ describe("tag service", () => {
       expect(parseTagSelector(`level:${atLimit}`)).toEqual([{ namespace: "level", value: atLimit }]);
       expect(() => parseTagSelector(`level:${overLimit}`)).toThrow(ZodError);
       expect(() => parseTagSelector(`${overLimit}:aaa`)).toThrow(ZodError);
-      // The bound is per SEGMENT and the token count is bounded separately, so the
-      // whole label stays well inside a single header line.
-      expect(MAX_TAG_SEGMENT_LENGTH * 2 * MAX_SELECTOR_TOKENS).toBeLessThan(4096);
+    });
+
+    it("BOUNDS the rendered label, not just its segments", () => {
+      // A per-segment bound alone is insufficient: MAX_SELECTOR_TOKENS tokens at
+      // MAX_TAG_SEGMENT_LENGTH each still render far past the 998-octet header
+      // line RFC 5322 allows, so the aggregate is what must be bounded. (Caught
+      // by the Stage-4 delta review of the per-segment fix.)
+      const seg = "a".repeat(MAX_TAG_SEGMENT_LENGTH);
+      const worstCase = Array.from({ length: MAX_SELECTOR_TOKENS }, (_, i) => `${seg}${i}:${seg}`).join(",");
+      expect(() => parseTagSelector(worstCase)).toThrow(ZodError);
+
+      // The bound is on the RENDERED label, so it holds whatever shape produces it.
+      const underLimit = Array.from({ length: 4 }, (_, i) => `ns${i}:${"a".repeat(40)}`).join(",");
+      expect(formatTagSelector(parseTagSelector(underLimit)).length).toBeLessThanOrEqual(
+        MAX_SELECTOR_LABEL_LENGTH,
+      );
+
+      // And the limit itself leaves room for the subject's prefix/suffix inside
+      // a single physical header line — the property the bound exists to give.
+      expect(MAX_SELECTOR_LABEL_LENGTH).toBeLessThan(998 - "ScoreKeeps Baseball (Tags: ) - Prev 28 Days".length);
     });
 
     it("ACCEPTS every value the system can actually store", () => {

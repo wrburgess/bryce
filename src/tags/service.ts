@@ -285,6 +285,16 @@ const TAG_SEGMENT = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const MAX_TAG_SEGMENT_LENGTH = 64;
 
 /**
+ * Longest the RENDERED label may be. A per-segment bound alone is not enough:
+ * {@link MAX_SELECTOR_TOKENS} tokens at {@link MAX_TAG_SEGMENT_LENGTH} each
+ * still render ~2,094 characters, well past the 998-octet physical header line
+ * RFC 5322 allows — so the aggregate is what must be bounded, not the parts.
+ * 512 leaves room for the subject's prefix and window suffix inside that limit
+ * while staying ~20x the longest selector anyone would actually type.
+ */
+export const MAX_SELECTOR_LABEL_LENGTH = 512;
+
+/**
  * Parse a comma-separated selector into distinct tokens. Each token is
  * `ns:value` or a bare `ns` (matching the namespace alone, e.g. `prospect`).
  * Whitespace is trimmed, empty segments dropped, duplicates deduped, and the
@@ -331,6 +341,16 @@ export function parseTagSelector(expr: string): TagToken[] {
   }
   if (tokens.length > MAX_SELECTOR_TOKENS) {
     throw selectorError(`too many tag tokens (max ${MAX_SELECTOR_TOKENS})`, expr);
+  }
+  // Bound what actually reaches the mail header: the RENDERED label, not the
+  // segments it is built from. Checked last, so a caller sees the specific
+  // reason (malformed / too many tokens) before this catch-all size limit.
+  const label = formatTagSelector(tokens);
+  if (label.length > MAX_SELECTOR_LABEL_LENGTH) {
+    throw selectorError(
+      `tag selector is too long: ${label.length} characters (max ${MAX_SELECTOR_LABEL_LENGTH})`,
+      expr,
+    );
   }
   return tokens;
 }
