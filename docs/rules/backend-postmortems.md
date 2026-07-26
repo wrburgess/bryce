@@ -124,9 +124,11 @@ independent directions:
    migration or table rebuild silently drops it. Hand-writing it is not "belt and braces" — it is a
    constraint with an expiry date.
 2. **Anchor a freshness or completeness claim on when the job *started*, not when it *finished*, and
-   read the watermark *before* assembling the output.** Finish time overstates coverage: a run that
-   began before a boundary may have processed early items under the old clock. Reading before assembly
-   also closes the window where a run finishing mid-read forges a fresh verdict.
+   read the watermark *before* assembling the output.** This bites whenever a job decides per-item what
+   to include against a **moving clock** — "is this event final *now*?" — because finish time then
+   overstates coverage: a run that began before a boundary may have processed early items under the old
+   clock. Reading before assembly also closes the window where a run finishing mid-read forges a fresh
+   verdict.
 3. **Never settle or release a durable claim/lease unconditionally.** Gate every settle on *still
    owning the claim* (`WHERE status = 'running'`) and treat a no-op settle as lost ownership —
    otherwise a worker whose lease expired and was reaped mid-flight resurrects its own row over the run
