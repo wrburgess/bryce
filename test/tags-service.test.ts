@@ -4,6 +4,8 @@ import { ZodError } from "zod";
 import type { OpenedDb } from "../src/db/client.js";
 import { players } from "../src/db/schema.js";
 import {
+  MAX_SELECTOR_TOKENS,
+  MAX_TAG_SEGMENT_LENGTH,
   ManualWriteToDerivedNamespaceError,
   UnknownTagError,
   addManualTag,
@@ -262,6 +264,20 @@ describe("tag service", () => {
       // Leading/trailing hyphens and internal spaces are not tag shapes.
       expect(() => parseTagSelector("-level:aaa")).toThrow(ZodError);
       expect(() => parseTagSelector("level:high a")).toThrow(ZodError);
+    });
+
+    it("BOUNDS each segment's length — an unbounded label still reaches a mail header", () => {
+      // The charset stops an injection payload but says nothing about length, and
+      // the label is reflected into an email subject where a multi-kilobyte header
+      // is folded or rejected outright (RFC 5322 caps a line at 998 octets).
+      const atLimit = "a".repeat(MAX_TAG_SEGMENT_LENGTH);
+      const overLimit = "a".repeat(MAX_TAG_SEGMENT_LENGTH + 1);
+      expect(parseTagSelector(`level:${atLimit}`)).toEqual([{ namespace: "level", value: atLimit }]);
+      expect(() => parseTagSelector(`level:${overLimit}`)).toThrow(ZodError);
+      expect(() => parseTagSelector(`${overLimit}:aaa`)).toThrow(ZodError);
+      // The bound is per SEGMENT and the token count is bounded separately, so the
+      // whole label stays well inside a single header line.
+      expect(MAX_TAG_SEGMENT_LENGTH * 2 * MAX_SELECTOR_TOKENS).toBeLessThan(4096);
     });
 
     it("ACCEPTS every value the system can actually store", () => {

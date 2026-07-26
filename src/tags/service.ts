@@ -272,7 +272,17 @@ function selectorError(message: string, input: unknown): ZodError {
  * granular + coarse values, including the leading-digit `1b`), `prospect`, and
  * `status:` (rostered, scouted).
  */
-const TAG_SEGMENT = /^[a-z0-9][a-z0-9-]*$/;
+const TAG_SEGMENT = /^[a-z0-9][a-z0-9-]{0,63}$/;
+
+/**
+ * Longest a single namespace or value may be. The charset above stops a segment
+ * from carrying a header-injection payload, but says nothing about LENGTH — and
+ * an unbounded segment is still reflected into a mail subject, where a
+ * multi-kilobyte header is at best folded and at worst rejected by the MTA
+ * (RFC 5322 caps a line at 998 octets). 64 is ~6x the longest value the system
+ * emits (`single-a`), so it bounds the label without constraining the model.
+ */
+export const MAX_TAG_SEGMENT_LENGTH = 64;
 
 /**
  * Parse a comma-separated selector into distinct tokens. Each token is
