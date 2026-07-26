@@ -27,7 +27,7 @@
 ## Anti-Patterns
 
 - **Never declare work done on a red or un-run check** — because "probably fine" is exactly how regressions ship. *(Extend per host.)*
-- **Never confirm a check through a pipeline that discards its exit status** — because `cmd | tail` reports the *last* command's status, so a red gate reads as green and then gets written down as evidence; run each check unpiped, or read `PIPESTATUS`. *(Provenance: issue #148 / PR #149; extend per host.)*
+- **Never confirm a check through a pipeline that discards its exit status** — because `cmd | tail` reports the *last* command's status, so a red gate reads as green and then gets written down as evidence; run each check unpiped, or read the shell's pipeline-status array — `pipestatus` in zsh, `PIPESTATUS` in bash (zsh leaves the uppercase name unset, so the bash spelling silently reveals nothing). *(Provenance: issue #148 / PR #149; extend per host.)*
 - **Never leave a "TODO / needs manual testing" comment in place of a test** — because it never gets written; build the test now. *(Extend per host.)*
 - **Never ship minimal assertions and call it complete** — because the last 20% (edge cases, sad paths, thorough assertions) is where quality lives. *(Extend per host.)*
 - **Never put `<angle-bracket>` placeholders in text you post to the lifecycle host** (issue/PR/comment bodies) — because GitHub's markdown sanitizer silently strips them (even inside backticks), so `path/<name>/file` renders as `path//file` and reads as a typo; use `{name}` or `NAME` in prose bound for a host artifact (angle brackets are fine in committed source files). *(Extend per host.)*
