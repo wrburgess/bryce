@@ -1,16 +1,29 @@
 import { desc, eq } from "drizzle-orm";
+import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { openDb } from "../src/db/client.js";
-import { refreshRuns } from "../src/db/schema.js";
+import {
+  highlightlyBoxScoreCache,
+  highlightlyMatchCache,
+  highlightlyPlayerCursors,
+  players,
+  refreshRuns,
+  seasonCalendar,
+  statLines,
+} from "../src/db/schema.js";
+import { runRefresh } from "../src/jobs/refresh.js";
 import {
   SUPERSEDED_MESSAGE,
   claimRefreshRun,
+  admitTargetedRefresh,
   digestFreshnessFor,
   refreshHealth,
   renewRefreshRun,
   settleRefreshRun,
   updateRefreshRunProgress,
+  withIngestionFence,
 } from "../src/jobs/refresh-run.js";
 import { TEST_TZ, insertRefreshRun, testDb, testFileDb } from "./factories.js";
 
@@ -18,6 +31,8 @@ import { TEST_TZ, insertRefreshRun, testDb, testFileDb } from "./factories.js";
 const T0 = "2026-07-19T07:00:00.000Z";
 const WITHIN_LEASE = "2026-07-19T07:05:00.000Z"; // +5 min
 const PAST_LEASE = "2026-07-19T07:11:00.000Z"; // +11 min
+const NCAA_T0 = "2026-05-19T07:00:00.000Z";
+const NCAA_PAST_LEASE = "2026-05-19T07:11:00.000Z";
 
 const at = (iso: string) => new Date(iso);
 
@@ -93,6 +108,15 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0043)", () => {
     });
   });
 
+  it("treats the exact lease boundary as expired for claim and reap", () => {
+    const first = claimRefreshRun(opened.db, { now: at(T0), playersTotal: 1 });
+    if (!first.claimed) throw new Error("expected claim");
+    const boundary = claimRefreshRun(opened.db, { now: at("2026-07-19T07:10:00.000Z"), playersTotal: 1 });
+    expect(boundary).toMatchObject({ claimed: true });
+    expect(opened.db.select().from(refreshRuns).where(eq(refreshRuns.id, first.runId)).all()[0])
+      .toMatchObject({ status: "failed", errorMessage: SUPERSEDED_MESSAGE });
+  });
+
   it("claimRefreshRun reaps an expired-lease `running` row to `failed` before inserting the new run", () => {
     // A crashed run left `running` with a long-stale lease, and no live lease
     // exists, so the next claim proceeds — and must fence the zombie first.
@@ -130,6 +154,30 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0043)", () => {
     expect(renewRefreshRun(opened.db, owner.runId, at(PAST_RENEWED_LEASE))).toBe(false);
     // And a renew of a wholly unknown id is likewise false (nothing to own).
     expect(renewRefreshRun(opened.db, 999_999, at(PAST_RENEWED_LEASE))).toBe(false);
+  });
+
+  it("does not let an expired but unreaped worker renew itself at the exact lease boundary", () => {
+    const claim = claimRefreshRun(opened.db, { now: at(T0), playersTotal: 1 });
+    if (!claim.claimed) throw new Error("expected claim");
+    expect(renewRefreshRun(opened.db, claim.runId, at("2026-07-19T07:10:00.000Z"))).toBe(false);
+    expect(opened.db.select().from(refreshRuns).where(eq(refreshRuns.id, claim.runId)).all()[0]?.claimedAt).toBe(T0);
+  });
+
+  it("rejects a guarded whole-refresh mutation after the owner is reaped", () => {
+    const a = claimRefreshRun(opened.db, { now: at(T0), playersTotal: 1 });
+    if (!a.claimed) throw new Error("expected claim");
+    claimRefreshRun(opened.db, { now: at(PAST_LEASE), playersTotal: 1 });
+    const result = withIngestionFence(opened.db, { kind: "whole-refresh", runId: a.runId, now: at(PAST_LEASE) }, () => "written");
+    expect(result).toEqual({ committed: false, reason: "lost-ownership" });
+  });
+
+  it("captures a targeted generation and rejects its write when a sweep claims first", () => {
+    const targeted = admitTargetedRefresh(opened.db, at(T0));
+    if (!targeted.admitted) throw new Error("expected targeted admission");
+    const sweep = claimRefreshRun(opened.db, { now: at(T0), playersTotal: 1 });
+    if (!sweep.claimed) throw new Error("expected sweep claim");
+    const result = withIngestionFence(opened.db, targeted.fence, () => "written");
+    expect(result).toEqual({ committed: false, reason: "whole-refresh-running" });
   });
 
   it("persists live progress only while the run still owns its running row", () => {
@@ -399,6 +447,625 @@ describe("refresh run claim across two file-db connections (ADR 0043)", () => {
       expect(file.opened.db.select().from(refreshRuns).all()).toHaveLength(1);
     } finally {
       second.close();
+      file.cleanup();
+    }
+  });
+});
+
+describe("refresh fencing across a real child process (ADR 0048)", () => {
+  it("defers a real targeted refresh whose buffered stat write loses to a whole refresh", async () => {
+    const file = testFileDb();
+    const player = file.opened.db
+      .insert(players)
+      .values({
+        externalId: 7,
+        ncaaPlayerSeq: null,
+        highlightlyPlayerId: null,
+        highlightlyTeamId: null,
+        ncaaSourceState: null,
+        fullName: "Initial",
+        level: "mlb",
+        milbLevel: null,
+        teamName: null,
+        position: null,
+        schoolName: null,
+        active: true,
+        notes: null,
+        createdAt: T0,
+        updatedAt: T0,
+      })
+      .returning({ id: players.id })
+      .get();
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
+      const { openDb } = await import(process.env.DB_CLIENT);
+      const { runRefreshForPlayer } = await import(process.env.REFRESH);
+      const opened = openDb(process.env.DB_PATH);
+      const oldSplit = {
+        date: "2026-07-18", gameType: "R", isHome: true,
+        game: { gamePk: 910001, gameNumber: 1 }, sport: { id: 1 },
+        opponent: { name: "Old Opponent" }, team: { name: "Old Club" },
+        league: { name: "MLB" }, stat: { hits: 1, atBats: 4 }
+      };
+      const client = {
+        getSeason: async () => null,
+        getPerson: async () => {
+          process.stdout.write("buffered\\n");
+          await new Promise((resolve) => process.stdin.once("data", resolve));
+          return { fullName: "OLD", primaryPosition: { abbreviation: "SS" }, currentTeam: { id: 1 } };
+        },
+        getTeam: async () => ({ sport: { id: 1 }, name: "Old Club" }),
+        getGameLog: async ({ group }) => ({ stats: group === "hitting" ? [{ splits: [oldSplit] }] : [] }),
+      };
+      const result = await runRefreshForPlayer(
+        { db: opened.db, client, now: () => new Date(process.env.NOW), tz: "America/Chicago" },
+        Number(process.env.PLAYER),
+      );
+      process.stdout.write(JSON.stringify(result) + "\\n");
+      opened.close();
+      process.exit(0);
+    `], {
+      env: {
+        ...process.env,
+        DB_PATH: file.path,
+        NOW: T0,
+        PLAYER: String(player.id),
+        DB_CLIENT: pathToFileURL(new URL("../src/db/client.ts", import.meta.url).pathname).href,
+        REFRESH: pathToFileURL(new URL("../src/jobs/refresh.ts", import.meta.url).pathname).href,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    try {
+      const lines: string[] = [];
+      let stderr = "";
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => lines.push(...chunk.trim().split("\n").filter(Boolean)));
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+      await new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.stdout.once("data", () => resolve());
+        child.once("exit", (code) => reject(new Error(`child exited before ready (${code}): ${stderr}`)));
+      });
+      expect(lines[0]).toBe("buffered");
+
+      const freshSplit = {
+        date: "2026-07-18", gameType: "R", isHome: true,
+        game: { gamePk: 910001, gameNumber: 1 }, sport: { id: 1 },
+        opponent: { name: "New Opponent" }, team: { name: "New Club" },
+        league: { name: "MLB" }, stat: { hits: 3, atBats: 4 },
+      };
+      const freshClient = {
+        getSeason: async () => ({
+          regularSeasonStartDate: "2026-03-25",
+          regularSeasonEndDate: "2026-09-27",
+          postSeasonStartDate: "2026-09-28",
+          postSeasonEndDate: "2026-10-31",
+          springStartDate: "2026-02-20",
+          springEndDate: "2026-03-24",
+        }),
+        getPerson: async () => ({ fullName: "NEW", primaryPosition: { abbreviation: "SS" }, currentTeam: { id: 1 } }),
+        getTeam: async () => ({ sport: { id: 1 }, name: "New Club" }),
+        getGameLog: async ({ group }: { group: string }) => ({
+          stats: group === "hitting" ? [{ splits: [freshSplit] }] : [],
+        }),
+      };
+      const whole = await runRefresh({
+        db: file.opened.db,
+        client: freshClient as never,
+        now: () => at(PAST_LEASE),
+        tz: TEST_TZ,
+      });
+      expect(whole).toMatchObject({ skipped: false, status: "ok", statLinesInserted: 1 });
+
+      child.stdin.write("release\n");
+      await new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`child exit ${code}: ${stderr}`)));
+      });
+
+      // The public targeted-refresh contract reports the durable deferral, and
+      // the successor's data remains both current and digest-fresh.
+      expect(JSON.parse(lines[1] ?? "{}")).toEqual({
+        skipped: true,
+        reason: "whole-refresh-running",
+        inserted: 0,
+        updated: 0,
+        calendarFailures: [],
+      });
+      const storedPlayer = file.opened.db.select().from(players).where(eq(players.id, player.id)).get();
+      expect(storedPlayer).toMatchObject({ fullName: "NEW", teamName: "New Club" });
+      const storedLines = file.opened.db.select().from(statLines).where(eq(statLines.playerId, player.id)).all();
+      expect(storedLines).toHaveLength(1);
+      expect(storedLines[0]).toMatchObject({ gameId: 910001, opponentName: "New Opponent" });
+      expect(storedLines[0]?.stats).toMatchObject({ hits: 3, atBats: 4 });
+      expect(digestFreshnessFor(file.opened.db, "2026-07-18", TEST_TZ)).toMatchObject({
+        state: "fresh",
+        playersRefreshed: 1,
+        playersTotal: 1,
+      });
+    } finally {
+      child.kill();
+      file.cleanup();
+    }
+  });
+
+  it("rejects a stale real whole-refresh writer after a successor reaps and settles", async () => {
+    const file = testFileDb();
+    const player = file.opened.db.insert(players).values({ externalId: 7, ncaaPlayerSeq: null, highlightlyPlayerId: null, highlightlyTeamId: null, ncaaSourceState: null, fullName: "Initial", level: "mlb", milbLevel: null, teamName: null, position: null, schoolName: null, active: true, notes: null, createdAt: T0, updatedAt: T0 }).returning({ id: players.id }).get();
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
+      const { openDb } = await import(process.env.DB_CLIENT); const { runRefresh } = await import(process.env.REFRESH);
+      const oldSplit = { date:'2026-07-18', gameType:'R', isHome:true, game:{gamePk:920001,gameNumber:1}, sport:{id:1}, opponent:{name:'Old Opponent'}, team:{name:'Old Club'}, league:{name:'MLB'}, stat:{hits:1,atBats:4} };
+      const opened = openDb(process.env.DB_PATH); const client = { getSeason: async()=>null, getPerson: async()=>{ process.stdout.write('buffered\\n'); await new Promise(r=>process.stdin.once('data',r)); return { fullName:'OLD', primaryPosition:{abbreviation:'SS'}, currentTeam:{id:1} }; }, getTeam: async()=>({sport:{id:1},name:'Old Club'}), getGameLog: async({group})=>({stats:group==='hitting'?[{splits:[oldSplit]}]:[]}) };
+      const result = await runRefresh({db:opened.db,client,now:()=>new Date(process.env.NOW),tz:'America/Chicago'}); process.stdout.write(JSON.stringify(result)+'\\n'); opened.close(); process.exit(0);
+    `], { env: { ...process.env, DB_PATH:file.path, NOW:T0, PLAYER:String(player.id), DB_CLIENT:pathToFileURL(new URL("../src/db/client.ts",import.meta.url).pathname).href, REFRESH:pathToFileURL(new URL("../src/jobs/refresh.ts",import.meta.url).pathname).href }, stdio:["pipe","pipe","pipe"] });
+    try {
+      const lines:string[]=[]; child.stdout.setEncoding("utf8"); child.stdout.on("data", (c:string)=>lines.push(...c.trim().split("\n").filter(Boolean)));
+      await new Promise<void>((resolve,reject)=>{ child.stdout.once("data",()=>resolve()); child.once("error",reject); });
+      const freshSplit = { date:"2026-07-18", gameType:"R", isHome:true, game:{gamePk:920001,gameNumber:1}, sport:{id:1}, opponent:{name:"New Opponent"}, team:{name:"New Club"}, league:{name:"MLB"}, stat:{hits:4,atBats:5} };
+      const freshClient = {
+        getSeason: async()=>({ regularSeasonStartDate:"2026-03-25", regularSeasonEndDate:"2026-09-27", postSeasonStartDate:"2026-09-28", postSeasonEndDate:"2026-10-31", springStartDate:"2026-02-20", springEndDate:"2026-03-24" }),
+        getPerson: async()=>({fullName:"NEW",primaryPosition:{abbreviation:"SS"},currentTeam:{id:1}}),
+        getTeam: async()=>({sport:{id:1},name:"New Club"}),
+        getGameLog: async({group}:{group:string})=>({stats:group==="hitting"?[{splits:[freshSplit]}]:[]}),
+      };
+      const whole = await runRefresh({ db:file.opened.db, client:freshClient as never, now:()=>at(PAST_LEASE), tz:TEST_TZ });
+      expect(whole).toMatchObject({ status:"ok", statLinesInserted:1 });
+      child.stdin.write("release\n");
+      await new Promise<void>((resolve,reject)=>child.once("exit", c=>c===0?resolve():reject(new Error(`child ${c}`))));
+      expect(JSON.parse(lines[1] ?? "{}")).toMatchObject({skipped:true,reason:"superseded"});
+      const runs = file.opened.db.select().from(refreshRuns).orderBy(refreshRuns.id).all();
+      expect(runs).toHaveLength(2);
+      expect(runs[0]).toMatchObject({
+        status: "failed",
+        errorMessage: SUPERSEDED_MESSAGE,
+        playersRefreshed: 0,
+      });
+      expect(runs[1]).toMatchObject({
+        status: "ok",
+        playersRefreshed: 1,
+        playersTotal: 1,
+        statLinesInserted: 1,
+      });
+      expect(file.opened.db.select().from(players).where(eq(players.id,player.id)).get()).toMatchObject({ fullName:"NEW", teamName:"New Club" });
+      const finalLines = file.opened.db.select().from(statLines).where(eq(statLines.playerId, player.id)).all();
+      expect(finalLines).toHaveLength(1);
+      expect(finalLines[0]).toMatchObject({ gameId:920001, opponentName:"New Opponent", stats:{hits:4,atBats:5} });
+      const calendars = file.opened.db.select().from(seasonCalendar).all();
+      expect(calendars.length).toBeGreaterThan(0);
+      expect(calendars.find((calendar) => calendar.sportId === 1)).toMatchObject({
+        season: "2026",
+        regularSeasonStart: "2026-03-25",
+        regularSeasonEnd: "2026-09-27",
+      });
+      expect(digestFreshnessFor(file.opened.db,"2026-07-18",TEST_TZ)).toMatchObject({
+        state:"fresh", playersRefreshed:1, playersTotal:1,
+      });
+    } finally {
+      child.kill();
+      file.cleanup();
+    }
+  });
+
+  it("refuses a stale calendar write from a reaped whole-refresh child", async () => {
+    const file = testFileDb();
+    file.opened.db.insert(players).values({
+      externalId: 7,
+      ncaaPlayerSeq: null,
+      highlightlyPlayerId: null,
+      highlightlyTeamId: null,
+      ncaaSourceState: null,
+      fullName: "Initial",
+      level: "mlb",
+      milbLevel: null,
+      teamName: null,
+      position: null,
+      schoolName: null,
+      active: true,
+      notes: null,
+      createdAt: T0,
+      updatedAt: T0,
+    }).run();
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
+      const { openDb } = await import(process.env.DB_CLIENT);
+      const { runRefresh } = await import(process.env.REFRESH);
+      const opened = openDb(process.env.DB_PATH);
+      const client = {
+        getSeason: async (sportId) => {
+          if (sportId !== 1) return null;
+          process.stdout.write("buffered-calendar\\n");
+          await new Promise((resolve) => process.stdin.once("data", resolve));
+          return { regularSeasonStartDate: "2026-01-01", regularSeasonEndDate: "2026-01-31" };
+        },
+        getPerson: async () => ({ fullName: "OLD" }),
+        getTeam: async () => ({ sport: { id: 1 }, name: "Old Club" }),
+        getGameLog: async () => ({ stats: [] }),
+      };
+      const result = await runRefresh(
+        { db: opened.db, client, now: () => new Date(process.env.NOW), tz: "America/Chicago" },
+      );
+      process.stdout.write(JSON.stringify(result) + "\\n");
+      opened.close();
+      process.exit(0);
+    `], {
+      env: {
+        ...process.env,
+        DB_PATH: file.path,
+        NOW: T0,
+        DB_CLIENT: pathToFileURL(new URL("../src/db/client.ts", import.meta.url).pathname).href,
+        REFRESH: pathToFileURL(new URL("../src/jobs/refresh.ts", import.meta.url).pathname).href,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    try {
+      const lines: string[] = [];
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => lines.push(...chunk.trim().split("\n").filter(Boolean)));
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.once("data", () => resolve());
+        child.once("error", reject);
+      });
+      expect(lines[0]).toBe("buffered-calendar");
+
+      const successor = await runRefresh({
+        db: file.opened.db,
+        client: {
+          getSeason: async (sportId: number) => sportId === 1 ? {
+            regularSeasonStartDate: "2026-03-25",
+            regularSeasonEndDate: "2026-09-27",
+          } : null,
+          getPerson: async () => ({ fullName: "NEW" }),
+          getTeam: async () => ({ sport: { id: 1 }, name: "New Club" }),
+          getGameLog: async () => ({ stats: [] }),
+        } as never,
+        now: () => at(PAST_LEASE),
+        tz: TEST_TZ,
+      });
+      expect(successor).toMatchObject({ skipped: false, status: "ok", playersRefreshed: 1 });
+      child.stdin.write("release\n");
+      await new Promise<void>((resolve, reject) => {
+        child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`child ${code}`)));
+      });
+
+      expect(JSON.parse(lines[1] ?? "{}")).toMatchObject({ skipped: true, reason: "superseded" });
+      expect(file.opened.db.select().from(seasonCalendar).where(eq(seasonCalendar.sportId, 1)).get())
+        .toMatchObject({
+          regularSeasonStart: "2026-03-25",
+          regularSeasonEnd: "2026-09-27",
+          fetchedAt: PAST_LEASE,
+        });
+      expect(file.opened.db.select().from(refreshRuns).orderBy(refreshRuns.id).all()[0])
+        .toMatchObject({ status: "failed", errorMessage: SUPERSEDED_MESSAGE });
+    } finally {
+      child.kill();
+      file.cleanup();
+    }
+  });
+
+  it("fences Highlightly cache writes from a reaped whole-refresh child", async () => {
+    const file = testFileDb();
+    const player = file.opened.db.insert(players).values({
+      externalId: null,
+      ncaaPlayerSeq: 9,
+      highlightlyPlayerId: 501,
+      highlightlyTeamId: 10,
+      ncaaSourceState: "highlightly_pending",
+      fullName: "Gavin Kelly",
+      level: "ncaa",
+      milbLevel: null,
+      teamName: "Tigers",
+      position: null,
+      schoolName: "Tigers University",
+      active: true,
+      notes: null,
+      createdAt: T0,
+      updatedAt: T0,
+    }).returning({ id: players.id }).get();
+    file.opened.db.insert(statLines).values({
+      playerId: player.id,
+      gameId: 99,
+      source: "ncaa_html_legacy",
+      statType: "fielding",
+      gameDate: "2026-03-01",
+      gameNumber: 1,
+      gameType: "R",
+      sportId: 22,
+      stats: { errors: 1 },
+      raw: {},
+      createdAt: T0,
+      updatedAt: T0,
+    }).run();
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
+      const { openDb } = await import(process.env.DB_CLIENT);
+      const { runRefresh } = await import(process.env.REFRESH);
+      const opened = openDb(process.env.DB_PATH);
+      const match = { id: 930001, date: "2026-05-18T19:00:00Z", league: "NCAA", season: 2026, homeTeam: { id: 10, name: "Old Tigers" }, awayTeam: { id: 11, name: "Old Owls" } };
+      const providerPlayer = { id: 501, fullName: "Gavin Kelly", statistics: [{ group: "Batting", name: "H", value: 1 }] };
+      const highlightlyClient = {
+        getFinalTeamMatches: async () => ({ value: [match], remaining: 99 }),
+        getBoxScore: async () => {
+          process.stdout.write("buffered-highlightly\\n");
+          await new Promise((resolve) => process.stdin.once("data", resolve));
+          return { value: [{ teamId: 10, players: [providerPlayer] }], remaining: 98 };
+        },
+      };
+      const result = await runRefresh(
+        { db: opened.db, client: { getSeason: async () => null }, highlightlyClient, now: () => new Date(process.env.NOW), tz: "America/Chicago" },
+      );
+      process.stdout.write(JSON.stringify(result) + "\\n");
+      opened.close();
+      process.exit(0);
+    `], {
+      env: {
+        ...process.env,
+        DB_PATH: file.path,
+        NOW: NCAA_T0,
+        PLAYER: String(player.id),
+        DB_CLIENT: pathToFileURL(new URL("../src/db/client.ts",import.meta.url).pathname).href,
+        REFRESH: pathToFileURL(new URL("../src/jobs/refresh.ts",import.meta.url).pathname).href,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    try {
+      const lines: string[] = [];
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => lines.push(...chunk.trim().split("\n").filter(Boolean)));
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.once("data", () => resolve());
+        child.once("error", reject);
+      });
+      expect(lines[0]).toBe("buffered-highlightly");
+      // The stale whole-refresh actor has crossed the first Highlightly write:
+      // its match cache is durable, but its box payload and atomic player
+      // cutover are still buffered behind getBoxScore.
+      expect(file.opened.db.select().from(highlightlyMatchCache).all()).toEqual([
+        expect.objectContaining({
+          matchId: 930001,
+          rateRemaining: 99,
+          payload: expect.objectContaining({ homeTeam: { id: 10, name: "Old Tigers" } }),
+        }),
+      ]);
+      expect(file.opened.db.select().from(highlightlyBoxScoreCache).all()).toHaveLength(0);
+      expect(file.opened.db.select().from(highlightlyPlayerCursors).all()).toHaveLength(0);
+      expect(file.opened.db.select().from(players).where(eq(players.id, player.id)).get()?.ncaaSourceState)
+        .toBe("highlightly_pending");
+
+      const freshMatch = {
+        id: 930001,
+        date: "2026-05-18T19:00:00Z",
+        league: "NCAA",
+        season: 2026,
+        homeTeam: { id: 10, name: "Fresh Tigers" },
+        awayTeam: { id: 11, name: "Fresh Owls" },
+      };
+      const freshProviderPlayer = {
+        id: 501,
+        fullName: "Gavin Kelly",
+        statistics: [{ group: "Batting", name: "H", value: 4 }],
+      };
+      const successor = await runRefresh({
+        db: file.opened.db,
+        client: { getSeason: async () => null } as never,
+        highlightlyClient: {
+          getFinalTeamMatches: async () => ({ value: [freshMatch], remaining: 80 }),
+          getBoxScore: async () => ({
+            value: [{ teamId: 10, players: [freshProviderPlayer] }],
+            remaining: 79,
+          }),
+        } as never,
+        now: () => at(NCAA_PAST_LEASE),
+        tz: TEST_TZ,
+      });
+      expect(successor).toMatchObject({
+        skipped: false,
+        status: "ok",
+        playersRefreshed: 1,
+        statLinesInserted: 1,
+      });
+      child.stdin.write("release\n");
+      await new Promise<void>((resolve, reject) => {
+        child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`child ${code}`)));
+      });
+
+      expect(JSON.parse(lines[1] ?? "{}")).toMatchObject({ skipped: true, reason: "superseded" });
+      expect(file.opened.db.select().from(highlightlyMatchCache).all()).toEqual([
+        expect.objectContaining({
+          matchId: 930001,
+          rateRemaining: 80,
+          payload: expect.objectContaining({ homeTeam: { id: 10, name: "Fresh Tigers" } }),
+        }),
+      ]);
+      expect(file.opened.db.select().from(highlightlyBoxScoreCache).all()).toEqual([
+        expect.objectContaining({ matchId: 930001, rateRemaining: 79 }),
+      ]);
+      expect(file.opened.db.select().from(highlightlyPlayerCursors).all()).toEqual([
+        expect.objectContaining({ playerId: player.id, lastCompleteAt: NCAA_PAST_LEASE }),
+      ]);
+      expect(file.opened.db.select().from(players).where(eq(players.id, player.id)).get()?.ncaaSourceState)
+        .toBe("highlightly_active");
+      const finalLines = file.opened.db.select().from(statLines).where(eq(statLines.playerId, player.id)).all();
+      expect(finalLines).toEqual([
+        expect.objectContaining({
+          source: "highlightly_ncaa",
+          gameId: 930001,
+          teamName: "Fresh Tigers",
+          stats: { hits: 4 },
+        }),
+      ]);
+      expect(file.opened.db.select().from(refreshRuns).orderBy(refreshRuns.id).all()).toEqual([
+        expect.objectContaining({ status: "failed", errorMessage: SUPERSEDED_MESSAGE }),
+        expect.objectContaining({ status: "ok", playersRefreshed: 1, statLinesInserted: 1 }),
+      ]);
+    } finally {
+      child.kill();
+      file.cleanup();
+    }
+  });
+
+  it("fences Highlightly cutover and cursor writes from a reaped whole-refresh child", async () => {
+    const file = testFileDb();
+    const player = file.opened.db.insert(players).values({
+      externalId: null,
+      ncaaPlayerSeq: 9,
+      highlightlyPlayerId: 501,
+      highlightlyTeamId: 10,
+      ncaaSourceState: "highlightly_pending",
+      fullName: "Gavin Kelly",
+      level: "ncaa",
+      milbLevel: null,
+      teamName: "Tigers",
+      position: null,
+      schoolName: "Tigers University",
+      active: true,
+      notes: null,
+      createdAt: NCAA_T0,
+      updatedAt: NCAA_T0,
+    }).returning({ id: players.id }).get();
+    file.opened.db.insert(statLines).values({
+      playerId: player.id,
+      gameId: 99,
+      source: "ncaa_html_legacy",
+      statType: "fielding",
+      gameDate: "2026-03-01",
+      gameNumber: 1,
+      gameType: "R",
+      sportId: 22,
+      stats: { errors: 1 },
+      raw: {},
+      createdAt: NCAA_T0,
+      updatedAt: NCAA_T0,
+    }).run();
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
+      const { openDb } = await import(process.env.DB_CLIENT);
+      const { runRefresh } = await import(process.env.REFRESH);
+      const opened = openDb(process.env.DB_PATH);
+      const highlightlyClient = {
+        getFinalTeamMatches: async () => {
+          process.stdout.write("buffered-cutover\\n");
+          await new Promise((resolve) => process.stdin.once("data", resolve));
+          return { value: [], remaining: 99 };
+        },
+      };
+      const result = await runRefresh({
+        db: opened.db,
+        client: { getSeason: async () => null },
+        highlightlyClient,
+        now: () => new Date(process.env.NOW),
+        tz: "America/Chicago",
+      });
+      process.stdout.write(JSON.stringify(result) + "\\n");
+      opened.close();
+      process.exit(0);
+    `], {
+      env: {
+        ...process.env,
+        DB_PATH: file.path,
+        NOW: NCAA_T0,
+        DB_CLIENT: pathToFileURL(new URL("../src/db/client.ts",import.meta.url).pathname).href,
+        REFRESH: pathToFileURL(new URL("../src/jobs/refresh.ts",import.meta.url).pathname).href,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    try {
+      const lines: string[] = [];
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => lines.push(...chunk.trim().split("\n").filter(Boolean)));
+      await new Promise<void>((resolve, reject) => {
+        child.stdout.once("data", () => resolve());
+        child.once("error", reject);
+      });
+      expect(lines[0]).toBe("buffered-cutover");
+
+      const successor = await runRefresh({
+        db: file.opened.db,
+        client: { getSeason: async () => null } as never,
+        highlightlyClient: {
+          getFinalTeamMatches: async () => ({ value: [], remaining: 80 }),
+        } as never,
+        now: () => at(NCAA_PAST_LEASE),
+        tz: TEST_TZ,
+      });
+      expect(successor).toMatchObject({
+        skipped: false,
+        status: "ok",
+        playersRefreshed: 1,
+        statLinesInserted: 0,
+      });
+      child.stdin.write("release\n");
+      await new Promise<void>((resolve, reject) => {
+        child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`child ${code}`)));
+      });
+
+      expect(JSON.parse(lines[1] ?? "{}")).toMatchObject({ skipped: true, reason: "superseded" });
+      expect(file.opened.db.select().from(highlightlyMatchCache).all()).toHaveLength(0);
+      expect(file.opened.db.select().from(highlightlyBoxScoreCache).all()).toHaveLength(0);
+      expect(file.opened.db.select().from(highlightlyPlayerCursors).all()).toEqual([
+        expect.objectContaining({ playerId: player.id, lastCompleteAt: NCAA_PAST_LEASE }),
+      ]);
+      expect(file.opened.db.select().from(players).where(eq(players.id, player.id)).get())
+        .toMatchObject({ ncaaSourceState: "highlightly_active", updatedAt: NCAA_PAST_LEASE });
+      expect(file.opened.db.select().from(statLines).where(eq(statLines.playerId, player.id)).all())
+        .toHaveLength(0);
+      expect(file.opened.db.select().from(refreshRuns).orderBy(refreshRuns.id).all()).toEqual([
+        expect.objectContaining({ status: "failed", errorMessage: SUPERSEDED_MESSAGE }),
+        expect.objectContaining({ status: "ok", playersRefreshed: 1 }),
+      ]);
+    } finally {
+      child.kill();
+      file.cleanup();
+    }
+  });
+
+  it("refuses a targeted write buffered before a whole sweep claims", async () => {
+    const file = testFileDb();
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
+      const { openDb } = await import(process.env.DB_CLIENT);
+      const { admitTargetedRefresh, withIngestionFence } = await import(process.env.REFRESH_RUN);
+      const opened = openDb(process.env.DB_PATH);
+      const admission = admitTargetedRefresh(opened.db, new Date(process.env.NOW));
+      process.stdout.write(JSON.stringify(admission) + "\\n");
+      process.stdin.once("data", () => {
+        const result = admission.admitted
+          ? withIngestionFence(opened.db, admission.fence, () => "stale-write")
+          : admission;
+        process.stdout.write(JSON.stringify(result) + "\\n");
+        opened.close();
+        process.exit(0);
+      });
+    `], {
+      env: {
+        ...process.env,
+        DB_PATH: file.path,
+        NOW: T0,
+        DB_CLIENT: pathToFileURL(new URL("../src/db/client.ts", import.meta.url).pathname).href,
+        REFRESH_RUN: pathToFileURL(new URL("../src/jobs/refresh-run.ts", import.meta.url).pathname).href,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    try {
+      const lines: string[] = [];
+      let stderr = "";
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => lines.push(...chunk.trim().split("\n").filter(Boolean)));
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+      await new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.stdout.once("data", () => resolve());
+        child.once("exit", (code) => reject(new Error(`child exited before ready (${code}): ${stderr}`)));
+      });
+      expect(JSON.parse(lines[0] ?? "{}")).toMatchObject({ admitted: true });
+
+      // This is the deterministic barrier: child has buffered its admission;
+      // parent now claims in a separate process before releasing the write.
+      expect(claimRefreshRun(file.opened.db, { now: at(T0), playersTotal: 1 }).claimed).toBe(true);
+      child.stdin.write("write\n");
+      await new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`child exit ${code}`)));
+      });
+      expect(JSON.parse(lines[1] ?? "{}")).toEqual({ committed: false, reason: "whole-refresh-running" });
+    } finally {
+      child.kill();
       file.cleanup();
     }
   });

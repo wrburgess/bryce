@@ -82,6 +82,8 @@ export class PlayerNotFoundError extends Error {
 
 export interface FirstRefreshSummary {
   skipped: boolean;
+  /** Why priming did not write: offseason or a live whole-watch-list Refresh. */
+  reason: "offseason-sleep" | "whole-refresh-running" | null;
   inserted: number;
   updated: number;
   /** Calendar fetch failures encountered priming this player's refresh (#23, MF3). */

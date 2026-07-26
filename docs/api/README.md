@@ -180,7 +180,11 @@ Run a Refresh now. Body is optional: empty or absent refreshes **every** active 
 (**400**), never a full refresh. A whole-watch-list Refresh returns its structured summary even when
 some players fail: `ok`, `partial`, and `skipped` results are **200**; a `failed` result (no player
 could be refreshed) is **502** with that same summary body. A single-player Refresh returns its
-per-player result, or **404** when that Player is not on the Watch List.
+per-player result, or **404** when that Player is not on the Watch List. If a whole-list Refresh is
+live, or starts before a buffered targeted write can commit, the single-player result is the explicit
+deferred outcome `{ "skipped": true, "reason": "whole-refresh-running", "inserted": 0, "updated": 0,
+"calendarFailures": [] }`; it is not a successful backfill. `offseason-sleep` remains a distinct
+skip reason.
 
 ## Error model
 

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { digestDeliveries, players, statLines } from "../src/db/schema.js";
 import { MlbClient } from "../src/mlb/client.js";
+import { claimRefreshRun } from "../src/jobs/refresh-run.js";
 import type { AppDeps } from "../src/server.js";
 import { createApp } from "../src/server.js";
 import {
@@ -80,6 +81,19 @@ describe("REST API", () => {
   });
 
   const app = () => createApp(deps);
+
+  it("returns the explicit targeted deferral contract while a whole refresh owns the lease", async () => {
+    await insertPlayer(opened.db, { externalId: 691185 });
+    expect(claimRefreshRun(opened.db, { now: clock.now(), playersTotal: 1 }).claimed).toBe(true);
+    const response = await app().request("/api/refresh", {
+      method: "POST", headers: JSON_AUTH, body: JSON.stringify({ personId: 691185 }),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      skipped: true, reason: "whole-refresh-running", inserted: 0, updated: 0, calendarFailures: [],
+    });
+    expect(api.calls).toHaveLength(0);
+  });
 
   describe("auth (rules/security.md: deny by default)", () => {
     it("401s /api and /mcp without a token, without echoing anything", async () => {

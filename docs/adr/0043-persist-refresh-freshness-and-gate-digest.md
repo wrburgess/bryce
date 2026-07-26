@@ -76,12 +76,8 @@ last terminal outcome, never a phantom `running`. The block is `null` before any
   watch-list-wide freshness claim.
 - **Offseason** reads `stale` by design; the heartbeat is the liveness signal.
 - Additive migration (`0005`), no backfill, reversible; no change to existing tables.
-- **Write coordination beyond the watermark is deferred to #81.** This ADR makes the freshness
-  *watermark* zombie-proof (a reaped or superseded run can never settle a success), but the underlying
-  `stat_lines`/`players` writes are not fully fenced: a reaped run can still write stale rows for the
-  players it touches before its next ownership check, and `runRefreshForPlayer` takes no claim. Both are
-  the pre-existing eventual-consistency behavior of ADR 0030 (idempotent upserts, self-corrected by the
-  next Refresh), not introduced here; an ingestion-wide write-fence is tracked in #81.
+- **Ingestion-wide write coordination is decided by ADR 0048.** This ADR's watermark fence is extended
+  there to every ingestion mutation, including targeted refreshes that defer behind a whole sweep.
 
 **Rejected:** gating on `finished_at` (cannot prove finality across a midnight straddle); **blocking**
 a stale digest instead of annotating (a silently missing digest is strictly worse than an annotated

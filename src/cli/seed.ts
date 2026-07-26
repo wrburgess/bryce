@@ -186,7 +186,7 @@ async function runAdd(flags: Map<string, string>, deps: SeedDeps): Promise<numbe
 
   deps.write(`added player id=${player.id} personId=${personId} name=${player.fullName}`);
   if (refresh === null || refresh.skipped) {
-    deps.write("refresh skipped reason=offseason-sleep");
+    deps.write(`refresh skipped reason=${refresh?.reason ?? "offseason-sleep"}`);
   } else {
     deps.write(`refresh done inserted=${refresh.inserted} updated=${refresh.updated}`);
   }
@@ -197,6 +197,13 @@ async function addHighlightlyPlayer(playerId: number, canonicalName: string, tea
   try {
     const result = await addHighlightlyNcaaPlayer({ ...deps }, { playerId, canonicalName, teamId });
     deps.write(`${result.action} player id=${result.player.id} highlightlyPlayerId=${playerId} name=${result.player.fullName}`);
+    if (result.action === "added") {
+      if (result.refresh === null || result.refresh.skipped) {
+        deps.write(`refresh skipped reason=${result.refresh?.reason ?? "offseason-sleep"}`);
+      } else {
+        deps.write(`refresh done inserted=${result.refresh.inserted} updated=${result.refresh.updated}`);
+      }
+    }
     return 0;
   } catch (err) {
     return writeHighlightlyError(err, deps);

@@ -25,8 +25,8 @@ import { levelForSportId, NCAA_SPORT_ID, SPORT_IDS } from "../mlb/levels.js";
 import type { GameLogSplit } from "../mlb/schemas.js";
 import { ncaaSeasonFor } from "../ncaa/seasons.js";
 import { syncDerivedTags } from "../tags/service.js";
-import type { RefreshTerminalStatus } from "./refresh-run.js";
-import { claimRefreshRun, renewRefreshRun, settleRefreshRun, updateRefreshRunProgress } from "./refresh-run.js";
+import type { IngestionFence, RefreshTerminalStatus } from "./refresh-run.js";
+import { admitTargetedRefresh, claimRefreshRun, renewRefreshRun, settleRefreshRun, updateRefreshRunProgress, withIngestionFence } from "./refresh-run.js";
 
 export interface RefreshDeps {
   db: Db;
@@ -146,6 +146,22 @@ export function summarizeRefreshFailures(
 const STAT_GROUPS: readonly StatGroup[] = ["hitting", "pitching", "fielding"];
 const UPSERT_CHUNK = 50;
 
+/** A guarded mutation was deliberately refused; never classify it as provider failure. */
+class RefreshFenceLostError extends Error {
+  constructor(readonly reason: "superseded" | "whole-refresh-running") { super(reason); }
+}
+
+function guardedWrite<T>(db: Db, fence: IngestionFence | undefined, mutation: (tx: TxHandle) => T): T {
+  const result = withIngestionFence(db, fence, mutation);
+  if (!result.committed) throw new RefreshFenceLostError(result.reason === "lost-ownership" ? "superseded" : "whole-refresh-running");
+  return result.value;
+}
+
+/** Whole-run lease validity is evaluated at the write, never at fetch start. */
+function fenceAtWrite(fence: IngestionFence | undefined, now: Date): IngestionFence | undefined {
+  return fence?.kind === "whole-refresh" ? { ...fence, now } : fence;
+}
+
 export async function loadCalendars(db: Db): Promise<CalendarEntry[]> {
   const rows = await db.select().from(seasonCalendar);
   return rows.map((r) => ({
@@ -213,8 +229,9 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   try {
     // getSeason failures are caught inside refreshCalendars and returned; a
     // calendar DB-WRITE failure is NOT — it escapes to the outer catch (MF1).
-    calendarFailures = await refreshCalendars(deps, season);
-    await refreshNcaaCalendar(deps, season, activePlayers);
+    const fence: IngestionFence = { kind: "whole-refresh", runId, now: now() };
+    calendarFailures = await refreshCalendars(deps, season, fence);
+    await refreshNcaaCalendar(deps, season, activePlayers, fence);
 
     for (const player of activePlayers) {
       // Renew + ownership check BEFORE this player's fetch/write (ADR 0043
@@ -248,7 +265,7 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
       // stranding the run. refreshOnePlayer buffers all HTTP before its atomic
       // write, so a throw leaves no partial write for this player.
       try {
-        const result = await refreshOnePlayer(deps, player, season);
+        const result = await refreshOnePlayer(deps, player, season, { kind: "whole-refresh", runId, now: now() });
         if (result === null) {
           playersSkipped += 1;
         } else {
@@ -257,6 +274,12 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
           updated += result.updated;
         }
       } catch (err) {
+        if (err instanceof RefreshFenceLostError) {
+          return {
+            skipped: true, reason: "superseded", status: null, playersRefreshed, statLinesInserted: inserted,
+            statLinesUpdated: updated, playersSkipped, playersFailed: playerFailures.length, calendarFailures, playerFailures, runId,
+          };
+        }
         playerFailures.push({
           playerId: player.id,
           reason: err instanceof Error ? err.message : String(err),
@@ -336,6 +359,10 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
     });
     errorMessage = summarizeRefreshFailures(calendarFailures, playerFailures);
   } catch (err) {
+    if (err instanceof RefreshFenceLostError) {
+      return { skipped: true, reason: "superseded", status: null, playersRefreshed, statLinesInserted: inserted,
+        statLinesUpdated: updated, playersSkipped, playersFailed: playerFailures.length, calendarFailures, playerFailures, runId };
+    }
     // MF1 fatal outer boundary: an UNEXPECTED throw during calendar/player
     // ORCHESTRATION — a calendar DB-upsert error, refreshNcaaCalendar, a
     // renewRefreshRun DB error, or the post-loop settle-time DB reads
@@ -446,6 +473,7 @@ export function currentSeason(deps: Pick<RefreshDeps, "now" | "tz">): string {
 export async function refreshCalendars(
   deps: RefreshDeps,
   season: string,
+  fence?: IngestionFence,
 ): Promise<CalendarFailure[]> {
   const { db, client, now } = deps;
   const fetchedAt = now().toISOString();
@@ -459,7 +487,7 @@ export async function refreshCalendars(
       continue;
     }
     if (s === null) continue;
-    await db
+    guardedWrite(db, fenceAtWrite(fence, now()), (tx) => tx
       .insert(seasonCalendar)
       .values({
         sportId,
@@ -483,7 +511,7 @@ export async function refreshCalendars(
           springEnd: s.springEndDate ?? null,
           fetchedAt,
         },
-      });
+      }).run());
   }
   return failures;
 }
@@ -497,6 +525,7 @@ export async function refreshNcaaCalendar(
   deps: RefreshDeps,
   season: string,
   activePlayers: PlayerRow[],
+  fence?: IngestionFence,
 ): Promise<void> {
   const watchingNcaa = activePlayers.some((p) => p.level === "ncaa");
   if (!watchingNcaa) return;
@@ -511,7 +540,7 @@ export async function refreshNcaaCalendar(
   }
 
   const fetchedAt = deps.now().toISOString();
-  await deps.db
+  guardedWrite(deps.db, fenceAtWrite(fence, deps.now()), (tx) => tx
     .insert(seasonCalendar)
     .values({
       sportId: NCAA_SPORT_ID,
@@ -531,7 +560,7 @@ export async function refreshNcaaCalendar(
         regularSeasonEnd: entry.regularSeasonEnd,
         fetchedAt,
       },
-    });
+    }).run());
 }
 
 /** Dispatch one active Player to the right ingest path; null = skipped. */
@@ -558,6 +587,7 @@ async function refreshOnePlayer(
   deps: RefreshDeps,
   player: PlayerRow,
   season: string,
+  fence?: IngestionFence,
 ): Promise<{ inserted: number; updated: number } | null> {
   if (player.level === "ncaa") {
     if (player.ncaaPlayerSeq === null) return null; // defensive: no identity to fetch
@@ -577,12 +607,12 @@ async function refreshOnePlayer(
       player.ncaaSourceState === "highlightly_active" ||
       player.ncaaSourceState === "highlightly_pending"
     ) {
-      return refreshHighlightlyNcaaPlayer(deps, player, Number(season));
+      return refreshHighlightlyNcaaPlayer(deps, player, Number(season), fence);
     }
     throw new HighlightlyMigrationRequiredError();
   }
   if (player.externalId === null) return null;
-  return refreshPlayer(deps, player, season);
+  return refreshPlayer(deps, player, season, fence);
 }
 
 type HighlightlyBox = Array<{ teamId: number | null; players: HighlightlyPlayer[] }>;
@@ -597,6 +627,7 @@ export async function refreshHighlightlyNcaaPlayer(
   deps: RefreshDeps,
   player: PlayerRow,
   season: number,
+  fence?: IngestionFence,
 ): Promise<{ inserted: number; updated: number }> {
   if (player.highlightlyPlayerId === null || player.highlightlyTeamId === null) {
     throw new HighlightlyMigrationRequiredError();
@@ -607,7 +638,7 @@ export async function refreshHighlightlyNcaaPlayer(
   const schedule = await deps.highlightlyClient.getFinalTeamMatches(player.highlightlyTeamId, season);
   const rows: NewStatLineRow[] = [];
   for (const match of schedule.value) {
-    await deps.db
+    guardedWrite(deps.db, fenceAtWrite(fence, deps.now()), (tx) => tx
       .insert(highlightlyMatchCache)
       .values({
         matchId: match.id,
@@ -620,7 +651,7 @@ export async function refreshHighlightlyNcaaPlayer(
       .onConflictDoUpdate({
         target: highlightlyMatchCache.matchId,
         set: { season, payload: match, complete: true, rateRemaining: schedule.remaining, fetchedAt: timestamp },
-      });
+      }).run());
 
     const cached = (await deps.db.select().from(highlightlyBoxScoreCache)
       .where(eq(highlightlyBoxScoreCache.matchId, match.id)))[0];
@@ -630,13 +661,13 @@ export async function refreshHighlightlyNcaaPlayer(
     } else {
       const fetched = await deps.highlightlyClient.getBoxScore(match.id);
       box = fetched.value;
-      await deps.db
+      guardedWrite(deps.db, fenceAtWrite(fence, deps.now()), (tx) => tx
         .insert(highlightlyBoxScoreCache)
         .values({ matchId: match.id, payload: box, complete: true, rateRemaining: fetched.remaining, fetchedAt: timestamp })
         .onConflictDoUpdate({
           target: highlightlyBoxScoreCache.matchId,
           set: { payload: box, complete: true, rateRemaining: fetched.remaining, fetchedAt: timestamp },
-        });
+        }).run());
     }
     const providerPlayer = box
       .filter((team) => team.teamId === player.highlightlyTeamId)
@@ -654,8 +685,7 @@ export async function refreshHighlightlyNcaaPlayer(
   const existingKeys = new Set(existing.map((row) => `${row.gameId}:${row.statType}`));
   const inserted = rows.filter((row) => !existingKeys.has(`${row.gameId}:${row.statType}`)).length;
 
-  deps.db.transaction(
-    (tx) => {
+  guardedWrite(deps.db, fenceAtWrite(fence, deps.now()), (tx) => {
       if (player.ncaaSourceState === "highlightly_pending") {
         tx.delete(statLines)
           .where(and(eq(statLines.playerId, player.id), eq(statLines.source, "ncaa_html_legacy"))).run();
@@ -670,9 +700,7 @@ export async function refreshHighlightlyNcaaPlayer(
           target: highlightlyPlayerCursors.playerId,
           set: { season, nextMatchDate: null, lastCompleteAt: timestamp, updatedAt: timestamp },
         }).run();
-    },
-    { behavior: "immediate" },
-  );
+  });
   syncDerivedTagsBestEffort(deps, player.id);
   return { inserted, updated: rows.length - inserted };
 }
@@ -726,6 +754,7 @@ export async function refreshPlayer(
   deps: RefreshDeps,
   player: PlayerRow,
   season: string,
+  fence?: IngestionFence,
 ): Promise<{ inserted: number; updated: number }> {
   const { db, client, now, tz } = deps;
   if (player.externalId === null) {
@@ -803,7 +832,7 @@ export async function refreshPlayer(
   // Atomic identity + stat lines (#23): one BEGIN IMMEDIATE transaction, so a
   // throw mid-upsert rolls the identity/location update back with it — a call-up
   // is never recorded without its games, nor vice versa.
-  writePlayerRefresh(db, { playerId: player.id, identity, rows });
+  writePlayerRefresh(db, { playerId: player.id, identity, rows }, fenceAtWrite(fence, now()));
 
   // Identity/location and this player's Stat Lines are now current — re-derive
   // his tags from the single entry point (covers the nightly sweep AND a first
@@ -922,23 +951,18 @@ export async function upsertStatLines(db: Db, rows: NewStatLineRow[]): Promise<v
  * HTTP I/O MUST be buffered by the caller BEFORE this runs; the transaction
  * never spans a network fetch.
  *
- * SCOPE (#23 SC4 / #81): this gives per-player atomicity only. It does NOT close
- * the ingestion-wide write-coordination race tracked by issue #81 — a superseded
- * run whose lease expired can still atomically write an OLDER snapshot after
- * losing ownership. The lease-fencing renew/settle guards (ADR 0043) bound that
- * exposure to a single in-flight player; the full fix is #81, out of scope here.
+ * When a fence is supplied, its ownership predicate is evaluated in this SAME
+ * immediate transaction as the identity and stat-line mutation (ADR 0048).
  */
 export function writePlayerRefresh(
   db: Db,
   args: { playerId: number; identity: Partial<typeof players.$inferInsert>; rows: NewStatLineRow[] },
+  fence?: IngestionFence,
 ): void {
-  db.transaction(
-    (tx) => {
+  guardedWrite(db, fence, (tx) => {
       tx.update(players).set(args.identity).where(eq(players.id, args.playerId)).run();
       upsertStatLinesInto(tx, args.rows);
-    },
-    { behavior: "immediate" },
-  );
+  });
 }
 
 /**
@@ -955,6 +979,8 @@ export async function runRefreshForPlayer(
   playerId: number,
 ): Promise<{
   skipped: boolean;
+  /** Distinguishes an offseason no-op from durable sweep serialization. */
+  reason: "offseason-sleep" | "whole-refresh-running" | null;
   inserted: number;
   updated: number;
   /**
@@ -970,29 +996,41 @@ export async function runRefreshForPlayer(
   const activePlayers = await loadActivePlayers(db);
   const calendars = await loadCalendars(db);
   if (sleepWindow(calendars, activePlayers, now(), tz).sleeping) {
-    return { skipped: true, inserted: 0, updated: 0, calendarFailures: [] };
+    return { skipped: true, reason: "offseason-sleep", inserted: 0, updated: 0, calendarFailures: [] };
   }
+  const admission = admitTargetedRefresh(db, now());
+  if (!admission.admitted) {
+    return { skipped: true, reason: "whole-refresh-running", inserted: 0, updated: 0, calendarFailures: [] };
+  }
+  const fence = admission.fence;
   const player = (await db.select().from(players).where(eq(players.id, playerId)))[0];
   if (player === undefined) {
     throw new Error(`No player with id ${playerId}`);
   }
   const season = currentSeason(deps);
   if (player.level === "ncaa") {
-    await refreshNcaaCalendar(deps, season, activePlayers);
+    try {
+      await refreshNcaaCalendar(deps, season, activePlayers, fence);
     if (
       player.ncaaPlayerSeq === null &&
       player.ncaaSourceState !== "highlightly_active" &&
       player.ncaaSourceState !== "highlightly_pending"
     ) {
-      return { skipped: false, inserted: 0, updated: 0, calendarFailures: [] };
+      return { skipped: false, reason: null, inserted: 0, updated: 0, calendarFailures: [] };
     }
     const ncaaResult =
       player.ncaaSourceState === "highlightly_active" || player.ncaaSourceState === "highlightly_pending"
-        ? await refreshHighlightlyNcaaPlayer(deps, player, Number(season))
+        ? await refreshHighlightlyNcaaPlayer(deps, player, Number(season), fence)
         : (() => { throw new HighlightlyMigrationRequiredError(); })();
-    return { skipped: false, ...ncaaResult, calendarFailures: [] };
+    return { skipped: false, reason: null, ...ncaaResult, calendarFailures: [] };
+    } catch (err) {
+      if (err instanceof RefreshFenceLostError) return { skipped: true, reason: "whole-refresh-running", inserted: 0, updated: 0, calendarFailures: [] };
+      throw err;
+    }
   }
-  const calendarFailures = await refreshCalendars(deps, season);
+  let calendarFailures: CalendarFailure[];
+  try {
+    calendarFailures = await refreshCalendars(deps, season, fence);
   if (calendarFailures.length > 0) {
     // MF3: do NOT silently swallow a calendar failure on the single-player path.
     // The player still proceeds (he never depended on the DB calendar), but the
@@ -1004,6 +1042,10 @@ export async function runRefreshForPlayer(
         "\n",
     );
   }
-  const result = await refreshPlayer(deps, player, season);
-  return { skipped: false, ...result, calendarFailures };
+    const result = await refreshPlayer(deps, player, season, fence);
+    return { skipped: false, reason: null, ...result, calendarFailures };
+  } catch (err) {
+    if (err instanceof RefreshFenceLostError) return { skipped: true, reason: "whole-refresh-running", inserted: 0, updated: 0, calendarFailures: [] };
+    throw err;
+  }
 }

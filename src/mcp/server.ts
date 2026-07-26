@@ -338,7 +338,7 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "run_refresh",
     {
       description:
-        "Run a refresh now: re-ingest the full current season for every active player, or just one player when personId (MLB/MiLB) or highlightlyPlayerId (NCAA) is given. A whole-watch-list refresh records a freshness run; a single-player refresh does not.",
+        "Run a refresh now: re-ingest the full current season for every active player, or just one player when personId (MLB/MiLB) or highlightlyPlayerId (NCAA) is given. A whole-watch-list refresh records a freshness run; a single-player refresh does not. A targeted result skipped with reason whole-refresh-running is deferred, not refreshed.",
       inputSchema: RefreshInputShape,
     },
     (args) =>
