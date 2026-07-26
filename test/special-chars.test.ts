@@ -9,7 +9,7 @@ import type { StatLineView } from "../src/queries/statLines.js";
 import { insertPlayer, TEST_API_TOKEN, testAppDeps, testDb } from "./factories.js";
 
 /*
- * #65 / ADR 0039 — the executable fidelity spec. A name carrying non-ASCII
+ * #65 / ADR 0041 — the executable fidelity spec. A name carrying non-ASCII
  * letters or punctuation must round-trip byte-for-byte through every surface
  * that echoes a stored name. Fixtures are forced to NFC (the canonical stored
  * form) so they do not depend on the source literal's byte form (Reviewer SC4),
@@ -24,7 +24,7 @@ const FIXTURES = [ACUNA, PENA, OREILLY, KANA];
 
 const AUTH = { Authorization: `Bearer ${TEST_API_TOKEN}` };
 
-describe("special characters in player names round-trip intact (#65 / ADR 0039)", () => {
+describe("special characters in player names round-trip intact (#65 / ADR 0041)", () => {
   let opened: OpenedDb;
   let deps: AppDeps;
   const app = () => createApp(deps);

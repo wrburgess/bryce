@@ -2,6 +2,10 @@
 
 **Status:** accepted
 
+> **Superseded in part by [ADR 0049](0049-runtime-actual-attribution-supersedes-mutable-model-defaults.md):**
+> the `Declared model`-column requirement described below is historical. Harness/model naming remains
+> accepted.
+
 ## Context
 
 Upstream ai-config's ADR 0023 (its Tool Roster decision; not vendored into this host) names the two

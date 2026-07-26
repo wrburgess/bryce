@@ -1,5 +1,5 @@
 /**
- * Player-name canonicalization at the ingestion boundary (ADR 0039).
+ * Player-name canonicalization at the ingestion boundary (ADR 0041).
  *
  * A Player's name arrives from two independent sources — the MLB Stats API
  * (JSON) and the stats.ncaa.org scrape (HTML) — that need not agree on Unicode

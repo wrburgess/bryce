@@ -90,7 +90,7 @@ function digestPresentation(assembly: DigestAssembly): DigestPresentation {
  * of those contexts, and every value here is emitted in one of them (`<td>`
  * text, `text-align: "..."`), never in a single-quoted attribute. Non-ASCII
  * letters (accents, wide characters) pass through untouched — the digest is a
- * UTF-8 mail part (#65 / ADR 0039).
+ * UTF-8 mail part (#65 / ADR 0041).
  */
 export function escapeHtml(s: string): string {
   return s
@@ -255,7 +255,7 @@ function textTable(
   // monospace display width for the Latin (incl. NFC-accented) names both
   // sources actually emit. It would UNDER-count an East-Asian wide glyph
   // (`鈴木`.length === 2, but it occupies 4 columns), misaligning that one
-  // row. That case is deliberately out of scope (#65 / ADR 0039): the MLB and
+  // row. That case is deliberately out of scope (#65 / ADR 0041): the MLB and
   // NCAA sources return Latin transliterations only, the HTML part (the primary
   // artifact) aligns via <td> regardless of glyph width, and a full
   // East-Asian-width table would align characters the data cannot contain. Such

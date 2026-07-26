@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,8 +53,10 @@ const LINK_CHECKED = [
   "docs/mcp/README.md",
 ];
 
-const MARKDOWN_LINK = /\[[^\]]*\]\(([^)]+)\)/g;
+const MARKDOWN_LINK = /\[[^\]\r\n]*\]\(([^)\r\n]+)\)/g;
 const CLAUDE_WORKTREES = join(REPO_ROOT, ".claude", "worktrees");
+const ADR_0039 = "0039-repo-tooling-unifies-on-typescript-remove-ruby.md";
+const ADR_0041 = "0041-normalize-player-names-nfc-at-ingestion.md";
 
 // Worktree directories are agent runtime state, not part of the shipped bundle. Rejecting their
 // root prevents cpSync from descending into arbitrary generated worktree names.
@@ -71,7 +73,7 @@ function healDeadLinks(root: string): void {
     if (!existsSync(file)) continue;
 
     for (const match of readFileSync(file, "utf-8").matchAll(MARKDOWN_LINK)) {
-      const raw = (match[1] ?? "").trim();
+      const raw = (match[2] ?? "").trim();
       if (raw === "" || /^(?:https?:|mailto:|#)/.test(raw)) continue;
 
       const target = raw.split("#")[0] ?? "";
@@ -223,6 +225,12 @@ function appendDuplicateHumanGates(root: string): void {
 function expectFailure(result: ReturnType<typeof runParityCheck>, message: string): void {
   expect(result.status).toBe(1);
   expect(result.errors.join("\n")).toContain(message);
+}
+
+function writeMarkdown(root: string, rel: string, body: string): void {
+  const file = join(root, rel);
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, body);
 }
 
 describe("parity check - Human Gates fixture bundles", () => {
@@ -414,4 +422,74 @@ describe("parity check - Human Gates fixture bundles", () => {
     },
     SPAWN_TIMEOUT_MS,
   );
+});
+
+describe("parity check - local ADR link labels", () => {
+  it("rejects a local ADR link whose displayed number disagrees with its target", () => {
+    withBundleCopy((root) => {
+      writeMarkdown(root, "docs/adr-link-mismatch.md", `[ADR 0041](adr/${ADR_0039})\n`);
+      expectFailure(
+        runParityCheck(root),
+        "ADR link number mismatch in docs/adr-link-mismatch.md: label ADR 0041 targets ADR 0039",
+      );
+    });
+  });
+
+  it("accepts matching same-directory and parent-relative ADR links, including fragments", () => {
+    withBundleCopy((root) => {
+      writeMarkdown(root, "docs/adr/adr-link-same-directory.md", `[ADR 0041](${ADR_0041}#decision)\n`);
+      writeMarkdown(root, "docs/adr-link-parent-relative.md", `[ADR 0041](adr/${ADR_0041})\n`);
+      expect(runParityCheck(root)).toMatchObject({ status: 0, errors: [] });
+    });
+  });
+
+  it("ignores link forms outside the local numbered-ADR grammar", () => {
+    withBundleCopy((root) => {
+      writeMarkdown(
+        root,
+        "docs/adr-link-ignored-forms.md",
+        [
+          `[ADR 0041](https://example.com/${ADR_0039})`,
+          `[ADR 0041](#${ADR_0039})`,
+          `[ADR 0041](adr%2F${ADR_0039})`,
+          `[Ordinary link](adr/${ADR_0039})`,
+          `[ADR 0041](adr/${ADR_0039}`,
+          `[ADR 0041][tooling]`,
+          `[ADR 0041](adr/not-numbered.md)`,
+          "",
+          "[tooling]: adr/0039-repo-tooling-unifies-on-typescript-remove-ruby.md",
+        ].join("\n"),
+      );
+      expect(runParityCheck(root)).toMatchObject({ status: 0, errors: [] });
+    });
+  });
+
+  it("does not let a malformed link consume a following valid ADR link", () => {
+    withBundleCopy((root) => {
+      writeMarkdown(
+        root,
+        "docs/adr-link-malformed-followed-by-valid.md",
+        `[ADR 0041](adr/broken.md\n[ADR 0041](adr/${ADR_0041})\n`,
+      );
+      expect(runParityCheck(root)).toMatchObject({ status: 0, errors: [] });
+    });
+  });
+
+  it("skips a directory symlink instead of recursively traversing its target", () => {
+    withBundleCopy((root) => {
+      symlinkSync(".", join(root, "docs", "adr-link-loop"));
+      expect(runParityCheck(root)).toMatchObject({ status: 0, errors: [] });
+    });
+  });
+
+  it("scans a symlinked Markdown file", () => {
+    withBundleCopy((root) => {
+      writeMarkdown(root, "docs/adr-link-target.txt", `[ADR 0041](adr/${ADR_0039})\n`);
+      symlinkSync("adr-link-target.txt", join(root, "docs", "adr-link-symlink.md"));
+      expectFailure(
+        runParityCheck(root),
+        "ADR link number mismatch in docs/adr-link-symlink.md: label ADR 0041 targets ADR 0039",
+      );
+    });
+  });
 });

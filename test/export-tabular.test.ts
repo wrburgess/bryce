@@ -103,7 +103,7 @@ describe("sqlResultToCsv", () => {
     expect(sqlResultToCsv(result)).toBe("a\r\n");
   });
 
-  // #65 / ADR 0039: a stored name is already NFC; CSV must preserve it verbatim.
+  // #65 / ADR 0041: a stored name is already NFC; CSV must preserve it verbatim.
   it("preserves an accented player name verbatim, unquoted", () => {
     const csv = statLinesToCsv([view({ playerName: "Wily Peña".normalize("NFC") })]);
     expect(csv).toContain("Wily Peña".normalize("NFC"));

@@ -57,8 +57,10 @@ split is what keeps future updates mergeable.
    the business-neutral placeholders in each of its five sections:
    - **Quality Checks** — the real commands an agent must run green before "done" (lint, tests,
      security, dependency audit).
-   - **Attribution & Model Declaration** — the per-agent tool + model for commit trailers and comment
-     footers ([ADR 0007](../adr/0007-attribution-includes-model-version-for-audits.md)).
+   - **Attribution & Model Declaration** — the per-harness identity email and artifact format for
+     runtime-actual model attribution; use literal `unknown` when runtime identity is unavailable,
+     never a configured model prediction ([ADR 0007](../adr/0007-attribution-includes-model-version-for-audits.md),
+     [ADR 0049](../adr/0049-runtime-actual-attribution-supersedes-mutable-model-defaults.md)).
    - **Branch & PR Policy** — protected branches, branch-naming prefixes, issue-linking rules. After
      editing the protected-branch list, re-run `bin/install-git-hooks` to regenerate the sidecar.
    - **Review Severity Framework** — tune the Critical/High/Medium/Low definitions the

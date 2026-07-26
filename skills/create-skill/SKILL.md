@@ -22,7 +22,7 @@ Skill's shape, emitting the paired artifacts, wiring the bookkeeping, and gating
 proposes.
 
 Read host-specific values from [`PROJECT.md`](../../PROJECT.md): the **quality-check commands** from
-*Quality Checks*, the branch/PR/issue-linking policy from *Branch & PR Policy*, the attribution/model
+*Quality Checks*, the branch/PR/issue-linking policy from *Branch & PR Policy*, the attribution format and identity email
 from *Attribution & Model Declaration*, and the lifecycle host from *Lifecycle Host*. Never hardcode a
 stack command, a branch name, or a platform verb here — the body stays business- and stack-neutral, and
 a Host App repoints those in Project Config, not in this Skill.
@@ -128,7 +128,8 @@ is **referenced in `AGENTS.md`** and the count prose is updated in `AGENTS.md`, 
 an adapted Skill carries its **`## Provenance` credit** (body) and `> **Upstream:**` echo (shim); and the
 host's *Quality Checks* are **green**. The output is a **reviewable PR**, **never a direct commit** to a
 protected branch. Sign every lifecycle-host comment with the footer from [`PROJECT.md`](../../PROJECT.md)
-→ *Attribution & Model Declaration*, using your runtime-actual model.
+→ *Attribution & Model Declaration*, using your runtime-actual model or literal `unknown` when it cannot
+be determined.
 
 **The gate that never degrades:** `create-skill` **proposes** a conforming Skill; a **human disposes** on
 the PR. The front door never merges a Skill on its own.

@@ -11,7 +11,7 @@ or the AC's own recommended option under `auto` ([`PROJECT.md`](../../PROJECT.md
 is **Stage 2 (Plan)** of the [development lifecycle](../../docs/standards/development-lifecycle.md).
 
 Read host-specific values — the lifecycle host and artifact map, the branch/PR policy, the
-quality-check commands, the attribution/model — from [`PROJECT.md`](../../PROJECT.md). Never hardcode
+quality-check commands, the attribution format and identity email — from [`PROJECT.md`](../../PROJECT.md). Never hardcode
 them here.
 
 </what-to-do>
@@ -110,7 +110,7 @@ starts. HC: comment on the issue to revise direction at any time.
 ```
 
 Sign with the attribution footer from [`PROJECT.md`](../../PROJECT.md) → *Attribution & Model
-Declaration*, using your runtime-actual model.
+Declaration*, using your runtime-actual model or literal `unknown` when it cannot be determined.
 
 **Then summon the Reviewer for a plan critique — the AC does this, not the HC.** With the plan
 posted, request an independent second-model critique of the plan text using the Reviewer declared in

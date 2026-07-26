@@ -10,7 +10,7 @@ Finalize the existing PR named in the invocation and prepare it for merge. This 
 
 Read host-specific values — the quality-check commands from [`PROJECT.md`](../../PROJECT.md) →
 *Quality Checks*, the review severities from *Review Severity Framework*, the branch/PR/issue-linking
-policy from *Branch & PR Policy*, the lifecycle host from *Lifecycle Host*, the attribution/model from
+policy from *Branch & PR Policy*, the lifecycle host from *Lifecycle Host*, the attribution format and identity email from
 *Attribution & Model Declaration*. Never hardcode them.
 
 **This stage operates on the PR that already exists — it never opens one, and it never self-merges.**
@@ -111,7 +111,7 @@ skipped: stop and recheck.
 7. **Notify the HC** the PR is ready for final review and merge.
 
 Sign every lifecycle-host comment with the attribution footer from [`PROJECT.md`](../../PROJECT.md) →
-*Attribution & Model Declaration*.
+*Attribution & Model Declaration*, using the runtime-actual model or literal `unknown`.
 
 **Do NOT merge the PR yourself — wait for the HC to merge.**
 
