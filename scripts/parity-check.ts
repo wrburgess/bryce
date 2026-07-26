@@ -83,6 +83,66 @@ const DEEP_DOC_TOKEN = /docs\/rules\/[a-z0-9-]+-postmortems\.md(?:#[A-Za-z0-9._-
 const DEEP_DOC_LINKED = /\]\(\s*(?:\.{0,2}\/)*$|\]:\s*(?:\.{0,2}\/)*$/;
 const RULES_DEEP_DOC_README = "docs/rules/README.md";
 
+// --- Tier-1 accretion guard (issue #152, ADR 0051) -------------------------
+//
+// The invariant is "Tier 1 carries the lesson, Tier 2 carries the narrative" (docs/rules/README.md).
+// This measures it PER BULLET rather than per file, because a per-file byte budget cannot tell a dense
+// lesson from an embedded case study: PR #150 added three genuinely new invariants that a byte budget
+// would have reddened, while the tree's worst inline narrative sat untouched in a file that budget
+// blessed. A bullet carrying its domain's case-study pointer is exempt at ANY length, so this never
+// asks more of an already-trimmed bullet (the longest such bullet today is 604 chars).
+export const NARRATIVE_MAX_CHARS = 600;
+
+// Group 1 is the bolded imperative, used verbatim as the allowlist key. `exec`-based (no /g) so there
+// is no shared-lastIndex hazard across the lines it is applied to.
+const RULE_BULLET = /^- \*\*(.+?)\*\*/;
+
+// Each Tier-1 rule's own domain deep doc, or `null` for a rule that has none BY DESIGN
+// (docs/rules/README.md records self-review as "(none - the checklist is the whole rule)").
+// A bullet is exempted only by ITS OWN domain's deep doc: accepting any `docs/rules/*-postmortems.md`
+// would let a rules/backend.md bullet be silenced by appending an unrelated domain's path.
+//
+// `null` is NOT the same state as "declared here but not yet written on disk" — three of these files
+// do not exist yet (docs/rules/README.md: deep docs are "absent until a host has a real postmortem to
+// record"), and pointing at an absent one trips checkRulesPointers(). The remedy this check advises is
+// therefore chosen from the path's state on disk, never from this table alone.
+export const RULE_DEEP_DOC: Record<string, string | null> = {
+  "rules/backend.md": "docs/rules/backend-postmortems.md",
+  "rules/frontend.md": "docs/rules/frontend-postmortems.md",
+  "rules/testing.md": "docs/rules/testing-postmortems.md",
+  "rules/security.md": "docs/rules/security-postmortems.md",
+  "rules/self-review.md": null,
+  "rules/scripting.md": "docs/rules/scripting-postmortems.md",
+  "rules/skills.md": "docs/rules/skills-postmortems.md",
+};
+
+// The bullets that already exceeded the limit when the guard landed, keyed by file and by the bullet's
+// exact bolded imperative. Keying on the imperative rather than a line number is deliberate: a line
+// number silently re-points at whatever bullet later occupies that line, which is the false green this
+// guard exists to prevent.
+//
+// This table only ever SHRINKS. Deleting an entry (by trimming its bullet) is welcome and requires no
+// other edit; ADDING one is a deliberate, reviewable act. An entry that is stale, ambiguous, or no
+// longer needed is itself an error, so the backlog cannot quietly stop shrinking -- the same
+// fail-closed discipline scripts/coverage-floors.ts applies to a floored path missing from the report.
+// Five of the eight are rules/backend.md bullets that issue #151 exists to trim.
+export const NARRATIVE_ALLOWLIST: Record<string, readonly string[]> = {
+  "rules/backend.md": [
+    "Anchor a freshness or completeness claim on when a job _started_, not when it _finished_.",
+    "A freshness/completeness verdict must not sit over data a consumer silently drops because a filter's own prerequisite was missing or unusable.",
+    "Never swap a live data file into place by moving the old one aside and then renaming the new one in",
+    "Never assume a framework's central error handler catches every route's thrown error",
+    "Never embed a raw control byte (most often a literal NUL) as a delimiter or sentinel in a text source file",
+  ],
+  "rules/security.md": [
+    "Never reuse a *coercing* validator at a typed-JSON boundary",
+  ],
+  "rules/scripting.md": [
+    "Never emit non-ASCII bytes from a bundled script's stdout/stderr",
+    "Never widen a guard's matching rule to clear a false alarm without asking which way the new failure points",
+  ],
+};
+
 const SKILLS_DIR = "skills";
 const CLAUDE_COMMANDS_DIR = ".claude/commands";
 const LIFECYCLE_SKILLS = ["assess", "devise", "invoke", "verify", "listen", "final"];
@@ -165,6 +225,7 @@ class ParityCheck {
     this.checkHumanGates();
     this.checkRules();
     this.checkRulesPointers();
+    this.checkRulesNarrative();
     this.checkSkills();
     this.checkGuardrails();
     this.checkGuides();
@@ -406,6 +467,141 @@ class ParityCheck {
           if (!this.exists(target)) {
             this.err(`Rules pointer ${rel}: case-study pointer \`${target}\` does not exist`);
           }
+        }
+      }
+    }
+  }
+
+  /**
+   * Every `- **…**` bullet in a Tier-1 rule file, in source order, with the fenced-code skipping
+   * checkRulesPointers() uses. Returns the bolded imperative (the allowlist key) alongside the whole
+   * line, because the limit is measured on the LINE and the exemption is read off the line too.
+   *
+   * Length is JS `String.length` (UTF-16 code units), not bytes. These files are full of em dashes,
+   * which are one char and three bytes, so the two measures disagree by ~10% on a typical bullet;
+   * chars is the honest unit for "how much does a reader have to take in".
+   */
+  private ruleBullets(rel: string): { key: string; line: string }[] {
+    const bullets: { key: string; line: string }[] = [];
+    let fenced = false;
+    for (const raw of this.read(rel).split("\n")) {
+      const line = rstrip(raw);
+      if (/^\s*```/.test(line)) {
+        fenced = !fenced;
+        continue;
+      }
+      if (fenced) continue;
+
+      const match = RULE_BULLET.exec(line);
+      if (match === null) continue;
+      bullets.push({ key: match[1] as string, line });
+    }
+    return bullets;
+  }
+
+  /** A bullet is over the limit and not exempted by its own domain's case-study pointer. */
+  private narrativeTrips(rel: string, line: string): boolean {
+    if (line.length <= NARRATIVE_MAX_CHARS) return false;
+    const deepDoc = RULE_DEEP_DOC[rel];
+    return !(deepDoc !== null && deepDoc !== undefined && line.includes(`\`${deepDoc}\``));
+  }
+
+  /**
+   * The remedy is chosen from the deep doc's state ON DISK, in three cases, so the advice can never be
+   * impossible to follow (issue #152 plan review):
+   *
+   *   null            - no deep doc by design (self-review). Shortening is the only remedy.
+   *   present         - point at it, or shorten.
+   *   declared/absent - authoring it comes FIRST. Adding a pointer to a file that does not exist trips
+   *                     checkRulesPointers(), so advising "just add a pointer" here would march the
+   *                     contributor straight into a second, differently-worded failure.
+   *
+   * Reading disk rather than a hardcoded list also means the advice updates itself the day a host
+   * writes its first postmortem for that domain.
+   */
+  private narrativeRemedy(rel: string): string {
+    const deepDoc = RULE_DEEP_DOC[rel];
+    if (deepDoc === null || deepDoc === undefined) {
+      return `${rel} has no Tier-2 deep doc, so shorten the bullet - keep the imperative and its rationale, drop the case narrative`;
+    }
+    if (this.exists(deepDoc)) {
+      return `move the case narrative to \`${deepDoc}\` and leave a backticked pointer to it, or shorten the bullet`;
+    }
+    return (
+      `\`${deepDoc}\` does not exist yet, so author it first (${RULES_DEEP_DOC_README}) and then leave a ` +
+      `backticked pointer to it, or shorten the bullet - a pointer to an absent deep doc fails the rules-pointer check`
+    );
+  }
+
+  /**
+   * Tier-1 accretion guard (issue #152, ADR 0051). Fails a `rules/*.md` bullet that exceeds
+   * NARRATIVE_MAX_CHARS without carrying its own domain's case-study pointer, unless it is named in
+   * NARRATIVE_ALLOWLIST.
+   *
+   * The allowlist is checked as strictly as the bullets are. An entry that names a non-Tier-1 file,
+   * matches no bullet, matches more than one, or covers a bullet that no longer trips is an error --
+   * so the grandfathered backlog cannot rot into a set of stale exemptions that silently re-cover a
+   * future bullet. That last case is what makes this a ratchet: trimming a bullet turns parity RED
+   * until its now-unnecessary entry is deleted.
+   */
+  private checkRulesNarrative(): void {
+    if (!this.dirExists(RULES_DIR)) return;
+
+    for (const rel of REQUIRED_RULES) {
+      if (!(rel in RULE_DEEP_DOC)) {
+        this.err(
+          `Tier-1 narrative: no deep-doc mapping for ${rel} - add it to RULE_DEEP_DOC in ` +
+          `scripts/parity-check.ts (use null for a rule with no Tier-2 deep doc)`,
+        );
+      }
+    }
+
+    for (const rel of Object.keys(NARRATIVE_ALLOWLIST)) {
+      if (!REQUIRED_RULES.includes(rel)) {
+        this.err(
+          `Tier-1 narrative allowlist: \`${rel}\` is not a Tier-1 rule file - remove it or correct the path ` +
+          `(expected one of ${inspectArray(REQUIRED_RULES.slice())})`,
+        );
+      }
+    }
+
+    for (const rel of REQUIRED_RULES) {
+      if (!this.exists(rel)) continue;   // already reported by checkRules()
+
+      const bullets = this.ruleBullets(rel);
+      const allowed = NARRATIVE_ALLOWLIST[rel] ?? [];
+
+      for (const { key, line } of bullets) {
+        if (!this.narrativeTrips(rel, line)) continue;
+        if (allowed.includes(key)) continue;
+        this.err(
+          `Tier-1 narrative ${rel}: bullet "${asciiSafeGateValue(key)}" is ${line.length} characters ` +
+          `(limit ${NARRATIVE_MAX_CHARS}) and carries no case-study pointer; ${this.narrativeRemedy(rel)}`,
+        );
+      }
+
+      for (const key of allowed) {
+        const matches = bullets.filter((b) => b.key === key);
+        const safeKey = asciiSafeGateValue(key);
+        if (matches.length === 0) {
+          this.err(
+            `Tier-1 narrative allowlist ${rel}: entry "${safeKey}" matches no bullet - the imperative was ` +
+            `reworded or the bullet removed; update the entry to the new wording or delete it`,
+          );
+          continue;
+        }
+        if (matches.length > 1) {
+          this.err(
+            `Tier-1 narrative allowlist ${rel}: entry "${safeKey}" matches ${matches.length} bullets - an ` +
+            `ambiguous key cannot exempt one bullet; make the imperatives distinct`,
+          );
+          continue;
+        }
+        if (!this.narrativeTrips(rel, (matches[0] as { line: string }).line)) {
+          this.err(
+            `Tier-1 narrative allowlist ${rel}: entry "${safeKey}" is no longer needed - the bullet is now ` +
+            `within the limit or carries its case-study pointer; remove the entry (this list only shrinks)`,
+          );
         }
       }
     }

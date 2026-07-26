@@ -44,3 +44,40 @@ target lands will break the parity gate.
 
 *(Provenance: PR #13 forward-references and #7 / PR #17's trigger table both relied on this unwritten
 rule; captured here per issue #19.)*
+
+## Convention: a Tier-1 bullet carries the lesson, not the case study
+
+The split above is the whole point of two tiers, so it is enforced rather than merely stated
+([ADR 0051](../adr/0051-tier-1-per-bullet-narrative-budget.md)). `scripts/parity-check.ts`
+(`checkRulesNarrative`) fails any `rules/*.md` bullet longer than **600 characters** that does not carry
+its own domain's case-study pointer.
+
+It is measured **per bullet, not per file**, and a bullet that carries its pointer is **exempt at any
+length** — so a rule file may grow indefinitely in well-shaped lessons, and the check never asks more of
+a bullet that has already been trimmed (the longest such bullet today is 604 characters). What it
+catches is the one thing the two-tier split forbids: a case narrative written inline instead of pushed
+down here.
+
+When it fires, the remedy depends on the state of your domain's deep doc — the error message says which
+one applies, read from disk:
+
+| Your domain's deep doc | Remedy |
+|---|---|
+| **exists** (`backend`, `skills`, `testing`) | Move the narrative into it and leave a backticked pointer in the bullet, **or** shorten the bullet. |
+| **declared but not yet written** (`frontend`, `security`, `scripting`) | **Author the deep doc first** (per *Baseline note* above), then point at it — **or** shorten the bullet. Pointing at a file that does not exist fails the rules-pointer check. |
+| **none by design** (`self-review`) | Shorten the bullet. |
+
+Whichever remedy you pick, **the instruction never moves behind the pointer** — `rules/skills.md`
+forbids that, because Copilot does not follow links. Only the *narrative* moves; the imperative and its
+rationale stay resident in Tier 1.
+
+**The grandfathered backlog only shrinks.** The bullets that were already over the limit when the guard
+landed sit in `NARRATIVE_ALLOWLIST` in `scripts/parity-check.ts`, keyed by their exact bolded
+imperative. Deleting an entry (by trimming its bullet) is welcome and needs no other edit; **adding**
+one is a deliberate, reviewable act. An entry that is stale, ambiguous, or no longer needed is itself a
+parity failure, so a trim turns the gate red until the now-pointless entry is removed — the backlog
+cannot quietly stop shrinking.
+
+*(Provenance: issue #152 — PR #149 trimmed `rules/testing.md` and the accretion resumed in the very next
+merged PR, past the size the trim started from, because every individual bullet was defensible and
+nothing asked whether its narrative belonged in Tier 2.)*
