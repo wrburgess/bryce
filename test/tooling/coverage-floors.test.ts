@@ -118,6 +118,34 @@ describe("relativeKey", () => {
   it("folds a backslash-spelled root when matching an absolute key", () => {
     expect(relativeKey("/repo/root/src/cli/main.ts", "\\repo\\root")).toBe("src/cli/main.ts");
   });
+
+  // Reviewer finding (PR #138): absoluteness was decided by `isAbsolute`, which is bound to
+  // the READING platform. On POSIX it calls a drive-letter path relative, so the root was
+  // never stripped and EVERY floored file came back "absent from coverage summary" —
+  // precisely the false diagnosis the cross-platform handling above exists to prevent.
+  it("strips a Windows drive-letter root when read on POSIX", () => {
+    expect(relativeKey("C:\\repo\\root\\src\\cli\\main.ts", "C:\\repo\\root")).toBe("src/cli/main.ts");
+    expect(relativeKey("C:/repo/root/src/cli/main.ts", "C:/repo/root/")).toBe("src/cli/main.ts");
+  });
+
+  it("treats a drive letter as case-insensitive, as Windows does", () => {
+    expect(relativeKey("C:\\repo\\root\\src\\cli\\main.ts", "c:\\repo\\root")).toBe("src/cli/main.ts");
+  });
+
+  it("does not rewrite a drive-letter key from outside the root", () => {
+    expect(relativeKey("D:\\other\\src\\cli\\main.ts", "C:\\repo\\root")).toBe("D:/other/src/cli/main.ts");
+    // A sibling sharing a textual prefix is still outside the root.
+    expect(relativeKey("C:\\repo\\root-other\\src\\a.ts", "C:\\repo\\root")).toBe("C:/repo/root-other/src/a.ts");
+  });
+
+  it("treats a UNC-style key as absolute rather than relative", () => {
+    expect(relativeKey("\\\\server\\share\\src\\a.ts", "/repo/root")).toBe("//server/share/src/a.ts");
+  });
+
+  // The guard must not swallow genuinely relative keys that merely contain a colon.
+  it("still treats a colon-bearing relative key as relative", () => {
+    expect(relativeKey("src/cli/main:copy.ts", "/repo/root")).toBe("src/cli/main:copy.ts");
+  });
 });
 
 describe("evaluate", () => {

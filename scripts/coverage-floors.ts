@@ -84,6 +84,23 @@ function toPosix(value: string): string {
   return value.replace(/\\/g, "/");
 }
 
+// A Windows drive-letter root ("C:/..."), already separator-normalized.
+const DRIVE_ABSOLUTE = /^[A-Za-z]:\//;
+
+// Absoluteness must be decided from the path's OWN shape, not the host's. `isAbsolute` is
+// platform-bound: on POSIX it calls "C:\\repo\\src\\cli\\main.ts" relative, so the
+// root-stripping below would be skipped and every floored file reported absent despite
+// being measured -- the exact bogus diagnosis this normalization exists to prevent.
+function looksAbsolute(original: string, posix: string): boolean {
+  return isAbsolute(original) || posix.startsWith("/") || DRIVE_ABSOLUTE.test(posix);
+}
+
+// Windows drive letters are case-insensitive, so "c:/repo" and "C:/repo" name one root.
+// Only the comparison is folded; the returned slice keeps the summary's own spelling.
+function comparable(posix: string): string {
+  return DRIVE_ABSOLUTE.test(posix) ? posix[0]!.toUpperCase() + posix.slice(1) : posix;
+}
+
 // The json-summary reporter keys files by ABSOLUTE path. Fold a key to the repo-relative,
 // forward-slash form the manifest uses so the two can be matched. A key that is already
 // relative, or absolute but outside the repo, is returned normalized but unrewritten —
@@ -95,9 +112,11 @@ export function relativeKey(key: string, root: string): string {
   // POSIX -- a Windows-shaped key would then never match a floor and would surface as a
   // bogus "absent" violation naming a file that is perfectly well covered.
   const posix = toPosix(key).replace(/^\.\//, "");
-  if (!isAbsolute(key)) return posix;
+  if (!looksAbsolute(key, posix)) return posix;
   const base = toPosix(root).replace(/\/+$/, "");
-  if (base !== "" && posix.startsWith(`${base}/`)) return posix.slice(base.length + 1);
+  if (base !== "" && comparable(posix).startsWith(`${comparable(base)}/`)) {
+    return posix.slice(base.length + 1);
+  }
   return posix;
 }
 
