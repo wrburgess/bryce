@@ -6,6 +6,8 @@ import type { PlayerTagRow } from "../db/schema.js";
 import { playerTags, players, statLines } from "../db/schema.js";
 import { latestStatLineOrder } from "../queries/statLines.js";
 import { deriveTags } from "./derive.js";
+import type { TagToken } from "./selector.js";
+import { formatTagSelector, parseTagSelectorOrError } from "./selector.js";
 
 /**
  * The tag service (Phase A of #29): the one home for tag semantics, mirroring
@@ -33,9 +35,6 @@ export const DERIVED_NAMESPACES: ReadonlySet<string> = new Set(["level", "pos", 
 /** The one manual namespace and its closed value set. */
 export const MANUAL_NAMESPACE = "status";
 export const MANUAL_STATUS_VALUES = ["rostered", "scouted"] as const;
-
-/** The most tokens a selector may carry (a cheap denial-of-service bound). */
-export const MAX_SELECTOR_TOKENS = 16;
 
 /**
  * A non-throwing check: is `(namespace, value)` a valid MANUAL tag (the `status`
@@ -247,122 +246,35 @@ export function listTags(db: TagDb, playerId: number): PlayerTagRow[] {
     .all();
 }
 
-/** A parsed selector token: `ns:value`, or a bare `ns` (value=null → any value). */
-export interface TagToken {
-  namespace: string;
-  value: string | null;
-}
-
 function selectorError(message: string, input: unknown): ZodError {
   return new ZodError([{ code: "custom", path: ["tags"], message, input }]);
 }
 
 /**
- * The one shape a namespace or value may take: lowercase alphanumerics and
- * internal hyphens. This is not a stylistic bound — it is the SECURITY boundary
- * for the cohort label (#140). A parsed selector is rendered back into an email
- * subject (an SMTP/Postmark header), an HTML heading, and a Markdown heading;
- * constraining the charset HERE makes the label safe in all of those sinks by
- * construction, rather than relying on each sink to escape correctly. A CR/LF
- * inside a value would otherwise survive `trim()` (which only strips the ENDS of
- * a token) and reach a mail header.
- *
- * Verified sufficient for every value the system can store: `level:` (mlb, aaa,
- * aa, high-a, single-a, rookie, dsl, ncaa), `pos:` (POSITION_MAP emits lowercase
- * granular + coarse values, including the leading-digit `1b`), `prospect`, and
- * `status:` (rostered, scouted).
+ * Re-exported from the dependency-free grammar module so every existing importer
+ * of the tag service keeps working, and there is still exactly ONE grammar. The
+ * split exists so `src/cli/router.ts` can validate a `--tags` value during
+ * preflight without importing service code — see `src/tags/selector.ts`.
  */
-const TAG_SEGMENT = /^[a-z0-9][a-z0-9-]{0,63}$/;
+export type { TagToken } from "./selector.js";
+export {
+  MAX_SELECTOR_LABEL_LENGTH,
+  MAX_SELECTOR_TOKENS,
+  MAX_TAG_SEGMENT_LENGTH,
+  formatTagSelector,
+  validateTagSelector,
+} from "./selector.js";
 
 /**
- * Longest a single namespace or value may be. The charset above stops a segment
- * from carrying a header-injection payload, but says nothing about LENGTH — and
- * an unbounded segment is still reflected into a mail subject, where a
- * multi-kilobyte header is at best folded and at worst rejected by the MTA
- * (RFC 5322 caps a line at 998 octets). 64 is ~6x the longest value the system
- * emits (`single-a`), so it bounds the label without constraining the model.
- */
-export const MAX_TAG_SEGMENT_LENGTH = 64;
-
-/**
- * Longest the RENDERED label may be. A per-segment bound alone is not enough:
- * {@link MAX_SELECTOR_TOKENS} tokens at {@link MAX_TAG_SEGMENT_LENGTH} each
- * still render ~2,094 characters, well past the 998-octet physical header line
- * RFC 5322 allows — so the aggregate is what must be bounded, not the parts.
- * 512 leaves room for the subject's prefix and window suffix inside that limit
- * while staying ~20x the longest selector anyone would actually type.
- */
-export const MAX_SELECTOR_LABEL_LENGTH = 512;
-
-/**
- * Parse a comma-separated selector into distinct tokens. Each token is
- * `ns:value` or a bare `ns` (matching the namespace alone, e.g. `prospect`).
- * Whitespace is trimmed, empty segments dropped, duplicates deduped, and the
- * distinct count bounded to {@link MAX_SELECTOR_TOKENS}. A malformed token
- * (`:foo`, `foo:`, `foo:bar:baz`, `level:AAA`, anything outside
- * {@link TAG_SEGMENT}) or an over-long list throws a ZodError — a boundary
- * validation error that every surface maps to 400 / exit 1.
- *
- * Rejecting a value with stray colons is what the documented grammar has always
- * claimed (`docs/domain/tags.md` → Selector grammar); the parser previously
- * split on the FIRST colon and accepted the rest, so `foo:bar:baz` parsed to the
- * value `bar:baz`. An uppercase token is likewise rejected rather than silently
- * matching nothing: every stored value is lowercase, so `level:AAA` was never a
- * working query, and a typo'd selector must not look like an honest empty cohort
- * (the same fail-closed reasoning `--window` uses).
+ * Parse a comma-separated selector into distinct tokens, throwing the typed
+ * boundary error on a malformed one — the throwing half of the grammar in
+ * `src/tags/selector.ts`, which owns every rule. A ZodError here is what each
+ * surface already maps to 400 / MCP isError / CLI exit 1.
  */
 export function parseTagSelector(expr: string): TagToken[] {
-  const segments = expr
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  const seen = new Set<string>();
-  const tokens: TagToken[] = [];
-  for (const segment of segments) {
-    const colon = segment.indexOf(":");
-    const namespace = colon === -1 ? segment : segment.slice(0, colon);
-    const value = colon === -1 ? null : segment.slice(colon + 1);
-    if (!TAG_SEGMENT.test(namespace) || (value !== null && !TAG_SEGMENT.test(value))) {
-      throw selectorError(`malformed tag token '${segment}'`, expr);
-    }
-    const key = `${namespace}\u0000${value ?? ""}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    tokens.push({ namespace, value });
-  }
-  // A PROVIDED expression that normalizes to zero tokens (only separators or
-  // whitespace, e.g. `,,,` or `  `) is malformed — NOT an absent filter. Left to
-  // fall through, an empty token list would read as "no filter" in
-  // `playerIdsMatchingTags` and return the whole roster, silently bypassing the
-  // validation error. An ABSENT `tags` param never reaches here (callers guard on
-  // undefined), so this only rejects a present-but-empty selector.
-  if (tokens.length === 0) {
-    throw selectorError(`tag selector '${expr}' has no tokens`, expr);
-  }
-  if (tokens.length > MAX_SELECTOR_TOKENS) {
-    throw selectorError(`too many tag tokens (max ${MAX_SELECTOR_TOKENS})`, expr);
-  }
-  // Bound what actually reaches the mail header: the RENDERED label, not the
-  // segments it is built from. Checked last, so a caller sees the specific
-  // reason (malformed / too many tokens) before this catch-all size limit.
-  const label = formatTagSelector(tokens);
-  if (label.length > MAX_SELECTOR_LABEL_LENGTH) {
-    throw selectorError(
-      `tag selector is too long: ${label.length} characters (max ${MAX_SELECTOR_LABEL_LENGTH})`,
-      expr,
-    );
-  }
-  return tokens;
-}
-
-/**
- * Render parsed tokens back to their normalized display form (`level:aaa,
- * status:rostered`) — deduped and order-preserving, because that is what the
- * parser produced. Presentation reads THIS rather than the operator's raw input,
- * so a label can never carry text the parser did not accept.
- */
-export function formatTagSelector(tokens: readonly TagToken[]): string {
-  return tokens.map((tok) => (tok.value === null ? tok.namespace : `${tok.namespace}:${tok.value}`)).join(", ");
+  const parsed = parseTagSelectorOrError(expr);
+  if ("error" in parsed) throw selectorError(parsed.error, expr);
+  return parsed.tokens;
 }
 
 /**

@@ -3,6 +3,7 @@ import type { OpenedDb } from "../src/db/client.js";
 import type { DigestCliDeps } from "../src/cli/digest.js";
 import { parseForce, parseList, parseTags, parseWindow, runDigestCli } from "../src/cli/digest.js";
 import { addToList, createList } from "../src/lists/service.js";
+import { preflightDirect } from "../src/cli/router.js";
 import {
   CapturingMailer,
   MID_SEASON,
@@ -288,6 +289,21 @@ describe("digest CLI", () => {
       expect(mailer.sent[0]?.subject).toBe(
         "ScoreKeeps Baseball (L + Tags: status:rostered) - Sat, July 18, 2026",
       );
+    });
+
+    it("--tags is rejected by router PREFLIGHT, before any leaf module loads (#140)", () => {
+      // The router's contract is loader-free validation: a leaf is imported only
+      // after preflight succeeds. Without a validator on this option, `sk digest
+      // --tags level:AAA` would load digest.main and run startupDb — snapshot,
+      // migrate, and re-derive tags — before resolveTagScope rejected it, so an
+      // invalid command could MUTATE STATE on its way to exit 1. Preflight shares
+      // the one grammar via the dependency-free src/tags/selector.ts.
+      for (const bad of ["level:AAA", "foo:bar:baz", ":foo", ",,,", "level:<script>"]) {
+        expect(preflightDirect(["digest"], ["--tags", bad])).toMatch(/tag selector|control characters/);
+      }
+      // A well-formed selector passes preflight untouched.
+      expect(preflightDirect(["digest"], ["--tags", "level:aaa,status:rostered"])).toBeNull();
+      expect(preflightDirect(["digest"], ["--tags", "prospect"])).toBeNull();
     });
 
     it("--tags fails closed on a malformed selector: exits 1 BEFORE the mailer is touched (#140)", async () => {
