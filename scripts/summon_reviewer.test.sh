@@ -269,6 +269,12 @@ expect_status "missing acting harness is a usage error" 1 "missing required --ac
   "$TSX" "$SCRIPT" --mode work --out "$TMP/missing-ac.md" --codex-bin "$FAKE_BIN" --ac ""
 expect_status "missing reviewer model is a usage error" 1 "missing required --reviewer-model MODEL" \
   "$TSX" "$SCRIPT" --mode work --out "$TMP/missing-reviewer-model.md" --codex-bin "$FAKE_BIN" --ac claude --ac-model opus-4.8
+expect_status "unknown acting harness is a usage error" 1 "unknown --ac \`unknown\`" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/unknown-ac.md" --codex-bin "$FAKE_BIN" \
+  --ac unknown --ac-model model --reviewer-model gpt-5.6-terra
+expect_status "Codex acting harness normalizes whitespace and case before self-review check" 1 "FAILED (self_review)" \
+  "$TSX" "$SCRIPT" --mode work --out "$TMP/codex-normalized.md" --codex-bin "$FAKE_BIN" \
+  --ac "  CoDeX  " --ac-model gpt-5.6 --reviewer-model GPT-5.6
 
 make_fake_codex echo_stdin
 PLAN="$TMP/plan.md"

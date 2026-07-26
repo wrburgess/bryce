@@ -125,8 +125,9 @@ npx tsx scripts/summon-reviewer.ts --mode work --base BRANCH --out OUT_FILE --ac
   - `AC_NAME` / `AC_MODEL` — the **acting harness and runtime-actual model** (for example,
     `codex` / `gpt-5.6`). `REVIEWER_MODEL` is the model the Codex CLI must use (normally
     `gpt-5.6-terra`). **All three are required; the script never defaults or infers an actor.** The
-    script refuses a Codex AC that names the same model as its reviewer; same harness plus a distinct
-    model is an independent review.
+    script accepts only the declared harnesses (`claude`, `codex`, `copilot`, `antigravity`, or
+    `grok-build`; `claude-code` is an alias), normalizes their spelling, and refuses a Codex AC that
+    names the same model as its reviewer; same harness plus a distinct model is an independent review.
   - `--min-bytes N` (default 200) sets the substance floor below which stdout is not a review;
     `--timeout SECONDS` (default 900) caps the wall clock. Neither is normally passed.
 
