@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import type { ReportCliDeps } from "../src/cli/report.js";
-import { launchCommand, parseReportPlayerArgs, runReportCli } from "../src/cli/report.js";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { launchCommand, main, parseReportPlayerArgs, runReportCli } from "../src/cli/report.js";
 import { renderPlayerCardHtml, renderPlayerCardText } from "../src/reports/player-card-render.js";
 import { assemblePlayerCard } from "../src/reports/player-card.js";
 import { MID_SEASON, TEST_TZ, fakeClock, insertCalendars2026, insertPlayer, insertStatLine, testDb } from "./factories.js";
@@ -48,7 +51,9 @@ describe("report player CLI", () => {
     expect(parseReportPlayerArgs(["--name=Jos\u00E9 Test"])).toEqual({ name: "Jos\u00E9 Test", windows: ["last10", "last30", "ytd"], format: "console", open: false });
   });
 
-  it("rejects ambiguous, malformed, and duplicate arguments before opening the database", () => {
+  // Pure-parser cases. The "before opening the database" CLAIM is asserted by
+  // side effect in its own test below — this one only pins the parse rules.
+  it("rejects ambiguous, malformed, and duplicate arguments", () => {
     expect(parseReportPlayerArgs([])).toContain("exactly one");
     expect(parseReportPlayerArgs(["--id", "01"])).toContain("canonical");
     expect(parseReportPlayerArgs(["--id", "1", "--name", "Name"])).toContain("exactly one");
@@ -59,8 +64,9 @@ describe("report player CLI", () => {
     const code = await runReportCli(["--id", String(playerId), "--windows", "last10"], deps());
     expect(code).toBe(0);
     expect(err).toEqual([]);
-    // Equality, not a substring: the CLI cannot drift into its own layout.
-    expect(out).toEqual([renderPlayerCardText(card())]);
+    // Equality, not a substring: the CLI cannot drift into its own layout. The
+    // renderer's own trailing newline is dropped because the writer adds one.
+    expect(out).toEqual([renderPlayerCardText(card()).replace(/\n$/, "")]);
     // Asserting it is not JSON is what would catch a default that never flipped.
     expect(() => JSON.parse(out[0]!)).toThrow();
   });
@@ -71,7 +77,24 @@ describe("report player CLI", () => {
 
     out = [];
     expect(await runReportCli(["--id", String(playerId), "--windows", "last10", "--format", "html"], deps())).toBe(0);
-    expect(out).toEqual([renderPlayerCardHtml(card())]);
+    expect(out).toEqual([renderPlayerCardHtml(card()).replace(/\n$/, "")]);
+  });
+
+  /**
+   * stdout and `--out` must deliver the SAME bytes. Both Presentations end with
+   * a newline and the production writer appends its own, so without the strip
+   * the piped card carried a trailing blank line the saved file did not.
+   */
+  it.each(["console", "html", "json"])("emits identical bytes on stdout and to --out (%s)", async (format) => {
+    const written: string[] = [];
+    await runReportCli(["--id", String(playerId), "--windows", "last10", "--format", format], deps());
+    await runReportCli(
+      ["--id", String(playerId), "--windows", "last10", "--format", format, "--out", "/tmp/card.out"],
+      deps({ writeFile: (_p, contents) => void written.push(contents) }),
+    );
+    // `out[0]` is the payload; the real writer re-adds the single newline.
+    expect(`${out[0]!}\n`.replace(/\n$/, "")).toBe(written[0]!.replace(/\n$/, ""));
+    expect(out[0]!.endsWith("\n"), `${format} would double-space stdout`).toBe(false);
   });
 
   it("rejects an unsupported or empty --format loudly, and never silently defaults", async () => {
@@ -211,6 +234,40 @@ describe("report player CLI", () => {
     });
   });
 
+  /**
+   * `main()` must reject a malformed invocation BEFORE `startupDb`, which
+   * acquires the open-lock and can snapshot + migrate on its way in. Router
+   * preflight alone does not cover this class: `--windows` is declared with no
+   * `values` list and no validator (router.ts), so `--windows bogus` passes
+   * preflight and is caught only by `parseReportPlayerArgs`.
+   *
+   * Asserted by SIDE EFFECT — no database file may appear — because that is the
+   * thing the ordering exists to prevent, not a proxy for it.
+   */
+  it("rejects a preflight-passing but malformed invocation without ever opening the database", async () => {
+    const work = mkdtempSync(join(tmpdir(), "bryce-report-order-"));
+    const dbPath = join(work, "should-never-exist.sqlite");
+    // MAILER_PROVIDER is pinned so a VALID config is loadable: this test is
+    // about ordering, and must not pass merely because loadConfig threw. (That
+    // it throws at all on a usage error is the same defect's other symptom —
+    // the operator gets a mailer-config error instead of "invalid --windows".)
+    const keys = ["DATABASE_PATH", "BACKUP_DIR", "MAILER_PROVIDER"] as const;
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+    process.env.DATABASE_PATH = dbPath;
+    process.env.BACKUP_DIR = join(work, "backups");
+    process.env.MAILER_PROVIDER = "console";
+    try {
+      await expect(main(["--id", "1", "--windows", "bogus"])).resolves.toBe(1);
+      expect(existsSync(dbPath), "startupDb ran before the usage error was reported").toBe(false);
+    } finally {
+      for (const key of keys) {
+        const value = saved[key];
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+      rmSync(work, { recursive: true, force: true });
+    }
+  });
+
   it("reports an unknown player through the injected writer with a non-zero exit", async () => {
     const code = await runReportCli(["--id", "999999"], deps());
     expect(code).toBe(1);
@@ -220,7 +277,7 @@ describe("report player CLI", () => {
 
   it("passes the terminal width through to the console rendering", async () => {
     await runReportCli(["--id", String(playerId), "--windows", "last10"], deps({ terminalWidth: 15 }));
-    expect(out[0]).toBe(renderPlayerCardText(card(), { width: 15 }));
-    expect(out[0]).not.toBe(renderPlayerCardText(card()));
+    expect(out[0]).toBe(renderPlayerCardText(card(), { width: 15 }).replace(/\n$/, ""));
+    expect(out[0]).not.toBe(renderPlayerCardText(card()).replace(/\n$/, ""));
   });
 });

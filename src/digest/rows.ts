@@ -116,7 +116,7 @@ type StatsBucket = ReadonlyArray<Record<string, unknown>>;
 /** An appearance is relief only when gamesStarted is PRESENT and 0. A missing
  * value (NCAA rows have no gamesStarted) is unknown-not-relief, so a starter's
  * decision is never miscounted as relief. Starter decisions are never surfaced. */
-export function isReliefAppearance(stats: Record<string, unknown>): boolean {
+function isReliefAppearance(stats: Record<string, unknown>): boolean {
   const gs = stats.gamesStarted;
   return typeof gs === "number" && Number.isFinite(gs) && gs === 0;
 }

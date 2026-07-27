@@ -170,7 +170,11 @@ export async function runReportCli(argv: string[], deps: ReportCliDeps): Promise
         ? renderPlayerCardHtml(card)
         : renderPlayerCardText(card, { width: deps.terminalWidth });
   if (out === undefined && !open) {
-    deps.write(payload);
+    // Both Presentations already end with a newline, and the production writer
+    // appends its own — so stdout would carry a trailing blank line that the
+    // `--out` file does not, making the two paths differ by a byte. Drop exactly
+    // one, so stdout and `--out` agree. (`json` has no trailing newline to drop.)
+    deps.write(payload.endsWith("\n") ? payload.slice(0, -1) : payload);
     return 0;
   }
   // A bare `--open` still needs a real file for the browser to load.
@@ -197,10 +201,23 @@ export async function runReportCli(argv: string[], deps: ReportCliDeps): Promise
   return 0;
 }
 
+/** `parseReportPlayerArgs` returns the parsed selection or an error string. */
+const asError = (parsed: ReturnType<typeof parseReportPlayerArgs>): string | null =>
+  typeof parsed === "string" ? parsed : null;
+
 export async function main(argv = process.argv.slice(2)): Promise<number> {
-  // Preflight BEFORE dotenv/config/startupDb, so a malformed invocation exits 1
-  // without snapshotting or migrating on its way out (the players-backup shape).
-  const failure = preflightDirect(["report", "player"], argv);
+  // Preflight AND parse BEFORE dotenv/config/startupDb, so a malformed
+  // invocation exits 1 without snapshotting or migrating on its way out (the
+  // players-backup shape).
+  //
+  // BOTH are required, not just preflight: `--windows` is declared with no
+  // `values` list and no validator, so `--windows bogus` clears the router and
+  // is caught only by `parseReportPlayerArgs`. Validating it here and not merely
+  // inside `runReportCli` is what keeps a usage error from acquiring the
+  // open-lock, migrating the database, and surfacing as a config error instead.
+  // `runReportCli` re-parses because it is also called directly, with its own
+  // injected deps — this is a cheap pure re-parse, not a second source of truth.
+  const failure = preflightDirect(["report", "player"], argv) ?? asError(parseReportPlayerArgs(argv));
   if (failure !== null) {
     process.stderr.write(`error: ${failure}\n`);
     return 1;

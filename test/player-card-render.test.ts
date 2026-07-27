@@ -87,7 +87,29 @@ function dataLine(text: string, lvl: string): string {
 const BATTING_SPLIT = { atBats: 4, hits: 2, doubles: 1, homeRuns: 1, baseOnBalls: 1, strikeOuts: 1, rbi: 3, runs: 2, errors: 1 };
 const PITCHING_SPLIT = { inningsPitched: "6.0", earnedRuns: 2, strikeOuts: 7, baseOnBalls: 1, hits: 4, homeRuns: 1 };
 
+/**
+ * A pinch-runner or defensive replacement: appearances, but ZERO at-bats. The
+ * Digest renders OPS as ".000" rather than "-" on a zero denominator (an idle
+ * player's row reads as a zero line, and a player with no at-bats did bat .000),
+ * and the Card must agree — otherwise the same player's two reports disagree
+ * about the same number. Every other fixture carries `atBats: 4`, so without
+ * this row the fallback is dead code in the suite.
+ */
+const ZERO_AB_SPLIT = { atBats: 0, hits: 0, baseOnBalls: 0, strikeOuts: 0, rbi: 0, runs: 1, errors: 0 };
+
 describe("Player Card console rendering", () => {
+  it("renders OPS as .000, not '-', for a batter with zero at-bats", () => {
+    const zeroCard = card([window("last10", [row("MLB", 0, "batting", [ZERO_AB_SPLIT])], [])]);
+    const text = renderPlayerCardText(zeroCard);
+    const html = renderPlayerCardHtml(zeroCard);
+    // The OPS cell specifically — asserting the string ".000" appears somewhere
+    // would also pass on an AVG of .000, which is not what this pins.
+    const opsColumn = text.split("\n").find((line) => line.includes("MLB") && line.includes(".000"));
+    expect(opsColumn, "a zero-AB batting row should still render numeric rate cells").toBeDefined();
+    expect(text).not.toMatch(/\bOPS\b[^\n]*\n[^\n]*\s-\s*$/m);
+    expect(html).toContain(".000");
+  });
+
   it("renders a batter's card: header, window heading, one Batting table, no Pitching section", () => {
     const text = renderPlayerCardText(card([window("last10", [row("MLB", 0, "batting", [BATTING_SPLIT])], [])]));
     expect(text).toContain("Maximo Acosta");
