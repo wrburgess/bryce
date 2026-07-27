@@ -164,23 +164,38 @@ describe("parity check - Tier-2 deep-doc pointers", () => {
     );
   });
 
-  // Issue #179. This walk's own ``` -only fence toggle is gone; the fenced-line question now goes to
-  // the CommonMark parser (`codeBlockLines`), which knows BOTH fence characters and indented code too.
-  //
-  // The exemption widens: a pointer in an INDENTED code block was checked before and is not now. That is
-  // the intended reading -- a pointer inside code is a worked example, the same reason the fenced one was
-  // always skipped -- but it is a widening toward a false GREEN, so it is pinned here rather than left
-  // implicit. Measured across the real tree before landing: all 30 live pointers are still checked,
-  // line for line.
-  it.each([
-    ["a tilde fence", ["~~~md", "- fenced: `docs/rules/absent-postmortems.md`", "~~~"]],
-    ["an indented code block", ["", "    - indented: `docs/rules/absent-postmortems.md`", ""]],
-  ])("ignores a pointer inside %s", (_label, block) => {
-    withRuleBody(block.join("\n"), (errors) => expect(errors).toEqual([]));
+  // Issue #179. This walk's own ``` -only fence toggle is gone; the fenced-line question now goes to the
+  // CommonMark parser (`fencedCodeLines`), which knows BOTH fence spellings. The exemption is otherwise
+  // unchanged: fenced blocks only.
+  it("ignores a pointer inside a tilde fence", () => {
+    withRuleBody(["~~~md", "- fenced: `docs/rules/absent-postmortems.md`", "~~~"].join("\n"), (errors) => {
+      expect(errors).toEqual([]);
+    });
   });
 
-  // The control the three cases above rest on. Each asserts an ABSENCE, which stays true if the walk
-  // stopped looking at pointers altogether; this one fails the moment it does.
+  // THE regression the PR #188 Reviewer reproduced, kept as its permanent guard.
+  //
+  // The first cut exempted every CommonMark `code_block`, indented ones included. CommonMark reads a
+  // 4-space-indented line as an indented code block whenever it opens a block -- so one stray indent on a
+  // section's first bullet, with no enclosing list to absorb it, made real content vanish from this check
+  // AND from the duplicate-imperative check. On `main` this dead pointer is reported; under that cut it
+  // was silent.
+  //
+  // A fenced example is content an author MARKED as code. Four accidental spaces are a typo. The
+  // exemption covers the first and must not cover the second, and the difference is not one a corpus
+  // measurement can defend -- "no such indent exists today" is a snapshot (rules/testing.md).
+  it("still reports a pointer on a bullet that is merely mis-indented", () => {
+    withRuleBody(
+      ["", "    - **Never x** — because y. *(Host case study: `docs/rules/absent-postmortems.md`.)*", ""].join("\n"),
+      (errors) => {
+        expect(errors).toHaveLength(1);
+        expect(errors[0]).toContain("`docs/rules/absent-postmortems.md` does not exist");
+      },
+    );
+  });
+
+  // The control the fence cases rest on. Each asserts an ABSENCE, which stays true if the walk stopped
+  // looking at pointers altogether; this one fails the moment it does.
   it("still reports the same pointer when it is NOT inside code", () => {
     withRuleBody("- **Never x** — because y. *(Host case study: `docs/rules/absent-postmortems.md`.)*", (errors) => {
       expect(errors).toHaveLength(1);

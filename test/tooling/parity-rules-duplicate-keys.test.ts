@@ -242,10 +242,34 @@ describe("parity check - a bolded imperative identifies one bullet", () => {
 // Task 0 of issue #179's plan, folded in after the Reviewer's plan critique found the premise false:
 // `ruleBullets` and `checkRulesPointers` each carried their own `` /^\s*```/ `` toggle, so CommonMark's
 // OTHER fence character was invisible to both. A bullet parked in a `~~~` block was read as live prose.
-// The fenced-line question now goes to the parser (`codeBlockLines`), which is ADR 0054's answer applied
+// The fenced-line question now goes to the parser (`fencedCodeLines`), which is ADR 0054's answer applied
 // to block structure.
-describe("parity check - code blocks are not bullets, in either fence spelling", () => {
+describe("parity check - FENCED code is not a bullet, in either fence spelling", () => {
   const DUPLICATE = "- **Never duplicate through a fence** — because reasons.";
+  const INDENTED = "    - **Never duplicate via leading indent** — because reasons.";
+
+  // The other half of the regression the PR #188 Reviewer reproduced (its pointer half lives in
+  // parity-rules-pointers.test.ts). The first cut of `fencedCodeLines` exempted every CommonMark
+  // `code_block`, so one stray indent on a section's first bullet -- no enclosing list to absorb it --
+  // took BOTH copies of a duplicated imperative out of the tree and the guard reported nothing.
+  //
+  // A fence is a mark an author put there on purpose. An accidental indent is a typo, and the guard
+  // whose entire subject is silent false greens must not have one of its own.
+  it("still counts a bullet that is merely mis-indented", () => {
+    withRuleBodies(
+      {
+        "rules/testing.md": ruleFile(
+          "rules/testing.md",
+          `${INDENTED}\n\n- **Never duplicate via leading indent** — because other reasons.`,
+        ),
+      },
+      (errors) => {
+        expect(errors).toEqual([
+          duplicateError("Never duplicate via leading indent", ["rules/testing.md", "rules/testing.md"]),
+        ]);
+      },
+    );
+  });
 
   // The negative control this whole describe rests on, and it is not optional. Every fence case below
   // asserts an ABSENCE of errors, which stays true when the guard is deleted -- an input that yields no
@@ -311,7 +335,7 @@ describe("parity check - code blocks are not bullets, in either fence spelling",
   });
 
   // ...and the negative control for the whole describe: the same bullet OUTSIDE a fence must still be
-  // measured. Without it, a `codeBlockLines` that returned every line would pass every case above.
+  // measured. Without it, a `fencedCodeLines` that returned every line would pass every case above.
   it("still measures the same bullet outside a fence", () => {
     const long = `- **Never write the case study inline** — ${"x".repeat(700)}`;
     withBundleCopy((root) => {

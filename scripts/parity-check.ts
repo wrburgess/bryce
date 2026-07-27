@@ -384,8 +384,8 @@ export function markdownLinks(source: string): MarkdownLink[] {
 }
 
 /**
- * The 1-based line numbers `source` spends inside a code block — fenced or indented, the delimiter
- * lines included. A line in this set is code, so no line-oriented rule reads it as prose.
+ * The 1-based line numbers `source` spends inside a FENCED code block, the fence lines included. A line
+ * in this set is code, so no line-oriented rule reads it as prose.
  *
  * ONE authored copy, from the parser, replacing the `fenced = !fenced` toggle that `checkRulesPointers`
  * and `ruleBullets` each carried (issue #179). Both toggles tested `` /^\s*```/ ``, so CommonMark's OTHER
@@ -407,20 +407,43 @@ export function markdownLinks(source: string): MarkdownLink[] {
  * where those checks must not. Asking the parser *which lines are code* takes nothing away from them —
  * they keep reading raw text, on a smaller and more correct set of lines.
  *
- * INDENTED code blocks are in scope too, which the toggles never covered. Verified against the real tree
- * before landing: both walks find exactly the same 102 bullets as before, so this is a widening with no
- * behavior change on today's corpus (`rules/testing.md` — a generated corpus's silence is not a statement
- * about the real one; this measurement is over the actual files).
+ * FENCED ONLY, and the word is load-bearing. The first cut of this exempted every `code_block` node,
+ * which silently included INDENTED code blocks the toggles never covered. That read as a harmless
+ * widening and was justified by measuring today's corpus; the PR #188 Reviewer refuted it with a
+ * reproduction, and it was a false green of exactly the kind this whole change exists to close:
+ *
+ *   ## Anti-Patterns
+ *
+ *       - **Never x** - because reasons. *(Host case study: `docs/rules/absent-postmortems.md`.)*
+ *
+ * One stray indent on a section's FIRST bullet — no enclosing list to absorb it — makes CommonMark read
+ * real content as an indented code block. On `main` that dead pointer is reported; under the first cut it
+ * vanished, and so did the bullet's imperative. A deliberate worked example inside a fence is a thing an
+ * author MARKED as code; four accidental spaces are a typo, and the two must not be treated alike.
+ *
+ * The corpus measurement was the tell, not the defense: "no such indent exists today" is a snapshot, and
+ * `rules/testing.md` says a corpus's silence is not a statement about the corpus tomorrow. So the
+ * exemption is now strictly narrower than the node type — fenced blocks only, in either spelling, which
+ * makes this a pure superset of what the toggles caught and a regression against nothing.
+ *
+ * Fenced-ness is read off the line the PARSER pointed at, at the column it gave: a fence opens with its
+ * delimiter run, an indented block opens with its content. That is not re-deriving the grammar — the
+ * parser has already decided this is a code block and where it starts — and it beats the private
+ * `_isFenced` field, which no public accessor exposes and which a minor `commonmark` bump could rename.
  */
-export function codeBlockLines(source: string): Set<number> {
+export function fencedCodeLines(source: string): Set<number> {
   const lines = new Set<number>();
+  const sourceLines = source.split("\n");
   const walker = MARKDOWN_PARSER.parse(source).walker();
 
   let event = walker.next();
   while (event !== null) {
     if (event.entering && event.node.type === "code_block") {
-      const [[first], [last]] = event.node.sourcepos;
-      for (let line = first; line <= last; line++) lines.add(line);
+      const [[first, column], [last]] = event.node.sourcepos;
+      const opener = (sourceLines[first - 1] ?? "").slice(column - 1);
+      if (/^(?:```|~~~)/.test(opener)) {
+        for (let line = first; line <= last; line++) lines.add(line);
+      }
     }
     event = walker.next();
   }
@@ -817,7 +840,7 @@ class ParityCheck {
       if (!this.exists(rel)) continue;   // already reported by checkRules()
 
       const source = this.read(rel);
-      const code = codeBlockLines(source);
+      const code = fencedCodeLines(source);
       const rawLines = source.split("\n");
 
       for (let index = 0; index < rawLines.length; index++) {
@@ -883,7 +906,7 @@ class ParityCheck {
     const bullets: { key: string; text: string }[] = [];
     const source = this.read(rel);
     const lines = source.split("\n").map(rstrip);
-    const code = codeBlockLines(source);
+    const code = fencedCodeLines(source);
 
     for (let i = 0; i < lines.length; i++) {
       if (code.has(i + 1)) continue;

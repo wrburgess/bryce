@@ -92,7 +92,19 @@ governing convention through it* — and the mirrored-pair case is a test, not a
   `` /^\s*```/ `` toggle, so CommonMark's `~~~` fence was invisible to both and a bullet parked in one
   would have been read as live prose. Rather than teach two toggles a second character — a naive
   both-characters toggle is *worse*, closing a backtick block early — the fenced-line question now goes
-  to the parser this file already depends on, authored once as `codeBlockLines`. That is
+  to the parser this file already depends on, authored once as `fencedCodeLines`. That is
   [ADR 0054](0054-code-spans-are-not-links.md)'s answer applied to block structure, and
-  `rules/scripting.md`'s standing instruction to run the format's own parser. Verified behavior-preserving
-  on the real tree: the same 102 bullets, before and after.
+  `rules/scripting.md`'s standing instruction to run the format's own parser. Verified
+  behavior-preserving on the real tree: the same 102 bullets and the same 30 deep-doc pointers, in the
+  same positions, before and after.
+
+  **The exemption is deliberately narrower than the node type: fenced blocks only.** The first cut
+  exempted every CommonMark `code_block`, which swept in *indented* ones the toggles never covered, and
+  justified it by measuring today's corpus. The PR #188 Reviewer refuted that with a reproduction: one
+  stray indent on a section's first bullet — no enclosing list to absorb it — makes CommonMark read real
+  content as an indented code block, and both the pointer check and this new duplicate check went silent
+  on it. A fenced example is content an author **marked** as code; four accidental spaces are a typo, and
+  a guard whose entire subject is silent false greens must not ship one of its own. The corpus
+  measurement was the tell rather than the defense — "no such indent exists today" is a snapshot, and
+  `rules/testing.md` already says a corpus's silence is not a statement about tomorrow's. Both halves of
+  the reproduction are now permanent regression tests.
