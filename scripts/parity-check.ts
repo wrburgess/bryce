@@ -18,7 +18,7 @@
 //                              (the region between the markers must equal AGENTS.md byte-for-byte)
 
 import { lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { basename, join, dirname, resolve as resolvePath } from "node:path";
+import { basename, join, dirname, sep, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { argv } from "node:process";
 import { fromFile as protectedBranchesFromFile } from "./protected-branches.js";
@@ -79,9 +79,95 @@ const DEEP_DOC_LABEL = "**Deep doc:**";
 const DEEP_DOC_TOKEN = /docs\/rules\/[a-z0-9-]+-postmortems\.md(?:#[A-Za-z0-9._-]+)?/g;
 // A link opener may be followed by a relative prefix before the token — `](../docs/rules/x.md)` is
 // the spelling a contributor writing from `rules/` would actually reach for, so the link form must
-// be recognized THROUGH `./`, `../`, and `/` rather than mistaken for an unresolvable path.
-const DEEP_DOC_LINKED = /\]\(\s*(?:\.{0,2}\/)*$|\]:\s*(?:\.{0,2}\/)*$/;
+// be recognized THROUGH `./`, `../`, and `/` rather than mistaken for an unresolvable path. The
+// prefix is CAPTURED, not just matched: a link's href is `prefix + token`, and the href is what has
+// to resolve from the referring file (issue #154).
+const DEEP_DOC_LINKED = /\](?:\(|:)\s*((?:\.{0,2}\/)*)$/;
 const RULES_DEEP_DOC_README = "docs/rules/README.md";
+
+// --- Tier-1 accretion guard (issue #152, ADR 0051) -------------------------
+//
+// The invariant is "Tier 1 carries the lesson, Tier 2 carries the narrative" (docs/rules/README.md).
+// This measures it PER BULLET rather than per file, because a per-file byte budget cannot tell a dense
+// lesson from an embedded case study: PR #150 added three genuinely new invariants that a byte budget
+// would have reddened, while the tree's worst inline narrative sat untouched in a file that budget
+// blessed. A bullet carrying its domain's case-study pointer is exempt at ANY length, so this never
+// asks more of an already-trimmed bullet (the longest such bullet today is 604 chars).
+export const NARRATIVE_MAX_CHARS = 600;
+
+// Group 1 is the bolded imperative, used verbatim as the allowlist key. `exec`-based (no /g) so there
+// is no shared-lastIndex hazard across the lines it is applied to.
+//
+// The marker is matched the way CommonMark defines it, NOT as the literal four bytes `- **` today's
+// files happen to use: any of `-`/`*`/`+`, one or more spaces or a tab, and optional leading indent.
+// A regex demanding exactly one space makes `-  **Never ...**` -- one accidental keystroke, rendering
+// identically for a reader -- completely invisible to this guard, which is a silent false green
+// reachable without any adversarial intent. Matching more marker spellings can only add coverage.
+const RULE_BULLET = /^\s*[-*+][ \t]+\*\*(.+?)\*\*/;
+
+// A line that opens a new block ends the preceding bullet. Kept in lockstep with RULE_BULLET's marker
+// set, so a spelling this guard measures is also a spelling that terminates its predecessor.
+//
+// Each alternative demands exactly the padding CommonMark demands, no more and no less. The ATX
+// heading rule is the one that bites: `#` NOT followed by a space, a tab, or end-of-line is not a
+// heading at all -- `#152` is literal text. Treating it as a block opener would end the bullet at any
+// wrap that happened to break before an issue reference, and these files are made of issue references,
+// so the remainder of the bullet would be counted toward nothing at all. Seven or more hashes is not a
+// heading either, and falls out of the same bound.
+//
+// The list markers take `$` for the same reason in the other direction: a bare `-`, `*`, `+`, or `1.`
+// alone on a line opens an EMPTY list item in CommonMark, so it ends the preceding bullet rather than
+// continuing it. A blockquote `>` and a fence genuinely need no following space and take none.
+const RULE_BLOCK_OPENER = /^\s*(?:[-*+](?:[ \t]|$)|\d+\.(?:[ \t]|$)|#{1,6}(?:[ \t]|$)|```|>)/;
+
+// Each Tier-1 rule's own domain deep doc, or `null` for a rule that has none BY DESIGN
+// (docs/rules/README.md records self-review as "(none - the checklist is the whole rule)").
+// A bullet is exempted only by ITS OWN domain's deep doc: accepting any `docs/rules/*-postmortems.md`
+// would let a rules/backend.md bullet be silenced by appending an unrelated domain's path.
+//
+// `null` is NOT the same state as "declared here but not yet written on disk" — three of these files
+// do not exist yet (docs/rules/README.md: deep docs are "absent until a host has a real postmortem to
+// record"), and pointing at an absent one trips checkRulesPointers(). The remedy this check advises is
+// therefore chosen from the path's state on disk, never from this table alone.
+export const RULE_DEEP_DOC: Record<string, string | null> = {
+  "rules/backend.md": "docs/rules/backend-postmortems.md",
+  "rules/frontend.md": "docs/rules/frontend-postmortems.md",
+  "rules/testing.md": "docs/rules/testing-postmortems.md",
+  "rules/security.md": "docs/rules/security-postmortems.md",
+  "rules/self-review.md": null,
+  "rules/scripting.md": "docs/rules/scripting-postmortems.md",
+  "rules/skills.md": "docs/rules/skills-postmortems.md",
+};
+
+// The bullets that already exceeded the limit when the guard landed, keyed by file and by the bullet's
+// exact bolded imperative. Keying on the imperative rather than a line number is deliberate: a line
+// number silently re-points at whatever bullet later occupies that line, which is the false green this
+// guard exists to prevent.
+//
+// This table only ever SHRINKS. Deleting an entry (by trimming its bullet) is welcome and requires no
+// other edit; ADDING one is a deliberate, reviewable act. An entry that is stale, ambiguous, or no
+// longer needed is itself an error, so the backlog cannot quietly stop shrinking -- the same
+// fail-closed discipline scripts/coverage-floors.ts applies to a floored path missing from the report.
+//
+// The ratchet has already been exercised once, before this guard even merged. The baseline was eight
+// bullets, five of them in rules/backend.md; issue #151 then trimmed exactly those five on main, and
+// this check turned RED demanding their removal until they were deleted here -- which is the mechanism
+// working, not a merge accident. In the same window two OTHER bullets grew past the limit on main
+// (rules/scripting.md and rules/skills.md), so the list is now five. That churn, in the days it took to
+// review this guard, is the clearest possible restatement of why issue #152 was filed.
+export const NARRATIVE_ALLOWLIST: Record<string, readonly string[]> = {
+  "rules/security.md": [
+    "Never reuse a *coercing* validator at a typed-JSON boundary",
+  ],
+  "rules/scripting.md": [
+    "Never emit non-ASCII bytes from a bundled script's stdout/stderr",
+    "Never widen a guard's matching rule to clear a false alarm without asking which way the new failure points",
+    "Never ship a guard without first running its own governing convention through it",
+  ],
+  "rules/skills.md": [
+    "Never trim length by moving a load-bearing instruction behind a link",
+  ],
+};
 
 const SKILLS_DIR = "skills";
 const CLAUDE_COMMANDS_DIR = ".claude/commands";
@@ -165,6 +251,7 @@ class ParityCheck {
     this.checkHumanGates();
     this.checkRules();
     this.checkRulesPointers();
+    this.checkRulesNarrative();
     this.checkSkills();
     this.checkGuardrails();
     this.checkGuides();
@@ -185,6 +272,30 @@ class ParityCheck {
   private exists(rel: string): boolean {
     try {
       return statSync(this.path(rel)).isFile();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Resolve `href` the way Markdown does — relative to the DIRECTORY OF THE REFERRING FILE, not the
+   * repo root — and report whether it lands on a real file inside the repo. `exists()` above answers
+   * the other question (does this repo-root path exist), and the two are deliberately distinct: a
+   * backticked path is prose naming a repo path, a link is a link (issue #154).
+   *
+   * An href that escapes the repo (a root-absolute `/docs/...`, or a `../../` that climbs past the
+   * root) is never a resolvable intra-repo link, so it is rejected WITHOUT consulting the disk. That
+   * is a correctness rule first — such a link is broken on the lifecycle host however the runner's
+   * filesystem happens to look — and it is what keeps the verdict from depending on files that
+   * happen to exist outside the checkout (rules/testing.md: an environment-dependent assertion is
+   * green on one machine and red on another).
+   */
+  private resolvesFrom(rel: string, href: string): boolean {
+    const root = resolvePath(this.root);
+    const resolved = resolvePath(dirname(this.path(rel)), href);
+    if (resolved !== root && !resolved.startsWith(root + sep)) return false;
+    try {
+      return statSync(resolved).isFile();
     } catch {
       return false;
     }
@@ -357,16 +468,27 @@ class ParityCheck {
     }
   }
 
-  // A Tier-1 bullet that points at a Tier-2 deep doc stands in for content that was MOVED there
-  // (issue #148), so the pointer must resolve — a broken one silently loses the case study, and
-  // nothing else would notice: these paths are deliberately backticked rather than linked, so
-  // checkLinks() never sees them.
+  // The invariant (issue #154, refining #148): EVERY Tier-2 deep-doc path named in a Tier-1 rule
+  // file must point at a file that is really there — a BARE path at the repo root (this.exists), a
+  // LINK at wherever the link actually leads (this.resolvesFrom). Two bases, one requirement; the
+  // paragraph below says why they differ. The single exception is a BARE-PATH `**Deep doc:**`
+  // header declaration, which may forward-reference a deep doc that does not exist yet.
   //
-  // The `**Deep doc:**` header is exempt from the existence check on purpose: docs/rules/README.md
-  // declares that a deep doc stays "absent until a host has a real postmortem to record", and
-  // rules/frontend.md, rules/security.md and rules/scripting.md all forward-reference one today.
-  // The link-form rule below still applies to it — a markdown link to a not-yet-existing file is
-  // exactly what reddens the dead-link validator, which is why that convention exists.
+  // Why it matters here and nowhere else: `rules/*.md` is deliberately absent from LINK_CHECKED, so
+  // checkLinks() never sees these files and this check is the ONLY validator they get. A Tier-1
+  // bullet pointing at a deep doc stands in for content that was MOVED there, so a broken pointer
+  // silently loses the case study with nothing else to notice.
+  //
+  // The two reference forms resolve against different bases, because Markdown does: a BACKTICKED
+  // path is prose naming a REPO-ROOT path (this.exists), while a LINK is a link and resolves
+  // relative to the REFERRING FILE (this.resolvesFrom) — the same base checkLinks() uses. So a
+  // promoted link out of `rules/` reads `[…](../docs/rules/x-postmortems.md)`, and the repo-root
+  // spelling inside `](…)` is a 404 that this check must still reject.
+  //
+  // The header exemption covers the bare form ONLY. docs/rules/README.md declares that a deep doc
+  // stays "absent until a host has a real postmortem to record", and rules/frontend.md,
+  // rules/security.md and rules/scripting.md all forward-reference one today; a dead LINK in that
+  // same header is still dead, so it is still rejected.
   private checkRulesPointers(): void {
     if (!this.dirExists(RULES_DIR)) return;
 
@@ -387,25 +509,236 @@ class ParityCheck {
           const before = line.slice(0, match.index);
           const target = (match[0] as string).split("#")[0] as string;
 
-          // The link-form rule is checked FIRST and independently of the path's shape: a relative
+          // The link form is recognized FIRST and independently of the path's shape: a relative
           // link (`](../docs/rules/x.md)`) is still a link, and skipping it as "unresolvable" would
           // let the likeliest real spelling through.
-          if (DEEP_DOC_LINKED.test(before)) {
-            this.err(
-              `Rules pointer ${rel}: \`${target}\` is written as a markdown link; a deep-doc path must be a ` +
-              `backticked path (${RULES_DEEP_DOC_README}) so it cannot redden the dead-link check before its target lands`,
-            );
+          const link = DEEP_DOC_LINKED.exec(before);
+          if (link) {
+            const href = (link[1] ?? "") + target;
+            if (this.resolvesFrom(rel, href)) continue;   // a promoted link that works — the convention allows it
+
+            // Two different mistakes, two different fixes: the target isn't written yet (keep it
+            // backticked), or it is written but the link can't reach it from here (fix the path).
+            this.err(this.exists(target)
+              ? `Rules pointer ${rel}: markdown link \`${href}\` does not resolve from ${dirname(rel)}/; ` +
+                `a promoted link is relative to the referring file`
+              : `Rules pointer ${rel}: \`${target}\` is written as a markdown link; a deep-doc path must be a ` +
+                `backticked path (${RULES_DEEP_DOC_README}) so it cannot redden the dead-link check before its target lands`);
             continue;
           }
 
-          // Not a pointer this check can resolve: an absolute path, a `../` traversal, or a URL that
-          // merely contains the path.
+          // Not a bare pointer this check can resolve: an absolute path, a `../` traversal, or a URL
+          // that merely contains the path.
           if (/[./]$|:\/\/\S*$/.test(before)) continue;
 
           if (isHeader) continue;   // a declaration, not a stand-in for moved content
           if (!this.exists(target)) {
-            this.err(`Rules pointer ${rel}: case-study pointer \`${target}\` does not exist`);
+            this.err(
+              `Rules pointer ${rel}: case-study pointer \`${target}\` does not exist; a deep doc that is not ` +
+              `written yet is forward-referenced from the \`${DEEP_DOC_LABEL}\` header, not from a body bullet`,
+            );
           }
+        }
+      }
+    }
+  }
+
+  /**
+   * Every `- **…**` bullet in a Tier-1 rule file, in source order, with the fenced-code skipping
+   * checkRulesPointers() uses. Returns the bolded imperative (the allowlist key) alongside the
+   * bullet's FULL text, because both the limit and the pointer exemption are read off that text.
+   *
+   * A bullet is measured INCLUDING its wrapped continuation lines, joined the way markdown renders
+   * them (newline -> space). Measuring only the first line would let any prose-wrapper -- an editor
+   * reflow, a formatter with `proseWrap` on -- silently disable this guard for the entire tree at
+   * once by re-flowing every bullet: a false green, arrived at by a routine, well-intentioned edit.
+   * Today's files happen to write one bullet per line, which is exactly why the assumption is
+   * dangerous to encode.
+   *
+   * Length is JS `String.length` (UTF-16 code units), not bytes. These files are full of em dashes,
+   * which are one char and three bytes, so the two measures disagree by ~10% on a typical bullet;
+   * chars is the honest unit for "how much does a reader have to take in".
+   */
+  private ruleBullets(rel: string): { key: string; text: string }[] {
+    const bullets: { key: string; text: string }[] = [];
+    const lines = this.read(rel).split("\n").map(rstrip);
+    let fenced = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i] as string;
+      if (/^\s*```/.test(line)) {
+        fenced = !fenced;
+        continue;
+      }
+      if (fenced) continue;
+
+      const match = RULE_BULLET.exec(line);
+      if (match === null) continue;
+
+      // Consume wrapped continuation lines. A continuation is any non-blank line that does not open a
+      // new block; the opener is re-examined by the outer loop, so a fence can never be swallowed as
+      // prose. Indentation is deliberately NOT required: CommonMark's *lazy* continuation lets a
+      // list item's paragraph continue at column zero, which is what a plain hard-wrap (`gq`, a hand
+      // edit, a formatter that does not re-indent list bodies) produces -- so requiring indentation
+      // would leave the cheapest flavor of the wrap bypass wide open while looking closed.
+      const parts = [line];
+      while (i + 1 < lines.length) {
+        const next = lines[i + 1] as string;
+        if (next === "") break;
+        if (RULE_BLOCK_OPENER.test(next)) break;
+        parts.push(strip(next));
+        i++;
+      }
+
+      bullets.push({ key: match[1] as string, text: parts.join(" ") });
+    }
+    return bullets;
+  }
+
+  /**
+   * Does this bullet carry a case-study pointer to its OWN domain's deep doc, in either form the
+   * convention allows, that actually RESOLVES?
+   *
+   * Both forms are accepted because docs/rules/README.md (issue #154) sanctions both, and each is
+   * validated against the same base checkRulesPointers() uses for that form -- a backticked path is
+   * prose naming a REPO-ROOT path (exists), a promoted link resolves relative to the REFERRING FILE
+   * (resolvesFrom). A contributor who promotes a pointer the way the convention tells them to must not
+   * be told by this guard to un-promote it.
+   *
+   * The two checks share the bases, not the input: checkRulesPointers reads one physical line, this
+   * reads the bullet's joined text, so a link broken across a wrap is adjacency here and is not there.
+   * That direction is harmless -- this guard only ever GRANTS an exemption, and only for a path that
+   * resolvesFrom/exists actually finds -- but it is why the claim is "same bases", not "identical".
+   *
+   * Resolution is required, not just presence. An unresolvable path exempts nothing -- otherwise a
+   * bullet could buy its way out with a pointer to a file no check verifies, which is the false green
+   * this whole guard exists to prevent.
+   */
+  private narrativePointerResolves(rel: string, text: string): boolean {
+    const deepDoc = RULE_DEEP_DOC[rel];
+    if (deepDoc === null || deepDoc === undefined) return false;
+
+    for (const match of text.matchAll(DEEP_DOC_TOKEN)) {
+      const target = (match[0] as string).split("#")[0] as string;
+      if (target !== deepDoc) continue;   // another domain's deep doc exempts nothing
+
+      const before = text.slice(0, match.index);
+      const link = DEEP_DOC_LINKED.exec(before);
+      if (link) {
+        if (this.resolvesFrom(rel, (link[1] ?? "") + target)) return true;
+        continue;
+      }
+      if (/[./]$|:\/\/\S*$/.test(before)) continue;   // a traversal or URL in bare form: unresolvable here
+      if (this.exists(target)) return true;
+    }
+    return false;
+  }
+
+  /** A bullet is over the limit and not exempted by its own domain's case-study pointer. */
+  private narrativeTrips(rel: string, text: string): boolean {
+    if (text.length <= NARRATIVE_MAX_CHARS) return false;
+    return !this.narrativePointerResolves(rel, text);
+  }
+
+  /**
+   * The remedy is chosen from the deep doc's state ON DISK, in three cases, so the advice can never be
+   * impossible to follow (issue #152 plan review):
+   *
+   *   null            - no deep doc by design (self-review). Shortening is the only remedy.
+   *   present         - point at it, or shorten.
+   *   declared/absent - authoring it comes FIRST. Adding a pointer to a file that does not exist trips
+   *                     checkRulesPointers(), so advising "just add a pointer" here would march the
+   *                     contributor straight into a second, differently-worded failure.
+   *
+   * Reading disk rather than a hardcoded list also means the advice updates itself the day a host
+   * writes its first postmortem for that domain.
+   */
+  private narrativeRemedy(rel: string): string {
+    const deepDoc = RULE_DEEP_DOC[rel];
+    if (deepDoc === null || deepDoc === undefined) {
+      return `${rel} has no Tier-2 deep doc, so shorten the bullet - keep the imperative and its rationale, drop the case narrative`;
+    }
+    if (this.exists(deepDoc)) {
+      return (
+        `move the case narrative to \`${deepDoc}\` and leave a pointer to it - either the backticked path or a ` +
+        `link relative to ${dirname(rel)}/ (${RULES_DEEP_DOC_README}) - or shorten the bullet`
+      );
+    }
+    return (
+      `\`${deepDoc}\` does not exist yet, so author it first (${RULES_DEEP_DOC_README}) and then leave a ` +
+      `backticked pointer to it, or shorten the bullet - a pointer to an absent deep doc fails the rules-pointer check`
+    );
+  }
+
+  /**
+   * Tier-1 accretion guard (issue #152, ADR 0051). Fails a `rules/*.md` bullet that exceeds
+   * NARRATIVE_MAX_CHARS without carrying its own domain's case-study pointer, unless it is named in
+   * NARRATIVE_ALLOWLIST.
+   *
+   * The allowlist is checked as strictly as the bullets are. An entry that names a non-Tier-1 file,
+   * matches no bullet, matches more than one, or covers a bullet that no longer trips is an error --
+   * so the grandfathered backlog cannot rot into a set of stale exemptions that silently re-cover a
+   * future bullet. That last case is what makes this a ratchet: trimming a bullet turns parity RED
+   * until its now-unnecessary entry is deleted.
+   */
+  private checkRulesNarrative(): void {
+    if (!this.dirExists(RULES_DIR)) return;
+
+    for (const rel of REQUIRED_RULES) {
+      if (!(rel in RULE_DEEP_DOC)) {
+        this.err(
+          `Tier-1 narrative: no deep-doc mapping for ${rel} - add it to RULE_DEEP_DOC in ` +
+          `scripts/parity-check.ts (use null for a rule with no Tier-2 deep doc)`,
+        );
+      }
+    }
+
+    for (const rel of Object.keys(NARRATIVE_ALLOWLIST)) {
+      if (!REQUIRED_RULES.includes(rel)) {
+        this.err(
+          `Tier-1 narrative allowlist: \`${rel}\` is not a Tier-1 rule file - remove it or correct the path ` +
+          `(expected one of ${inspectArray(REQUIRED_RULES.slice())})`,
+        );
+      }
+    }
+
+    for (const rel of REQUIRED_RULES) {
+      if (!this.exists(rel)) continue;   // already reported by checkRules()
+
+      const bullets = this.ruleBullets(rel);
+      const allowed = NARRATIVE_ALLOWLIST[rel] ?? [];
+
+      for (const { key, text } of bullets) {
+        if (!this.narrativeTrips(rel, text)) continue;
+        if (allowed.includes(key)) continue;
+        this.err(
+          `Tier-1 narrative ${rel}: bullet "${asciiSafeGateValue(key)}" is ${text.length} characters ` +
+          `(limit ${NARRATIVE_MAX_CHARS}) and carries no case-study pointer; ${this.narrativeRemedy(rel)}`,
+        );
+      }
+
+      for (const key of allowed) {
+        const matches = bullets.filter((b) => b.key === key);
+        const safeKey = asciiSafeGateValue(key);
+        if (matches.length === 0) {
+          this.err(
+            `Tier-1 narrative allowlist ${rel}: entry "${safeKey}" matches no bullet - the imperative was ` +
+            `reworded or the bullet removed; update the entry to the new wording or delete it`,
+          );
+          continue;
+        }
+        if (matches.length > 1) {
+          this.err(
+            `Tier-1 narrative allowlist ${rel}: entry "${safeKey}" matches ${matches.length} bullets - an ` +
+            `ambiguous key cannot exempt one bullet; make the imperatives distinct`,
+          );
+          continue;
+        }
+        if (!this.narrativeTrips(rel, (matches[0] as { text: string }).text)) {
+          this.err(
+            `Tier-1 narrative allowlist ${rel}: entry "${safeKey}" is no longer needed - the bullet is now ` +
+            `within the limit or carries its case-study pointer; remove the entry (this list only shrinks)`,
+          );
         }
       }
     }
