@@ -49,7 +49,7 @@ its `outcome` line (its malformed-invocation error path shares the sad-path gap 
 
 **Amendment (#146).** `refresh` was classified "no identity field" because it printed exactly one
 summary line and never named a Player. Issue #146 gives it a live per-Player progress stream
-([ADR 0054](0054-refresh-emits-typed-progress-events-cli-is-the-only-presenter.md)), so that premise
+([ADR 0056](0056-refresh-emits-typed-progress-events-cli-is-the-only-presenter.md)), so that premise
 no longer holds and the row is re-classified into `batch-add`'s existing class rather than onto the
 UTF-8 side. Two reasons, in the order that decided it. First, the **forgery-proofing argument is
 sharper here than anywhere else in this table**: `canonicalizeName` ([ADR 0041](0041-normalize-player-names-nfc-at-ingestion.md))

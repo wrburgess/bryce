@@ -229,7 +229,7 @@ _Avoid_: overloading the delivery-ledger sense ("guarantee restored across the d
   discarded the instant it is read. **Accounting** is the durable record of what a Sweep did; its
   audience is `/health`, the MCP status tool, and the **Digest**'s freshness banner, and it is read
   after the fact. Accounting can never serve as Liveness — it is aggregate and after-the-fact by
-  construction ([ADR 0054](../adr/0054-refresh-emits-typed-progress-events-cli-is-the-only-presenter.md)).
+  construction ([ADR 0056](../adr/0056-refresh-emits-typed-progress-events-cli-is-the-only-presenter.md)).
 - **"batch-add player names"** (issue #68) — the title reads as "add by name," but the domain
   identifies a **Player** by **External ID** (NCAA: `stats_player_seq`), never by a bare name.
   Resolved: a batch add keys on *identity*; a **name** is only a search convenience — the MLB Stats
