@@ -1253,7 +1253,19 @@ export function main(args: string[]): number {
       return 2;
     }
   }
-  const result = runParityCheck(root);
+  // A read failure that is NOT "absent" reaches here as a throw (see `markdownFilesIn`), and a stack
+  // trace is not the greppable, deterministic output a Host App or CI asserts on (rules/scripting.md).
+  // Report it in this script's own failure grammar and keep the exit non-zero: the point of rethrowing
+  // was to be loud, not to be unreadable.
+  let result: ParityResult;
+  try {
+    result = runParityCheck(root);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`parity_check: FAILED - cannot read the repository at ${root} - ${reason}\n`);
+    return 1;
+  }
+
   process.stdout.write(formatParityResult(result));
   return result.status;
 }

@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { linkCheckedFiles, markdownLinks, runParityCheck } from "../../scripts/parity-check.js";
+import { linkCheckedFiles, main, markdownLinks, runParityCheck } from "../../scripts/parity-check.js";
 import { REPO_ROOT, healDeadLinks, withBundleCopy } from "./parity-fixture.js";
 
 // Issue #159. `rules/*.md` carried markdown links its whole life and none of them were ever resolved:
@@ -360,6 +360,30 @@ describe("parity check - docs/adr joins the derived scope (issue #164)", () => {
       writeFileSync(join(root, ADR_DIR), "a file where a directory belongs\n");
 
       expect(() => linkCheckedFiles(root)).toThrow(/ENOTDIR/);
+    });
+  });
+
+  // ...and being loud must not mean being unreadable. Left unguarded, that throw escapes `main` as a
+  // stack trace, which is not the deterministic, greppable output rules/scripting.md requires of a
+  // bundled script — the exit code is right and the line a Host App greps for is gone.
+  it("reports an unreadable repository in the CLI's own failure grammar, not as a stack trace", () => {
+    withBundleCopy((root) => {
+      rmSync(join(root, ADR_DIR), { recursive: true, force: true });
+      writeFileSync(join(root, ADR_DIR), "a file where a directory belongs\n");
+
+      const stderr: string[] = [];
+      const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+        stderr.push(String(chunk));
+        return true;
+      });
+
+      try {
+        expect(main(["--root", root])).toBe(1);
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(stderr.join("")).toMatch(/^parity_check: FAILED - cannot read the repository at .*ENOTDIR/);
     });
   });
 });
