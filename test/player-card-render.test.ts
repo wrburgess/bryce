@@ -97,6 +97,31 @@ const PITCHING_SPLIT = { inningsPitched: "6.0", earnedRuns: 2, strikeOuts: 7, ba
  */
 const ZERO_AB_SPLIT = { atBats: 0, hits: 0, baseOnBalls: 0, strikeOuts: 0, rbi: 0, runs: 1, errors: 0 };
 
+/**
+ * Pins the invariant the CLI's newline normalization leans on. Both renderers
+ * must end in EXACTLY one newline: the CLI strips the trailing run and re-adds
+ * one so stdout and `--out` are byte-identical, and a renderer that emitted a
+ * blank line would otherwise silently change what the file contains. Asserted
+ * on the renderers themselves, not through the CLI, because that is where the
+ * property actually lives.
+ */
+describe("Presentation trailing-newline invariant", () => {
+  const cases = [
+    ["a populated window", card([window("last10", [row("MLB", 0, "batting", [BATTING_SPLIT])], [])])],
+    ["an empty window", card([window("last10", [], [])])],
+  ] as const;
+  it.each(cases)("renderPlayerCardText ends in exactly one newline (%s)", (_label, c) => {
+    const text = renderPlayerCardText(c);
+    expect(text.endsWith("\n")).toBe(true);
+    expect(text.endsWith("\n\n"), "a trailing blank line would desync stdout from --out").toBe(false);
+  });
+  it.each(cases)("renderPlayerCardHtml ends in exactly one newline (%s)", (_label, c) => {
+    const html = renderPlayerCardHtml(c);
+    expect(html.endsWith("\n")).toBe(true);
+    expect(html.endsWith("\n\n")).toBe(false);
+  });
+});
+
 describe("Player Card console rendering", () => {
   it("renders OPS as .000, not '-', for a batter with zero at-bats", () => {
     const zeroCard = card([window("last10", [row("MLB", 0, "batting", [ZERO_AB_SPLIT])], [])]);

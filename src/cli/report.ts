@@ -176,7 +176,12 @@ export async function runReportCli(argv: string[], deps: ReportCliDeps): Promise
   // writer appends a newline stdout gets and the file does not. Normalizing
   // here, before the paths diverge, makes "stdout and --out are the same bytes"
   // true by construction rather than per-format.
-  const payload = `${rendered.replace(/\n$/, "")}\n`;
+  // `\n+$`, not `\n$`: stripping only the LAST of several trailing newlines
+  // would leave the payload ending in a blank line and quietly reintroduce the
+  // very divergence this normalization exists to remove. Today no renderer
+  // emits more than one (pinned in test/player-card-render.ts), so this is
+  // defense in depth against a future edit, not a live fix.
+  const payload = `${rendered.replace(/\n+$/, "")}\n`;
   if (out === undefined && !open) {
     // The writer re-adds the newline stripped here.
     deps.write(payload.slice(0, -1));
