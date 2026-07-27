@@ -600,11 +600,15 @@ class ParityCheck {
    * convention allows, that actually RESOLVES?
    *
    * Both forms are accepted because docs/rules/README.md (issue #154) sanctions both, and each is
-   * validated against the base Markdown itself uses -- a backticked path is prose naming a REPO-ROOT
-   * path, a promoted link resolves relative to the REFERRING FILE. Those are exactly the two bases
-   * checkRulesPointers() uses, so the two checks cannot disagree about what a valid pointer is: a
-   * contributor who promotes a pointer the way the convention tells them to must not be told by this
-   * guard to un-promote it.
+   * validated against the same base checkRulesPointers() uses for that form -- a backticked path is
+   * prose naming a REPO-ROOT path (exists), a promoted link resolves relative to the REFERRING FILE
+   * (resolvesFrom). A contributor who promotes a pointer the way the convention tells them to must not
+   * be told by this guard to un-promote it.
+   *
+   * The two checks share the bases, not the input: checkRulesPointers reads one physical line, this
+   * reads the bullet's joined text, so a link broken across a wrap is adjacency here and is not there.
+   * That direction is harmless -- this guard only ever GRANTS an exemption, and only for a path that
+   * resolvesFrom/exists actually finds -- but it is why the claim is "same bases", not "identical".
    *
    * Resolution is required, not just presence. An unresolvable path exempts nothing -- otherwise a
    * bullet could buy its way out with a pointer to a file no check verifies, which is the false green

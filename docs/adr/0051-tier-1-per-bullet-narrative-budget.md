@@ -167,9 +167,15 @@ domain.
   instructs contributors to promote a pointer to `[…](../docs/rules/x-postmortems.md)` once its target
   exists. Holding the original position past that point would have meant one check telling a
   contributor to promote a pointer and another telling them to un-promote it. So the guard now accepts
-  a backticked repo-root path **or** a promoted link, each validated against the base Markdown itself
-  uses for that form — the same two bases `checkRulesPointers` uses, so the two checks cannot disagree
-  about what a valid pointer is. Resolution is still required: presence alone exempts nothing.
+  a backticked repo-root path **or** a promoted link, each validated against the same base
+  `checkRulesPointers` uses for that form. Resolution is still required: presence alone exempts
+  nothing, and a resolving pointer to *another* domain's deep doc still exempts nothing.
+
+  The two checks share those bases but not their input — `checkRulesPointers` reads one physical line,
+  this guard reads the bullet's joined text — so a link broken across a wrap reads as adjacent here and
+  not there. That divergence only ever *grants* an exemption, and only for a path `resolvesFrom`
+  actually finds on disk, so it cannot produce a false green; it is why the claim here is "the same
+  bases", not "identical behavior".
 - Completing #151 becomes a **measurable** ratchet step: five allowlist entries must be deleted, and the
   gate enforces it.
 - Documented for contributors in `docs/rules/README.md` → *Convention: a Tier-1 bullet carries the

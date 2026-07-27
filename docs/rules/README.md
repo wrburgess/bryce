@@ -87,7 +87,7 @@ one applies, read from disk:
 
 | Your domain's deep doc | Remedy |
 |---|---|
-| **exists** (`backend`, `skills`, `testing`) | Move the narrative into it and leave a backticked pointer in the bullet, **or** shorten the bullet. |
+| **exists** (`backend`, `skills`, `testing`) | Move the narrative into it and leave a pointer in the bullet — **either** the backticked repo-root path **or** a promoted link written relative to the rule file, per *Promotion* above — **or** shorten the bullet. |
 | **declared but not yet written** (`frontend`, `security`, `scripting`) | **Author the deep doc first** (per *Baseline note* above), then point at it — **or** shorten the bullet. Pointing at a file that does not exist fails the rules-pointer check. |
 | **none by design** (`self-review`) | Shorten the bullet. |
 
