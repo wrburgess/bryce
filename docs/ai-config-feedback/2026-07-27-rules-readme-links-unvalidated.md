@@ -81,6 +81,21 @@ Any of these would close it; the first is the cheapest and the least clever:
 - **Fence the examples.** `checkLinks` already skips fenced code, so moving each illustrative link into a
   fence would let the file join `LINK_CHECKED` with real links checked and examples ignored. Costs the
   examples their inline rendering, and is a larger edit than it looks — the examples are woven into prose.
+
+  > **Correction (issue #163).** "`checkLinks` already skips fenced code" was **false when this entry was
+  > written.** `checkLinks` matched `MARKDOWN_LINK` over raw text; only `checkRulesPointers` and
+  > `ruleBullets` tracked a `fenced` toggle. Reproduced on the tree as it then stood: appending a fenced
+  > dead link to `docs/mcp/README.md`, a `LINK_CHECKED` file, reddened the gate. So fencing the examples
+  > would not have worked at the time, and this option was unavailable rather than merely awkward — which
+  > is a further reason the deferral was right, on top of the ones stated. PR #162 has since made the
+  > claim true by parsing markdown instead of matching it
+  > ([ADR 0054](../adr/0054-code-spans-are-not-links.md)); see the resolution note at the top.
+  >
+  > The option below carries a second error worth flagging, since both misdescribe the checker a reader
+  > might go on to modify: its caveat that the illustrative `[ADR NNNN](MMMM-...md)` example "would need
+  > excluding" was **never true**. `ADR_LINK_LABEL` is `/^ADR (\d{4})$/`, so the label `ADR NNNN` has
+  > never matched and the example was always skipped. The entry's conclusion — defer, do not fold — is
+  > unaffected by either correction.
 - **Make the ADR-number scan resolve the path it already matched.** It sees every `[ADR NNNN](…NNNN-….md)`
   link repo-wide and checks number agreement; adding a resolution check for that one link shape would
   have caught the #160 case in **any** file, not just this one, without link-checking whole documents.
