@@ -57,6 +57,21 @@ The recurring job that re-ingests every active Player's *complete current-season
 upserts it idempotently — no date windows; adding a Player is just his first Refresh.
 _Avoid_: "yesterday fetch", "incremental sync" (there is no window to fall out of)
 
+**Sweep**:
+One Refresh's single pass over the **Watch List**, from claiming the run to settling its outcome.
+_Avoid_: "run" on its own (ambiguous between the pass and its durable record)
+
+**Skipped Sweep**:
+A Refresh that swept nobody at all — during **Offseason Sleep**, behind a concurrent Refresh already
+holding the claim, or after being superseded mid-flight. It settles no outcome of its own.
+_Avoid_: bare "skipped" (that collides with a **Passed-Over Player**); "failed" (a Skipped Sweep is
+not an error)
+
+**Passed-Over Player**:
+An active Player a **Sweep** deliberately did not fetch — out of season, or carrying no usable
+**External ID**. Distinct from a Player whose refresh was attempted and failed.
+_Avoid_: bare "skipped" (see **Skipped Sweep**); "missing" (he is on the Watch List and accounted for)
+
 **Digest**:
 The email reporting every Stat Line whose game date falls inside a **Window**, as two tables of
 aggregate numbers — Batters and Pitchers — one row per Player per **Level**. Sent every day, even
@@ -180,6 +195,10 @@ _Avoid_: overloading the delivery-ledger sense ("guarantee restored across the d
   choices are not.
 - A **Snapshot** is the local rollback point before a risky change; a **Replica** is the continuous
   off-box copy guarding against hardware loss — complementary, not substitutes.
+- A **Refresh** either performs a **Sweep** that settles an outcome, or is a **Skipped Sweep** that
+  settles nothing — never both.
+- Every Player in a **Sweep** ends in exactly one of three states — refreshed, **Passed-Over**, or
+  failed — and the three together account for the whole **Watch List**.
 
 ## Example dialogue
 
@@ -221,6 +240,18 @@ _Avoid_: overloading the delivery-ledger sense ("guarantee restored across the d
 - **"player list"** (issue #67's phrasing) — resolved: a **Player List Backup** captures *every*
   **Player** row, active and inactive, which is broader than the **Watch List** (the active subset
   only); inactive Players carry history and past choices worth restoring.
+- **"skipped"** (issue #146) — used for two unrelated things: a whole Refresh that never ran, and one
+  Player a running Sweep chose not to fetch. Resolved: **Skipped Sweep** for the first,
+  **Passed-Over Player** for the second. Never say "skipped" unqualified, least of all in output the
+  HC reads live.
+- **"progress"** (issues #95 → #146) — #95 delivered durable per-Sweep counters and #146 reported
+  that "progress does not work," which read as a defect in them. Resolved: those are two different
+  obligations, and #95 built only the second. **Liveness** is continuous evidence that a Sweep is
+  alive and where it is right now; its audience is whoever is watching the terminal, and it is
+  discarded the instant it is read. **Accounting** is the durable record of what a Sweep did; its
+  audience is `/health`, the MCP status tool, and the **Digest**'s freshness banner, and it is read
+  after the fact. Accounting can never serve as Liveness — it is aggregate and after-the-fact by
+  construction ([ADR 0056](../adr/0056-refresh-emits-typed-progress-events-cli-is-the-only-presenter.md)).
 - **"batch-add player names"** (issue #68) — the title reads as "add by name," but the domain
   identifies a **Player** by **External ID** (NCAA: `stats_player_seq`), never by a bare name.
   Resolved: a batch add keys on *identity*; a **name** is only a search convenience — the MLB Stats
