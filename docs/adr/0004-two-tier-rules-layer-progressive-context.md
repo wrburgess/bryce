@@ -4,10 +4,14 @@
 
 Knowledge (patterns + anti-patterns + domain guidance) lives in a **two-tier Rules layer**, kept separate from the Project Config (which is settings only). This is the mechanism for "load the right amount of context per session, load more when needed."
 
-- **Tier 1 — Lean Core.** Small, invariant per-domain rule files, always resident. Reachable from `AGENTS.md` so **every** tool receives them; Claude's `.claude/rules/` auto-load is a tool-specific accelerator over the same content. Each file carries a **Patterns** section and an **Anti-Patterns** section, plus a header stating its trigger and a pointer to its deep file.
+- **Tier 1 — Lean Core.** Small, invariant per-domain rule files: **mandatory and task-routed** — an agent reads the applicable file when its work enters that domain, guided by the trigger table in `AGENTS.md`. Reachable from `AGENTS.md` so **every** tool can find them by the same route; a host may add a tool-specific auto-load projection over the same content, but the baseline ships none and Tier 1 does not depend on one. Each file carries a **Patterns** section and an **Anti-Patterns** section, plus a header stating its trigger and a pointer to its deep file.
 - **Tier 2 — Deferred Deep Docs.** Heavy, subsystem-specific case studies in `docs/rules/<domain>-postmortems.md`. **Not** auto-loaded — read on demand (or via a dispatched sub-agent) when work touches that subsystem. Keeping these out of Tier 1 is what actually keeps session context lean.
 
 An explicit **trigger table** tells an agent *when* to load a deferred doc (e.g. "working in `app/models/` → read `backend-postmortems.md`").
+
+**What separates the tiers**, now that neither is auto-loaded: Tier 1 is read **whenever work enters its domain** — the trigger is the domain itself, and reading it is not optional. Tier 2 is read when a *specific* case study is wanted, pointed at by a Tier-1 bullet or the trigger table. So Tier 1 bounds what an agent must carry to work in an area at all, and Tier 2 holds the depth it consults for one question.
+
+> **Correction (issue #186).** This ADR originally described Tier 1 as *"always resident"* and named Claude's per-tool auto-load as an accelerator over it. Neither was ever implemented in the bryce host: the import chain is `CLAUDE.md → @AGENTS.md` and stops, so no rule file was auto-loaded into any session. The text above states what actually happens. Deliberately **not** done in response: wiring a loading mechanism — the corpus is ~46 KB, and making it resident would trade a governance problem for a permanent context tax (see #185 for the measurements).
 
 ## Anti-Patterns are first-class
 

@@ -158,13 +158,18 @@ thread. The fetch-and-fix churn may be offloaded; the severity and stop-and-ask 
 the orchestrator (ADR 0005).
 
 **AC delivers (`final`):** first disposes of any Rules-Layer/config improvements per
-[`PROJECT.md`](../../PROJECT.md) → *Human Gates* → *Rule-suggestion disposition* (under `autonomous-fold`,
-folds the well-scoped/low-risk ones into this PR and defers the rest) **before** verifying, so the
-folded diff is what gets checked and recorded; re-verifies the PR is green with no open must-fix
-findings; confirms the Reviewer backstop covers the delivered diff (re-summoning on any late fold);
-then posts a **Statement of Work** on the PR (issue link; option chosen; technical decisions; what
-changed; folded/deferred rule-config changes; testing coverage; Reviewer backstop; Reviewer findings +
-resolutions; known limitations; follow-ups) and a reference link on the issue.
+[`PROJECT.md`](../../PROJECT.md) → *Human Gates* → *Rule-suggestion disposition*, which resolves every
+suggestion to exactly one of four outcomes — *enforce* · *retain a concise rule* · *record as an
+expiring finding* · *do nothing* — and sweeps any expiring findings that have come due. The setting
+decides who picks: under `present-to-hc` the AC recommends an outcome and presents it as `pending HC
+decision`, editing no Rules Layer or config without approval; under `autonomous-fold` it acts on its own
+pick, folding the well-scoped/low-risk ones into this PR and deferring the rest. Either way this happens
+**before** verifying, so whatever diff results is what gets checked and recorded. Then: re-verifies the
+PR is green with no open must-fix findings; confirms the Reviewer backstop covers the delivered diff
+(re-summoning on any change that moved `HEAD` past the reviewed SHA); then posts a **Statement of Work**
+on the PR (issue link; option chosen; technical decisions; what changed; the rule/config disposition of
+every suggestion considered; testing coverage; Reviewer backstop; Reviewer findings + resolutions; known
+limitations; follow-ups) and a reference link on the issue.
 
 **Both operate on the existing PR — they never open one. `final` does not self-merge.** **Terminal
 artifact:** the SOW on the PR + the reference link on the issue. **This is the second mandatory human

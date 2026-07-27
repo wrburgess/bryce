@@ -23,18 +23,73 @@ skipped: stop and recheck.
 
 1. **Dispose of Rules Layer / config improvements** learned during implementation — a convention that
    isn't documented, a gap a Reviewer finding revealed, a new anti-pattern worth capturing — per
-   [`PROJECT.md`](../../PROJECT.md) → *Human Gates* → *Rule-suggestion disposition*. **Do this before
-   the verification and SOW below**, so a folded change is part of the diff those steps check and
-   record — never edited in after the SOW is posted:
-   - Under **`autonomous-fold`** (this host's shipped default): **fold** the well-scoped, low-risk ones
-     into **this PR** — the same PR a human merges, so the merge gate stays their backstop — and
-     **defer** the large or contentious ones to a tracked follow-up issue. The discretion bar is
-     *well-scoped **and** low-risk → fold; large **or** contentious → defer.* **Commit and push the
-     folds** so Step 2's checks run on the folded diff, and record BOTH — what was folded and what was
-     deferred (with the follow-up link) — in the SOW's *Folded Rule/Config Changes* section (Step 5).
-     The `create-skill` review-PR gate is **out of scope** — never auto-dispose it.
-   - Under **`present-to-hc`**: **present** the suggestions to the HC and wait; **do not edit the Rules
-     Layer or config without approval** (nothing is folded, so the diff is unchanged).
+   [`PROJECT.md`](../../PROJECT.md) → *Human Gates* → *Rule-suggestion disposition*, **read at execution
+   time** (a run that started under one setting finishes under whatever the branch now declares). **Do
+   this before the verification and SOW below**, so any change it produces is part of the diff those
+   steps check and record — never edited in after the SOW is posted.
+
+   **Every suggestion resolves to exactly one of the four outcomes the Project Config defines** —
+   *enforce* · *retain a concise rule* · *record as an expiring finding* · *do nothing* — carrying the
+   evidence that outcome requires. Two of them need no approval under **either** setting, because
+   neither produces a Rules Layer or config artifact: *enforce* (the guard and its regression test) and
+   *do nothing*. A **high-severity first occurrence takes *enforce* immediately** — Step 3's
+   requirement that every Critical and High finding be resolved outranks this setting.
+   - Under **`autonomous-fold`**: pick the outcome and act on it — **fold** the well-scoped, low-risk
+     ones into **this PR** (the same PR a human merges, so the merge gate stays their backstop) and
+     **defer** the large or contentious ones to a tracked follow-up. The discretion bar is *well-scoped
+     **and** low-risk → fold; large **or** contentious → defer.* **Commit and push the folds** so Step
+     2's checks run on the folded diff.
+   - Under **`present-to-hc`** (this host's shipped default): pick a **recommended** outcome and
+     **present** it — record the recommendation plus `pending HC decision` per suggestion, and **edit no
+     Rules Layer or config without approval**. A `pending` row does **not** block the SOW; presenting it
+     is what this setting delivers. The HC replies on the PR; an approved outcome is then applied in
+     this PR — which moves `HEAD`, so re-enter Step 4 — unless the HC elects to defer it.
+
+   Record **every** suggestion and its outcome in the SOW's *Rule/Config Disposition* section (Step 5),
+   including the ones that resolved to *do nothing*: an invisible outcome is indistinguishable from a
+   suggestion never considered. An expiring finding goes in the findings log the Project Config names.
+   The `create-skill` review-PR gate is **out of scope** — never auto-dispose it.
+
+   **Sweep the findings log first**, before disposing of anything new. Read the findings log the Project
+   Config names — absent is fine, and means nothing is due. An entry is **active** until it sits under the
+   log's `## Archived` heading and **archived** once it does; that heading is the entire boundary. Stop at
+   it: process every **active** entry whose **review date has passed**, and read nothing beneath it.
+   Without this sweep an entry recorded once and never met again would sit in the log forever, which is
+   the accretion *record as an expiring finding* exists to avoid, in a slower form.
+
+   Apply the rule the Project Config declares — no recurrence and nothing having cited it → archive;
+   recurrence → eligible for a real outcome, entering this step's disposition beside the new suggestions.
+   Then close the entry out **before this run ends**, because **a due entry never survives its own sweep
+   as active, whichever branch it took**: archived on no recurrence; archived **with a pointer to what it
+   became** once a promoted outcome is applied; archived as *presented; outcome 4 unless a resumed pass
+   records otherwise* while a `pending HC decision` row is still open — the **same wording** the paragraph
+   below requires, because two spellings of one disposition is two dispositions, and the looser one wins
+   whenever a reader stops at the first. Bounding only the archived side leaves the promotion side
+   unbounded: an
+   entry presented, never answered, and defaulted to *do nothing* would still be active with the same past
+   review date, and every later run would re-present it identically.
+
+   **Archive the pending one here — do not wait for the merge.** Merge is the last event in the lifecycle;
+   no stage runs after it, so a step that deferred the archival to it would simply never run. Record the
+   disposition as *presented; outcome 4 unless a resumed pass records otherwise* — a line that is already
+   correct if no answer ever comes, so nothing is left reading as stale. Archival records that an entry was
+   **considered**, never how it resolved, so archiving ahead of the answer misfiles nothing. A later
+   recurrence opens a **new** entry citing the archived one rather than reviving it, carrying its
+   recurrence count forward.
+
+   **An HC decision that arrives after the SOW re-opens `final`.** This stage posts its SOW and ends, and a
+   `pending` row deliberately does not block that — so an approval lands with no run in flight to apply it.
+   It is therefore **a new `final` pass, not an edit**: re-enter this step to apply the approved outcome,
+   then Step 2's checks, then **Step 4 on the resulting commit** — it moved `HEAD` past the reviewed SHA
+   like any other late change — and finally Step 5 to repost the SOW with the entry's pointer updated.
+   **No approved post-SOW change reaches merge without Reviewer evidence covering it**; that invariant is
+   Step 4's and this is simply its entry point. If no decision ever arrives, nothing resumes: the row
+   inherits outcome 4 at merge and the archived line already says so.
+
+   **Archiving by the declared rule is executing the policy, not proposing one**, so the setting does not
+   gate it; promoting an entry to a retained rule **is** a suggestion, and does. Report the sweep in the
+   same SOW section — including **"no entries due"**, so a sweep that found nothing is distinguishable
+   from a sweep that never ran.
 2. **Verify the PR is ready:**
    - Integrate the latest base branch (merge it in — do not rebase if the branch-protection guardrails
      refuse a mid-rebase detached HEAD; see [`PROJECT.md`](../../PROJECT.md) → *Branch & PR Policy*).
@@ -56,10 +111,12 @@ skipped: stop and recheck.
    - **Equal** (`reviewed-sha` = `HEAD`) → the PR-gate review stands; validate the evidence below, then
      record the reviewer identity, model, disposition, artifact URL, and reviewed SHA in the SOW's
      *Reviewer Backstop* line and continue.
-   - **Different** (Step 1 folded something after `verify`) → **re-summon the Reviewer on the delta**
+   - **Different** (something moved `HEAD` after `verify` — a fold, an HC-approved fold under
+     `present-to-hc`, a review-response fix, or a high-severity containment fix) → **re-summon the
+     Reviewer on the delta**
      (`--mode work --base <reviewed_sha>`, per [`PROJECT.md`](../../PROJECT.md) → *Lifecycle Host* →
-     *Reviewer*) so only the folded diff is re-reviewed. If that re-review makes you fold a new must-fix
-     fix, that fold moves `HEAD` again — so **repeat this step** (re-anchor: reviewed SHA ← the newly
+     *Reviewer*) so only the delta is re-reviewed. Resolving a new must-fix finding moves `HEAD` again —
+     so **repeat this step** (re-anchor: reviewed SHA ← the newly
      reviewed commit, compare to `HEAD`) until `HEAD` equals the last reviewed SHA. Each re-summon
      replaces the evidence block with a new request marker, its delta baseline, and the new artifact
      URL. **Treat every delta review like the first one:** take its findings back through Step 3's
@@ -73,6 +130,14 @@ skipped: stop and recheck.
      summon *returned a review*, never that the review was clean, so a validated block is not by itself
      a resolved one. No commit reaches the SOW that some Reviewer pass did not see, and no finding
      reaches it unresolved.
+
+     **The recursion bound** ([`PROJECT.md`](../../PROJECT.md) → *Rule-suggestion disposition*): a **rule
+     suggestion** arising from a delta review may not be resolved by *retain a concise rule* — it
+     resolves to *enforce*, *record as an expiring finding*, or *do nothing* only. Defect fixes are
+     unaffected; every Critical and High delta finding is still resolved above. Without this, fold →
+     delta review → fold still runs even with four outcomes available. Record, per delta review, the
+     commit that triggered it and the reviewed SHA it was based on, so the chain is reconstructable from
+     the PR alone.
    - **The chain is exhausted** (no Reviewer answers, through the whole fallback order) → the
      [`PROJECT.md`](../../PROJECT.md) *Reviewer degradation floor* applies: it is `stop-and-ask` and is
      **not configurable**, so an unreviewed PR does **not** reach a SOW. Stop and ask the HC instead of
@@ -111,9 +176,13 @@ skipped: stop and recheck.
    |------|--------|---------|
    | path/to/file | Created/Modified/Deleted | What changed and why |
 
-   ### Folded Rule/Config Changes
-   - [Well-scoped, low-risk Rules-Layer/config improvements folded into THIS PR under `autonomous-fold` — or "None"]
-   - Deferred (follow-up): [link to the follow-up issue for large/contentious suggestions — or "None"]
+   ### Rule/Config Disposition
+   Every suggestion Step 1 considered, including the ones that resolved to *do nothing* — or "None considered".
+   Findings-log sweep: [entries archived / promoted this run — or "no entries due"].
+
+   | Suggestion | Outcome | State | Where it landed |
+   |------------|---------|-------|-----------------|
+   | [what was learned] | [enforce \| retain a concise rule \| expiring finding \| do nothing] | [applied \| deferred \| `pending HC decision`] | [commit, findings-log entry, follow-up link, or "—"] |
 
    ### Testing Coverage
    - [Coverage by test type, notable scenarios, and edge cases]
