@@ -318,6 +318,38 @@ function decodeDestination(destination: string): string {
 }
 
 /**
+ * Resolve `href` against `fromDir` and return the absolute path ONLY when it stays inside `root`;
+ * `null` when it escapes.
+ *
+ * An href that escapes the repo (a root-absolute `/docs/...`, or a `../../` that climbs past the root)
+ * is never a resolvable intra-repo link, so it is rejected WITHOUT consulting the disk. That is a
+ * correctness rule first — such a link is broken on the lifecycle host however the runner's filesystem
+ * happens to look — and it is what keeps the verdict from depending on files that happen to exist
+ * outside the checkout (`rules/testing.md`: an environment-dependent assertion is green on one machine
+ * and red on another).
+ *
+ * ONE authored copy, because the rule being written three times and enforced twice is exactly how issue
+ * #165 happened: `resolvesFrom` guarded it, the test fixture's healer guarded it, and `checkLinks` — the
+ * widest surface of the three — did not. A fourth resolution site now inherits the rule instead of
+ * having to remember it.
+ *
+ * It deliberately performs NO `stat`. The three callers ask genuinely different disk questions —
+ * `resolvesFrom` requires `.isFile()`, `checkLinks` accepts a directory (a link to `rules/` is valid),
+ * and the fixture asks `existsSync` — so containment is the shared part and the stat is not.
+ *
+ * `root` is normalized here rather than being a precondition on the caller: the parameter is a plain
+ * `string`, and an unstated "must already be absolute" is how the next caller gets it wrong.
+ */
+export function resolveInsideRoot(root: string, fromDir: string, href: string): string | null {
+  const base = resolvePath(root);
+  const resolved = resolvePath(fromDir, href);
+  // The `+ sep` is load-bearing: without it a sibling sharing a name prefix (`<root>-old`) reads as
+  // inside `<root>`, which is a guard loosened just enough to print a false green (`rules/scripting.md`).
+  if (resolved !== base && !resolved.startsWith(base + sep)) return null;
+  return resolved;
+}
+
+/**
  * Every inline link and image in `source`, in document order.
  *
  * IMAGES are included because the old regex could not tell `![alt](x.png)` from `[alt](x.png)` and so
@@ -505,17 +537,14 @@ class ParityCheck {
    * the other question (does this repo-root path exist), and the two are deliberately distinct: a
    * backticked path is prose naming a repo path, a link is a link (issue #154).
    *
-   * An href that escapes the repo (a root-absolute `/docs/...`, or a `../../` that climbs past the
-   * root) is never a resolvable intra-repo link, so it is rejected WITHOUT consulting the disk. That
-   * is a correctness rule first — such a link is broken on the lifecycle host however the runner's
-   * filesystem happens to look — and it is what keeps the verdict from depending on files that
-   * happen to exist outside the checkout (rules/testing.md: an environment-dependent assertion is
-   * green on one machine and red on another).
+   * Containment — an href that escapes the repo is rejected without consulting the disk — lives in
+   * `resolveInsideRoot`, which documents why and is shared with `checkLinks` and the test fixture's
+   * healer (issue #165). What remains local here is the `.isFile()` requirement: a rules pointer names
+   * a document, never a directory.
    */
   private resolvesFrom(rel: string, href: string): boolean {
-    const root = resolvePath(this.root);
-    const resolved = resolvePath(dirname(this.path(rel)), href);
-    if (resolved !== root && !resolved.startsWith(root + sep)) return false;
+    const resolved = resolveInsideRoot(this.root, dirname(this.path(rel)), href);
+    if (resolved === null) return false;
     try {
       return statSync(resolved).isFile();
     } catch {
@@ -1214,7 +1243,16 @@ class ParityCheck {
         target = target.split("#")[0] as string; // drop any #anchor fragment
         if (target === "") continue;
 
-        const resolved = resolvePath(dir, target);
+        // Issue #165. Containment is decided BEFORE the disk is consulted, so a `../../` chain that
+        // climbs out is dead whether or not the runner happens to have something at the far end. The
+        // two messages stay distinct because they send a reader to different places: "escapes the
+        // repository" is a fact about the path, "does not resolve" is a fact about the filesystem.
+        const resolved = resolveInsideRoot(this.root, dir, target);
+        if (resolved === null) {
+          this.err(`Dead link in ${rel}: \`${target}\` escapes the repository`);
+          continue;
+        }
+
         try {
           statSync(resolved);
         } catch {

@@ -5,6 +5,8 @@ import type { OpenedDb } from "../src/db/client.js";
 import { digestDeliveries, playerTags, players, refreshRuns, statLines } from "../src/db/schema.js";
 import { MlbClient } from "../src/mlb/client.js";
 import { claimRefreshRun } from "../src/jobs/refresh-run.js";
+import { assemblePlayerCard } from "../src/reports/player-card.js";
+import { renderPlayerCardHtml, renderPlayerCardText } from "../src/reports/player-card-render.js";
 import type { AppDeps } from "../src/server.js";
 import { createApp } from "../src/server.js";
 import {
@@ -155,6 +157,18 @@ describe("MCP server over Streamable HTTP", () => {
     // send_digest names a game-count window among the on-demand ones (no daily slot).
     expect(descriptionOf("send_digest")).toContain("on-demand");
     expect(descriptionOf("send_digest")).toContain("last10games");
+
+    // report_player's description LEADS WITH THE OUTCOME (ADR 0055): an agent
+    // picks and interprets a tool from this string, so flipping the default to
+    // `console` without rewriting it would not stop the agent re-deriving a
+    // layout. Asserted, because the description IS half the mechanism.
+    const cardTool = descriptionOf("report_player");
+    expect(cardTool).toMatch(/ready-to-display/i);
+    expect(cardTool).toMatch(/do not reformat/i);
+    expect(cardTool.indexOf("format 'json'")).toBeGreaterThan(cardTool.indexOf("ready-to-display"));
+    for (const format of ["console", "html", "json"]) {
+      expect(cardTool, `report_player enumerates ${format}`).toContain(format);
+    }
   });
 
   it("describes every input field of every exposed tool schema", async () => {
@@ -482,13 +496,38 @@ describe("MCP server over Streamable HTTP", () => {
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
   });
 
-  it("report_player returns the read-only card and rejects typed-json coercion", async () => {
+  it("report_player DEFAULTS to the finished console card, and still serves json/html on request", async () => {
     const player = await insertPlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id, stats: { hits: 2, atBats: 4 } });
     const before = await opened.db.select().from(statLines);
+    const card = assemblePlayerCard(opened.db, { id: player.id, windows: ["last10"], now: clock.now, tz: TEST_TZ });
+
+    // DELIBERATE CHANGE (#141 / ADR 0055): the default flipped from json to
+    // `console`, so this call no longer returns `structuredContent`. An agent
+    // should receive an artifact it can show, not ~315 key/value pairs it then
+    // lays out slightly differently every time.
     const result = await call("report_player", { id: player.id, windows: ["last10"] });
     expect(result.isError).not.toBe(true);
-    expect(result.structuredContent).toMatchObject({ player: { id: player.id }, windows: [{ spec: "last10", actualGames: 1 }] });
+    expect(result.structuredContent).toBeUndefined();
+    // EQUALITY against the pure renderer the CLI also prints, so the two console
+    // surfaces cannot drift into two layouts.
+    expect(result.content[0]?.text).toBe(renderPlayerCardText(card));
+
+    // `json` remains the machine contract on every surface, unchanged apart from
+    // #141's three additive keys (pinned in test/player-card-contract.test.ts).
+    const json = await call("report_player", { id: player.id, windows: ["last10"], format: "json" });
+    expect(json.structuredContent).toMatchObject({ player: { id: player.id }, windows: [{ spec: "last10", actualGames: 1 }] });
+    expect(json.structuredContent?.windows).toEqual(JSON.parse(JSON.stringify(card.windows)));
+
+    // `html` is a Presentation, so it travels as TEXT (like digest_preview's).
+    const html = await call("report_player", { id: player.id, windows: ["last10"], format: "html" });
+    expect(html.structuredContent).toBeUndefined();
+    expect(html.content[0]?.text).toBe(renderPlayerCardHtml(card));
+
+    // An unsupported format is refused, not silently defaulted.
+    const bogus = await call("report_player", { id: player.id, format: "pdf" });
+    expect(bogus.isError).toBe(true);
+
     expect(await opened.db.select().from(statLines)).toEqual(before);
     const invalid = await call("report_player", { id: String(player.id) });
     expect(invalid.isError).toBe(true);
