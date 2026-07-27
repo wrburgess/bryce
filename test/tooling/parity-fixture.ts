@@ -1,8 +1,8 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve, sep } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { linkCheckedFiles, markdownLinks } from "../../scripts/parity-check.js";
+import { linkCheckedFiles, markdownLinks, resolveInsideRoot } from "../../scripts/parity-check.js";
 
 // Shared fixture copier for the parity self-tests (issue #139). Both tooling tests hand
 // `runParityCheck` a real tree in an OS tmpdir; this module owns HOW that tree is built so there is
@@ -79,8 +79,11 @@ export function copyBundle(
  * Self-healing: once the target exists, nothing is created.
  *
  * Stub creation is CONTAINED to `root`: the target comes from file content, so a relative link that
- * climbs out (`../../elsewhere.md`) would otherwise have this helper write into the real filesystem
- * outside the throwaway copy. An escaping link is skipped, not healed.
+ * climbs out (`../../elsewhere.md`) would otherwise have this helper WRITE into the real filesystem
+ * outside the throwaway copy — the stakes here are higher than the checker's, which only reads. An
+ * escaping link is skipped, not healed, and the containment test itself comes from the checker
+ * (`resolveInsideRoot`) rather than being re-derived: this file used to carry its own copy of that
+ * expression, and a rule written three times and enforced twice is what issue #165 was.
  *
  * The file list and the link EXTRACTION both come from scripts/parity-check.ts (issue #159) rather than
  * being mirrored here, so the healer and the checker cannot drift apart on either. Sharing
@@ -91,8 +94,6 @@ export function copyBundle(
  * checker ignores those either way — so it has its own test in parity-links.test.ts.
  */
 export function healDeadLinks(root: string): void {
-  const contained = resolve(root);
-
   for (const rel of linkCheckedFiles(root)) {
     const file = join(root, rel);
     if (!existsSync(file)) continue;
@@ -104,8 +105,8 @@ export function healDeadLinks(root: string): void {
       const target = raw.split("#")[0] ?? "";
       if (target === "") continue;
 
-      const resolved = resolve(dirname(file), target);
-      if (resolved !== contained && !resolved.startsWith(contained + sep)) continue;
+      const resolved = resolveInsideRoot(root, dirname(file), target);
+      if (resolved === null) continue;
       if (existsSync(resolved)) continue;
 
       mkdirSync(dirname(resolved), { recursive: true });
