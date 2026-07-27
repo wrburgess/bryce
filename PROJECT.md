@@ -288,7 +288,10 @@ to stop. Following this repository's absent-until-needed convention for deep doc
 the first finding is recorded**, never as an empty placeholder. Each entry carries: normalized failure
 class · severity and blast radius · enforcement status · recurrence count · the PR or issue that
 surfaced it · date recorded · **review date, written absolute, = date recorded + 90 days**. The HC is
-its reviewer, inside a corpus review or on the first `final` run past an entry's review date. At that
+its reviewer, inside a corpus review; independently of that, **`final` sweeps the log at the start of its
+disposition step** and processes every entry whose review date has passed — an entry recorded once and
+never met again must not be able to sit here indefinitely, which would be this section's own accretion in
+slower form. At the review
 date: recurrence `0` and nothing having cited it → **archive** the entry (move it under an `## Archived`
 heading — do not delete, because the record of what was considered and dropped is the point);
 recurrence `≥ 1` → it becomes eligible for outcome 1 or 2. **The default at expiry is archival, never

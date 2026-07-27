@@ -49,6 +49,17 @@ skipped: stop and recheck.
    including the ones that resolved to *do nothing*: an invisible outcome is indistinguishable from a
    suggestion never considered. An expiring finding goes in the findings log the Project Config names.
    The `create-skill` review-PR gate is **out of scope** — never auto-dispose it.
+
+   **Sweep the findings log first**, before disposing of anything new. Read the findings log the Project
+   Config names — absent is fine, and means nothing is due — and process every entry whose **review date
+   has passed**, by the rule that Config declares: no recurrence and no work having cited it →
+   **archive** it; recurrence → it is eligible for a real outcome and enters this step's disposition
+   beside the new suggestions. Without this sweep an entry recorded once and never met again would sit
+   in the log forever, which is the accretion *record as an expiring finding* exists to avoid, in a
+   slower form. **Archiving by the declared rule is executing the policy, not proposing one**, so the
+   setting does not gate it; promoting an entry to a retained rule **is** a suggestion, and does. Report
+   the sweep in the same SOW section — including **"no entries due"**, so a sweep that found nothing
+   is distinguishable from a sweep that never ran.
 2. **Verify the PR is ready:**
    - Integrate the latest base branch (merge it in — do not rebase if the branch-protection guardrails
      refuse a mid-rebase detached HEAD; see [`PROJECT.md`](../../PROJECT.md) → *Branch & PR Policy*).
@@ -137,6 +148,7 @@ skipped: stop and recheck.
 
    ### Rule/Config Disposition
    Every suggestion Step 1 considered, including the ones that resolved to *do nothing* — or "None considered".
+   Findings-log sweep: [entries archived / promoted this run — or "no entries due"].
 
    | Suggestion | Outcome | State | Where it landed |
    |------------|---------|-------|-----------------|
