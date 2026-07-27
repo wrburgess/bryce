@@ -71,7 +71,7 @@ the stop-and-ask judgment stay with the orchestrator. On a tool without sub-agen
    resolved by *retain a concise rule* — it resolves to *enforce*, *record as an expiring finding*, or
    *do nothing* only.
    ```markdown
-   Acknowledged — [the disposition and why: enforced in <commit>, recorded as an expiring finding, deferred to #N, or no action and the reason].
+   Acknowledged — [the disposition and why: enforced in {commit}, recorded as an expiring finding, deferred to #N, or no action and the reason].
    ```
 7. Post a summary comment on the PR:
    ```markdown
