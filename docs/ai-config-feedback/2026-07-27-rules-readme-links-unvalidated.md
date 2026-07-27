@@ -8,15 +8,16 @@
 > needs either a fencing pass over the prose or a change to what the validator considers a link." Issue
 > #159 — filed independently, from the same root cause reached via `rules/*.md` — took the second path.
 >
-> `checkLinks` now blanks fenced blocks and inline code spans before matching
+> `checkLinks` now finds links by PARSING with `commonmark` rather than matching a regex
 > ([ADR 0054](../adr/0054-code-spans-are-not-links.md)), so every illustrative `[text](path)` in this file
-> is prose again rather than a link, and the file joined the checked set with **no prose edit at all** —
-> the cost this entry priced into the fencing option is not paid. The five failures quoted below are the
-> exact five that masking removes. The scope was derived rather than listed, so the skill bodies and
-> command shims came with it.
+> is prose again — it is not a link node — and the file joined the checked set with **no prose edit at
+> all**, so the cost this entry priced into the fencing option is not paid. The five failures quoted
+> below are exactly the five that stop being links. The scope was derived rather than listed, so the
+> skill bodies and command shims came with it.
 >
 > That makes this entry's third suggestion — resolve the path in the ADR-number scan — unnecessary as a
-> narrower substitute, though the ADR scan is masked too, for consistency.
+> narrower substitute; that scan is parsed too, and gained reference-link and percent-encoded coverage
+> in the process.
 >
 > The one thing #159 did **not** do is this entry's first suggestion, and it is worth keeping: the
 > *reason* the naive `LINK_CHECKED` addition fails is now encoded in a validator instead of stated in

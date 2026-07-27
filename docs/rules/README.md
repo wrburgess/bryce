@@ -36,9 +36,10 @@ target pattern. That is deliberate and load-bearing:
   exist yet reddens CI with a dead-link failure; a backticked path is inert text the validator ignores.
   A separate repository-wide Markdown scan checks only local `[ADR NNNN](MMMM-...md)` links for a
   disagreement between their displayed and target ADR numbers; it does not resolve additional links.
-- Both scans first blank every **fenced block and inline code span**, so a worked example like the
-  `[text](path)` on this line is prose about markdown, not a link. That is what made covering these
-  prose-heavy files possible at all ([ADR 0054](../adr/0054-code-spans-are-not-links.md)).
+- Both scans find links by **parsing** the file rather than pattern-matching it, so a worked example like
+  the `[text](path)` on this line is prose about markdown and is never reported as a link — it is not a
+  link node ([ADR 0054](../adr/0054-code-spans-are-not-links.md)). That is what made covering these
+  prose-heavy files possible at all.
 - This is what lets the Rules Layer ship a trigger table — and any forward-reference to a
   planned-but-absent file — **without creating empty placeholder files** just to satisfy the checker.
 

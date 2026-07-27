@@ -32,8 +32,8 @@ span, so adding the files reported dead links to `url` and `path` — targets th
 That is why upstream ADR 0051's own worked example, and the deep-doc convention itself, are written
 around the checker rather than checked by it.
 
-**Both halves are baseline-generic.** Neither the masking rule (CommonMark: a link inside code is not a
-link) nor the derivation (every Tier-1 rule, every Skill body, every shim — from the same constants the
+**Both halves are baseline-generic.** Neither the parsing rule (a link inside code is not a link) nor
+the derivation (every Tier-1 rule, every Skill body, every shim — from the same constants the
 checker already has) contains one byte of stack or domain. A host with a Rails app, a Go service, or no
 application code at all vendors the identical `rules/` and `skills/` layout and inherits the identical
 gap. This clears the ledger's upstream test — *"would a project with a completely different stack and
@@ -41,23 +41,39 @@ domain hit the same thing?"* — without qualification.
 
 **The fix as shipped here** (bryce PR for issue #159), all of it in baseline files:
 
-- `maskCode(text)` — an offset-preserving mask for fenced blocks and inline code spans, so every caller
-  keeps matching the same regexes at the same offsets and keeps reporting the raw href a contributor
-  typed. Consumed by `checkLinks` and `checkAdrLinkNumbers`; deliberately **not** by
-  `checkRulesPointers` / `ruleBullets`, which exist to read backticked text.
+- `markdownLinks(source)` — parse with `commonmark` and walk the AST for `link`/`image` nodes, instead
+  of matching a regex. A link inside a code span is not reported **because it is not a node**. Consumed
+  by `checkLinks` and `checkAdrLinkNumbers`; deliberately **not** by `checkRulesPointers` / `ruleBullets`,
+  which exist to read backticked text.
 - `linkCheckedFiles(root)` — the dead-link scope **derived** rather than hand-kept, so a tenth Skill is
   covered the day it lands. **12 files → 39** (189 resolved internal links → 364, measured at merge).
 - `RENDER_SCANNED` split out of `LINK_CHECKED`, because a `parity:render` marker is an Adapter concern
   and should not follow the link scope.
 - Decisions recorded in [ADR 0054](../adr/0054-code-spans-are-not-links.md).
 
-**A second-order note worth carrying upstream with it.** Two Tier-1 anti-patterns in
-`rules/scripting.md` — *"never widen a guard's matching rule without asking which way the new failure
-points"* and *"never build a guard around the shape the current files happen to have"* — were the
-load-bearing constraints on the design, and an independent plan critique found a real over-masking
-hazard by applying exactly those. The baseline's own rules did the work they were written to do. That is
-a data point for the Rules Layer's value, not a friction, and it is recorded here so it is not read as
-one.
+**The recommendation changed during implementation, and the reason is the most useful thing here.** The
+first implementation hand-rolled the code-awareness: mask every code span and fenced block, then run the
+existing regex over the masked text. It was written, reviewed, and **failed five independent review
+rounds** — each one found a silent false green, a link the CommonMark reference parser renders live that
+the masker hid, and two of the five were introduced while fixing the round before. The full table is in
+[ADR 0054](../adr/0054-code-spans-are-not-links.md).
+
+So the upstream recommendation is **not** "add a masker to the baseline's parity check." It is: *do not
+reimplement a format's grammar to check something about that format.* A structural checker that needs to
+know what markdown means should parse markdown. The masker was ~180 lines encoding a subset of CommonMark
+badly; the replacement is ~40 lines and a devDependency.
+
+**That dependency is the real cost a vendoring Host App must weigh**, and it is why this is recorded
+rather than assumed: the Generic Baseline's parity check has been dependency-free, and `rules/scripting.md`
+only permits `scripts/*.ts` deps as a *host opt-in* (ADR 0039). Upstream has to decide whether the
+baseline takes the dependency, ships the (defective) regex behaviour with the scope narrow, or makes the
+link scanner pluggable. This host's evidence says the dependency is worth it; that is one data point, not
+a decision for the baseline.
+
+**A second-order note.** Two Tier-1 anti-patterns in `rules/scripting.md` — *"never widen a guard's
+matching rule without asking which way the new failure points"* and *"never build a guard around the
+shape the current files happen to have"* — were the load-bearing constraints throughout, and every round
+that ignored them produced a defect. The baseline's own rules did the work they were written to do.
 
 **Scope deliberately left behind:** `docs/adr/*.md` is still unchecked. It carries two genuinely dead
 links whose repair means editing accepted ADRs — a records decision, not a validator one. Any host will

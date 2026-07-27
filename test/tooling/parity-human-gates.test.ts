@@ -369,16 +369,36 @@ describe("parity check - local ADR link labels", () => {
         [
           `[ADR 0041](https://example.com/${ADR_0039})`,
           `[ADR 0041](#${ADR_0039})`,
-          `[ADR 0041](adr%2F${ADR_0039})`,
           `[Ordinary link](adr/${ADR_0039})`,
           `[ADR 0041](adr/${ADR_0039}`,
-          `[ADR 0041][tooling]`,
           `[ADR 0041](adr/not-numbered.md)`,
-          "",
-          "[tooling]: adr/0039-repo-tooling-unifies-on-typescript-remove-ruby.md",
         ].join("\n"),
       );
       expect(runParityCheck(root)).toMatchObject({ status: 0, errors: [] });
+    });
+  });
+
+  // Issue #159 moved this check from a regex to a CommonMark parser, and these two forms went from
+  // invisible to caught. Both were listed above as "ignored" when that was a statement about the
+  // regex's reach rather than about intent: each is a genuine citation whose displayed number
+  // disagrees with its target, and a reader following either lands on the wrong ADR.
+  //
+  //   - a percent-encoded separator: the old scan skipped any destination containing `%`
+  //   - a reference link: the old scan never resolved a `[label]: dest` definition at all
+  it("catches mismatches in forms the regex could not see (percent-encoded, reference link)", () => {
+    withBundleCopy((root) => {
+      writeMarkdown(root, "docs/adr-link-percent.md", `[ADR 0041](adr%2F${ADR_0039})\n`);
+      writeMarkdown(
+        root,
+        "docs/adr-link-reference.md",
+        `[ADR 0041][tooling]\n\n[tooling]: adr/${ADR_0039}\n`,
+      );
+
+      const errors = runParityCheck(root).errors.filter((e) => e.startsWith("ADR link number mismatch"));
+      expect(errors).toEqual([
+        "ADR link number mismatch in docs/adr-link-percent.md: label ADR 0041 targets ADR 0039",
+        "ADR link number mismatch in docs/adr-link-reference.md: label ADR 0041 targets ADR 0039",
+      ]);
     });
   });
 
