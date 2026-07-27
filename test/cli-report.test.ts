@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import type { ReportCliDeps } from "../src/cli/report.js";
-import { parseReportPlayerArgs, runReportCli } from "../src/cli/report.js";
+import { launchCommand, parseReportPlayerArgs, runReportCli } from "../src/cli/report.js";
 import { renderPlayerCardHtml, renderPlayerCardText } from "../src/reports/player-card-render.js";
 import { assemblePlayerCard } from "../src/reports/player-card.js";
 import { MID_SEASON, TEST_TZ, fakeClock, insertCalendars2026, insertPlayer, insertStatLine, testDb } from "./factories.js";
@@ -167,6 +167,48 @@ describe("report player CLI", () => {
     expect(code).toBe(1);
     expect(writeFile).toHaveBeenCalledTimes(1);
     expect(err.join("\n")).toContain("could not open /tmp/card.html");
+  });
+
+  /**
+   * The case above passes even against a launcher that can NEVER report failure
+   * synchronously, so on its own it is a false green: the production opener
+   * learns of a missing `open`/`xdg-open` from an async `error` event, after it
+   * has already returned. `runReportCli` therefore has to AWAIT the launcher, or
+   * `--open` exits 0 on every machine without one while promising otherwise.
+   */
+  it("a launcher that REJECTS asynchronously still exits non-zero", async () => {
+    const writeFile = vi.fn();
+    const launch = vi.fn(() => Promise.reject(new Error("spawn xdg-open ENOENT")));
+    const code = await runReportCli(["--id", String(playerId), "--open", "--out", "/tmp/card.html"], deps({ writeFile, launch }));
+    expect(code).toBe(1);
+    expect(writeFile).toHaveBeenCalledTimes(1);
+    expect(err.join("\n")).toContain("could not open /tmp/card.html");
+    expect(err.join("\n")).toContain("ENOENT");
+  });
+
+  it("waits for an async launcher to settle before reporting success", async () => {
+    const order: string[] = [];
+    const launch = vi.fn(async () => { await Promise.resolve(); order.push("launched"); });
+    const code = await runReportCli(["--id", String(playerId), "--open", "--out", "/tmp/card.html"], deps({ writeFile: vi.fn(), launch }));
+    order.push("returned");
+    expect(code).toBe(0);
+    expect(order).toEqual(["launched", "returned"]);
+  });
+
+  /**
+   * Per-platform argv is asserted as DATA, so Windows and Linux are covered on
+   * the macOS/ubuntu runners that never execute those branches.
+   */
+  it("builds a correct opener invocation for every platform", () => {
+    expect(launchCommand("darwin", "/tmp/a card.html")).toEqual({ command: "open", args: ["/tmp/a card.html"] });
+    expect(launchCommand("linux", "/tmp/a card.html")).toEqual({ command: "xdg-open", args: ["/tmp/a card.html"] });
+    // `start` is a cmd builtin whose first quoted argument is the WINDOW TITLE:
+    // without the empty title the path becomes the title and nothing opens, and
+    // a shell-splatted unquoted path breaks on the space this fixture carries.
+    expect(launchCommand("win32", "C:\\Users\\me\\a card.html")).toEqual({
+      command: "cmd.exe",
+      args: ["/c", "start", "", "C:\\Users\\me\\a card.html"],
+    });
   });
 
   it("reports an unknown player through the injected writer with a non-zero exit", async () => {

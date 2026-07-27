@@ -97,8 +97,11 @@ export interface ReportCliDeps {
   write: (line: string, error?: boolean) => void;
   /** Defaults to a synchronous UTF-8 file write. */
   writeFile?: (path: string, contents: string) => void;
-  /** Defaults to the platform's browser opener. */
-  launch?: (path: string) => void;
+  /**
+   * Defaults to the platform's browser opener. May be async: the production
+   * launcher only learns a missing opener asynchronously, so the caller awaits.
+   */
+  launch?: (path: string) => void | Promise<void>;
   /** Defaults to the OS temp dir; used only by a bare `--open`. */
   tempPath?: (filename: string) => string;
   /** Terminal width for the console rendering; `process.stdout.columns` in production. */
@@ -107,11 +110,42 @@ export interface ReportCliDeps {
 
 const defaultTempPath = (filename: string): string => join(tmpdir(), filename);
 
-/** Best-effort platform browser opener. Detached and unref'd so it never holds the CLI open. */
-function defaultLaunch(path: string): void {
-  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
-  const child = spawn(command, [path], { detached: true, stdio: "ignore", shell: process.platform === "win32" });
-  child.unref();
+/**
+ * The opener invocation for a platform, as a PURE function so every platform's
+ * argv is unit-testable on the one platform CI actually runs.
+ *
+ * Windows is `cmd /c start "" <path>`, not `start <path>` under a shell: `start`
+ * is a `cmd` builtin whose FIRST quoted argument is the window title, so a
+ * quoted path is swallowed as a title and an unquoted one splits on spaces. The
+ * empty `""` supplies that title, leaving the path as the file to open.
+ */
+export function launchCommand(platform: string, path: string): { command: string; args: string[] } {
+  if (platform === "darwin") return { command: "open", args: [path] };
+  if (platform === "win32") return { command: "cmd.exe", args: ["/c", "start", "", path] };
+  return { command: "xdg-open", args: [path] };
+}
+
+/**
+ * Best-effort platform browser opener. Detached and unref'd so it never holds
+ * the CLI open — but it RESOLVES ONLY ONCE THE CHILD HAS ACTUALLY SPAWNED.
+ *
+ * `spawn` reports a missing opener asynchronously via an `error` event, long
+ * after it returns. Without this promise the caller's try/catch could never
+ * fire, so `--open` exited 0 on any machine lacking `open`/`xdg-open` while
+ * promising a non-zero exit — and an unlistened `error` event would additionally
+ * throw as an unhandled exception. Waiting for `spawn` (not for exit) keeps the
+ * detached behavior while making a failure to launch observable.
+ */
+function defaultLaunch(path: string): Promise<void> {
+  const { command, args } = launchCommand(process.platform, path);
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { detached: true, stdio: "ignore" });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
 }
 
 export async function runReportCli(argv: string[], deps: ReportCliDeps): Promise<number> {
@@ -152,7 +186,7 @@ export async function runReportCli(argv: string[], deps: ReportCliDeps): Promise
   }
   if (!open) return 0;
   try {
-    (deps.launch ?? defaultLaunch)(destination);
+    await (deps.launch ?? defaultLaunch)(destination);
   } catch (err) {
     // The file IS written and usable, so name it rather than only reporting the
     // launch failure — but the exit code still says the command did not do what
