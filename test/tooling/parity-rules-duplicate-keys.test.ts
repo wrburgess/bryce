@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { runParityCheck } from "../../scripts/parity-check.js";
+import { fencedCodeLines, runParityCheck } from "../../scripts/parity-check.js";
 import { withBundleCopy } from "./parity-fixture.js";
 
 // Issue #179, ADR 0058. `NARRATIVE_ALLOWLIST` is keyed by a bullet's bolded imperative, so uniqueness is
@@ -342,5 +342,58 @@ describe("parity check - FENCED code is not a bullet, in either fence spelling",
       writeFileSync(join(root, "rules/testing.md"), ruleFile("rules/testing.md", long));
       expect(runParityCheck(root).errors.filter((e) => NARRATIVE_ERROR.test(e))).toHaveLength(1);
     });
+  });
+});
+
+// The discriminator itself, tested directly rather than only through its downstream effects.
+//
+// `fencedCodeLines` decides fenced-vs-indented from a STRUCTURAL property: a fenced block's source span
+// includes delimiter lines that are not part of its content, an indented block's span is exactly its
+// content, so `span > content lines` is "fenced". Two earlier cuts got this wrong in the same direction --
+// exempting every `code_block` (PR #188 Reviewer, High), then testing the look of the opening line (the
+// delta Reviewer, P2: CommonMark reports sourcepos at the first content character for BOTH node types, so
+// an indented block whose content starts with a fence reads as fenced to any text test).
+//
+// Both of those defects are single rows in this table. It is written as a table precisely because the
+// failure mode is "some construction nobody enumerated", and a table is the only shape that makes adding
+// the next one a one-line change (rules/scripting.md: prefer a bound you can state as a property).
+describe("fencedCodeLines - which code blocks earn the exemption", () => {
+  const FENCED = true;
+  const INDENTED = false;
+
+  it.each([
+    ["a backtick fence",                        FENCED,   "a\n\n```\n- x\n```\n"],
+    ["a tilde fence",                           FENCED,   "a\n\n~~~\n- x\n~~~\n"],
+    ["a fence with an info string",             FENCED,   "a\n\n```md\n- x\n```\n"],
+    ["a fence of four or more delimiters",      FENCED,   "a\n\n````\n- x\n````\n"],
+    ["a fence closed by a longer one",          FENCED,   "a\n\n```\n- x\n`````\n"],
+    ["a fence with trailing spaces",            FENCED,   "a\n\n```   \n- x\n```   \n"],
+    ["an unclosed fence at EOF",                FENCED,   "a\n\n```\n- x\n"],
+    ["a fence containing blank lines",          FENCED,   "a\n\n```\n- x\n\n- y\n```\n"],
+    ["an empty fence",                          FENCED,   "a\n\n```\n```\n"],
+    ["a fence indented three spaces",           FENCED,   "a\n\n   ```\n   - x\n   ```\n"],
+    ["a fence nested in a list item",           FENCED,   "- item\n\n  ```\n  - x\n  ```\n"],
+    ["a plain indented block",                  INDENTED, "a\n\n    - x\n"],
+    ["a multi-line indented block",             INDENTED, "a\n\n    - x\n    - y\n"],
+    ["an indented block with interior blanks",  INDENTED, "a\n\n    - x\n\n    - y\n"],
+    ["an indented block at EOF",                INDENTED, "a\n\n    - x"],
+    ["a deeply indented block in a list",       INDENTED, "- item\n\n      - deep\n"],
+    // The delta Reviewer's case, both spellings. These are the rows an opening-line test fails.
+    ["an indented block starting with ```",     INDENTED, "a\n\n    ```\n    - x\n"],
+    ["an indented block starting with a tab+```", INDENTED, "a\n\n\t```\n\t- x\n"],
+    ["an indented block starting with ~~~",      INDENTED, "a\n\n    ~~~\n    - x\n"],
+  ])("treats %s as %s", (_label, fenced, source) => {
+    const lines = fencedCodeLines(source);
+    // Line 3 opens the code block in every fixture above except the two list ones, whose block opens on
+    // line 3 as well. Asserting on the block's own lines keeps each row a statement about THAT block.
+    expect(lines.size > 0).toBe(fenced);
+  });
+
+  it("exempts a fence's delimiter lines as well as its contents", () => {
+    expect([...fencedCodeLines("a\n\n```\n- x\n```\n")].sort((p, q) => p - q)).toEqual([3, 4, 5]);
+  });
+
+  it("exempts nothing in a document with no code at all", () => {
+    expect(fencedCodeLines("# t\n\n- **Never x** — because reasons.\n").size).toBe(0);
   });
 });

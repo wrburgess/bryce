@@ -426,22 +426,41 @@ export function markdownLinks(source: string): MarkdownLink[] {
  * exemption is now strictly narrower than the node type — fenced blocks only, in either spelling, which
  * makes this a pure superset of what the toggles caught and a regression against nothing.
  *
- * Fenced-ness is read off the line the PARSER pointed at, at the column it gave: a fence opens with its
- * delimiter run, an indented block opens with its content. That is not re-deriving the grammar — the
- * parser has already decided this is a code block and where it starts — and it beats the private
- * `_isFenced` field, which no public accessor exposes and which a minor `commonmark` bump could rename.
+ * Fenced-ness is decided STRUCTURALLY, from a property of the node rather than from the look of its
+ * first line: a fenced block's source span includes delimiter lines that are not part of its content, and
+ * an indented block's span is exactly its content. So `span > content lines` IS "fenced", and neither
+ * side of that comparison has to be parsed by us.
+ *
+ * The first repair of the finding above did read the opening line, and the delta Reviewer refuted THAT
+ * too: CommonMark reports `sourcepos` at the first content character for both node types, so an indented
+ * block whose content happens to begin `    ``` ` or a tab plus a fence looks fenced to any text test,
+ * and the false-green path reopens one layer down. Reading the text was still modelling the format —
+ * `rules/scripting.md` names exactly this, and thinning the candidate set is not a safe simplification.
+ * The span comparison has no such case because it never looks at a character.
+ *
+ * The private `_isFenced` field would answer directly, and is deliberately not used: no public accessor
+ * exposes it, so a minor `commonmark` bump could rename it and this guard would silently classify every
+ * block as indented. The discriminator here was checked against `_isFenced` over 21 constructions —
+ * both fence characters, 4+ delimiters, an info string, an unclosed fence at EOF, a fence closed by a
+ * longer one, blank lines inside a fence, an empty fence, fences at indent 0-3, a fence nested in a list
+ * item, indented blocks plain / multi-line / with interior blanks / at EOF, and both spellings of the
+ * adversarial indented-block-whose-content-starts-with-a-fence — and agreed on all 21. `fencedCodeLines`
+ * is exported so that table is a test, not a claim in a comment.
  */
 export function fencedCodeLines(source: string): Set<number> {
   const lines = new Set<number>();
-  const sourceLines = source.split("\n");
   const walker = MARKDOWN_PARSER.parse(source).walker();
 
   let event = walker.next();
   while (event !== null) {
     if (event.entering && event.node.type === "code_block") {
-      const [[first, column], [last]] = event.node.sourcepos;
-      const opener = (sourceLines[first - 1] ?? "").slice(column - 1);
-      if (/^(?:```|~~~)/.test(opener)) {
+      const [[first], [last]] = event.node.sourcepos;
+      const literal = event.node.literal ?? "";
+      const contentLines = literal === ""
+        ? 0
+        : literal.split("\n").length - (literal.endsWith("\n") ? 1 : 0);
+
+      if (last - first + 1 > contentLines) {
         for (let line = first; line <= last; line++) lines.add(line);
       }
     }

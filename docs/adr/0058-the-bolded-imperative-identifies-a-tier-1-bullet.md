@@ -108,3 +108,20 @@ governing convention through it* — and the mirrored-pair case is a test, not a
   measurement was the tell rather than the defense — "no such indent exists today" is a snapshot, and
   `rules/testing.md` already says a corpus's silence is not a statement about tomorrow's. Both halves of
   the reproduction are now permanent regression tests.
+
+  **Fenced-ness is decided structurally, and the second attempt was wrong too.** The first repair read
+  the opening line the parser pointed at; the delta Reviewer refuted that as well — CommonMark reports
+  `sourcepos` at the first *content* character for both node types, so an indented block whose content
+  begins `` ``` `` reads as fenced to any text test, and the same false-green path reopened one layer
+  down. Reading the text was still modelling the format. What ships instead is a property: a fenced
+  block's source span includes delimiter lines that are not part of its content, an indented block's span
+  is exactly its content, so **`span > content lines` is `fenced`** — a comparison that never inspects a
+  character. It is checked against the parser's private `_isFenced` over 21 constructions and agrees on
+  all of them; `fencedCodeLines` is exported so that table is a test rather than a claim in a comment.
+  The private field itself is deliberately *not* used: no public accessor exposes it, so a minor
+  `commonmark` bump could rename it and this guard would silently classify every block as indented.
+
+  Two Reviewer rounds found the same defect class in two different disguises. That is the shape
+  `rules/scripting.md` predicts — *enumerating harder does not converge, and thinning the candidate set
+  is not a safe simplification either* — and the exit was to stop describing the format and compare a
+  property instead.
