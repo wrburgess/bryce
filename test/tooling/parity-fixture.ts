@@ -2,7 +2,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, write
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { linkCheckedFiles, markdownLinks } from "../../scripts/parity-check.js";
+import { ADR_DIR, linkCheckedFiles, markdownLinks } from "../../scripts/parity-check.js";
 
 // Shared fixture copier for the parity self-tests (issue #139). Both tooling tests hand
 // `runParityCheck` a real tree in an OS tmpdir; this module owns HOW that tree is built so there is
@@ -82,6 +82,10 @@ export function copyBundle(
  * climbs out (`../../elsewhere.md`) would otherwise have this helper write into the real filesystem
  * outside the throwaway copy. An escaping link is skipped, not healed.
  *
+ * It is contained AWAY from `docs/adr/` for the opposite reason — see the rule in the body. Healing there
+ * manufactures a record file and converts a dead link into a duplicate-ADR-number error naming a file
+ * nobody wrote (issue #163).
+ *
  * The file list and the link EXTRACTION both come from scripts/parity-check.ts (issue #159) rather than
  * being mirrored here, so the healer and the checker cannot drift apart on either. Sharing
  * `markdownLinks` is what stops it stubbing out the pseudo-links in code spans — with a regex of its
@@ -92,6 +96,7 @@ export function copyBundle(
  */
 export function healDeadLinks(root: string): void {
   const contained = resolve(root);
+  const adrDir = resolve(root, ADR_DIR);
 
   for (const rel of linkCheckedFiles(root)) {
     const file = join(root, rel);
@@ -106,6 +111,16 @@ export function healDeadLinks(root: string): void {
 
       const resolved = resolve(dirname(file), target);
       if (resolved !== contained && !resolved.startsWith(contained + sep)) continue;
+      // Never synthesize a record file. A stub under docs/adr/ named `NNNN-*.md` collides with the real
+      // ADR of that number, so checkAdrNumbers reports "Duplicate ADR number" for a file nobody wrote and
+      // the dead link that caused it vanishes from the output entirely (issue #163). Healing it was never
+      // the honest outcome: a dead ADR link is a defect, so it stays visible AS a dead link.
+      //
+      // Tested on the RESOLVED path, not the raw href, so `../adr/x`, `./0001-y.md`, and a plain name all
+      // land in the same test -- an equivalent spelling cannot slip past. Deliberately not limited to the
+      // ADR filename pattern or to `.md`: the rule is "this directory holds records", and a narrower rule
+      // just moves the hole.
+      if (resolved === adrDir || resolved.startsWith(adrDir + sep)) continue;
       if (existsSync(resolved)) continue;
 
       mkdirSync(dirname(resolved), { recursive: true });

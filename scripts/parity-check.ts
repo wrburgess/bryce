@@ -69,7 +69,9 @@ const LINK_CHECKED = [
 const GUIDES_DIR = "docs/guides";
 const REQUIRED_GUIDES = ["docs/guides/usage.md"];
 
-const ADR_DIR = "docs/adr";
+// Exported so the self-test fixture names this directory from the same source the checker does, rather
+// than mirroring the literal and drifting from it (issue #163).
+export const ADR_DIR = "docs/adr";
 const ADR_FILENAME = /^(\d+)-.+\.md$/;
 const ADR_LINK_LABEL = /^ADR (\d{4})$/;
 const ADR_LINK_TARGET = /^(\d{4})-[^/]+\.md$/;
@@ -359,6 +361,24 @@ function subdirectories(absolute: string): string[] {
   }
 }
 
+/** Immediate `.md` file names in `absolute`, sorted; empty when it is not a readable directory. */
+function markdownFilesIn(absolute: string): string[] {
+  try {
+    return readdirSync(absolute)
+      .sort()
+      .filter((child) => {
+        if (!child.endsWith(".md")) return false;
+        try {
+          return statSync(join(absolute, child)).isFile();
+        } catch {
+          return false;
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
 /**
  * The files whose markdown links `checkLinks` resolves (issue #159).
  *
@@ -367,10 +387,18 @@ function subdirectories(absolute: string): string[] {
  * hardcoded paths this replaced — is how `rules/*.md` went unchecked for its entire life while carrying
  * links the whole time.
  *
- * `docs/adr/*.md` is deliberately absent: it carries two dead links whose repair means editing accepted
- * ADRs, which is a records decision rather than a validator one. Tracked as a follow-up, not silently
- * dropped. A path listed here but absent from disk is skipped by the caller, so the derivation is safe
- * against a bundle that ships a subset.
+ * `docs/adr/*.md` joined in issue #163. It was excluded when the scope widened because it was holding two
+ * dead links whose repair meant editing accepted ADRs — a records decision rather than a validator one.
+ * That decision is now made and recorded (ADR 0055: an ADR's argument is immutable, the paths it cites are
+ * maintained), the two links are repaired, and the exclusion has no remaining rationale.
+ *
+ * TOP-LEVEL ONLY, deliberately: `checkAdrNumbers` reads the same directory non-recursively and is what
+ * DEFINES an ADR in this repo, so a nested `docs/adr/archive/0056-*.md` is already outside the numbering
+ * authority. Giving the link scope a wider reach than the numbering scope would be the inconsistency, not
+ * the fix. A test pins the exclusion so widening it later is a deliberate act.
+ *
+ * A path listed here but absent from disk is skipped by the caller, so the derivation is safe against a
+ * bundle that ships a subset.
  */
 export function linkCheckedFiles(root: string): string[] {
   const seen = new Set<string>();
@@ -384,16 +412,8 @@ export function linkCheckedFiles(root: string): string[] {
   for (const rel of LINK_CHECKED) add(rel);
   for (const rel of REQUIRED_RULES) add(rel);
   for (const name of subdirectories(join(root, SKILLS_DIR))) add(`${SKILLS_DIR}/${name}/SKILL.md`);
-
-  let shims: string[] = [];
-  try {
-    shims = readdirSync(join(root, CLAUDE_COMMANDS_DIR)).sort();
-  } catch {
-    shims = [];
-  }
-  for (const name of shims) {
-    if (name.endsWith(".md")) add(`${CLAUDE_COMMANDS_DIR}/${name}`);
-  }
+  for (const name of markdownFilesIn(join(root, CLAUDE_COMMANDS_DIR))) add(`${CLAUDE_COMMANDS_DIR}/${name}`);
+  for (const name of markdownFilesIn(join(root, ADR_DIR))) add(`${ADR_DIR}/${name}`);
 
   return out;
 }
