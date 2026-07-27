@@ -309,12 +309,19 @@ run: the same re-report-forever failure this outcome exists to prevent, one bran
 
 **The pending row is archived by the run that presents it, not by the merge.** Merge is the last event in
 the lifecycle — no stage runs after it — so a rule that waited for the merge to close the entry would
-never execute, and the entry would stay active forever. So `final` archives it **in the same run**, with
-its disposition recorded honestly as *presented, awaiting HC*. If the HC answers before merge, the
-approved outcome is applied in that PR and the archived entry's pointer is updated in the same run. If
-they never answer, the row inherits outcome 4 at merge and the archived entry already says what happened:
-considered, presented, unanswered. Archival records that an entry was **considered**, never that it was
-resolved a particular way, so nothing is misfiled by archiving before the answer arrives.
+never execute, and the entry would stay active forever. So `final` archives it **in the run that presents
+it**, with the disposition recorded as *presented; outcome 4 unless a resumed pass records otherwise* — a
+line that is already correct if no answer ever comes, so it never reads as stale. Archival records that an
+entry was **considered**, never that it was resolved a particular way, so nothing is misfiled by archiving
+before the answer arrives.
+
+**An HC decision on a `pending` row re-opens `final` as a new pass.** `final` posts its SOW and ends, and a
+`pending` row deliberately does not block that, so an approval arrives with no run in flight to apply it —
+it cannot be handled "in the same run", and treating it as an edit would slip a change past the backstop.
+The resumed pass applies the outcome, re-runs the *Quality Checks*, **re-anchors the Reviewer backstop on
+the resulting commit** (it moved `HEAD` past the reviewed SHA like any other late change), and reposts the
+SOW with the entry's pointer updated. **No approved post-SOW change reaches merge without Reviewer
+evidence covering it.** If no decision arrives, nothing resumes and the row inherits outcome 4 at merge.
 
 **A later recurrence opens a NEW entry** citing the archived one, rather than reviving it — archival stays
 terminal without discarding genuine recurrence signal, and the new entry's recurrence count carries

@@ -68,12 +68,20 @@ skipped: stop and recheck.
 
    **Archive the pending one here — do not wait for the merge.** Merge is the last event in the lifecycle;
    no stage runs after it, so a step that deferred the archival to it would simply never run. Record the
-   disposition honestly as *presented, awaiting HC*: if the HC answers before merge, apply the approved
-   outcome in this PR and update the entry's pointer in the same run; if they never answer, the row
-   inherits *do nothing* at merge and the entry already reads considered, presented, unanswered. Archival
-   records that an entry was **considered**, never how it resolved, so archiving ahead of the answer
-   misfiles nothing. A later recurrence opens a **new** entry citing the archived one rather than reviving
-   it, carrying its recurrence count forward.
+   disposition as *presented; outcome 4 unless a resumed pass records otherwise* — a line that is already
+   correct if no answer ever comes, so nothing is left reading as stale. Archival records that an entry was
+   **considered**, never how it resolved, so archiving ahead of the answer misfiles nothing. A later
+   recurrence opens a **new** entry citing the archived one rather than reviving it, carrying its
+   recurrence count forward.
+
+   **An HC decision that arrives after the SOW re-opens `final`.** This stage posts its SOW and ends, and a
+   `pending` row deliberately does not block that — so an approval lands with no run in flight to apply it.
+   It is therefore **a new `final` pass, not an edit**: re-enter this step to apply the approved outcome,
+   then Step 2's checks, then **Step 4 on the resulting commit** — it moved `HEAD` past the reviewed SHA
+   like any other late change — and finally Step 5 to repost the SOW with the entry's pointer updated.
+   **No approved post-SOW change reaches merge without Reviewer evidence covering it**; that invariant is
+   Step 4's and this is simply its entry point. If no decision ever arrives, nothing resumes: the row
+   inherits outcome 4 at merge and the archived line already says so.
 
    **Archiving by the declared rule is executing the policy, not proposing one**, so the setting does not
    gate it; promoting an entry to a retained rule **is** a suggestion, and does. Report the sweep in the
