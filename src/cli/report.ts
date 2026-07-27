@@ -163,18 +163,23 @@ export async function runReportCli(argv: string[], deps: ReportCliDeps): Promise
     throw err;
   }
 
-  const payload =
+  const rendered =
     format === "json"
       ? JSON.stringify(card)
       : format === "html"
         ? renderPlayerCardHtml(card)
         : renderPlayerCardText(card, { width: deps.terminalWidth });
+
+  // ONE payload for both destinations, ending in exactly one newline. The two
+  // Presentations already do; `json` does not — and normalizing only the ones
+  // that do is what left `--format json` a byte apart, since the production
+  // writer appends a newline stdout gets and the file does not. Normalizing
+  // here, before the paths diverge, makes "stdout and --out are the same bytes"
+  // true by construction rather than per-format.
+  const payload = `${rendered.replace(/\n$/, "")}\n`;
   if (out === undefined && !open) {
-    // Both Presentations already end with a newline, and the production writer
-    // appends its own — so stdout would carry a trailing blank line that the
-    // `--out` file does not, making the two paths differ by a byte. Drop exactly
-    // one, so stdout and `--out` agree. (`json` has no trailing newline to drop.)
-    deps.write(payload.endsWith("\n") ? payload.slice(0, -1) : payload);
+    // The writer re-adds the newline stripped here.
+    deps.write(payload.slice(0, -1));
     return 0;
   }
   // A bare `--open` still needs a real file for the browser to load.

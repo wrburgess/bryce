@@ -92,9 +92,15 @@ describe("report player CLI", () => {
       ["--id", String(playerId), "--windows", "last10", "--format", format, "--out", "/tmp/card.out"],
       deps({ writeFile: (_p, contents) => void written.push(contents) }),
     );
-    // `out[0]` is the payload; the real writer re-adds the single newline.
-    expect(`${out[0]!}\n`.replace(/\n$/, "")).toBe(written[0]!.replace(/\n$/, ""));
+    // EXACT bytes, no normalization on either side. Stripping trailing newlines
+    // before comparing is precisely how the first version of this test passed
+    // while `--format json` still differed by one byte: a normalizing assertion
+    // cannot see the difference it exists to catch. `${out[0]}\n` reconstructs
+    // what the production writer emits.
+    expect(`${out[0]!}\n`).toBe(written[0]!);
     expect(out[0]!.endsWith("\n"), `${format} would double-space stdout`).toBe(false);
+    expect(written[0]!.endsWith("\n"), `${format} file should end in exactly one newline`).toBe(true);
+    expect(written[0]!.endsWith("\n\n"), `${format} file has a trailing blank line`).toBe(false);
   });
 
   it("rejects an unsupported or empty --format loudly, and never silently defaults", async () => {
