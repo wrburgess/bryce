@@ -31,10 +31,11 @@ const EXPECTED_FLOORS: Floors = {
   "src/cli/main.ts": { statements: 42, branches: 50 },
   "src/cli/seed.ts": { statements: 54, branches: 61 },
   "src/server.ts": { statements: 56, branches: 76 },
-  "src/cli/batch-add.ts": { statements: 66, branches: 54 },
   "src/cli/migrate.ts": { statements: 70, branches: 33 },
   "src/cli/restore.ts": { statements: 78, branches: 61 },
+  "src/cli/batch-add.ts": { statements: 85, branches: 73 },
   "src/watchlist/service.ts": { statements: 86, branches: 79 },
+  "src/cli/refresh.ts": { statements: 90, branches: 87 },
 };
 
 // Build a summary entry at the given percentages, in the reporter's real shape.
@@ -59,10 +60,10 @@ function passingSummary(floors: Floors = FLOORS, prefix = ""): Summary {
 describe("FLOORS manifest", () => {
   // Case 1 -- the manifest is the gate. Weakening or dropping an entry fails HERE,
   // by name, instead of quietly widening what the checker will accept.
-  it("holds exactly the seven expected paths with the expected floors", () => {
+  it("holds exactly the eight expected paths with the expected floors", () => {
     expect(FLOORS).toEqual(EXPECTED_FLOORS);
     expect(Object.keys(FLOORS).sort()).toEqual(Object.keys(EXPECTED_FLOORS).sort());
-    expect(Object.keys(FLOORS)).toHaveLength(7);
+    expect(Object.keys(FLOORS)).toHaveLength(8);
   });
 
   it("declares both metrics as whole-number percentages in range for every entry", () => {
@@ -400,7 +401,7 @@ describe("main (CLI)", () => {
     const io = capture();
 
     expect(main(["--summary", path])).toBe(0);
-    expect(io.out()).toContain("coverage_floors: OK - all 7 floored file(s) present and at or above floor.");
+    expect(io.out()).toContain(`coverage_floors: OK - all ${Object.keys(FLOORS).length} floored file(s) present and at or above floor.`);
     expect(io.err()).toBe("");
   });
 

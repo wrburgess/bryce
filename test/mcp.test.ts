@@ -973,7 +973,7 @@ describe("MCP server over Streamable HTTP", () => {
       { row: { status: "ok", startedAt: "2026-07-18T07:00:00.000Z", finishedAt: "2026-07-18T07:20:00.000Z" }, state: "stale" },
       { row: { status: "partial", startedAt: "2026-07-19T07:00:00.000Z", finishedAt: "2026-07-19T07:20:00.000Z" }, state: "partial" },
       { row: { status: "failed", startedAt: "2026-07-19T07:00:00.000Z", finishedAt: "2026-07-19T07:20:00.000Z" }, state: "failed" },
-      { row: { status: "running", startedAt: "2026-07-19T16:59:00.000Z", claimedAt: "2026-07-19T16:59:00.000Z", finishedAt: null, playersRefreshed: 2, playersTotal: 5, statLinesInserted: 7, statLinesUpdated: 3 }, state: "running" },
+      { row: { status: "running", startedAt: "2026-07-19T16:59:00.000Z", claimedAt: "2026-07-19T16:59:00.000Z", finishedAt: null, playersRefreshed: 2, playersSkipped: 1, playersFailed: 1, playersTotal: 5, statLinesInserted: 7, statLinesUpdated: 3 }, state: "running" },
       // A crashed run whose lease expired two hours before the clock: NOT running.
       { row: { status: "running", startedAt: "2026-07-19T15:00:00.000Z", claimedAt: "2026-07-19T15:00:00.000Z", finishedAt: null }, state: "stale" },
     ];
@@ -985,7 +985,12 @@ describe("MCP server over Streamable HTTP", () => {
       const refresh = result.structuredContent?.refresh as Record<string, unknown> | null;
       expect(refresh?.state, JSON.stringify(row)).toBe(state);
       if (state === "running") {
-        expect(refresh).toMatchObject({ playersRefreshed: 2, playersTotal: 5, statLinesInserted: 7, statLinesUpdated: 3 });
+        expect(refresh).toMatchObject({ playersRefreshed: 2, playersSkipped: 1, playersFailed: 1, playersTotal: 5, statLinesInserted: 7, statLinesUpdated: 3 });
+        // #146: `toMatchObject` alone would pass if a field-picking serializer
+        // dropped these two, so the presence of the newly documented fields is
+        // asserted directly — docs/mcp/README.md now publishes them.
+        expect(refresh).toHaveProperty("playersSkipped");
+        expect(refresh).toHaveProperty("playersFailed");
       }
     }
   });

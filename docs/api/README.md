@@ -30,6 +30,16 @@ fixed body and the token is never echoed or logged:
 server is up, is public (no bearer required); everything under `/api` requires the token. Requests
 and responses are JSON.
 
+`GET /health` returns `{ ok, players, statLines, lastDelivery, refresh }`. Its `refresh` block carries
+`state`, `lastStartedAt`, `lastFinishedAt`, `lastSuccessAt`, `playersRefreshed`, **`playersSkipped`**,
+**`playersFailed`**, `playersTotal`, `statLinesInserted`, and `statLinesUpdated`. The two bolded
+fields are **additive** in #146, so the durable Accounting carries the same three-way per-player
+classification the `sk refresh` console shows
+([ADR 0056](../adr/0056-refresh-emits-typed-progress-events-cli-is-the-only-presenter.md)); on a run
+settled before #146 they read `0`, which means *not recorded*, not *nothing happened*. Everything
+else about this route, and about `POST /api/refresh`, is unchanged: the REST surface attaches no
+progress sink and behaves exactly as it did.
+
 ## Routes
 
 All routes live under `/api`. Request/response bodies are JSON; inputs are validated by the same

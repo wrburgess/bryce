@@ -69,14 +69,21 @@ export type Summary = Record<string, SummaryEntry>;
 //
 // Raising a floor is welcome. LOWERING or DELETING one is a deliberate, reviewable act:
 // test/tooling/coverage-floors.test.ts pins this table entry by entry and fails by name.
+//
+// #146 re-measured two entries. `src/cli/batch-add.ts` rose to 85/73 once the `--file`
+// grammar gained its first CLI tests (moving `asciiField` out to src/domain/names.ts had
+// removed well-covered lines and pushed the RATIO below the old 66/54, so the floor was
+// re-earned rather than lowered). `src/cli/refresh.ts` is a NEW entry: it stopped being a
+// one-line presenter, and nothing else would have caught a thinly-tested renderer.
 export const FLOORS: Floors = {
   "src/cli/main.ts": { statements: 42, branches: 50 },
   "src/cli/seed.ts": { statements: 54, branches: 61 },
   "src/server.ts": { statements: 56, branches: 76 },
-  "src/cli/batch-add.ts": { statements: 66, branches: 54 },
   "src/cli/migrate.ts": { statements: 70, branches: 33 },
   "src/cli/restore.ts": { statements: 78, branches: 61 },
+  "src/cli/batch-add.ts": { statements: 85, branches: 73 },
   "src/watchlist/service.ts": { statements: 86, branches: 79 },
+  "src/cli/refresh.ts": { statements: 90, branches: 87 },
 };
 
 // Both path separators, folded to the POSIX one the manifest is written in.

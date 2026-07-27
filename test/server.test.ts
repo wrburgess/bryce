@@ -292,18 +292,28 @@ describe("GET /health refresh freshness (ADR 0043)", () => {
       claimedAt: "2026-07-19T16:59:00.000Z", // one minute before the app clock
       finishedAt: null,
       playersRefreshed: 2,
+      playersSkipped: 1,
+      playersFailed: 1,
       playersTotal: 5,
       statLinesInserted: 7,
       statLinesUpdated: 3,
     });
-    expect(await health()).toMatchObject({
+    const body = await health();
+    expect(body).toMatchObject({
       state: "running",
       lastFinishedAt: null,
       playersRefreshed: 2,
+      playersSkipped: 1,
+      playersFailed: 1,
       playersTotal: 5,
       statLinesInserted: 7,
       statLinesUpdated: 3,
     });
+    // #146: asserted on the WIRE, and with `toHaveProperty` as well as a value —
+    // `toMatchObject` alone would pass if a field-picking serializer dropped these
+    // two, silently falsifying the contract docs/api and docs/mcp now publish.
+    expect(body).toHaveProperty("playersSkipped");
+    expect(body).toHaveProperty("playersFailed");
   });
 
   it("reports `partial` when the latest terminal run left players unrefreshed", async () => {

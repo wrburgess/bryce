@@ -27,6 +27,8 @@ import { ncaaSeasonFor } from "../ncaa/seasons.js";
 import { syncDerivedTags } from "../tags/service.js";
 import type { IngestionFence, RefreshTerminalStatus } from "./refresh-run.js";
 import { admitTargetedRefresh, claimRefreshRun, renewRefreshRun, settleRefreshRun, updateRefreshRunProgress, withIngestionFence } from "./refresh-run.js";
+import type { PlayerRef, RefreshCall, RefreshProgressEvent, RefreshProgressSink } from "./refresh-progress.js";
+import { emitNotice, safeEmit } from "./refresh-progress.js";
 
 export interface RefreshDeps {
   db: Db;
@@ -35,6 +37,55 @@ export interface RefreshDeps {
   highlightlyClient?: HighlightlyClient;
   now: () => Date;
   tz: string;
+  /**
+   * The Liveness sink (ADR 0056). OPTIONAL by design: the MCP tool, the REST
+   * route, and the watchlist seed path attach none and stay byte-identical to
+   * their pre-#146 behavior. It carries EVENTS ABOUT THE SWEEP, never
+   * diagnostics of convenience, and is never awaited — a slow or throwing
+   * presenter must not be able to stall or fail a healthy sweep.
+   */
+  onProgress?: RefreshProgressSink;
+  /**
+   * Where the three LEGACY notice lines go when NO sink is attached. Defaults to
+   * `process.stderr`. This is NOT a logging channel: it carries exactly the
+   * three diagnostics that wrote to stderr before #146, so a sink-less caller's
+   * stderr is unchanged. With a sink attached it is never used.
+   */
+  writeLegacyNotice?: (line: string) => void;
+}
+
+/** The `player-settled` event, held back until the progress write has committed. */
+type PlayerSettledEvent = Extract<RefreshProgressEvent, { kind: "player-settled" }>;
+
+/**
+ * Wrap one job-owned external call in its `call-started` / `call-finished` pair,
+ * timing it on the injected clock. The pair is emitted for BOTH outcomes, so a
+ * call that threw still reports how long it burned before it did — the
+ * difference between a fast rejection and a socket that hung.
+ */
+async function timedCall<T>(
+  deps: RefreshDeps,
+  player: PlayerRef | null,
+  call: RefreshCall,
+  run: () => Promise<T>,
+): Promise<T> {
+  safeEmit(deps.onProgress, { kind: "call-started", player, ...call });
+  const startedMs = deps.now().getTime();
+  try {
+    const value = await run();
+    safeEmit(deps.onProgress, {
+      kind: "call-finished", player, ...call,
+      elapsedMs: deps.now().getTime() - startedMs, outcome: "ok",
+    });
+    return value;
+  } catch (err) {
+    safeEmit(deps.onProgress, {
+      kind: "call-finished", player, ...call,
+      elapsedMs: deps.now().getTime() - startedMs, outcome: "error",
+      reason: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
 }
 
 
@@ -195,6 +246,9 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   // weekly heartbeat — not a freshness row — is the offseason liveness signal
   // (ADR 0031/0042). A stale freshness reading during sleep is expected.
   if (sleep.sleeping) {
+    // A Skipped Sweep (docs/domain/CONTEXT.md) — the whole Refresh never ran.
+    // Distinct from a Passed-Over Player, which only a RUNNING sweep produces.
+    safeEmit(deps.onProgress, { kind: "sweep-skipped", reason: "offseason-sleep" });
     return skippedSummary("offseason-sleep", null);
   }
 
@@ -203,6 +257,7 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   // run — so this one no-ops rather than double-sweeping.
   const claim = claimRefreshRun(db, { now: now(), playersTotal: activePlayers.length });
   if (!claim.claimed) {
+    safeEmit(deps.onProgress, { kind: "sweep-skipped", reason: claim.reason });
     return skippedSummary(claim.reason, null);
   }
   const runId = claim.runId;
@@ -226,14 +281,39 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   // Hoisted above the try so the settle-time freshness check (P1) can re-check
   // season membership for the SAME season the calendars were fetched for.
   const season = currentSeason(deps);
+  // The stream's opening event: emitted AFTER the claim, so a sweep that never
+  // started never announces one, and BEFORE any player event, so a presenter
+  // always knows the denominator of `index/total` from the first player on.
+  safeEmit(deps.onProgress, {
+    kind: "sweep-started", runId, playersTotal: activePlayers.length, season,
+  });
   try {
     // getSeason failures are caught inside refreshCalendars and returned; a
     // calendar DB-WRITE failure is NOT — it escapes to the outer catch (MF1).
     const fence: IngestionFence = { kind: "whole-refresh", runId, now: now() };
+    safeEmit(deps.onProgress, { kind: "phase-started", phase: "calendars" });
     calendarFailures = await refreshCalendars(deps, season, fence);
+    safeEmit(deps.onProgress, {
+      kind: "phase-finished", phase: "calendars", failures: calendarFailures.length,
+    });
+    safeEmit(deps.onProgress, { kind: "phase-started", phase: "ncaa-calendar" });
     await refreshNcaaCalendar(deps, season, activePlayers, fence);
+    // The NCAA calendar is seeded from bundled dates, never fetched, so it has
+    // no failure to collect; a missing bundled year is a `notice`, not a failure.
+    safeEmit(deps.onProgress, { kind: "phase-finished", phase: "ncaa-calendar", failures: 0 });
 
+    safeEmit(deps.onProgress, { kind: "phase-started", phase: "players" });
+    let playerIndex = 0;
     for (const player of activePlayers) {
+      playerIndex += 1;
+      // Carried EXPLICITLY on every event about this player, including his
+      // calls, so a presenter never infers association from event ordering.
+      const ref: PlayerRef = {
+        playerId: player.id,
+        name: player.fullName,
+        index: playerIndex,
+        total: activePlayers.length,
+      };
       // Renew + ownership check BEFORE this player's fetch/write (ADR 0043
       // fencing). A healthy long sweep keeps its lease live here; a run whose
       // lease expired was reaped `failed` by the successor that took over, so
@@ -246,6 +326,7 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
       // `superseded` abort is NOT a player failure — it must early-return, not
       // be collected and counted against the run.
       if (!renewRefreshRun(db, runId, now())) {
+        safeEmit(deps.onProgress, { kind: "sweep-superseded", at: "renew" });
         return {
           skipped: true,
           reason: "superseded",
@@ -260,21 +341,38 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
           runId,
         };
       }
+      safeEmit(deps.onProgress, { kind: "player-started", player: ref });
+      const playerStartedMs = now().getTime();
+      // The settled event is BUILT here but HELD until the progress write below
+      // commits — see the emit at the bottom of the loop.
+      let settledEvent: PlayerSettledEvent;
       // Per-player boundary (#23): one player's fetch/write throw is collected
       // as a failure and the sweep CONTINUES to the next player, rather than
       // stranding the run. refreshOnePlayer buffers all HTTP before its atomic
       // write, so a throw leaves no partial write for this player.
       try {
-        const result = await refreshOnePlayer(deps, player, season, { kind: "whole-refresh", runId, now: now() });
+        const result = await refreshOnePlayer(deps, player, season, { kind: "whole-refresh", runId, now: now() }, ref);
         if (result === null) {
           playersSkipped += 1;
+          settledEvent = {
+            kind: "player-settled", player: ref, outcome: "passed-over",
+            elapsedMs: now().getTime() - playerStartedMs,
+            counts: { refreshed: playersRefreshed, passedOver: playersSkipped, failed: playerFailures.length },
+          };
         } else {
           playersRefreshed += 1;
           inserted += result.inserted;
           updated += result.updated;
+          settledEvent = {
+            kind: "player-settled", player: ref, outcome: "refreshed",
+            inserted: result.inserted, updated: result.updated,
+            elapsedMs: now().getTime() - playerStartedMs,
+            counts: { refreshed: playersRefreshed, passedOver: playersSkipped, failed: playerFailures.length },
+          };
         }
       } catch (err) {
         if (err instanceof RefreshFenceLostError) {
+          safeEmit(deps.onProgress, { kind: "sweep-superseded", at: "player-fence" });
           return {
             skipped: true, reason: "superseded", status: null, playersRefreshed, statLinesInserted: inserted,
             statLinesUpdated: updated, playersSkipped, playersFailed: playerFailures.length, calendarFailures, playerFailures, runId,
@@ -284,6 +382,15 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
           playerId: player.id,
           reason: err instanceof Error ? err.message : String(err),
         });
+        // Deliberately NO inserted/updated: refreshOnePlayer buffers all HTTP
+        // before its single atomic write, so a throw leaves no partial write —
+        // reporting `0` would read as "wrote nothing" rather than "never got there".
+        settledEvent = {
+          kind: "player-settled", player: ref, outcome: "failed",
+          reason: err instanceof Error ? err.message : String(err),
+          elapsedMs: now().getTime() - playerStartedMs,
+          counts: { refreshed: playersRefreshed, passedOver: playersSkipped, failed: playerFailures.length },
+        };
       }
 
       // Persist only completed work, after the player's atomic write or its
@@ -293,10 +400,13 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
       // means this worker lost ownership and must not start another player.
       if (!updateRefreshRunProgress(db, runId, {
         playersRefreshed,
+        playersSkipped,
+        playersFailed: playerFailures.length,
         playersTotal: activePlayers.length,
         statLinesInserted: inserted,
         statLinesUpdated: updated,
       })) {
+        safeEmit(deps.onProgress, { kind: "sweep-superseded", at: "progress" });
         return {
           skipped: true,
           reason: "superseded",
@@ -311,7 +421,18 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
           runId,
         };
       }
+      // ORDERING INVARIANT (ADR 0056 s2). `player-settled` fires ONLY after the
+      // progress write has committed, so the console counter can never run ahead
+      // of `/health`: the printed tally and the persisted one derive from the
+      // same committed fact, not from two counters kept in step by hand. A lost
+      // fence above returns WITHOUT emitting, so the last thing an operator sees
+      // is `player-started(N)` then `superseded` — never a settled player the
+      // database does not know about.
+      safeEmit(deps.onProgress, settledEvent);
     }
+    safeEmit(deps.onProgress, {
+      kind: "phase-finished", phase: "players", failures: playerFailures.length,
+    });
 
     // A calendar failure BLOCKS `fresh` (P1) only when it would leave the digest
     // silently incomplete: a getSeason FETCH threw for a sport that — judged
@@ -360,6 +481,7 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
     errorMessage = summarizeRefreshFailures(calendarFailures, playerFailures);
   } catch (err) {
     if (err instanceof RefreshFenceLostError) {
+      safeEmit(deps.onProgress, { kind: "sweep-superseded", at: "calendar-fence" });
       return { skipped: true, reason: "superseded", status: null, playersRefreshed, statLinesInserted: inserted,
         statLinesUpdated: updated, playersSkipped, playersFailed: playerFailures.length, calendarFailures, playerFailures, runId };
     }
@@ -379,6 +501,10 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
       status: "failed",
       counts: {
         playersRefreshed,
+        // Carried here too, or a fatal run would report `skipped=0 failed=0`
+        // while its own errorMessage says otherwise.
+        playersSkipped,
+        playersFailed: playerFailures.length,
         playersTotal: activePlayers.length,
         statLinesInserted: inserted,
         statLinesUpdated: updated,
@@ -395,6 +521,8 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
     status,
     counts: {
       playersRefreshed,
+      playersSkipped,
+      playersFailed: playerFailures.length,
       playersTotal: activePlayers.length,
       statLinesInserted: inserted,
       statLinesUpdated: updated,
@@ -407,6 +535,7 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   // mid-final-write and must NOT claim success. Report `superseded`, exactly like
   // a mid-loop loss; the successor's row is the freshness winner.
   if (!settled) {
+    safeEmit(deps.onProgress, { kind: "sweep-superseded", at: "settle" });
     return {
       skipped: true,
       reason: "superseded",
@@ -421,6 +550,19 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
       runId,
     };
   }
+
+  // The SAME field set the terminal `refresh done` line prints, emitted only on
+  // the one path that actually settled a terminal status.
+  safeEmit(deps.onProgress, {
+    kind: "sweep-finished",
+    status,
+    playersRefreshed,
+    playersSkipped,
+    playersFailed: playerFailures.length,
+    playersTotal: activePlayers.length,
+    statLinesInserted: inserted,
+    statLinesUpdated: updated,
+  });
 
   return {
     skipped: false,
@@ -481,7 +623,9 @@ export async function refreshCalendars(
   for (const sportId of SPORT_IDS) {
     let s: Awaited<ReturnType<typeof client.getSeason>>;
     try {
-      s = await client.getSeason(sportId, season);
+      // `player: null` exactly here: the calendar phase runs BEFORE the loop, so
+      // these calls belong to no player and must never be attributed to one.
+      s = await timedCall(deps, null, { call: "getSeason", sportId }, () => client.getSeason(sportId, season));
     } catch (err) {
       failures.push({ sportId, reason: err instanceof Error ? err.message : String(err) });
       continue;
@@ -532,10 +676,7 @@ export async function refreshNcaaCalendar(
 
   const entry = ncaaSeasonFor(season);
   if (entry === null) {
-    process.stderr.write(
-      `refresh: no bundled NCAA season lookup for year=${season}; ` +
-        `NCAA treated as not In Season (update src/ncaa/seasons.ts)\n`,
-    );
+    emitNotice(deps, { code: "ncaa-season-missing", season });
     return;
   }
 
@@ -588,6 +729,7 @@ async function refreshOnePlayer(
   player: PlayerRow,
   season: string,
   fence?: IngestionFence,
+  ref?: PlayerRef,
 ): Promise<{ inserted: number; updated: number } | null> {
   if (player.level === "ncaa") {
     if (player.ncaaPlayerSeq === null) return null; // defensive: no identity to fetch
@@ -607,12 +749,12 @@ async function refreshOnePlayer(
       player.ncaaSourceState === "highlightly_active" ||
       player.ncaaSourceState === "highlightly_pending"
     ) {
-      return refreshHighlightlyNcaaPlayer(deps, player, Number(season), fence);
+      return refreshHighlightlyNcaaPlayer(deps, player, Number(season), fence, ref);
     }
     throw new HighlightlyMigrationRequiredError();
   }
   if (player.externalId === null) return null;
-  return refreshPlayer(deps, player, season, fence);
+  return refreshPlayer(deps, player, season, fence, ref);
 }
 
 type HighlightlyBox = Array<{ teamId: number | null; players: HighlightlyPlayer[] }>;
@@ -628,14 +770,23 @@ export async function refreshHighlightlyNcaaPlayer(
   player: PlayerRow,
   season: number,
   fence?: IngestionFence,
+  ref?: PlayerRef,
 ): Promise<{ inserted: number; updated: number }> {
   if (player.highlightlyPlayerId === null || player.highlightlyTeamId === null) {
     throw new HighlightlyMigrationRequiredError();
   }
   if (deps.highlightlyClient === undefined) throw new HighlightlyMigrationRequiredError();
+  const highlightlyClient = deps.highlightlyClient;
+  const highlightlyTeamId = player.highlightlyTeamId;
+  // Null on the targeted single-player path, which has no position in a sweep.
+  const callRef = ref ?? null;
 
   const timestamp = deps.now().toISOString();
-  const schedule = await deps.highlightlyClient.getFinalTeamMatches(player.highlightlyTeamId, season);
+  const schedule = await timedCall(
+    deps, callRef,
+    { call: "getFinalTeamMatches", teamId: highlightlyTeamId, season },
+    () => highlightlyClient.getFinalTeamMatches(highlightlyTeamId, season),
+  );
   const rows: NewStatLineRow[] = [];
   for (const match of schedule.value) {
     guardedWrite(deps.db, fenceAtWrite(fence, deps.now()), (tx) => tx
@@ -659,7 +810,11 @@ export async function refreshHighlightlyNcaaPlayer(
     if (cached?.complete) {
       box = cached.payload as HighlightlyBox;
     } else {
-      const fetched = await deps.highlightlyClient.getBoxScore(match.id);
+      const fetched = await timedCall(
+        deps, callRef,
+        { call: "getBoxScore", matchId: match.id },
+        () => highlightlyClient.getBoxScore(match.id),
+      );
       box = fetched.value;
       guardedWrite(deps.db, fenceAtWrite(fence, deps.now()), (tx) => tx
         .insert(highlightlyBoxScoreCache)
@@ -755,11 +910,15 @@ export async function refreshPlayer(
   player: PlayerRow,
   season: string,
   fence?: IngestionFence,
+  ref?: PlayerRef,
 ): Promise<{ inserted: number; updated: number }> {
   const { db, client, now, tz } = deps;
   if (player.externalId === null) {
     throw new Error(`refreshPlayer requires an externalId (player id ${player.id})`);
   }
+  const personId = player.externalId;
+  // Null on the targeted single-player path, which has no position in a sweep.
+  const callRef = ref ?? null;
 
   // Finality gate (ADR 0040, issue #77): a game whose date is not yet in the
   // past may still be IN PROGRESS. The MLB gameLog split carries no game-status
@@ -772,7 +931,9 @@ export async function refreshPlayer(
   // Buffer ALL network fetches FIRST (#23) — identity (person/team) then every
   // game-log group — into `identity` + `rows`. The atomic write below must never
   // be held open across HTTP I/O.
-  const person = await client.getPerson(player.externalId);
+  const person = await timedCall(
+    deps, callRef, { call: "getPerson", personId }, () => client.getPerson(personId),
+  );
   const identity: Partial<typeof players.$inferInsert> = {
     fullName: person.fullName,
     updatedAt: now().toISOString(),
@@ -781,7 +942,10 @@ export async function refreshPlayer(
     identity.position = person.primaryPosition.abbreviation;
   }
   if (person.currentTeam !== undefined) {
-    const team = await client.getTeam(person.currentTeam.id);
+    const teamId = person.currentTeam.id;
+    const team = await timedCall(
+      deps, callRef, { call: "getTeam", teamId }, () => client.getTeam(teamId),
+    );
     const info = levelForSportId(team.sport.id);
     if (info !== null && info.level !== "ncaa") {
       identity.level = info.level;
@@ -793,12 +957,11 @@ export async function refreshPlayer(
   const rows: NewStatLineRow[] = [];
   for (const sportId of SPORT_IDS) {
     for (const group of STAT_GROUPS) {
-      const log = await client.getGameLog({
-        personId: player.externalId,
-        sportId,
-        group,
-        season,
-      });
+      const log = await timedCall(
+        deps, callRef,
+        { call: "getGameLog", personId, sportId, statGroup: group },
+        () => client.getGameLog({ personId, sportId, group, season }),
+      );
       const statType = group === "hitting" ? "batting" : group;
       for (const stat of log.stats) {
         for (const split of stat.splits) {
@@ -850,15 +1013,18 @@ export async function refreshPlayer(
  * failure here must not fail the player nor roll back his refreshed data. The
  * next successful Refresh re-derives and self-heals the tags.
  */
-function syncDerivedTagsBestEffort(deps: Pick<RefreshDeps, "db" | "now">, playerId: number): void {
+function syncDerivedTagsBestEffort(
+  deps: Pick<RefreshDeps, "db" | "now" | "onProgress" | "writeLegacyNotice">,
+  playerId: number,
+): void {
   try {
     syncDerivedTags(deps.db, playerId, deps.now());
   } catch (err) {
-    process.stderr.write(
-      `refresh: tag sync failed for player id=${playerId} ` +
-        `(identity/stats already committed; will heal next refresh): ` +
-        `${err instanceof Error ? err.message : String(err)}\n`,
-    );
+    emitNotice(deps, {
+      code: "tag-sync-failed",
+      playerId,
+      reason: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 
@@ -1044,13 +1210,8 @@ export async function runRefreshForPlayer(
   if (calendarFailures.length > 0) {
     // MF3: do NOT silently swallow a calendar failure on the single-player path.
     // The player still proceeds (he never depended on the DB calendar), but the
-    // failure is explicit — returned to the caller AND logged.
-    process.stderr.write(
-      `refresh: ${calendarFailures.length} calendar fetch(es) failed during single-player ` +
-        `refresh of player id=${playerId}: ` +
-        calendarFailures.map((f) => `${f.sportId} (${f.reason})`).join("; ") +
-        "\n",
-    );
+    // failure is explicit — returned to the caller AND reported.
+    emitNotice(deps, { code: "targeted-calendar-failures", playerId, failures: calendarFailures });
   }
     const result = await refreshPlayer(deps, player, season, fence);
     return { skipped: false, reason: null, ...result, calendarFailures };
