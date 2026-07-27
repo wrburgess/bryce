@@ -287,17 +287,26 @@ file and *not* one issue per finding, because an issue per finding is the accret
 to stop. Following this repository's absent-until-needed convention for deep docs, it is **created when
 the first finding is recorded**, never as an empty placeholder. Each entry carries: normalized failure
 class · severity and blast radius · enforcement status · recurrence count · the PR or issue that
-surfaced it · date recorded · **review date, written absolute, = date recorded + 90 days**. The HC is
-its reviewer, inside a corpus review; independently of that, **`final` sweeps the log at the start of its
-disposition step** and processes every entry whose review date has passed — an entry recorded once and
-never met again must not be able to sit here indefinitely, which would be this section's own accretion in
-slower form. At the review
-date: recurrence `0` and nothing having cited it → **archive** the entry (move it under an `## Archived`
-heading — do not delete, because the record of what was considered and dropped is the point);
-recurrence `≥ 1` → it becomes eligible for outcome 1 or 2. **The default at expiry is archival, never
-promotion**, so an unattended finding shrinks the corpus rather than growing it. **Archival is terminal
-and the sweep reads only the active entries** — an archived entry still carries a past review date, so a
-sweep that did not exclude it would re-archive and re-report the same finding forever.
+surfaced it · date recorded · **review date, written absolute, = date recorded + 90 days**. An entry is
+**active** until it is moved under the log's `## Archived` heading, and **archived** once it is; that
+heading is the whole boundary, and nothing under it is ever due again. The HC is its reviewer, inside a
+corpus review; independently of that, **`final` sweeps the log at the start of its disposition step** and
+processes every **active** entry whose review date has passed — an entry recorded once and never met
+again must not be able to sit here indefinitely, which would be this section's own accretion in slower
+form. At the review date: recurrence `0` and nothing having cited it → **archive** the entry (move it
+under `## Archived` — do not delete, because the record of what was considered and dropped is the point);
+recurrence `≥ 1` → it becomes eligible for outcome 1 or 2 and enters that run's disposition. **The default
+at expiry is archival, never promotion**, so an unattended finding shrinks the corpus rather than growing
+it.
+
+**A due entry never survives its own sweep as active — whichever branch it takes.** It is archived on no
+recurrence; archived **with a pointer to what it became** when it is promoted and that outcome is applied;
+and archived as *considered and dropped* when it resolves to *do nothing*, **including** the outcome-4
+default a `pending HC decision` row inherits at merge. Only entries whose review date has not yet passed
+stay active. Bounding just the archived side would leave the promotion side unbounded — a promoted entry
+that is presented, never answered, and defaults to *do nothing* would still be active, still carry the
+same past review date, and be re-presented identically by every later `final` run: the same
+re-report-forever failure this outcome exists to prevent, one branch over.
 
 **The recursion bound.** Any post-`verify` change that moves `HEAD` past the reviewed SHA triggers a
 delta review — an `autonomous-fold`, an HC-approved fold under `present-to-hc`, a `listen` fix, or a

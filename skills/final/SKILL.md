@@ -51,17 +51,26 @@ skipped: stop and recheck.
    The `create-skill` review-PR gate is **out of scope** — never auto-dispose it.
 
    **Sweep the findings log first**, before disposing of anything new. Read the findings log the Project
-   Config names — absent is fine, and means nothing is due — and process every **active** entry whose
-   **review date has passed**, by the rule that Config declares: no recurrence and no work having cited
-   it → **archive** it; recurrence → it is eligible for a real outcome and enters this step's disposition
-   beside the new suggestions. **Archival is terminal**: an already-archived entry still carries a past
-   review date, so a sweep that did not exclude it would re-archive and re-report the same finding on
-   every later run — read past the archive, never through it. Without this sweep an entry recorded once and never met again would sit
-   in the log forever, which is the accretion *record as an expiring finding* exists to avoid, in a
-   slower form. **Archiving by the declared rule is executing the policy, not proposing one**, so the
-   setting does not gate it; promoting an entry to a retained rule **is** a suggestion, and does. Report
-   the sweep in the same SOW section — including **"no entries due"**, so a sweep that found nothing
-   is distinguishable from a sweep that never ran.
+   Config names — absent is fine, and means nothing is due. An entry is **active** until it sits under the
+   log's `## Archived` heading and **archived** once it does; that heading is the entire boundary. Stop at
+   it: process every **active** entry whose **review date has passed**, and read nothing beneath it.
+   Without this sweep an entry recorded once and never met again would sit in the log forever, which is
+   the accretion *record as an expiring finding* exists to avoid, in a slower form.
+
+   Apply the rule the Project Config declares — no recurrence and nothing having cited it → archive;
+   recurrence → eligible for a real outcome, entering this step's disposition beside the new suggestions.
+   Then close the entry out, because **a due entry never survives its own sweep as active, whichever
+   branch it took**: archived on no recurrence; archived **with a pointer to what it became** once a
+   promoted outcome is applied; archived as *considered and dropped* when it resolves to *do nothing* —
+   **including** the outcome-4 default a `pending HC decision` row inherits at merge. Bounding only the
+   archived side leaves the promotion side unbounded: an entry presented, never answered, and defaulted to
+   *do nothing* would still be active with the same past review date, and every later run would re-present
+   it identically.
+
+   **Archiving by the declared rule is executing the policy, not proposing one**, so the setting does not
+   gate it; promoting an entry to a retained rule **is** a suggestion, and does. Report the sweep in the
+   same SOW section — including **"no entries due"**, so a sweep that found nothing is distinguishable
+   from a sweep that never ran.
 2. **Verify the PR is ready:**
    - Integrate the latest base branch (merge it in — do not rebase if the branch-protection guardrails
      refuse a mid-rebase detached HEAD; see [`PROJECT.md`](../../PROJECT.md) → *Branch & PR Policy*).
