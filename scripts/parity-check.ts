@@ -360,19 +360,9 @@ function subdirectories(absolute: string): string[] {
 }
 
 /**
- * Immediate `*.md` REGULAR FILES of `absolute`, sorted, with the two read failures answered differently
- * (issue #164).
- *
- * `isFile()` is not tidiness: a DIRECTORY named `nested.md` passes a name-only filter, and this list is
- * consumed by test/tooling/parity-fixture.ts `healDeadLinks()`, which guards with `existsSync` (true for a
- * directory) and then `readFileSync`s it — `EISDIR`, taking the fixture down. `checkLinks` itself only
- * skips such an entry, so the name-only bug would have been invisible from the checker's own output.
- *
- * ENOENT is swallowed and every other error rethrown, rather than a blanket catch: a bundle legitimately
- * ships a subset of the tree, but an unreadable directory (a permission error, an `ENOTDIR` from a path
- * that is a file) is a MALFORMED bundle, and returning "no files" for it silently empties the scope —
- * `rules/scripting.md`'s false green, where the gate reports OK while checking nothing. Absent is a fact;
- * unreadable is a failure.
+ * A repository read that failed for a reason other than "absent" (issue #164). Typed so `main` can
+ * report it in this script's own failure grammar while letting a genuine internal bug keep its stack
+ * trace — catching both alike would relabel the bug as a read failure and name the wrong cause.
  */
 export class RepositoryReadError extends Error {
   constructor(readonly path: string, readonly code: string | undefined, reason: string) {
@@ -381,7 +371,14 @@ export class RepositoryReadError extends Error {
   }
 }
 
-/** Absent is a fact (skip it); any other read failure is a malformed bundle (raise it, typed). */
+/**
+ * Absent is a fact (return `absent`); any other read failure is a malformed bundle (raise it, typed).
+ *
+ * The split is the whole point, and it is not a blanket catch: a bundle legitimately ships a subset of
+ * the tree, but an unreadable path (a permission error, an `ENOTDIR` from a path that is a file, an
+ * `ELOOP` from a symlink cycle) answered with "nothing here" silently empties whatever scope was being
+ * derived — `rules/scripting.md`'s false green, where the gate reports OK while checking nothing.
+ */
 function readOrRaise<T>(path: string, absent: T, read: () => T): T {
   try {
     return read();
@@ -392,6 +389,15 @@ function readOrRaise<T>(path: string, absent: T, read: () => T): T {
   }
 }
 
+/**
+ * Immediate `*.md` REGULAR FILES of `absolute`, sorted, with both reads going through `readOrRaise`
+ * above (issue #164).
+ *
+ * `isFile()` is not tidiness: a DIRECTORY named `nested.md` passes a name-only filter, and this list is
+ * consumed by test/tooling/parity-fixture.ts `healDeadLinks()`, which guards with `existsSync` (true for a
+ * directory) and then `readFileSync`s it — `EISDIR`, taking the fixture down. `checkLinks` itself only
+ * skips such an entry, so the name-only bug would have been invisible from the checker's own output.
+ */
 function markdownFilesIn(absolute: string): string[] {
   const children = readOrRaise(absolute, [] as string[], () => readdirSync(absolute));
 
