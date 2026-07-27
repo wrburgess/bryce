@@ -301,7 +301,8 @@ it.
 
 **A due entry never survives its own sweep as active — whichever branch it takes.** It is archived on no
 recurrence; archived **with a pointer to what it became** when it is promoted and that outcome is applied;
-and archived as *presented, pending* when a `pending HC decision` row is still open. Only entries whose
+and archived as *presented; outcome 4 unless a resumed pass records otherwise* — the **same wording** the
+paragraph below requires — when a `pending HC decision` row is still open. Only entries whose
 review date has not yet passed stay active. Bounding just the archived side would leave the promotion side
 unbounded — a promoted entry that is presented, never answered, and defaults to *do nothing* would still
 be active, still carry the same past review date, and be re-presented identically by every later `final`
@@ -322,6 +323,11 @@ The resumed pass applies the outcome, re-runs the *Quality Checks*, **re-anchors
 the resulting commit** (it moved `HEAD` past the reviewed SHA like any other late change), and reposts the
 SOW with the entry's pointer updated. **No approved post-SOW change reaches merge without Reviewer
 evidence covering it.** If no decision arrives, nothing resumes and the row inherits outcome 4 at merge.
+
+**The trigger is the HC's reply itself** — there is no automation watching for it, and none is implied. The
+HC invokes a resumed pass the way any stage is invoked; the reply is what makes one *owed*, not what
+performs it. This is why the archived line must be correct **before** the answer arrives: an unanswered
+row is the expected steady state, not a dropped one.
 
 **A later recurrence opens a NEW entry** citing the archived one, rather than reviving it — archival stays
 terminal without discarding genuine recurrence signal, and the new entry's recurrence count carries
