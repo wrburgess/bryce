@@ -108,3 +108,50 @@ and merging it turned parity red with five "no longer needed" errors until those
 *(Provenance: issue #152 — PR #149 trimmed `rules/testing.md` and the accretion resumed in the very next
 merged PR, past the size the trim started from, because every individual bullet was defensible and
 nothing asked whether its narrative belonged in Tier 2.)*
+
+## Convention: an invariant may be stated in both moods, keyed on the failure mode
+
+A Tier-1 invariant **may** appear in both `## Patterns` and `## Anti-Patterns`. The mirrored pair is the
+Lean Core's shape, not accretion — 21 such pairs across the seven Tier-1 files, five of which mirror a
+*majority* of their Patterns, and [ADR 0004](../adr/0004-two-tier-rules-layer-progressive-context.md)
+makes the imperative-negative
+form a *required* section precisely because it steers effectively where the positive framing does not
+([ADR 0053](../adr/0053-mirrored-pattern-anti-pattern-pairs-are-the-tier-1-convention.md)).
+
+**The unit is the failure mode, not the principle.** One Pattern may be mirrored by as many
+Anti-Patterns as there are distinct ways to get it wrong — `rules/frontend.md`'s "Native / server-driven
+interactivity first" is mirrored by *two*, one for a parallel rendering paradigm and one for a parallel
+DOM idiom, because those fail differently.
+
+**What each mood owes** — this is the bar a pair must clear:
+
+| Mood | Must carry |
+|---|---|
+| **Pattern** | The action to take **before the code exists**: the positive imperative and what to do instead. |
+| **Anti-Pattern** | The failure **mechanism and its consequence** — the "*because*" clause ADR 0004 requires, and what goes wrong when it is ignored. |
+
+**Both halves must carry content the other lacks.** A bullet that spends its length restating the other
+mood's job has not earned its place: **delete it, do not keep it for symmetry.** That is the whole
+constraint — without it, "an invariant may appear in both moods" is a licence rather than a rule.
+
+**Tolerated, not justified:** restating the shared invariant, and naming the same remedy, in both moods.
+Five files do this and none of it is a defect. But note *why* it is only tolerated — every consumer reads
+a rule file **whole** (the trigger table above binds a *file* to a working context, not a section, and
+`skills/create-skill/SKILL.md` cites both sections together as one surface), so duplicated prose is a
+real context cost with no offsetting benefit. Prefer the tighter phrasing where you have the choice.
+
+**Not allowed:** a second bullet for the *same* failure mode, or a pair whose two halves are both written
+in the same mood.
+
+**There is no checker for this one, deliberately.** "Each half carries content the other lacks" is a
+semantic judgment; the mechanical proxy — a verbatim-overlap check between bullets — was measured and
+rejected, because the most-duplicated pair in the tree shares only 26 characters and ranks *seventh*
+behind six unrelated pairs, so any threshold that catches it reddens on ordinary shared vocabulary. The
+measurement is in [ADR 0053](../adr/0053-mirrored-pattern-anti-pattern-pairs-are-the-tier-1-convention.md)
+so the next leanness pass does not re-propose a guard that was rejected on evidence rather than
+overlooked. What *is* enforced is the per-bullet narrative budget above.
+
+*(Provenance: issue #160 — deferred from PR #156 as a convention decision rather than a cleanup, after
+three passes at `rules/backend.md` kept rediscovering one mirrored pair and reading it as accretion. The
+audit that answered it also corrected this convention's own first draft, which would have declared
+`rules/frontend.md`'s one-Pattern-to-two-Anti-Patterns fan-out non-conforming.)*
