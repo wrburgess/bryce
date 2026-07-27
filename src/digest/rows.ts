@@ -102,10 +102,21 @@ export function withPlateAppearances(split: Split): Split {
   return derived === 0 ? split : { ...split, stats: { ...split.stats, plateAppearances: derived } };
 }
 
+/**
+ * The three per-game COUNTS below take a bucket of raw per-game `stats` records
+ * rather than `Split[]`, because that is the whole of what they read — no
+ * `s.line`, no `s.player`. Signing them at that grain is what lets the Player
+ * Card (`src/reports/player-card.ts`, whose bucket is already
+ * `Record<string, unknown>[]`) call the SAME implementation the Digest uses
+ * instead of re-deriving the math, which would risk diverging on the NCAA
+ * fail-closed `gamesStarted` rule below (#141 / ADR 0055 consequence 2).
+ */
+type StatsBucket = ReadonlyArray<Record<string, unknown>>;
+
 /** An appearance is relief only when gamesStarted is PRESENT and 0. A missing
  * value (NCAA rows have no gamesStarted) is unknown-not-relief, so a starter's
  * decision is never miscounted as relief. Starter decisions are never surfaced. */
-function isReliefAppearance(stats: Record<string, unknown>): boolean {
+export function isReliefAppearance(stats: Record<string, unknown>): boolean {
   const gs = stats.gamesStarted;
   return typeof gs === "number" && Number.isFinite(gs) && gs === 0;
 }
@@ -115,22 +126,22 @@ function isReliefAppearance(stats: Record<string, unknown>): boolean {
  * per-game rows are still in hand. A window's QS is a count of qualifying games,
  * never a flag: summed outs and summed earned runs cannot recover it.
  */
-function countQualityStarts(bucket: Split[]): number {
-  return bucket.filter((s) => {
-    const ip = s.stats.inningsPitched;
+export function countQualityStarts(bucket: StatsBucket): number {
+  return bucket.filter((stats) => {
+    const ip = stats.inningsPitched;
     // Same coercion as src/stats/aggregate.ts, so this count and the summed outs
     // it sits beside can never disagree about what an IP value means.
     const outs = ipToOuts(typeof ip === "string" ? ip : String(ip));
-    return qualityStart(outs, numberOr0(s.stats.earnedRuns)) === 1;
+    return qualityStart(outs, numberOr0(stats.earnedRuns)) === 1;
   }).length;
 }
 
-function countReliefWins(bucket: Split[]): number {
-  return bucket.filter((s) => numberOr0(s.stats.wins) === 1 && isReliefAppearance(s.stats)).length;
+export function countReliefWins(bucket: StatsBucket): number {
+  return bucket.filter((stats) => numberOr0(stats.wins) === 1 && isReliefAppearance(stats)).length;
 }
 
-function countReliefLosses(bucket: Split[]): number {
-  return bucket.filter((s) => numberOr0(s.stats.losses) === 1 && isReliefAppearance(s.stats)).length;
+export function countReliefLosses(bucket: StatsBucket): number {
+  return bucket.filter((stats) => numberOr0(stats.losses) === 1 && isReliefAppearance(stats)).length;
 }
 
 export function toRenderPlayer(player: PlayerRow): RenderPlayer {
@@ -164,16 +175,16 @@ export interface StatRowCore {
 
 export function buildStatRowCore(bucket: Split[], statType: "batting" | "pitching"): StatRowCore {
   const first = bucket[0]!;
+  // The Digest's bucket is Split[]; the counters (and `aggregate`) read only the
+  // per-game stats, so this caller projects once and passes that.
+  const stats = bucket.map((s) => s.stats);
   return {
     lvl: levelAbbrev(first.line.sportId, first.line.leagueName),
     lvlRank: levelRank(first.line.sportId),
-    agg: aggregate(
-      statType,
-      bucket.map((s) => s.stats),
-    ),
-    qualityStarts: statType === "pitching" ? countQualityStarts(bucket) : 0,
-    reliefWins: statType === "pitching" ? countReliefWins(bucket) : 0,
-    reliefLosses: statType === "pitching" ? countReliefLosses(bucket) : 0,
+    agg: aggregate(statType, stats),
+    qualityStarts: statType === "pitching" ? countQualityStarts(stats) : 0,
+    reliefWins: statType === "pitching" ? countReliefWins(stats) : 0,
+    reliefLosses: statType === "pitching" ? countReliefLosses(stats) : 0,
   };
 }
 

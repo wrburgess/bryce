@@ -23,7 +23,13 @@ do not share a default:
 |---|---|---|
 | CLI `sk report player` | `console` | a human at a terminal |
 | MCP `report_player` | `console` | an agent, which should receive a finished artifact to show |
-| REST `GET /api/players/:id/card` | `json` | the actual programmatic caller — unchanged |
+| REST `GET /api/reports/player/:id` | `json` | the actual programmatic caller — unchanged |
+
+> **Correction (#141 implementation).** This table first named `GET /api/players/:id/card`, a route
+> that does not exist. What ships — and what the row above now names — is the pair of routes already
+> in the codebase, `GET /api/reports/player/:id` and `GET /api/reports/player?name=`; both gained
+> `?format=`. Adding the originally-named path would have duplicated a surface, and renaming would
+> have broken one, so neither was done. Nothing else in this ADR changes.
 
 Every surface still accepts every format; only the default moves. The measurement that decided it: a
 Card's JSON carries `Aggregate.counters` for **every** counter key of the stat type — 27 batting, 43

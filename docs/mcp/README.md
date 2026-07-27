@@ -37,14 +37,32 @@ upstream failure all surface. An unexpected (non-domain) error is not swallowed 
 
 ### `report_player`
 
-Build a read-only multi-window card for exactly one tracked Player. Supply one
-typed `id` (internal `players.id`) or canonical exact `name`, plus an optional
-ordered `windows` array containing `last10`, `last30`, and/or `ytd`. Game-count
-windows select distinct regular-season games before companion stat lines, while
-`ytd` follows the Player sport's season calendar through the last completed host
-date. Results retain batting/pitching level splits and actual game/date-span
+Returns a **formatted, ready-to-display card** for exactly one tracked Player —
+show it verbatim; do not reformat or rebuild it as a table. Supply one typed `id`
+(internal `players.id`) or canonical exact `name`, plus an optional ordered
+`windows` array containing `last10`, `last30`, and/or `ytd`. Game-count windows
+select distinct regular-season games before companion stat lines, while `ytd`
+follows the Player sport's season calendar through the last completed host date.
+Results retain batting/pitching level splits and actual game/date-span
 provenance. Unknown or ambiguous Players and malformed typed inputs return the
 standard structured MCP error. The tool sends nothing and writes nothing.
+
+`format` **defaults to `console`** (`#141` /
+[ADR 0055](../adr/0055-player-card-presentation-per-surface-defaults-no-pdf.md)),
+not `json`: an agent should receive a finished artifact to display, not ~315
+key/value pairs it must then lay out — and the console rendering is ~300 tokens
+against the JSON's 2–4k, identical every call. It is the **same pure renderer**
+`sk report player` prints, so the two surfaces cannot drift.
+
+| `format` | Result |
+|----------|--------|
+| `console` (default) | A text part: the finished monospace card, one table per Card Window. No `structuredContent`. |
+| `html` | A text part: a standalone printable document whose `@media print` rules make browser print → *Save as PDF* paginate correctly. No `structuredContent`. |
+| `json` | `structuredContent`: the raw structured card. Use only when you need the numbers to compute with. |
+
+This is the one place the MCP and REST **defaults** intentionally differ —
+`GET /api/reports/player/:id` keeps `json` for its programmatic caller. For an
+**explicit** `format` the two surfaces return the same bytes.
 
 ### `watchlist_list`
 
