@@ -43,7 +43,8 @@ describe("parity check - Tier-2 deep-doc pointers", () => {
   });
 
   // docs/rules/README.md: a deep doc stays "absent until a host has a real postmortem to record".
-  // rules/frontend.md, rules/security.md and rules/scripting.md all rely on this today.
+  // rules/frontend.md and rules/security.md rely on this today (rules/scripting.md did until issue
+  // #166 wrote its deep doc).
   it("accepts a `**Deep doc:**` header that forward-references an absent deep doc", () => {
     withRuleBody(`**Deep doc:** \`${ABSENT_DEEP_DOC}\` (Tier 2 — deferred)`, (errors) => {
       expect(errors).toEqual([]);
@@ -168,9 +169,16 @@ describe("issue #148 - the moved content is reachable and intact", () => {
   const doc = readFileSync(join(REPO_ROOT, DEEP_DOC), "utf-8");
   const sections = doc.split(/\n(?=## )/).slice(1);
 
+  // Issue #166: this asserted `toContain(DEEP_DOC)` over the whole README, which also spells the path
+  // in its convention prose -- deleting the trigger-table row left the test green (proved by mutation).
+  // Assert the ROW that binds this Tier-1 rule to this deep doc.
   it("is listed in the Tier-2 trigger table", () => {
     expect(existsSync(join(REPO_ROOT, DEEP_DOC))).toBe(true);
-    expect(readFileSync(join(REPO_ROOT, "docs/rules/README.md"), "utf-8")).toContain(DEEP_DOC);
+    const row = readFileSync(join(REPO_ROOT, "docs/rules/README.md"), "utf-8")
+      .split("\n")
+      .find((l) => l.startsWith("|") && l.includes(`\`${RULE}\``));
+    expect(row, `no trigger-table row for ${RULE}`).toBeTypeOf("string");
+    expect(row).toContain(DEEP_DOC);
   });
 
   // A single section citing all five incidents would satisfy a file-wide check; these assert the
@@ -247,9 +255,16 @@ describe("issue #166 - the scripting deep doc is reachable and intact", () => {
   const doc = readFileSync(join(REPO_ROOT, SCRIPTING_DEEP_DOC), "utf-8");
   const sections = doc.split(/\n(?=## )/).slice(1);
 
+  // A file-wide `toContain` would pass on the convention prose further down docs/rules/README.md,
+  // which also spells this path -- so it would stay green with the trigger-table row deleted. Assert
+  // the ROW: the line that binds this Tier-1 rule to this deep doc.
   it("is listed in the Tier-2 trigger table", () => {
     expect(existsSync(join(REPO_ROOT, SCRIPTING_DEEP_DOC))).toBe(true);
-    expect(readFileSync(join(REPO_ROOT, "docs/rules/README.md"), "utf-8")).toContain(SCRIPTING_DEEP_DOC);
+    const row = readFileSync(join(REPO_ROOT, "docs/rules/README.md"), "utf-8")
+      .split("\n")
+      .find((l) => l.startsWith("|") && l.includes(`\`${SCRIPTING_RULE}\``));
+    expect(row, `no trigger-table row for ${SCRIPTING_RULE}`).toBeTypeOf("string");
+    expect(row).toContain(SCRIPTING_DEEP_DOC);
   });
 
   it("carries one case study per incident", () => {
