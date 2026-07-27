@@ -179,6 +179,24 @@ describe("parity check - a bolded imperative identifies one bullet", () => {
       },
       (errors) => expect(errors).toEqual([]),
     );
+
+    // The control, and it is not optional. The assertion above is an ABSENCE, so it would also pass if a
+    // combining mark simply broke bullet extraction and neither line was seen as a bullet at all -- a
+    // test that reads as an equality decision while pinning nothing. Repeat ONE of the two spellings and
+    // the guard must fire, which proves both were extracted in the first place.
+    withRuleBodies(
+      {
+        "rules/testing.md": ruleFile(
+          "rules/testing.md",
+          `- **${nfd}** — because reasons.\n- **${nfd}** — because other reasons.`,
+        ),
+      },
+      (errors) => {
+        expect(errors).toEqual([
+          duplicateError("Never mangle Acun\\u0303a's name", ["rules/testing.md", "rules/testing.md"]),
+        ]);
+      },
+    );
   });
 
   // rules/scripting.md / ADR 0011: a bundled script's output must survive a non-UTF-8 locale, and these

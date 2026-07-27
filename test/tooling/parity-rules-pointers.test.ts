@@ -163,6 +163,30 @@ describe("parity check - Tier-2 deep-doc pointers", () => {
       },
     );
   });
+
+  // Issue #179. This walk's own ``` -only fence toggle is gone; the fenced-line question now goes to
+  // the CommonMark parser (`codeBlockLines`), which knows BOTH fence characters and indented code too.
+  //
+  // The exemption widens: a pointer in an INDENTED code block was checked before and is not now. That is
+  // the intended reading -- a pointer inside code is a worked example, the same reason the fenced one was
+  // always skipped -- but it is a widening toward a false GREEN, so it is pinned here rather than left
+  // implicit. Measured across the real tree before landing: all 30 live pointers are still checked,
+  // line for line.
+  it.each([
+    ["a tilde fence", ["~~~md", "- fenced: `docs/rules/absent-postmortems.md`", "~~~"]],
+    ["an indented code block", ["", "    - indented: `docs/rules/absent-postmortems.md`", ""]],
+  ])("ignores a pointer inside %s", (_label, block) => {
+    withRuleBody(block.join("\n"), (errors) => expect(errors).toEqual([]));
+  });
+
+  // The control the three cases above rest on. Each asserts an ABSENCE, which stays true if the walk
+  // stopped looking at pointers altogether; this one fails the moment it does.
+  it("still reports the same pointer when it is NOT inside code", () => {
+    withRuleBody("- **Never x** — because y. *(Host case study: `docs/rules/absent-postmortems.md`.)*", (errors) => {
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain("`docs/rules/absent-postmortems.md` does not exist");
+    });
+  });
 });
 
 describe("issue #148 - the moved content is reachable and intact", () => {
