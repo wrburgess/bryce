@@ -1,4 +1,4 @@
-# ADR 0055 — An ADR's argument is immutable; the paths it cites are maintained
+# ADR 0057 — An ADR's argument is immutable; the paths it cites are maintained
 
 **Status:** Accepted
 **Date:** 2026-07-27

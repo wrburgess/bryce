@@ -389,7 +389,7 @@ function markdownFilesIn(absolute: string): string[] {
  *
  * `docs/adr/*.md` joined in issue #163. It was excluded when the scope widened because it was holding two
  * dead links whose repair meant editing accepted ADRs — a records decision rather than a validator one.
- * That decision is now made and recorded (ADR 0055: an ADR's argument is immutable, the paths it cites are
+ * That decision is now made and recorded (ADR 0057: an ADR's argument is immutable, the paths it cites are
  * maintained), the two links are repaired, and the exclusion has no remaining rationale.
  *
  * TOP-LEVEL ONLY, deliberately: `checkAdrNumbers` reads the same directory non-recursively and is what
