@@ -114,6 +114,45 @@ function calendarWriteThrows(db: Db, err: Error): Db {
  * once at the top for the sleep check, once at SETTLE time (post-loop, P1) — so
  * `nth: 2` targets the settle-time read that must sit inside the MF1 boundary.
  */
+/**
+ * A db whose refresh_runs PROGRESS write throws — the one `.set()` carrying the
+ * counts, identified by `playersRefreshed`. The lease renewal (`claimed_at` only)
+ * still works, and so does the terminal settle: `settleRefreshRun` goes through
+ * `tx.update` inside a transaction, which this proxy on `db.update` never sees.
+ *
+ * This is the ONLY path on which the MF1 catch's `playersSkipped`/`playersFailed`
+ * are load-bearing. Everywhere else `updateRefreshRunProgress` has already
+ * persisted them, so omitting them from the fatal settle changes nothing — which
+ * is exactly why they need this test and not a bigger fixture on an ordinary
+ * fatal run.
+ */
+function refreshRunProgressWriteThrows(db: Db, err: Error): Db {
+  return new Proxy(db, {
+    get(target, prop) {
+      const value: unknown = Reflect.get(target, prop);
+      if (prop !== "update") {
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (table: unknown): unknown => {
+        const builder = (value as (t: unknown) => unknown).call(target, table);
+        if (table !== refreshRuns) return builder;
+        return new Proxy(builder as object, {
+          get(b, p) {
+            const bv: unknown = Reflect.get(b, p);
+            if (p === "set") {
+              return (values: Record<string, unknown>) => {
+                if ("playersRefreshed" in values) throw err;
+                return (bv as (v: unknown) => unknown).call(b, values);
+              };
+            }
+            return typeof bv === "function" ? bv.bind(b) : bv;
+          },
+        }) as unknown;
+      };
+    },
+  }) as Db;
+}
+
 function seasonCalendarSelectThrows(db: Db, err: Error, nth: number): Db {
   let count = 0;
   return new Proxy(db, {
@@ -1272,6 +1311,20 @@ describe("runRefresh — continue after failures (#23)", () => {
 
   it("settles `failed` AND re-throws when a SETTLE-TIME DB read throws (MF1 covers post-refresh reads)", async () => {
     await insertPlayer(opened.db, { externalId: 691185 });
+    // A Passed-Over Player and a FAILING one alongside the successful one, so the
+    // MF1 settle's counts are non-zero and this case can actually see them (#146).
+    // With a single successful player, players_skipped/players_failed are 0 whether
+    // or not the MF1 settle carries them, and deleting those lines stays green.
+    await insertPlayer(opened.db, {
+      externalId: null, ncaaPlayerSeq: 700005, ncaaSourceState: "legacy_html",
+      level: "ncaa", milbLevel: null, fullName: "Legacy Guy", schoolName: "State",
+    });
+    await insertPlayer(opened.db, { externalId: 660271 });
+    const failing660271 = new MlbClient({
+      fetchImpl: (url: string) =>
+        url.includes("/people/660271?") ? Promise.reject(new Error("b down")) : api.fetch(url),
+      delayMs: 0,
+    });
     const boom = new Error("settle-time read boom");
     // Throw on the SECOND select().from(seasonCalendar): the 1st is the top-of-run
     // sleep-check load; the 2nd is the POST-LOOP settle-time loadCalendars, which
@@ -1280,7 +1333,9 @@ describe("runRefresh — continue after failures (#23)", () => {
     const faultDb = seasonCalendarSelectThrows(opened.db, boom, 2);
 
     // (b) The unexpected error PROPAGATES to the caller...
-    await expect(runRefresh({ ...deps(), db: faultDb })).rejects.toThrow("settle-time read boom");
+    await expect(
+      runRefresh({ ...deps(), db: faultDb, client: failing660271 }),
+    ).rejects.toThrow("settle-time read boom");
 
     // (a) ...AND the run's own row is settled `failed`, never stranded `running`.
     // (If the settle-time reads were OUTSIDE the try, (b) would still pass but this
@@ -1290,6 +1345,46 @@ describe("runRefresh — continue after failures (#23)", () => {
     expect(runs[0]).toMatchObject({ status: "failed" });
     expect(runs[0]?.errorMessage).toContain("settle-time read boom");
     expect(runs[0]?.finishedAt).not.toBeNull();
+    // (c) #146: a fatal run's row still carries the FULL three-way classification
+    // and it adds up to the total. On THIS path the counts come from the last
+    // per-player progress write rather than the MF1 settle; the settle's own copy
+    // is guarded by the progress-write-throws case below.
+    expect(runs[0]).toMatchObject({
+      playersRefreshed: 1,
+      playersSkipped: 1,
+      playersFailed: 1,
+      playersTotal: 3,
+    });
+  });
+
+  it("MF1 settle records players_skipped/players_failed when the PROGRESS WRITE itself throws (#146)", async () => {
+    // The one path where the fatal settle's counts are the only source: the
+    // per-player classification happened, then the write that would have
+    // persisted it threw. Without those two fields on the MF1 settle this row
+    // reports `failed=0` while its own errorMessage names the failure.
+    await insertPlayer(opened.db, { externalId: 691185 });
+    const boom = new Error("progress write boom");
+    const faultDb = refreshRunProgressWriteThrows(opened.db, boom);
+    const failingClient = new MlbClient({
+      fetchImpl: (url: string) =>
+        url.includes("/people/691185?") ? Promise.reject(new Error("a down")) : api.fetch(url),
+      delayMs: 0,
+    });
+
+    await expect(
+      runRefresh({ ...deps(), db: faultDb, client: failingClient }),
+    ).rejects.toThrow("progress write boom");
+
+    const runs = await opened.db.select().from(refreshRuns);
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({
+      status: "failed",
+      playersRefreshed: 0,
+      playersSkipped: 0,
+      playersFailed: 1,
+      playersTotal: 1,
+    });
+    expect(runs[0]?.errorMessage).toContain("progress write boom");
   });
 
   it("runRefreshForPlayer surfaces a getSeason failure in a NON-empty calendarFailures (MF3)", async () => {

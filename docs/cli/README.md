@@ -59,9 +59,18 @@ refresh done status=ok players=11 skipped=1 failed=0 inserted=44 updated=3
   stall is distinguishable from truncation.
 - **On a terminal**: the same lines, plus one *in-place* line for the call in flight whose elapsed
   time ticks each second. Cursor control appears on that line only; every settled line is plain.
-- **Player names are folded to ASCII** and spaces become `_`, so one line stays one parseable record
-  and no escape sequence in an upstream name can overwrite what the presenter already printed
+- **Player names and failure reasons are folded to ASCII** and spaces become `_`, so one line stays
+  one parseable record: no escape sequence in an upstream name can overwrite what the presenter
+  already printed, and no crafted upstream error message can forge a trailing `key=value` token that
+  reads as this run's own counters
   ([ADR 0047](../adr/0047-app-clis-emit-utf8-ascii-scopes-to-machine-output.md), amended for #146).
+- **The three notices move from stderr to stdout in verbose mode.** `ncaa-season-missing`,
+  `tag-sync-failed`, and `targeted-calendar-failures` were unconditional `stderr` writes before #146;
+  a verbose run now renders them as `refresh notice code=…` on **stdout**, alongside the rest of the
+  stream. `sk refresh 2> errors.log` therefore no longer captures them — use `--quiet`, which keeps
+  the pre-#146 stderr text byte-identically, or redirect stdout. Callers with no presenter attached
+  (the MCP tool, the REST route, and the seed path) are unaffected: they still get the original
+  stderr line and nothing else.
 - **`--quiet`** reproduces exactly the pre-#146 output: the single `refresh done …` (or
   `refresh skipped reason=…`) line, plus the stderr failure summary and the three legacy notice
   lines, which are unconditional. Scheduled runs use it — see `ops/templates/com.sk.refresh.plist`,

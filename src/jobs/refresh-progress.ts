@@ -51,8 +51,19 @@ export type RefreshCall =
   | { call: "getTeam"; teamId: number }
   | { call: "getGameLog"; personId: number; sportId: number; statGroup: StatGroup };
 
-/** The declared payload keys of each call, in declaration order (see above). */
-export const REFRESH_CALL_KEYS: { readonly [C in RefreshCall["call"]]: readonly string[] } = {
+/**
+ * The declared payload keys of each call, in declaration order (see above).
+ *
+ * Each entry is typed against ITS OWN variant's payload — not `string[]` — so a
+ * renamed field is a COMPILE error rather than a silent `matchId=undefined` in
+ * the greppable line. The presenter renders `String(record[key])`, which cannot
+ * fail loudly on its own, so the guarantee has to live here in the type
+ * (`rules/scripting.md`: a mis-invocation must fail loudly, never pass).
+ * `call` itself is excluded — it is rendered by the `call=` key, not a payload field.
+ */
+type PayloadKeys<C extends RefreshCall["call"]> = Exclude<keyof Extract<RefreshCall, { call: C }>, "call">;
+
+export const REFRESH_CALL_KEYS: { readonly [C in RefreshCall["call"]]: readonly PayloadKeys<C>[] } = {
   getSeason: ["sportId"],
   getFinalTeamMatches: ["teamId", "season"],
   getBoxScore: ["matchId"],

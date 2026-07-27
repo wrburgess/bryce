@@ -387,7 +387,6 @@ describe("refresh CLI (#23 MF6 wiring, #146 presenter)", () => {
     );
     // ...and it was erased before the next append-only line was written.
     expect(raw).toContain("\r\u001b[K");
-    expect(await runRefreshCli(["--quiet"], deps({ isTty: true }))).toBe(0);
   });
 
   it("--quiet writes nothing raw even on a TTY", async () => {

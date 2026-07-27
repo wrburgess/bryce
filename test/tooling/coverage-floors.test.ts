@@ -60,7 +60,7 @@ function passingSummary(floors: Floors = FLOORS, prefix = ""): Summary {
 describe("FLOORS manifest", () => {
   // Case 1 -- the manifest is the gate. Weakening or dropping an entry fails HERE,
   // by name, instead of quietly widening what the checker will accept.
-  it("holds exactly the seven expected paths with the expected floors", () => {
+  it("holds exactly the eight expected paths with the expected floors", () => {
     expect(FLOORS).toEqual(EXPECTED_FLOORS);
     expect(Object.keys(FLOORS).sort()).toEqual(Object.keys(EXPECTED_FLOORS).sort());
     expect(Object.keys(FLOORS)).toHaveLength(8);

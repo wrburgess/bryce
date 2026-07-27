@@ -181,6 +181,84 @@ describe("runRefresh liveness event stream (#146, ADR 0056)", () => {
     expect(finished.every((e) => e.outcome === "ok" && Number.isInteger(e.elapsedMs))).toBe(true);
   });
 
+  it("instruments the NCAA path too — one call event per box score, each carrying its Player", async () => {
+    // The ~57-round-trip cold NCAA Player is the case the assessment used to
+    // REJECT per-Player granularity, so it is the one that most needs liveness.
+    // Every other Highlightly test uses a stub client with no sink, leaving this
+    // path — timedCall, the player ref on an NCAA call, and the cached branch —
+    // unexercised through the stream.
+    clock.set("2026-05-19T07:00:00.000Z"); // inside the NCAA season
+    await insertPlayer(opened.db, {
+      externalId: null, ncaaPlayerSeq: 9, highlightlyPlayerId: 501, highlightlyTeamId: 10,
+      ncaaSourceState: "highlightly_pending", level: "ncaa", milbLevel: null,
+      fullName: "Gavin Kelly", teamName: "Tigers", schoolName: "State",
+    });
+    const matches = [
+      { id: 930001, date: "2026-05-17T19:00:00Z", league: "NCAA", season: 2026, homeTeam: { id: 10, name: "Tigers" }, awayTeam: { id: 11, name: "Owls" } },
+      { id: 930002, date: "2026-05-18T19:00:00Z", league: "NCAA", season: 2026, homeTeam: { id: 10, name: "Tigers" }, awayTeam: { id: 12, name: "Bears" } },
+    ];
+    const highlightlyClient = {
+      getFinalTeamMatches: async () => ({ value: matches, remaining: 99 }),
+      getBoxScore: async (id: number) => ({
+        value: [{ teamId: 10, players: [{ id: 501, fullName: "Gavin Kelly", statistics: [{ group: "Batting", name: "H", value: id === 930001 ? 1 : 2 }] }] }],
+        remaining: 98,
+      }),
+    } as unknown as RefreshDeps["highlightlyClient"];
+
+    await runRefresh(deps({ highlightlyClient }));
+
+    const finished = of("call-finished");
+    // The schedule fetch, then ONE box-score call per match — the per-call
+    // granularity the whole design rests on. A per-player stream would show one
+    // event where this shows three.
+    expect(finished.filter((e) => e.call === "getFinalTeamMatches")).toHaveLength(1);
+    const boxScores = finished.filter((e) => e.call === "getBoxScore");
+    expect(boxScores).toHaveLength(matches.length);
+    expect(boxScores.map((e) => (e.call === "getBoxScore" ? e.matchId : null)).sort()).toEqual([930001, 930002]);
+    // Each NCAA call carries its Player explicitly — `matchId=...` with no
+    // `player=` would leave an operator unable to tell WHOSE box score is slow.
+    expect(boxScores.every((e) => e.player?.playerId !== undefined)).toBe(true);
+    expect(boxScores.every((e) => e.outcome === "ok" && Number.isInteger(e.elapsedMs))).toBe(true);
+    expect(of("player-settled").at(-1)?.outcome).toBe("refreshed");
+  });
+
+  it("a WARM box-score cache emits no call event for the cached match — the known quiet window", async () => {
+    // Documents rather than fixes: the cache is what makes a warm run cheap, and
+    // a cached match does no external call to time. An operator therefore sees a
+    // gap between `getFinalTeamMatches` and `player-settled` on a warm run. This
+    // pins that behavior so a future change to it is deliberate, and it is why
+    // `player-settled` still reports the player's own elapsed time.
+    clock.set("2026-05-19T07:00:00.000Z");
+    await insertPlayer(opened.db, {
+      externalId: null, ncaaPlayerSeq: 9, highlightlyPlayerId: 501, highlightlyTeamId: 10,
+      ncaaSourceState: "highlightly_pending", level: "ncaa", milbLevel: null,
+      fullName: "Gavin Kelly", teamName: "Tigers", schoolName: "State",
+    });
+    const match = { id: 930001, date: "2026-05-17T19:00:00Z", league: "NCAA", season: 2026, homeTeam: { id: 10, name: "Tigers" }, awayTeam: { id: 11, name: "Owls" } };
+    let boxScoreCalls = 0;
+    const highlightlyClient = {
+      getFinalTeamMatches: async () => ({ value: [match], remaining: 99 }),
+      getBoxScore: async () => {
+        boxScoreCalls += 1;
+        return { value: [{ teamId: 10, players: [{ id: 501, fullName: "Gavin Kelly", statistics: [{ group: "Batting", name: "H", value: 1 }] }] }], remaining: 98 };
+      },
+    } as unknown as RefreshDeps["highlightlyClient"];
+
+    await runRefresh(deps({ highlightlyClient }));
+    expect(boxScoreCalls).toBe(1);
+    expect(of("call-finished").filter((e) => e.call === "getBoxScore")).toHaveLength(1);
+
+    // Second sweep: the box score is cached, so no call is made and none is timed.
+    events = [];
+    clock.set("2026-05-20T07:00:00.000Z");
+    await runRefresh(deps({ highlightlyClient }));
+    expect(boxScoreCalls).toBe(1);
+    expect(of("call-finished").filter((e) => e.call === "getBoxScore")).toHaveLength(0);
+    // The Player is still settled with his own elapsed time, so the run is not silent.
+    expect(of("player-settled")).toHaveLength(1);
+    expect(Number.isInteger(of("player-settled")[0]?.elapsedMs)).toBe(true);
+  });
+
   it("reports a failing call as call-finished outcome=error with its reason, not as silence", async () => {
     await insertPlayer(opened.db, { externalId: 691185 });
     const client = new MlbClient({
