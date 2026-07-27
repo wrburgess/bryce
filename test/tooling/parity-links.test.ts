@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { linkCheckedFiles, maskCode, runParityCheck } from "../../scripts/parity-check.js";
 import { REPO_ROOT, healDeadLinks, withBundleCopy } from "./parity-fixture.js";
@@ -293,9 +293,9 @@ describe("maskCode - a fence may not escape its container", () => {
   });
 
   // The same class, but reached through a block opener that is NOT a fence — a list item. These two
-  // inputs came out of the fuzzer while validating the first fix for the case above, which handled only
-  // fence lines and left these masked. Together they pin `inlineBarriers`: revert the block-opener
-  // barrier to blank-lines-only and both redden.
+  // inputs came out of the fuzzer while validating an earlier, enumerated block-opener barrier. That
+  // barrier is gone (the line bound subsumes it), but the cases are kept: both still redden if the line
+  // bound is removed, and they are the shapes that proved the enumeration approach was unwinnable.
   it("stops an inline span at a list item that opens a new block", () => {
     const masked = maskCode("abc ``` def [L8](t.md)\nstu ~~~ vwx [L6](t.md)\n- ```\n");
 
@@ -357,6 +357,27 @@ describe("parity check - dead links in the widened scope", () => {
       expect(errors).toEqual([`Dead link in CONTEXT.md: \`${ABSENT}\` does not resolve`]);
     });
   });
+
+  // PR #162 delta round 5, High. The line bound (ADR 0054, decision 1) means a MULTI-LINE inline code
+  // span is not recognized: its opening backtick is left orphaned, and on a line carrying other spans
+  // that orphan pairs with the next run and masks prose that is not code. Two files in the checked set
+  // really do contain such a span — `docs/api/README.md:74-75` and `docs/mcp/README.md:21-22` — so the
+  // claim that none existed, made in an earlier draft of ADR 0054, was simply wrong.
+  //
+  // It is benign today only because no link happens to sit in the mis-masked stretch. That is precisely
+  // the kind of accident that stops being true on an ordinary edit, so it is pinned rather than trusted:
+  // if masking ever swallows a link in either file, this reddens.
+  it.each(["docs/api/README.md", "docs/mcp/README.md"])(
+    "loses no link to the multi-line-span limitation in %s",
+    (rel) => {
+      const source = readFileSync(join(REPO_ROOT, rel), "utf-8");
+      const pattern = /\[([^\]\r\n]*)\]\(([^)\r\n]+)\)/g;
+      const raw = [...source.matchAll(pattern)].map((m) => m[2]);
+      const masked = [...maskCode(source).matchAll(pattern)].map((m) => m[2]);
+
+      expect(masked).toEqual(raw);
+    },
+  );
 
   it("never reports a link that resolves", () => {
     withMarkdownFile("CONTEXT.md", "# Context\n\n[canonical](AGENTS.md) and [rules](rules/testing.md)\n", (errors) => {

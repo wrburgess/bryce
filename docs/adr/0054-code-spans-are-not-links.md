@@ -65,8 +65,22 @@ A span that cannot leave its line cannot leave its block, whatever a block turns
 holds without knowing the enumeration, so it cannot be defeated by an entry missing from one. Two fuzzers
 over 33,000 generated documents now report **0** false greens, where the round-4 code reports 161–835.
 
-The cost is a genuine multi-line span going unmasked: a **false RED**, loud and cheap, and no file in the
-checked set contains one. That is the trade `rules/scripting.md` asks for by name.
+The cost is a genuine multi-line span going unmasked. An earlier draft of this ADR claimed no file in the
+checked set contained one; **that was false**, and the delta review proved it —
+`docs/api/README.md:74-75` and `docs/mcp/README.md:21-22` each wrap a JSON example across a line break
+inside one span. The claim was made from a fuzzer's silence rather than from the files, which is the same
+mistake, one level up, as the ones below.
+
+What actually happens there is worth stating exactly, because it is the residual limitation this design
+accepts: the opening backtick is left orphaned, and on a line carrying other spans that orphan pairs with
+the next run, so a stretch of **prose is masked as if it were code**. No link sits in either stretch
+today, so nothing is lost — but "no link sits there today" is an accident, not an invariant, and it is
+pinned by a test rather than trusted.
+
+That is a **false red waiting to become a false green**, which is a weaker guarantee than the rest of
+this design offers, and it is the one place a real CommonMark parser would do strictly better. It is
+recorded here rather than fixed because switching `checkLinks` to a parser is an architecture change this
+issue's plan did not contemplate — see *Follow-up* below.
 
 **2. Fence delimiters are recognized after any whitespace and/or `>`, not CommonMark's
 container-relative `` {0,3}``.**
@@ -121,8 +135,13 @@ Where the two trade off, take the red.
   link, including the two documents this change brought with it.)
 - An **unclosed fence is not a fence.** Its content stays visible to the link checker, so a malformed
   document produces dead-link errors rather than silent coverage loss.
-- A **multi-line inline code span is not masked.** No file in the checked set has one; if one is written
-  later, its contents are link-checked, which is a loud failure and not a silent one.
+- A **multi-line inline code span is not masked**, and two files in the checked set have one
+  (`docs/api/README.md`, `docs/mcp/README.md`). The orphaned opening backtick can pair with a later run
+  on its own line, masking prose as code. No link falls in either stretch today; a test pins that, so the
+  day one does, the gate reddens instead of going quiet. This is the design's weakest guarantee.
+- The **fence closer must match the opener's container in both directions.** `leavesContainer` answers
+  only "have we left?", so a *deeper* line — more blockquote markers — was accepted as a closer, which
+  made the masker mistake the real closer for a new opener and blank a following paragraph.
 - The masker is **cross-checked against the CommonMark reference parser** (`commonmark` npm), not merely
   against today's files: over all 39 in-scope files it misses **0** of the links a real parser calls live
   (364 at merge), and **0** across 33,000 generated documents from two independently written fuzzers.
@@ -160,3 +179,20 @@ So the standing rule for this code: a claim about what masking can and cannot do
 reading it. Fuzz it against a real parser, and mutate the guard to confirm a test actually fails without
 it — twice in this PR a guard was load-bearing and had no test, and once a fuzzer reported clean against
 a version already known to be broken.
+
+And a third, learned last: **a fuzzer's silence is not a statement about the repository.** The claim that
+no checked file had a multi-line span came from 33,000 green synthetic documents, not from the files; two
+files had one. Generated coverage and real coverage answer different questions.
+
+## Follow-up: should this parse instead of mask?
+
+Five review rounds found a silent defect in this masker, two of them introduced while fixing the round
+before. The final design is the smallest and the only one whose bound is a property rather than a list —
+but it still mis-pairs backticks in two real files, and a CommonMark parser would not.
+
+`commonmark` (npm) is already used to *verify* this code, and `rules/scripting.md`'s no-dependency
+anti-pattern carries an explicit host opt-in for `scripts/*.ts`
+([ADR 0039](0039-repo-tooling-unifies-on-typescript-remove-ruby.md)), so the option is open. What stops
+it being folded in here is scope: rewriting `checkLinks` and `checkAdrLinkNumbers` to walk a parsed AST
+is an architecture change issue #159's plan never contemplated, and `ship`'s emergency stop covers
+exactly that. It is raised with the HC rather than decided by the AC.

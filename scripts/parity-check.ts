@@ -335,6 +335,21 @@ function leavesContainer(line: LineInfo, opener: LineInfo): boolean {
   return line.quotes < opener.quotes || line.indent < opener.indent;
 }
 
+/**
+ * May this delimiter line close a fence opened at `opener`? Container membership is checked in BOTH
+ * directions, which `leavesContainer` alone does not do (PR #162 delta round 5, Critical).
+ *
+ * `leavesContainer` answers "have we left?", so it only rejects a line that is SHALLOWER. A line that is
+ * DEEPER — more blockquote markers than the opener — is not a closer either: CommonMark's closing fence
+ * carries the same container prefix as its opener plus at most three spaces, so a `> ``` ` cannot close a
+ * fence opened at top level. Accepting it made the masker mistake the real closer for a new opener and
+ * blank a following paragraph, hiding a live link. Blockquote depth must MATCH; indentation may vary
+ * within the three spaces CommonMark allows.
+ */
+function closesFence(line: LineInfo, opener: LineInfo): boolean {
+  return line.quotes === opener.quotes && line.indent <= opener.indent + 3;
+}
+
 /** Overwrite `[start, end)` with spaces, leaving newlines in place so every offset survives. */
 function maskRange(chars: string[], start: number, end: number): void {
   for (let k = start; k < end; k++) {
@@ -426,6 +441,7 @@ export function maskCode(text: string): string {
       const candidate = FENCE_DELIM.exec(line.text);
       if (
         candidate !== null &&
+        closesFence(line, opener) &&
         (candidate[2] as string)[0] === run[0] &&
         (candidate[2] as string).length >= run.length &&
         strip(candidate[3] as string) === ""
