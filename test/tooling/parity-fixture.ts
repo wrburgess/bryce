@@ -1,8 +1,8 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { linkCheckedFiles, markdownLinks, resolveInsideRoot } from "../../scripts/parity-check.js";
+import { ADR_DIR, linkCheckedFiles, markdownLinks, resolveInsideRoot } from "../../scripts/parity-check.js";
 
 // Shared fixture copier for the parity self-tests (issue #139). Both tooling tests hand
 // `runParityCheck` a real tree in an OS tmpdir; this module owns HOW that tree is built so there is
@@ -85,6 +85,11 @@ export function copyBundle(
  * (`resolveInsideRoot`) rather than being re-derived: this file used to carry its own copy of that
  * expression, and a rule written three times and enforced twice is what issue #165 was.
  *
+ * It is contained AWAY from `docs/adr/` for the opposite reason — see the rule in the body. Issue #164
+ * put that directory in the checked scope, and therefore in this healer's reach, without the rule:
+ * healing there manufactures a record file and converts a dead link into a duplicate-ADR-number error
+ * naming a file nobody wrote (issue #163).
+ *
  * The file list and the link EXTRACTION both come from scripts/parity-check.ts (issue #159) rather than
  * being mirrored here, so the healer and the checker cannot drift apart on either. Sharing
  * `markdownLinks` is what stops it stubbing out the pseudo-links in code spans — with a regex of its
@@ -94,6 +99,8 @@ export function copyBundle(
  * checker ignores those either way — so it has its own test in parity-links.test.ts.
  */
 export function healDeadLinks(root: string): void {
+  const adrDir = resolve(root, ADR_DIR);
+
   for (const rel of linkCheckedFiles(root)) {
     const file = join(root, rel);
     if (!existsSync(file)) continue;
@@ -105,8 +112,35 @@ export function healDeadLinks(root: string): void {
       const target = raw.split("#")[0] ?? "";
       if (target === "") continue;
 
+      // Root containment comes from the checker's ONE authored copy (issue #165), not a fourth
+      // hand-written prefix test -- this file used to carry its own and that is how #165 happened.
       const resolved = resolveInsideRoot(root, dirname(file), target);
       if (resolved === null) continue;
+
+      // Then a SECOND, narrower rule: never synthesize a record file. A stub under docs/adr/ named
+      // `NNNN-*.md` collides with the real ADR of that number, so checkAdrNumbers reports "Duplicate ADR
+      // number" for a file nobody wrote and the dead link that caused it vanishes from the output
+      // entirely (issue #163). A dead ADR link is a defect; it stays visible AS a dead link.
+      //
+      // Tested on the RESOLVED path, so `../adr/x`, `./0001-y.md`, and a plain name all land in it.
+      // Deliberately not limited to the ADR filename pattern or to `.md`: the rule is "this directory
+      // holds records", and a narrower rule just moves the hole.
+      //
+      // CASE-INSENSITIVE, and deliberately NOT delegated to `resolveInsideRoot`, which is exact. The two
+      // are different guards pointing different ways. `resolve()` never consults the filesystem, so on a
+      // case-insensitive volume (APFS, NTFS -- what this repo is developed on) `../ADR/0029-x.md` fails an
+      // exact test while `writeFileSync` still lands the stub in that very directory; reproduced before
+      // fixing. Folding is safe HERE because this guard DENIES: on a case-sensitive volume `docs/ADR/` is
+      // genuinely separate and declining to stub into it merely reports the dead link. Folding
+      // `resolveInsideRoot` instead would loosen a guard whose callers ask the permissive question --
+      // exactly what `rules/scripting.md` forbids. ADR_DIR is fixed ASCII lowercase, so no locale care.
+      // Like `resolveInsideRoot`, this is string arithmetic: a symlink inside the copy pointing back at
+      // docs/adr/ would resolve outside the literal prefix and slip both guards. Not reachable today --
+      // nothing under docs/ is a symlink and `copyBundle`'s `cpSync` manufactures none -- so the
+      // assumption is recorded rather than paid for with a `realpath` on every href.
+      const resolvedKey = resolved.toLowerCase();
+      const adrKey = adrDir.toLowerCase();
+      if (resolvedKey === adrKey || resolvedKey.startsWith(adrKey + sep)) continue;
       if (existsSync(resolved)) continue;
 
       mkdirSync(dirname(resolved), { recursive: true });

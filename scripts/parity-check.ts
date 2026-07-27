@@ -69,7 +69,10 @@ const LINK_CHECKED = [
 const GUIDES_DIR = "docs/guides";
 const REQUIRED_GUIDES = ["docs/guides/usage.md"];
 
-const ADR_DIR = "docs/adr";
+// Exported for the same reason `resolveInsideRoot` is (issue #165): test/tooling/parity-fixture.ts needs
+// to know which directory holds records so its healer never manufactures one, and a second hand-written
+// "docs/adr" over there is exactly the drift that lets the two disagree.
+export const ADR_DIR = "docs/adr";
 const ADR_FILENAME = /^(\d+)-.+\.md$/;
 const ADR_LINK_LABEL = /^ADR (\d{4})$/;
 const ADR_LINK_TARGET = /^(\d{4})-[^/]+\.md$/;
