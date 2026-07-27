@@ -11,10 +11,13 @@ where a `→` glyph in `bin/ai-config-sync`'s output crashed on a US-ASCII-local
 ## Why a source-byte scan is the wrong instrument
 
 - **The sources contain intentional non-ASCII bytes.** Every bundled `bin/`/`scripts/` file uses em
-  dashes (`—`) in comments, and [`scripts/protected_branches.rb`](../../scripts/protected_branches.rb)
+  dashes (`—`) in comments, and [`scripts/protected-branches.ts`](../../scripts/protected-branches.ts)
   defines a **functional** `EM_DASH = "—"` constant — it exists to parse the ` — ` separator in
   `PROJECT.md`'s Branch & PR Policy, the source of the protected-branch list. A source scan would
-  redden CI immediately and fight a load-bearing constant.
+  redden CI immediately and fight a load-bearing constant. (The file was
+  `scripts/protected_branches.rb` when this was decided; ported per
+  [ADR 0039](0039-repo-tooling-unifies-on-typescript-remove-ruby.md), and the constant survived the
+  port unchanged.)
 - **The rule targets runtime output, not source bytes.** The failure mode is a non-ASCII byte reaching
   a pipe under a non-UTF-8 locale. Whether a given source byte is *emitted* cannot be decided by
   scanning the file — a comment em dash is harmless; an em dash in a string passed to `puts` is not.

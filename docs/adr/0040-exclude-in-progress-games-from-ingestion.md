@@ -3,7 +3,7 @@
 **Status:** accepted — tightens the ingestion half of [ADR 0030](0030-full-season-refresh-report-once-digest.md) (issue #77).
 
 Refresh re-ingests every active Player's complete current-season game log and upserts idempotently on
-the [ADR 0029](0029-per-game-stat-line-identity.md) per-game key. It ingested **every** allowlisted
+the [ADR 0029](0029-stat-lines-per-game-keyed-by-game-id.md) per-game key. It ingested **every** allowlisted
 split unconditionally — with no notion of whether the game was final. The MLB `gameLog` split carries
 **no game-status field** (its `game` object is `{gamePk, link, content, gameNumber, dayNight}`; verified
 against `test/fixtures/mlb/gamelog_pitching_mlb.json`), and a game appears in the log the moment it
