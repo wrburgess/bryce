@@ -240,16 +240,16 @@ under `auto` the AC proceeds on its own recommended option, under `required` the
 
 How [`final`](skills/final/SKILL.md) handles the Rules-Layer / config improvements it learns during
 implementation, now that a hands-off run reaches the merge gate on its own. Its shipped default is
-`autonomous-fold`; allowed values `autonomous-fold | present-to-hc`. This is a **documentary** value —
+`present-to-hc`; allowed values `autonomous-fold | present-to-hc`. This is a **documentary** value —
 prose, **not** a third row in the gate table above (the parser reads a two-row table and must stay
 two-row), so it is changed by editing this paragraph.
 
-- **`autonomous-fold`** (shipped default) — `final` **folds** well-scoped, low-risk Rules-Layer/config
+- **`autonomous-fold`** — `final` **folds** well-scoped, low-risk Rules-Layer/config
   improvements into the **same PR a human merges**, so the merge gate stays the backstop for them, and
   **defers** large or contentious ones to a follow-up issue recorded in the SOW. The discretion bar:
   well-scoped **and** low-risk → fold; large **or** contentious → defer.
-- **`present-to-hc`** — `final` **presents** the suggestions to the HC and waits, editing no Rules
-  Layer or config without approval.
+- **`present-to-hc`** (shipped default) — `final` **presents** the suggestions to the HC and waits,
+  editing no Rules Layer or config without approval.
 
 A fold changes the diff **after** `verify` closed the Reviewer summons, so `final` re-anchors the
 backstop: it compares the reviewed commit SHA recorded by `verify` against `HEAD` and, when they

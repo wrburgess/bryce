@@ -128,7 +128,9 @@ describe("extract - the shipped PROJECT.md data contract", () => {
   it("parses this host's plan-approval, floor, and disposition declarations", () => {
     expectField(shipped, "planApproval", "auto", "parsed", "auto");
     expectField(shipped, "reviewerFloor", "stop-and-ask", "parsed", "stop-and-ask");
-    expectField(shipped, "ruleDisposition", "autonomous-fold", "parsed", "autonomous-fold");
+    // `present-to-hc` is ALSO this field's fail-closed default, so `effective` alone cannot tell a
+    // real declaration from a broken one. `value` + `status: parsed` are what carry the proof here.
+    expectField(shipped, "ruleDisposition", "present-to-hc", "parsed", "present-to-hc");
   });
 
   // Asserted on its own: a plan-approval edit must never be able to mask a merge-gate regression.
