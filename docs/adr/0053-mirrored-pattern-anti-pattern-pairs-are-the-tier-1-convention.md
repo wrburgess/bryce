@@ -94,7 +94,12 @@ into a named, testable behavior unit") restates the Pattern almost exactly, and 
 uniquely adds — *discoverable*, easy to **find** — is thin. It passes, because the Anti-Pattern still
 carries a mechanism the Pattern does not ("it can't be reused or tested") and the Pattern still names
 the positive action. But it passes narrowly, and it is the pair to revisit first if this convention is
-ever tightened. Every other pair clears the bar with room.
+ever tightened.
+
+`rules/self-review.md`'s "Confirm every planned item has a corresponding test" ↔ "Never ship minimal
+assertions and call it complete" is the second-thinnest, for the same reason — the Anti-Pattern's
+rationale ("the last 20% is where quality lives") adds little the Pattern's "would it actually fail if
+the feature broke" does not already imply. The remaining nineteen pairs clear the bar with room.
 
 ## The audit corrected the bar — the case that shaped it
 
