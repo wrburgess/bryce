@@ -334,7 +334,14 @@ describe("parity check - a bullet is measured across its wrapped continuation li
     ["a blank line", `${SHORT}\n\n${LONG_TRAILER}`],
     ["a sibling bullet", `${SHORT}\n- **Another one** — ${LONG_TRAILER}`],
     ["a heading", `${SHORT}\n## A heading ${LONG_TRAILER}`],
+    // A lone `#` IS a valid empty ATX heading, so this is a stays-correct sanity check rather than a
+    // regression test for the padding rule below -- it passed before that fix too (Reviewer, delta 2).
     ["a bare hash heading", `${SHORT}\n#\n${LONG_TRAILER}`],
+    // The list markers take `$` for the same CommonMark reason `#` does: a bare marker opens an empty
+    // list item. These DO discriminate -- without the `$` branch each is swallowed as prose.
+    ["a bare dash marker", `${SHORT}\n-\n${LONG_TRAILER}`],
+    ["a bare star marker", `${SHORT}\n*\n${LONG_TRAILER}`],
+    ["a bare ordered marker", `${SHORT}\n1.\n${LONG_TRAILER}`],
     ["a fenced block", `${SHORT}\n\`\`\`\n${LONG_TRAILER}\n\`\`\``],
     ["a blockquote", `${SHORT}\n> ${LONG_TRAILER}`],
   ])("stops the bullet at %s", (_label, body) => {

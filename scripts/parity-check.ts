@@ -110,9 +110,13 @@ const RULE_BULLET = /^\s*[-*+][ \t]+\*\*(.+?)\*\*/;
 // heading rule is the one that bites: `#` NOT followed by a space, a tab, or end-of-line is not a
 // heading at all -- `#152` is literal text. Treating it as a block opener would end the bullet at any
 // wrap that happened to break before an issue reference, and these files are made of issue references,
-// so the remainder of the bullet would be counted toward nothing at all. A blockquote `>` and a fence,
-// by contrast, genuinely need no following space.
-const RULE_BLOCK_OPENER = /^\s*(?:[-*+][ \t]|\d+\.[ \t]|#{1,6}(?:[ \t]|$)|```|>)/;
+// so the remainder of the bullet would be counted toward nothing at all. Seven or more hashes is not a
+// heading either, and falls out of the same bound.
+//
+// The list markers take `$` for the same reason in the other direction: a bare `-`, `*`, `+`, or `1.`
+// alone on a line opens an EMPTY list item in CommonMark, so it ends the preceding bullet rather than
+// continuing it. A blockquote `>` and a fence genuinely need no following space and take none.
+const RULE_BLOCK_OPENER = /^\s*(?:[-*+](?:[ \t]|$)|\d+\.(?:[ \t]|$)|#{1,6}(?:[ \t]|$)|```|>)/;
 
 // Each Tier-1 rule's own domain deep doc, or `null` for a rule that has none BY DESIGN
 // (docs/rules/README.md records self-review as "(none - the checklist is the whole rule)").
