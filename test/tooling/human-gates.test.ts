@@ -156,17 +156,31 @@ describe("extract - the shipped PROJECT.md data contract", () => {
 // This is the disposition's own outcome 1 (enforce) applied to the disposition: the invariant is
 // mechanically checkable, so it gets a test rather than a rule bullet.
 const DECLARATION = /shipped default is\s+`[^`]+`/gi;
+const GATES_HEADING = "## Human Gates";
 const DISPOSITION_HEADING = "### Rule-suggestion disposition";
 
-/** The subsection body, sliced exactly the way `scripts/human-gates.ts` slices it. */
+/** Everything after `heading` up to the next `## ` H2, or `null` when the heading is not there. */
+function sectionBody(lines: string[], heading: string): string[] | null {
+  const start = lines.findIndex((l) => l.trim().toLowerCase() === heading.toLowerCase());
+  if (start === -1) return null;
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((l) => l.startsWith("## ")); // `### ...` does not match, as in the parser
+  return end === -1 ? rest : rest.slice(0, end);
+}
+
+/**
+ * The subsection body, sliced the way `scripts/human-gates.ts` slices it: `## Human Gates` FIRST, then
+ * the disposition heading nested inside it. Searching the whole file for the heading instead would
+ * count a subsection the parser cannot see — it reports `absent` for one placed outside `## Human
+ * Gates` — and this guard would then bless a file the parser reads as undeclared.
+ */
 function dispositionBody(text: string): string {
   const lines = text.split("\n").map((l) => l.replace(/\r$/, ""));
-  const start = lines.findIndex((l) => l.trim().toLowerCase() === DISPOSITION_HEADING.toLowerCase());
-  if (start === -1) return "";
-  const rest = lines.slice(start + 1);
-  const end = rest.findIndex((l) => l.startsWith("## ")); // the next H2 ends it, as in the parser
+  const gates = sectionBody(lines, GATES_HEADING);
+  if (gates === null) return "";
+  const body = sectionBody(gates, DISPOSITION_HEADING);
   // Joined, not scanned line by line: the declaring sentence legitimately wraps across a newline.
-  return (end === -1 ? rest : rest.slice(0, end)).join("\n");
+  return body === null ? "" : body.join("\n");
 }
 
 function declarations(text: string): string[] {
@@ -202,6 +216,23 @@ describe("the shipped disposition subsection declares its value exactly once", (
   it("ignores a declaration outside the subsection", () => {
     expect(declarations(`${text}\n## Elsewhere\n\nIts shipped default is \`autonomous-fold\`.\n`))
       .toHaveLength(1);
+  });
+
+  // The parser reports `absent` for a subsection nested outside `## Human Gates`, so a counter that
+  // found the heading anywhere in the file would bless a declaration the tooling never reads.
+  it("counts nothing when the subsection sits outside `## Human Gates`", () => {
+    const orphaned = [
+      "# PROJECT.md - fixture",
+      "",
+      "## Somewhere Else",
+      "",
+      DISPOSITION_HEADING,
+      "",
+      "Its shipped default is `autonomous-fold`.",
+      "",
+    ].join("\n");
+    expect(extract(orphaned).ruleDisposition.status).toBe("absent"); // what the parser sees
+    expect(declarations(orphaned)).toHaveLength(0); // ...and now what this guard sees
   });
 });
 

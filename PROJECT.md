@@ -248,7 +248,7 @@ hard-fails anything else.
 
 **Every rule suggestion resolves to exactly one of four outcomes.** This section once offered two —
 fold or defer — and neither of them was "drop it", so nothing was ever dropped and the corpus grew by
-~2 permanent Tier-1 bullets per shipped issue (#185).
+~2 permanent Tier-1 bullets per shipped issue ([#185](https://github.com/wrburgess/bryce/issues/185)).
 
 1. **Enforce** — write the guard and its regression test. The default for any mechanically checkable
    invariant.
@@ -267,7 +267,7 @@ without approval**. Only outcome 2, the prose, waits on the setting.
 
 **A high-severity first occurrence takes outcome 1 immediately** — fix, guard, test, in this PR, under
 either setting. `final`'s requirement that every Critical and High finding be resolved before the SOW
-outranks this setting. A flat wait-for-recurrence rule would have deferred #163, a fail-open
+outranks this setting. A flat wait-for-recurrence rule would have deferred [#163](https://github.com/wrburgess/bryce/issues/163), a fail-open
 containment guard.
 
 - **`autonomous-fold`** — `final` picks the outcome and acts on it: an outcome 1 or 2 is **folded** into
@@ -308,7 +308,7 @@ it and the reviewed SHA it was based on, so the chain is reconstructable from th
 
 **Minting freeze.** No new Tier-1 rule bullet until this gate is live. The freeze **lifts** when (a) the
 four-outcome disposition is in this file and in both skill bodies, and (b) a bounded corpus review has
-dispositioned the 45 loop-added bullets measured in #185. An open-ended freeze is the same failure mode
+dispositioned the 45 loop-added bullets measured in [#185](https://github.com/wrburgess/bryce/issues/185). An open-ended freeze is the same failure mode
 inverted, so its exit is named up front.
 
 This setting governs only the rule-suggestion step of `final` and `listen`; it does not touch
