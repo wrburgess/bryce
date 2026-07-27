@@ -68,7 +68,7 @@ state, so re-running a Window always sends the same content.
   distinct regular-season games — a per-player ordered limit, so two Players in one report cover
   different date spans, and each row carries its real games count (`GP`) and first–last date (`Span`).
   They are **on-demand only** (no daily slot), like a cohort scope, and compose with `--list` / `--tags`
-  ([#153](https://github.com/wrburgess/bryce/issues/153) / [ADR 0051](../adr/0051-cohort-game-count-windows.md)).
+  ([#153](https://github.com/wrburgess/bryce/issues/153) / [ADR 0052](../adr/0052-cohort-game-count-windows.md)).
 
   ```sh
   sk digest -w last10games                             # all tracked, each over his last 10 games
