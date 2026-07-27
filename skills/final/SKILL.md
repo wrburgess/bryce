@@ -61,8 +61,11 @@ skipped: stop and recheck.
    recurrence → eligible for a real outcome, entering this step's disposition beside the new suggestions.
    Then close the entry out **before this run ends**, because **a due entry never survives its own sweep
    as active, whichever branch it took**: archived on no recurrence; archived **with a pointer to what it
-   became** once a promoted outcome is applied; archived as *presented, awaiting HC* while a `pending HC
-   decision` row is still open. Bounding only the archived side leaves the promotion side unbounded: an
+   became** once a promoted outcome is applied; archived as *presented; outcome 4 unless a resumed pass
+   records otherwise* while a `pending HC decision` row is still open — the **same wording** the paragraph
+   below requires, because two spellings of one disposition is two dispositions, and the looser one wins
+   whenever a reader stops at the first. Bounding only the archived side leaves the promotion side
+   unbounded: an
    entry presented, never answered, and defaulted to *do nothing* would still be active with the same past
    review date, and every later run would re-present it identically.
 
