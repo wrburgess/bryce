@@ -37,7 +37,11 @@ const NATIVE_CAPABLE_ADAPTERS = ["GEMINI.md"];
 const COPILOT_ADAPTER = ".github/copilot-instructions.md";
 const PROJECT_CONFIG = "PROJECT.md";
 
-const LINK_CHECKED = [
+// The Adapter surface `checkRenderedRegions` scans for a `parity:render` block. This was once the same
+// list as the dead-link scope; issue #159 split them because they answer different questions. A render
+// marker is an ADAPTER concern, so folding it into the (much wider) link scope would silently start
+// scanning ~30 more files for a marker that has no business appearing in them.
+const RENDER_SCANNED = [
   "AGENTS.md",
   "CLAUDE.md",
   "GEMINI.md",
@@ -52,6 +56,15 @@ const LINK_CHECKED = [
   "docs/mcp/README.md",
 ];
 
+// The AUTHORED seed of the dead-link scope; `linkCheckedFiles()` derives the rest. Every render-scanned
+// file is also link-checked (the containment runs one way only, which is why this is derived rather
+// than a second hand-kept copy), plus the two prose-heavy documents that have no other home.
+const LINK_CHECKED = [
+  ...RENDER_SCANNED,
+  "CONTEXT.md",
+  "docs/rules/README.md",
+];
+
 const GUIDES_DIR = "docs/guides";
 const REQUIRED_GUIDES = ["docs/guides/usage.md"];
 
@@ -61,6 +74,13 @@ const ADR_LINK_LABEL = /^ADR (\d{4})$/;
 const ADR_LINK_TARGET = /^(\d{4})-[^/]+\.md$/;
 // Inline links cannot cross a line boundary. Keeping this deliberately narrow
 // means a malformed opening link cannot consume and misclassify a later line.
+//
+// KNOWN LIMITATION (issue #159): a CommonMark link TITLE — `[text](path "title")` — is captured into
+// group 2 along with the path, so such a link would resolve as `path "title"` and never be found. No
+// file in the repo uses title syntax today. It is left unhandled deliberately: parsing a destination
+// properly also means `<angle-bracket>` destinations and balanced nested parens, and a half-right split
+// risks producing a target that resolves BY ACCIDENT — a false green traded for a false red that
+// nothing currently triggers, which is the wrong side of rules/scripting.md's asymmetry rule.
 const MARKDOWN_LINK = /\[([^\]\r\n]*)\]\(([^)\r\n]+)\)/g;
 const MARKDOWN_SCAN_EXCLUDED_DIRS = new Set([".git", "node_modules", ".claude/worktrees", ".codex-worktrees"]);
 
@@ -227,6 +247,243 @@ function inspectArray(arr: string[]): string {
   return "[" + arr.map(esc).join(", ") + "]";
 }
 
+// --- Code masking: a link inside code is not a link (issue #159, ADR 0053) -------------------------
+//
+// `rules/security.md` writes `![x](url)` while TEACHING escaping; `docs/rules/README.md` writes
+// `[text](path)` four times while teaching the deep-doc form rule. Those are prose ABOUT markdown, and
+// resolving them as hrefs is a false RED — which is exactly why both files sat outside the dead-link
+// scope entirely, an unchecked gap that announced itself to nobody (rules/scripting.md: nothing tells
+// you it isn't checking).
+//
+// `maskCode` blanks code content and returns a string of IDENTICAL LENGTH: every non-newline byte it
+// removes becomes a space, and newlines are preserved. Callers keep matching the same regexes at the
+// same offsets, and keep reporting the raw href a contributor actually typed.
+//
+// Two deliberate departures from CommonMark, recorded in ADR 0053. Both are chosen so the residual
+// failure is a false RED (loud, cheap, self-announcing) rather than a false GREEN (silent, and it takes
+// the whole guard with it) — rules/scripting.md's asymmetry rule:
+//
+//   * INDENTED (4-space) code blocks are NOT masked. At this altitude they cannot be told apart from a
+//     wrapped continuation under a nested list item, and rules/*.md and the skill bodies are made of
+//     those; masking them would blank real links.
+//   * A fence's CONTAINER is not tracked, so a fence opened inside a list item or a blockquote is
+//     closed by the next matching delimiter anywhere, not only one in the same container.
+//
+// Fence delimiters are recognized after any run of whitespace and/or blockquote markers, rather than
+// CommonMark's container-relative ` {0,3}`. That is the SAFER direction, not merely the simpler one.
+// Under ` {0,3}`, a fence nested beneath a wide list marker (`10. `, a nested sub-list) or inside a
+// blockquote goes unrecognized — and its delimiter backticks then fall through to the INLINE scanner as
+// an ordinary backtick run, free to pair with some distant run and blank every real link in between.
+// That was not theoretical: `> ``` … > ``` ` reached the right answer only because its two 3-backtick
+// runs happened to match as an inline span, and a closer written one backtick longer — still a valid
+// fence close — would have sent the scanner hunting into unrelated prose. Consuming these as fences
+// REMOVES the hazard rather than documenting it.
+//
+// The only lines this newly claims are ones prefixed with indentation or `>` and carrying a fence run:
+// inside a blockquote it IS a fence, and a line indented >= 4 outside a list is an indented code block.
+// Already code, either way.
+const FENCE_DELIM = /^([\s>]*)(`{3,}|~{3,})(.*)$/;
+
+/** Overwrite `[start, end)` with spaces, leaving newlines in place so every offset survives. */
+function maskRange(chars: string[], start: number, end: number): void {
+  for (let k = start; k < end; k++) {
+    if (chars[k] !== "\n") chars[k] = " ";
+  }
+}
+
+/**
+ * Is the character at `index` backslash-escaped? CommonMark honors backslash escapes everywhere except
+ * INSIDE a code span, so `\`` is a literal backtick that opens nothing. Skipping this check would let
+ * an escaped backtick open a span and blank the real links after it — a false green.
+ */
+function isEscaped(text: string, index: number): boolean {
+  let backslashes = 0;
+  for (let k = index - 1; k >= 0 && text[k] === "\\"; k--) backslashes++;
+  return backslashes % 2 === 1;
+}
+
+/** Length of the maximal run of the character at `index`. */
+function runLength(text: string, index: number): number {
+  const ch = text[index];
+  let end = index;
+  while (end < text.length && text[end] === ch) end++;
+  return end - index;
+}
+
+/**
+ * Per-character flags marking every position on a whitespace-only line, and that line's terminating
+ * newline. A blank line ends a paragraph, so a code span may not cross one.
+ *
+ * This does double duty: a masked fence line is all spaces, hence blank, so these flags ALSO stop an
+ * inline span from reaching across a fenced block into unrelated prose.
+ */
+function blankLineFlags(text: string): boolean[] {
+  const flags = new Array<boolean>(text.length).fill(false);
+  let start = 0;
+
+  while (start <= text.length) {
+    let end = text.indexOf("\n", start);
+    if (end === -1) end = text.length;
+
+    if (strip(text.slice(start, end)) === "") {
+      for (let k = start; k < end; k++) flags[k] = true;
+      if (end < text.length) flags[end] = true;
+    }
+
+    if (end === text.length) break;
+    start = end + 1;
+  }
+  return flags;
+}
+
+/** The closing run of exactly `len` backticks, or -1 if the opener is unmatched within its paragraph. */
+function findCloser(text: string, from: number, len: number, blankAt: readonly boolean[]): number {
+  let k = from;
+  while (k < text.length) {
+    if (blankAt[k]) return -1;
+    if (text[k] !== "`" || isEscaped(text, k)) {
+      k++;
+      continue;
+    }
+    const run = runLength(text, k);
+    if (run === len) return k;
+    k += run;
+  }
+  return -1;
+}
+
+/**
+ * Blank every fenced block and inline code span, preserving length and newline positions.
+ *
+ * Block structure is resolved before inlines, the order CommonMark itself parses in — so a backtick
+ * that belongs to a fence delimiter can never be re-read as an inline opener.
+ */
+export function maskCode(text: string): string {
+  const chars = text.split("");
+
+  // --- Fenced blocks, line-scoped. An UNCLOSED fence masks to EOF: that is what CommonMark says and
+  // what a renderer shows, so the content genuinely is code, not coverage quietly dropped.
+  let lineStart = 0;
+  let fence: { char: string; len: number } | null = null;
+
+  while (lineStart <= text.length) {
+    let lineEnd = text.indexOf("\n", lineStart);
+    if (lineEnd === -1) lineEnd = text.length;
+
+    const delim = FENCE_DELIM.exec(text.slice(lineStart, lineEnd));
+    if (fence === null) {
+      if (delim !== null) {
+        const run = delim[2] as string;
+        // A backtick fence's info string may not contain a backtick (CommonMark); a tilde fence's may.
+        if (run[0] !== "`" || !(delim[3] as string).includes("`")) {
+          fence = { char: run[0] as string, len: run.length };
+          maskRange(chars, lineStart, lineEnd);
+        }
+      }
+    } else {
+      const run = delim === null ? "" : (delim[2] as string);
+      const closes =
+        delim !== null &&
+        run[0] === fence.char &&
+        run.length >= fence.len &&
+        strip(delim[3] as string) === "";
+      maskRange(chars, lineStart, lineEnd);
+      if (closes) fence = null;
+    }
+
+    if (lineEnd === text.length) break;
+    lineStart = lineEnd + 1;
+  }
+
+  // --- Inline code spans, over what the fence pass left behind.
+  //
+  // CommonMark's real rule, not the shape today's files happen to use: a maximal run of N backticks
+  // opens, and ONLY a run of exactly N closes it. An UNMATCHED run is literal text and scanning resumes
+  // immediately after it — the single property that stops one stray backtick from blanking the rest of
+  // a file, which is the silent failure this whole guard exists to avoid.
+  const fenced = chars.join("");
+  const blankAt = blankLineFlags(fenced);
+
+  let i = 0;
+  while (i < fenced.length) {
+    if (fenced[i] !== "`") {
+      i++;
+      continue;
+    }
+    if (isEscaped(fenced, i)) {
+      i++;   // `\`` is a literal backtick: it opens nothing, and the rest of the run is re-measured
+      continue;
+    }
+
+    const open = runLength(fenced, i);
+    const close = findCloser(fenced, i + open, open, blankAt);
+    if (close === -1) {
+      i += open;
+      continue;
+    }
+    maskRange(chars, i, close + open);
+    i = close + open;
+  }
+
+  return chars.join("");
+}
+
+/** Immediate subdirectory names of `absolute`, sorted; empty when it is not a readable directory. */
+function subdirectories(absolute: string): string[] {
+  try {
+    return readdirSync(absolute)
+      .sort()
+      .filter((child) => {
+        try {
+          return statSync(join(absolute, child)).isDirectory();
+        } catch {
+          return false;
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The files whose markdown links `checkLinks` resolves (issue #159).
+ *
+ * DERIVED, not hand-kept, for everything below the authored seed: a tenth Skill or a new command shim is
+ * link-checked the day it lands, with nobody having to remember a list. The alternative — the twelve
+ * hardcoded paths this replaced — is how `rules/*.md` went unchecked for its entire life while carrying
+ * links the whole time.
+ *
+ * `docs/adr/*.md` is deliberately absent: it carries two dead links whose repair means editing accepted
+ * ADRs, which is a records decision rather than a validator one. Tracked as a follow-up, not silently
+ * dropped. A path listed here but absent from disk is skipped by the caller, so the derivation is safe
+ * against a bundle that ships a subset.
+ */
+export function linkCheckedFiles(root: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const add = (rel: string): void => {
+    if (seen.has(rel)) return;
+    seen.add(rel);
+    out.push(rel);
+  };
+
+  for (const rel of LINK_CHECKED) add(rel);
+  for (const rel of REQUIRED_RULES) add(rel);
+  for (const name of subdirectories(join(root, SKILLS_DIR))) add(`${SKILLS_DIR}/${name}/SKILL.md`);
+
+  let shims: string[] = [];
+  try {
+    shims = readdirSync(join(root, CLAUDE_COMMANDS_DIR)).sort();
+  } catch {
+    shims = [];
+  }
+  for (const name of shims) {
+    if (name.endsWith(".md")) add(`${CLAUDE_COMMANDS_DIR}/${name}`);
+  }
+
+  return out;
+}
+
 export interface ParityResult {
   readonly status: 0 | 1;
   readonly errors: readonly string[];
@@ -367,7 +624,7 @@ class ParityCheck {
     if (!this.exists(CANONICAL)) return;
 
     const canonical = this.read(CANONICAL);
-    for (const rel of LINK_CHECKED) {
+    for (const rel of RENDER_SCANNED) {
       if (!this.exists(rel)) continue;
 
       const lines = toLines(this.read(rel));
@@ -474,10 +731,16 @@ class ParityCheck {
   // paragraph below says why they differ. The single exception is a BARE-PATH `**Deep doc:**`
   // header declaration, which may forward-reference a deep doc that does not exist yet.
   //
-  // Why it matters here and nowhere else: `rules/*.md` is deliberately absent from LINK_CHECKED, so
-  // checkLinks() never sees these files and this check is the ONLY validator they get. A Tier-1
-  // bullet pointing at a deep doc stands in for content that was MOVED there, so a broken pointer
-  // silently loses the case study with nothing else to notice.
+  // Why it still matters now that `rules/*.md` IS link-checked (issue #159): checkLinks() validates the
+  // LINK form only, and the convention's default form for a deep doc is a BACKTICKED path — precisely so
+  // a pointer can be written before its target lands without reddening the gate. Nothing but this check
+  // ever resolves a backticked path, and a Tier-1 bullet pointing at a deep doc stands in for content
+  // that was MOVED there, so a broken bare pointer still loses the case study with nothing else to
+  // notice. The two checks are complementary, not redundant.
+  //
+  // Corollary, and the reason the fenced-line walk below is NOT replaced by maskCode(): this check
+  // exists to READ backticked text. Feeding it masked input would blank the very substring it searches
+  // for and blind it completely. Same for ruleBullets(). Do not "finish the refactor".
   //
   // The two reference forms resolve against different bases, because Markdown does: a BACKTICKED
   // path is prose naming a REPO-ROOT path (this.exists), while a LINK is a link and resolves
@@ -896,7 +1159,11 @@ class ParityCheck {
    */
   private checkAdrLinkNumbers(): void {
     for (const rel of this.markdownFiles()) {
-      for (const match of this.read(rel).matchAll(MARKDOWN_LINK)) {
+      // Masked for the same reason checkLinks() is (issue #159): a citation inside a code span is a
+      // worked EXAMPLE of the convention, not a citation. Verified to change no verdict across all 108
+      // markdown files in the tree at the time it landed — this closes a latent gap, it does not move
+      // today's result.
+      for (const match of maskCode(this.read(rel)).matchAll(MARKDOWN_LINK)) {
         const label = match[1] ?? "";
         const labelMatch = ADR_LINK_LABEL.exec(label);
         if (labelMatch === null) continue;
@@ -964,11 +1231,12 @@ class ParityCheck {
   }
 
   private checkLinks(): void {
-    for (const rel of LINK_CHECKED) {
+    for (const rel of linkCheckedFiles(this.root)) {
       if (!this.exists(rel)) continue;
 
       const dir = dirname(this.path(rel));
-      for (const m of this.read(rel).matchAll(MARKDOWN_LINK)) {
+      // Masked, not raw: a `[text](path)` inside a code span is prose about markdown, not a link.
+      for (const m of maskCode(this.read(rel)).matchAll(MARKDOWN_LINK)) {
         let target = (m[2] ?? "").trim();
         if (target === "") continue;
         if (

@@ -30,11 +30,15 @@ Notice that every deferred deep doc above (e.g. `docs/rules/scripting-postmortem
 target pattern. That is deliberate and load-bearing:
 
 - The parity check's dead-link validator (`checkLinks` in `scripts/parity-check.ts`) resolves **only
-  markdown links**, and **only** in its explicit `LINK_CHECKED` file list. In one of those files, a
-  markdown link to a file that doesn't exist yet
-  reddens CI with a dead-link failure; a backticked path is inert text the validator ignores. A
-  separate repository-wide Markdown scan checks only local `[ADR NNNN](MMMM-...md)` links for a
+  markdown links** — and, since [#159](https://github.com/wrburgess/bryce/issues/159), **`rules/*.md` is
+  one of the files it resolves them in** (along with the skill bodies, the command shims, this file, and
+  `CONTEXT.md`; the file set is derived, not a hand-kept list). A markdown link to a file that doesn't
+  exist yet reddens CI with a dead-link failure; a backticked path is inert text the validator ignores.
+  A separate repository-wide Markdown scan checks only local `[ADR NNNN](MMMM-...md)` links for a
   disagreement between their displayed and target ADR numbers; it does not resolve additional links.
+- Both scans first blank every **fenced block and inline code span**, so a worked example like the
+  `[text](path)` on this line is prose about markdown, not a link. That is what made covering these
+  prose-heavy files possible at all ([ADR 0053](../adr/0053-code-spans-are-not-links.md)).
 - This is what lets the Rules Layer ship a trigger table — and any forward-reference to a
   planned-but-absent file — **without creating empty placeholder files** just to satisfy the checker.
 
@@ -50,8 +54,10 @@ The repo-root spelling `[the deep doc](docs/rules/x-postmortems.md)` names a rea
 a repo-root path**; a **link is a link**.
 
 **The resolution rule (Tier-1 rule files).** Inside `rules/*.md` a deep-doc path must additionally
-**resolve** — checked by `checkRulesPointers` in `scripts/parity-check.ts`, which is the *only*
-validator these files get, since `rules/*.md` is deliberately not in `LINK_CHECKED`. One exception: the
+**resolve** — checked by `checkRulesPointers` in `scripts/parity-check.ts`. Since #159 that check no
+longer stands alone, but it is still the *only* validator of the **backticked** form: `checkLinks`
+resolves links, and the convention's default spelling here is deliberately not a link. The two are
+complementary. One exception: the
 `**Deep doc:**` header **may forward-reference a deep doc that does not exist yet**, in bare form. That
 header is a *declaration* of where the domain's deep doc lives; `rules/frontend.md`,
 `rules/security.md`, and `rules/scripting.md` all rely on it today. A dead *link* in that same header is
