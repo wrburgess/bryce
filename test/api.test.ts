@@ -627,6 +627,29 @@ describe("REST API", () => {
       expect(await bogus.json()).toMatchObject({ error: "invalid-input" });
     });
 
+    it("previews a per-player game-count window, carrying per-row provenance (issue #153)", async () => {
+      const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+      await insertStatLine(opened.db, { playerId: player.id, gameId: 801, gameDate: "2026-07-12", stats: { hits: 1, atBats: 4 } });
+      await insertStatLine(opened.db, { playerId: player.id, gameId: 802, gameDate: "2026-07-18", stats: { hits: 2, atBats: 4 } });
+
+      const res = await app().request("/api/digest/preview?window=last10games", { headers: AUTH });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        window: { spec: string; label: string; groupBy: string };
+        batters: Array<{ agg: { games: number }; spanFrom?: string; spanTo?: string }>;
+      };
+      expect(body.window).toMatchObject({ spec: "last10games", label: "Last 10 Games", groupBy: "playerLevel" });
+      expect(body.batters[0]?.agg.games).toBe(2);
+      expect(body.batters[0]?.spanFrom).toBe("2026-07-12");
+      expect(body.batters[0]?.spanTo).toBe("2026-07-18");
+      // Read-only: no delivery row.
+      expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
+
+      // A malformed game-count-ish token still fails closed as 400.
+      const bad = await app().request("/api/digest/preview?window=last5games", { headers: AUTH });
+      expect(bad.status).toBe(400);
+    });
+
     it("scopes by ?tags, intersects with ?list, and rejects a malformed selector (#140)", async () => {
       const tagged = await insertPlayer(opened.db, { fullName: "Tagged Cohortguy" });
       await insertStatLine(opened.db, { playerId: tagged.id, gameDate: "2026-07-18" });

@@ -614,4 +614,74 @@ describe("renderDigest — non-ASCII name fidelity (#65 / ADR 0041)", () => {
     expect(mail.text).toContain("鈴木, I");
     expect(mail.html).toContain("鈴木, I");
   });
+
+  // A game-count report (issue #153) adds a per-row Span column; every other
+  // report leaves it off. It renders in all four surfaces (text/HTML/Markdown/CSV)
+  // because they all derive from one Column[].
+  describe("game-count Span column (#153)", () => {
+    function gameCountAssembly(batters: DigestRow[]): DigestAssembly {
+      return {
+        window: {
+          spec: "last10games",
+          from: "2026-07-03",
+          to: "2026-07-18",
+          label: "Last 10 Games",
+          groupBy: "playerLevel",
+        },
+        batters,
+        pitchers: [],
+        playerCount: batters.length,
+        statLineCount: batters.reduce((n, r) => n + r.agg.games, 0),
+        unknownFields: [],
+      };
+    }
+
+    const harperGames = row(
+      "Bryce Harper",
+      "batting",
+      [
+        { atBats: 4, hits: 2, plateAppearances: 4 },
+        { atBats: 3, hits: 1, plateAppearances: 4 },
+      ],
+      { spanFrom: "2026-07-12", spanTo: "2026-07-18" },
+    );
+
+    it("titles a game-count window by its count, not a date", () => {
+      expect(digestWindowTitle(gameCountAssembly([]).window)).toBe("Last 10 Games");
+    });
+
+    it("renders GP (the honest game count) and a Span column in text and HTML", () => {
+      const mail = renderDigest(gameCountAssembly([harperGames]));
+      expect(mail.text).toContain("GP");
+      expect(mail.text).toContain("Span");
+      expect(mail.text).toContain("Jul 12-18");
+      // GP is the aggregate's own games count (2), the "report 4, not 10" contract.
+      expect(mail.html).toContain("Span");
+      expect(mail.html).toContain("Jul 12-18");
+    });
+
+    it("carries the Span column into the Markdown and CSV surfaces too", () => {
+      const assembly = gameCountAssembly([harperGames]);
+      const md = renderDigestMarkdown(assembly);
+      expect(md).toContain("| Span |");
+      expect(md).toContain("Jul 12-18");
+      const csv = digestTableRows(assembly, "batters");
+      expect(csv.headers).toContain("Span");
+      expect(csv.rows[0]).toContain("Jul 12-18");
+    });
+
+    it("collapses a single-game span to one date", () => {
+      const oneGame = row("Solo Game", "batting", [{ atBats: 3, hits: 1, plateAppearances: 3 }], {
+        spanFrom: "2026-07-18",
+        spanTo: "2026-07-18",
+      });
+      expect(renderDigest(gameCountAssembly([oneGame])).text).toContain("Jul 18");
+    });
+
+    it("shows NO Span column on a date window (regression guard)", () => {
+      const mail = renderDigest(assemblyWith({ spec: "7d", batters: [harper7d] }));
+      expect(mail.text).not.toContain("Span");
+      expect(digestTableRows(assemblyWith({ spec: "7d", batters: [harper7d] }), "batters").headers).not.toContain("Span");
+    });
+  });
 });

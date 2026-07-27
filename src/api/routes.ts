@@ -5,6 +5,8 @@ import { bodyLimit } from "hono/body-limit";
 import { ZodError } from "zod";
 import { players } from "../db/schema.js";
 import { assembleDigest } from "../digest/assemble.js";
+import { assembleGameWindow } from "../digest/game-window.js";
+import { isGameCountSpec } from "../domain/window.js";
 import {
   digestTableRows,
   renderDigest,
@@ -349,13 +351,25 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
       throw err;
     }
     const list = query.list !== undefined ? await resolveListByName(deps.db, query.list) : undefined;
-    const assembly = await assembleDigest(deps.db, {
-      ...deps,
-      spec: query.window,
-      listId: list?.id,
-      listName: list?.name,
-      tagScope,
-    });
+    // A game-count window is a per-player ordered limit, not a shared date range,
+    // so it routes to its own assembly engine (issue #153); both produce the same
+    // preview shape and file formats.
+    const assembly = isGameCountSpec(query.window)
+      ? await assembleGameWindow(deps.db, {
+          now: deps.now,
+          tz: deps.tz,
+          spec: query.window,
+          listId: list?.id,
+          listName: list?.name,
+          tagScope,
+        })
+      : await assembleDigest(deps.db, {
+          ...deps,
+          spec: query.window,
+          listId: list?.id,
+          listName: list?.name,
+          tagScope,
+        });
     const spec = assembly.window.spec;
     if (query.format === "html") {
       return fileResponse(
