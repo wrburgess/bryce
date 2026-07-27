@@ -108,7 +108,8 @@ from [`PROJECT.md`](PROJECT.md) and post to its *Lifecycle Host*; their five-sta
 
 Host guidance loads in two tiers so session context stays lean
 ([ADR 0004](docs/adr/0004-two-tier-rules-layer-progressive-context.md)): **Tier 1 — Lean Core**
-(`rules/*.md`, always-resident, each with a **Patterns** + required **Anti-Patterns** section; ships
+(`rules/*.md`, **mandatory and task-routed** — read the applicable file when work enters its domain,
+each with a **Patterns** + required **Anti-Patterns** section; ships
 business-neutral, *extend per host*) and **Tier 2 — Deferred Deep Docs**
 (`docs/rules/<domain>-postmortems.md`, not auto-loaded — read on demand when a trigger fires; see
 [`docs/rules/README.md`](docs/rules/README.md)). The trigger table binds each tier:
@@ -123,9 +124,10 @@ business-neutral, *extend per host*) and **Tier 2 — Deferred Deep Docs**
 | Bundled / CLI scripts | [`rules/scripting.md`](rules/scripting.md) | `docs/rules/scripting-postmortems.md` |
 | Skill bodies + shims | [`rules/skills.md`](rules/skills.md) | `docs/rules/skills-postmortems.md` |
 
-A host binds each role to its own path globs (in `PROJECT.md` or its stack overlay). Claude's
-`.claude/rules/` auto-load may mirror the Lean Core; the Generic Baseline keeps a single canonical home
-under `rules/` and leaves that projection to a host.
+A host binds each role to its own path globs (in `PROJECT.md` or its stack overlay). **The trigger table
+above is the loading mechanism** — no tool auto-loads `rules/*.md` in this host, and none is wired to:
+the Generic Baseline keeps a single canonical home under `rules/` and leaves any per-tool projection to
+a host that wants one.
 
 ## Quality gate
 

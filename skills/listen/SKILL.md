@@ -59,9 +59,19 @@ the stop-and-ask judgment stay with the orchestrator. On a tool without sub-agen
    ```markdown
    Fixed in [commit] — [brief description of the change].
    ```
-6. For findings intentionally **not** addressed, reply with rationale (or a link to a follow-up issue):
+6. For findings intentionally **not** fixed in this PR, reply with an **explicit disposition** — never a
+   bare acknowledgement, and never an automatic follow-up issue. Where the finding carries a Rules-Layer
+   or config lesson, that disposition is one of the four outcomes in
+   [`PROJECT.md`](../../PROJECT.md) → *Human Gates* → *Rule-suggestion disposition* — *enforce*, *retain
+   a concise rule*, *record as an expiring finding*, or *do nothing* — and a new tracked issue is one way
+   to carry an outcome, not the default one. Under `present-to-hc` a *retain a concise rule* outcome is
+   recommended and presented, not written.
+
+   **The recursion bound** (same section): a **rule suggestion** arising from a delta review may not be
+   resolved by *retain a concise rule* — it resolves to *enforce*, *record as an expiring finding*, or
+   *do nothing* only.
    ```markdown
-   Acknowledged — [why this was not changed, or deferred to follow-up #N].
+   Acknowledged — [the disposition and why: enforced in <commit>, recorded as an expiring finding, deferred to #N, or no action and the reason].
    ```
 7. Post a summary comment on the PR:
    ```markdown

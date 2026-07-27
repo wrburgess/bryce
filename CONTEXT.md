@@ -61,11 +61,11 @@ The external platform where lifecycle artifacts live — assessments/plans on an
 _Avoid_: "the repo", "CI"
 
 **Rules Layer**:
-The tiered home for host guidance — patterns and anti-patterns. Split into a **Lean Core** (always resident) and **Deferred Deep Docs** (read on demand). Distinct from Project Config, which holds settings, not knowledge.
+The tiered home for host guidance — patterns and anti-patterns. Split into a **Lean Core** (mandatory, task-routed) and **Deferred Deep Docs** (read for a specific case study). Distinct from Project Config, which holds settings, not knowledge.
 _Avoid_: "docs", "guidelines"
 
 **Lean Core**:
-Tier 1 of the Rules Layer — small, invariant per-domain rule files that are always loaded, each with a Patterns and an Anti-Patterns section.
+Tier 1 of the Rules Layer — small, invariant per-domain rule files, read whenever work enters the domain each one covers (not auto-loaded; the `AGENTS.md` trigger table routes to them), each with a Patterns and an Anti-Patterns section.
 _Avoid_: "the rules" (ambiguous with the whole Rules Layer)
 
 **Deferred Deep Docs**:
@@ -79,7 +79,7 @@ _Avoid_: "gotcha", "warning"
 ## Relationships
 
 - The **Config Bundle** contains one **Canonical Source**, many **Adapters**, many **Skills**, one **Rules Layer**, and one **Project Config**.
-- The **Rules Layer** = **Lean Core** (Tier 1, always resident) + **Deferred Deep Docs** (Tier 2, on demand); a trigger table links a Tier-1 file to its Tier-2 deep doc.
+- The **Rules Layer** = **Lean Core** (Tier 1, mandatory and task-routed) + **Deferred Deep Docs** (Tier 2, read for a specific case study); a trigger table links a Tier-1 file to its Tier-2 deep doc.
 - A **Host App** vendors the **Generic Baseline**, then applies **Customization** (including its **Project Config**).
 - A **Host App** may also vendor one or more **Stack Overlays** (e.g. `ai-config-rails`) alongside the **Generic Baseline**: the baseline states each rule as a neutral, stack-agnostic principle; the overlay supplies that stack's concrete patterns and anti-patterns.
 - Each **Adapter** is derived from the **Canonical Source**; every **Skill** reads the **Project Config** for host-specific values.

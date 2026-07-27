@@ -238,21 +238,78 @@ under `auto` the AC proceeds on its own recommended option, under `required` the
 
 ### Rule-suggestion disposition
 
-How [`final`](skills/final/SKILL.md) handles the Rules-Layer / config improvements it learns during
-implementation, now that a hands-off run reaches the merge gate on its own. Its shipped default is
-`present-to-hc`; allowed values `autonomous-fold | present-to-hc`. This is a **documentary** value —
-prose, **not** a third row in the gate table above (the parser reads a two-row table and must stay
-two-row), so it is changed by editing this paragraph.
+How [`final`](skills/final/SKILL.md) and [`listen`](skills/listen/SKILL.md) handle the Rules-Layer /
+config improvements they learn during implementation. Its shipped default is `present-to-hc`; allowed
+values `autonomous-fold | present-to-hc`. This is a **documentary** value — prose, **not** a third row
+in the gate table above (the parser reads a two-row table and must stay two-row), so it is changed by
+editing this paragraph. The four outcomes below are the **menu**; they are *not* additional allowed
+values of this setting — `scripts/human-gates.ts` pins the range to the two above and the parity check
+hard-fails anything else.
 
-- **`autonomous-fold`** — `final` **folds** well-scoped, low-risk Rules-Layer/config
-  improvements into the **same PR a human merges**, so the merge gate stays the backstop for them, and
-  **defers** large or contentious ones to a follow-up issue recorded in the SOW. The discretion bar:
+**Every rule suggestion resolves to exactly one of four outcomes.** This section once offered two —
+fold or defer — and neither of them was "drop it", so nothing was ever dropped and the corpus grew by
+~2 permanent Tier-1 bullets per shipped issue (#185).
+
+1. **Enforce** — write the guard and its regression test. The default for any mechanically checkable
+   invariant.
+2. **Retain a concise rule** — only where the invariant needs human judgment or encodes a non-obvious
+   threat model. Must record: the triggering failure and its severity, *why a guard alone is
+   insufficient*, the consuming task, and **either an enforcing artifact or an existing bullet retired
+   in exchange**.
+3. **Record as an expiring finding** — in the findings log described below.
+4. **Do nothing** — the outcome that did not exist before, and the reason the corpus only grew.
+
+**What this setting governs, and what it never governs.** It decides the fate of the **Rules-Layer or
+config artifact**: a rule bullet, a config edit. It has never governed the **defect fix, its guard, or
+its regression test**, none of which is Rules Layer or config. Those are ordinary implementation work
+inside the PR, already backed by the merge gate — so **outcome 1 is available under both values,
+without approval**. Only outcome 2, the prose, waits on the setting.
+
+**A high-severity first occurrence takes outcome 1 immediately** — fix, guard, test, in this PR, under
+either setting. `final`'s requirement that every Critical and High finding be resolved before the SOW
+outranks this setting. A flat wait-for-recurrence rule would have deferred #163, a fail-open
+containment guard.
+
+- **`autonomous-fold`** — `final` picks the outcome and acts on it: an outcome 1 or 2 is **folded** into
+  the **same PR a human merges**, so the merge gate stays the backstop for it, and a large or
+  contentious one is **deferred** to a tracked follow-up recorded in the SOW. The discretion bar:
   well-scoped **and** low-risk → fold; large **or** contentious → defer.
-- **`present-to-hc`** (shipped default) — `final` **presents** the suggestions to the HC and waits,
-  editing no Rules Layer or config without approval.
+- **`present-to-hc`** (shipped default) — `final` picks a **recommended** outcome and **presents** it,
+  editing no Rules Layer or config without approval. Per suggestion it records that recommendation and
+  the state `pending HC decision` in the SOW; a `pending` row never blocks the SOW, because presenting
+  it **is** what this setting delivers. The HC's selection is captured as a reply on the PR — no new
+  artifact. An approved outcome 1 or 2 is applied **in that PR**, which moves `HEAD` and re-anchors the
+  backstop below, unless the HC elects to defer it. A `pending` row the HC never answers is answered by
+  the merge itself, and defaults to outcome 4.
 
-A fold changes the diff **after** `verify` closed the Reviewer summons, so `final` re-anchors the
-backstop: it compares the reviewed commit SHA recorded by `verify` against `HEAD` and, when they
-differ, re-summons the Reviewer on the delta. If that chain is exhausted, the floor applies and no
-SOW is written. This value governs only `final`'s rule-suggestion step; it does not touch
+**The findings log (outcome 3).** A single append-only log at `docs/findings-log.md` — deliberately one
+file and *not* one issue per finding, because an issue per finding is the accretion this section exists
+to stop. Following this repository's absent-until-needed convention for deep docs, it is **created when
+the first finding is recorded**, never as an empty placeholder. Each entry carries: normalized failure
+class · severity and blast radius · enforcement status · recurrence count · the PR or issue that
+surfaced it · date recorded · **review date, written absolute, = date recorded + 90 days**. The HC is
+its reviewer, inside a corpus review or on the first `final` run past an entry's review date. At that
+date: recurrence `0` and nothing having cited it → **archive** the entry (move it under an `## Archived`
+heading — do not delete, because the record of what was considered and dropped is the point);
+recurrence `≥ 1` → it becomes eligible for outcome 1 or 2. **The default at expiry is archival, never
+promotion**, so an unattended finding shrinks the corpus rather than growing it.
+
+**The recursion bound.** Any post-`verify` change that moves `HEAD` past the reviewed SHA triggers a
+delta review — an `autonomous-fold`, an HC-approved fold under `present-to-hc`, a `listen` fix, or a
+high-severity containment fix. `final` re-anchors the backstop across it: it compares the reviewed
+commit SHA recorded by `verify` against `HEAD` and, when they differ, re-summons the Reviewer on the
+delta; if that chain is exhausted the floor applies and no SOW is written. **A rule suggestion arising
+from such a delta review may not be resolved by outcome 2** — it resolves to outcome 1, 3, or 4 only.
+Without that, fold → delta review → fold still runs even with four outcomes available. The bound
+governs the growth of Tier-1 prose and nothing else: `final`'s duty to resolve every Critical and High
+delta finding is unchanged and outranks it, and outcome 1 stays available at every depth, which is what
+makes the bound safe to state absolutely. The SOW records, per delta review, the commit that triggered
+it and the reviewed SHA it was based on, so the chain is reconstructable from the PR alone.
+
+**Minting freeze.** No new Tier-1 rule bullet until this gate is live. The freeze **lifts** when (a) the
+four-outcome disposition is in this file and in both skill bodies, and (b) a bounded corpus review has
+dispositioned the 45 loop-added bullets measured in #185. An open-ended freeze is the same failure mode
+inverted, so its exit is named up front.
+
+This setting governs only the rule-suggestion step of `final` and `listen`; it does not touch
 `create-skill`'s review-PR gate.

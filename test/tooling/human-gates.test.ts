@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { fileURLToPath } from "node:url";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   extract,
@@ -140,6 +141,67 @@ describe("extract - the shipped PROJECT.md data contract", () => {
 
   it("reports no invalid declaration", () => {
     expect(invalid(shipped)).toEqual([]);
+  });
+});
+
+// --- exactly one declaring sentence (issue #186) ---------------------------
+//
+// `extractDisposition` reads the FIRST /shipped default is `...`/ match in the subsection and reports
+// `parsed`. A SECOND declaration is therefore not a duplicate, not an error, and not visible in any
+// output — the parser silently obeys whichever comes first, and a reader scrolling to the later one
+// sees a value the tooling does not use. That was tolerable while the subsection was two paragraphs.
+// It is not now that the subsection states four outcomes and names BOTH allowed values in its prose,
+// which is exactly the shape in which a second declaration gets written by accident.
+//
+// This is the disposition's own outcome 1 (enforce) applied to the disposition: the invariant is
+// mechanically checkable, so it gets a test rather than a rule bullet.
+const DECLARATION = /shipped default is\s+`[^`]+`/gi;
+const DISPOSITION_HEADING = "### Rule-suggestion disposition";
+
+/** The subsection body, sliced exactly the way `scripts/human-gates.ts` slices it. */
+function dispositionBody(text: string): string {
+  const lines = text.split("\n").map((l) => l.replace(/\r$/, ""));
+  const start = lines.findIndex((l) => l.trim().toLowerCase() === DISPOSITION_HEADING.toLowerCase());
+  if (start === -1) return "";
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((l) => l.startsWith("## ")); // the next H2 ends it, as in the parser
+  // Joined, not scanned line by line: the declaring sentence legitimately wraps across a newline.
+  return (end === -1 ? rest : rest.slice(0, end)).join("\n");
+}
+
+function declarations(text: string): string[] {
+  return dispositionBody(text).match(DECLARATION) ?? [];
+}
+
+describe("the shipped disposition subsection declares its value exactly once", () => {
+  const text = readFileSync(join(REPO_ROOT, "PROJECT.md"), "utf-8");
+
+  it("counts one declaration even though the prose also names the other allowed value", () => {
+    // The bare token IS present — so a passing count proves the counter distinguishes a declaration
+    // from a mention, rather than passing because the other value never appears.
+    expect(dispositionBody(text)).toContain("`autonomous-fold`");
+    expect(declarations(text)).toHaveLength(1);
+  });
+
+  it("counts the declaration that carries the value the parser reports", () => {
+    expect(declarations(text)[0]).toContain("present-to-hc");
+  });
+
+  // Broken on purpose (rules/testing.md): the same helper, on the same subsection plus one extra
+  // declaration, must report 2 — otherwise the assertion above passes for the wrong reason.
+  it("counts a second declaration appended to that same subsection", () => {
+    const doctored = text.replace(
+      DISPOSITION_HEADING,
+      `${DISPOSITION_HEADING}\n\nIts shipped default is \`autonomous-fold\`.`,
+    );
+    expect(declarations(doctored)).toHaveLength(2);
+  });
+
+  // A declaration placed AFTER the subsection ends belongs to no subsection and must not be counted,
+  // so the bound stays the parser's bound and not a whole-file grep.
+  it("ignores a declaration outside the subsection", () => {
+    expect(declarations(`${text}\n## Elsewhere\n\nIts shipped default is \`autonomous-fold\`.\n`))
+      .toHaveLength(1);
   });
 });
 

@@ -3,7 +3,7 @@
 **Applies to:** `skills/` (canonical Skill bodies) and their Invocation Shims (`.claude/commands/*.md`)
 **Deep doc:** `docs/rules/skills-postmortems.md` (Tier 2 — deferred; read on demand when a trigger fires)
 
-> Tier-1 Lean Core ([ADR 0004](../docs/adr/0004-two-tier-rules-layer-progressive-context.md)): always-resident invariants. Keep this file lean — push heavy, subsystem-specific case studies down to the deep doc. These are business-neutral, stack-neutral starters; **extend per host** — concrete stack-named examples live in the matching **Stack Overlay** (e.g. `ai-config-rails`), vendored alongside the baseline.
+> Tier-1 Lean Core ([ADR 0004](../docs/adr/0004-two-tier-rules-layer-progressive-context.md)): mandatory, task-routed invariants — read this file when work enters its domain. Keep this file lean — push heavy, subsystem-specific case studies down to the deep doc. These are business-neutral, stack-neutral starters; **extend per host** — concrete stack-named examples live in the matching **Stack Overlay** (e.g. `ai-config-rails`), vendored alongside the baseline.
 
 A Skill is authored **once** as a canonical body at `skills/<name>/SKILL.md` and reached through thin per-tool shims ([ADR 0003](../docs/adr/0003-skills-canonical-body-thin-shims-graceful-degradation.md), [ADR 0010](../docs/adr/0010-repo-layout-canonical-skills-at-root.md)). These rules keep every skill body generic, single-sourced, and portable.
 
