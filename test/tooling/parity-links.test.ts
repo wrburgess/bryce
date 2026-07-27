@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   statSync,
@@ -325,6 +326,7 @@ describe("parity check - the checked file set", () => {
     ["a skill body", "skills/assess/SKILL.md"],
     ["a command shim", ".claude/commands/assess.md"],
     ["the deep-doc README", "docs/rules/README.md"],
+    ["a Tier-2 deep doc", "docs/rules/testing-postmortems.md"],
     ["the glossary", "CONTEXT.md"],
     ["an ADR", "docs/adr/0011-ascii-safe-stdout-stays-doc-only.md"],
   ])("resolves links in %s", (_label, rel) => {
@@ -382,7 +384,7 @@ describe("parity check - docs/adr joins the derived scope (issue #164)", () => {
   // name-only filter. `checkLinks` would merely skip it, so this bug is invisible from the checker's own
   // output — but `healDeadLinks` guards with existsSync (true for a directory) and then readFileSync's
   // it, which is EISDIR and takes down every bundle-copy test in this file.
-  it.each([[ADR_DIR], [".claude/commands"]])("excludes a directory named like a markdown file in %s", (dir) => {
+  it.each([[ADR_DIR], [".claude/commands"], ["docs/rules"]])("excludes a directory named like a markdown file in %s", (dir) => {
     withBundleCopy((root) => {
       mkdirSync(join(root, dir, "nested.md"), { recursive: true });
 
@@ -523,6 +525,122 @@ describe("parity check - docs/adr joins the derived scope (issue #164)", () => {
     }
 
     expect(stderr.join("")).toBe("");
+  });
+});
+
+// Issue #179. The Tier-2 deep docs were the surface `docs/adr` was wrongly called the last of: the files a
+// Tier-1 bullet's pointer SENDS an agent to, the most link-heavy prose in the repo, with nothing resolving
+// any of it. PR #174's new deep doc had to be hand-verified for exactly that reason.
+//
+// The whole DIRECTORY is derived, not a `*-postmortems.md` pattern — a pattern is a second hand-kept fact,
+// and hand-keeping is how `rules/*.md` went unchecked for its entire life (ADR 0054).
+describe("parity check - docs/rules joins the derived scope (issue #179)", () => {
+  const RULES_DOCS_DIR = "docs/rules";
+
+  /** Every `*.md` regular file the checker should be deriving from a real `docs/rules` on disk. */
+  const deepDocsOn = (root: string): string[] =>
+    readdirSync(join(root, RULES_DOCS_DIR))
+      .sort()
+      .filter((name) => name.endsWith(".md") && statSync(join(root, RULES_DOCS_DIR, name)).isFile())
+      .map((name) => `${RULES_DOCS_DIR}/${name}`);
+
+  // THE test for the widening, and the one a hand-kept list cannot pass: this file did not exist when any
+  // list was written, so only a derivation from disk finds it.
+  it("discovers a deep doc that did not exist when the scope was written", () => {
+    withBundleCopy((root) => {
+      const rel = `${RULES_DOCS_DIR}/probe-179-postmortems.md`;
+      writeFileSync(join(root, rel), `# Probe postmortems\n\n[gone](${ABSENT})\n`);
+
+      expect(runParityCheck(root).errors.filter((e) => DEAD_LINK.test(e)))
+        .toEqual([`Dead link in ${rel}: \`${ABSENT}\` does not resolve`]);
+    });
+  });
+
+  // The discriminator between deriving the DIRECTORY and globbing `*-postmortems.md`. A future
+  // `docs/rules/<domain>-casebook.md` is checked the day it lands; under a glob it would be invisible,
+  // and nothing would say so.
+  it("covers a docs/rules file that is not a postmortem", () => {
+    withBundleCopy((root) => {
+      const rel = `${RULES_DOCS_DIR}/casebook-179.md`;
+      writeFileSync(join(root, rel), `# A future kind of deep doc\n\n[gone](${ABSENT})\n`);
+
+      expect(runParityCheck(root).errors.filter((e) => DEAD_LINK.test(e)))
+        .toEqual([`Dead link in ${rel}: \`${ABSENT}\` does not resolve`]);
+    });
+  });
+
+  // Membership AND completeness. This is also what makes removing `docs/rules/README.md` from the authored
+  // seed safe: the derivation now owns it, and this case plus the `["the deep-doc README", ...]` redden-case
+  // above both go red if the derivation branch is deleted.
+  it("covers every docs/rules markdown file currently on disk", () => {
+    const derived = linkCheckedFiles(REPO_ROOT).filter((rel) => rel.startsWith(`${RULES_DOCS_DIR}/`));
+    expect(derived).toEqual(deepDocsOn(REPO_ROOT));
+    expect(derived).toContain(`${RULES_DOCS_DIR}/README.md`);
+    expect(derived.length).toBeGreaterThan(4);   // the README plus the deep docs written so far
+  });
+
+  // The same three failure semantics `docs/adr` pins, because this is the same `markdownFilesIn` helper and
+  // a later refactor must not be able to silently skip the whole deep-doc scope. Absent is a FACT about a
+  // bundle that ships a subset (the deep docs are "absent until needed"), so it fails soft...
+  it("fails soft when docs/rules is absent, keeping the rest of the scope", () => {
+    withBundleCopy((root) => {
+      rmSync(join(root, RULES_DOCS_DIR), { recursive: true, force: true });
+
+      const files = linkCheckedFiles(root);
+      expect(files.filter((rel) => rel.startsWith(`${RULES_DOCS_DIR}/`))).toEqual([]);
+      expect(files).toContain("rules/testing.md");
+    });
+  });
+
+  it("contributes nothing, and does not throw, for an empty docs/rules", () => {
+    withBundleCopy((root) => {
+      rmSync(join(root, RULES_DOCS_DIR), { recursive: true, force: true });
+      mkdirSync(join(root, RULES_DOCS_DIR), { recursive: true });
+
+      expect(linkCheckedFiles(root).filter((rel) => rel.startsWith(`${RULES_DOCS_DIR}/`))).toEqual([]);
+    });
+  });
+
+  // ...but UNREADABLE is a malformed bundle, and answering "no deep docs" for it is the false green
+  // rules/scripting.md forbids.
+  it("raises a typed read failure rather than silently emptying the deep-doc scope", () => {
+    withBundleCopy((root) => {
+      rmSync(join(root, RULES_DOCS_DIR), { recursive: true, force: true });
+      writeFileSync(join(root, RULES_DOCS_DIR), "a file where a directory belongs\n");
+
+      expect(() => linkCheckedFiles(root)).toThrow(RepositoryReadError);
+      try {
+        linkCheckedFiles(root);
+      } catch (error) {
+        expect(error).toBeInstanceOf(RepositoryReadError);
+        expect((error as RepositoryReadError).code).toBe("ENOTDIR");
+        expect((error as RepositoryReadError).path).toContain(RULES_DOCS_DIR);
+      }
+    });
+  });
+
+  // Per file, one level down: a dangling child is absent and skipped, an unstattable one must not be
+  // quietly demoted to "not a markdown file".
+  it("skips a child that vanished, but raises on one that cannot be statted", () => {
+    withBundleCopy((root) => {
+      symlinkSync(join(root, RULES_DOCS_DIR, "no-such-target.md"), join(root, RULES_DOCS_DIR, "dangling.md"));
+      expect(linkCheckedFiles(root)).not.toContain(`${RULES_DOCS_DIR}/dangling.md`);
+
+      symlinkSync(join(root, RULES_DOCS_DIR, "loop-b.md"), join(root, RULES_DOCS_DIR, "loop-a.md"));
+      symlinkSync(join(root, RULES_DOCS_DIR, "loop-a.md"), join(root, RULES_DOCS_DIR, "loop-b.md"));
+      expect(() => linkCheckedFiles(root)).toThrow(RepositoryReadError);
+    });
+  });
+
+  // The reason this widening was safe at all, asserted rather than assumed. `docs/rules/scripting-postmortems.md`
+  // teaches output escaping by writing `![x](url)` inside an inline code span — prose ABOUT markdown. A
+  // regex-based checker reports it as a dead link to `url` and reddens CI on day one; the parser does not
+  // report it as a link at all (ADR 0054). Asserted against the REAL file, not a synthetic one: a generated
+  // corpus's silence is not a statement about the real one (rules/testing.md).
+  it("does not report the code-span pseudo-link the real scripting deep doc teaches with", () => {
+    const source = readFileSync(join(REPO_ROOT, RULES_DOCS_DIR, "scripting-postmortems.md"), "utf-8");
+    expect(source).toContain("![x](url)");                        // the trap is still in the file
+    expect(destinations(source)).not.toContain("url");            // and the parser still ignores it
   });
 });
 
