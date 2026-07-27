@@ -78,7 +78,8 @@ a test rather than left to drift.
   directory, not a new rule. Stated here so it is a chosen cost.
 - **A rename that breaks an ADR citation now fails the gate**, in the PR that does the renaming, where the
   author has the context to repair it. That is the whole return on this decision.
-- **Coverage: 39 link-checked files → 86**, all 47 ADRs included.
+- **Coverage: 39 link-checked files → 89**, every ADR in `docs/adr/` included (50 at the time of writing;
+  the set is derived, so it tracks the directory rather than this number).
 - **The self-test fixture had to stop healing these.** `healDeadLinks` stubs any unresolved target into
   the bundle copy so a happy path can assert exit 0. Under the widened scope, a dead ADR link produced
   `0029-<name>.md` beside the real ADR 0029 and turned a link typo into a **`Duplicate ADR number`** error

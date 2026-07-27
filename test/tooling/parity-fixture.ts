@@ -120,7 +120,20 @@ export function healDeadLinks(root: string): void {
       // land in the same test -- an equivalent spelling cannot slip past. Deliberately not limited to the
       // ADR filename pattern or to `.md`: the rule is "this directory holds records", and a narrower rule
       // just moves the hole.
-      if (resolved === adrDir || resolved.startsWith(adrDir + sep)) continue;
+      //
+      // Compared CASE-INSENSITIVELY, which is load-bearing rather than defensive. `resolve()` is pure
+      // string arithmetic and never consults the filesystem, so on a case-insensitive volume -- APFS and
+      // NTFS, i.e. the machines this repo is developed on -- a link spelled `../ADR/0029-x.md` resolves to
+      // a path that fails an exact prefix test, yet `mkdirSync`/`writeFileSync` land the stub in the very
+      // same physical `docs/adr/`. `checkAdrNumbers` then enumerates it and the duplicate-number masking
+      // is back, which is the entire defect this guard exists to close. Verified by reproducing it.
+      //
+      // Safe on a case-sensitive volume too: there `docs/ADR/` is genuinely a different directory, and
+      // declining to stub into it costs nothing -- the link is simply reported as the dead link it is.
+      // ADR_DIR is a fixed ASCII lowercase literal, so `toLowerCase()` needs no locale care.
+      const resolvedKey = resolved.toLowerCase();
+      const adrKey = adrDir.toLowerCase();
+      if (resolvedKey === adrKey || resolvedKey.startsWith(adrKey + sep)) continue;
       if (existsSync(resolved)) continue;
 
       mkdirSync(dirname(resolved), { recursive: true });

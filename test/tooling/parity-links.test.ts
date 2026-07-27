@@ -446,6 +446,32 @@ describe("parity fixture - healDeadLinks shares the checker's link extraction", 
     });
   });
 
+  // Issue #163, found by the independent Stage-4 Reviewer and reproduced before fixing. `resolve()` is
+  // string arithmetic and never touches the filesystem, so on a case-INSENSITIVE volume (APFS, NTFS) a
+  // link spelled `../ADR/…` resolved to a path that failed an exact prefix test while `writeFileSync`
+  // still landed the stub in the same physical `docs/adr/`. Confirmed end to end: the stub appeared, the
+  // "Duplicate ADR number 0029" error came back, and the dead-link error disappeared -- the exact defect
+  // this guard exists to close, on the platform the repo is developed on.
+  //
+  // Asserted on BOTH spellings deliberately, so the case is not a no-op on either kind of filesystem:
+  // on a case-insensitive volume the two paths are one file and the lower-case assertion catches it; on a
+  // case-sensitive volume the unfixed healer creates a genuinely separate `docs/ADR/`, which the
+  // upper-case assertion catches. Neither platform gets a silently vacuous test.
+  it("creates no stub for a differently-cased spelling of docs/adr", () => {
+    withBundleCopy((root) => {
+      writeFileSync(
+        join(root, "docs/adr/0040-exclude-in-progress-games-from-ingestion.md"),
+        "# ADR 0040\n\nUpserts on the [ADR 0029](../ADR/0029-per-game-stat-line-identity.md) key.\n",
+      );
+
+      healDeadLinks(root);
+
+      expect(existsSync(join(root, "docs/adr/0029-per-game-stat-line-identity.md"))).toBe(false);
+      expect(existsSync(join(root, "docs/ADR/0029-per-game-stat-line-identity.md"))).toBe(false);
+      expect(runParityCheck(root).errors.filter((e) => /^Duplicate ADR number /.test(e))).toEqual([]);
+    });
+  });
+
   // A whole-directory comparison rather than a named-stub check: any pollution at all, from any future
   // link shape, shows up here without somebody having predicted its name.
   it("leaves docs/adr byte-for-byte identical to the real repository's listing", () => {

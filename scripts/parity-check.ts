@@ -361,7 +361,15 @@ function subdirectories(absolute: string): string[] {
   }
 }
 
-/** Immediate `.md` file names in `absolute`, sorted; empty when it is not a readable directory. */
+/**
+ * Immediate `.md` file names in `absolute`, sorted; empty when it is not a readable directory.
+ *
+ * Shared by the command-shim and ADR derivations. Note this is NOT a pure extraction of the shim loop it
+ * replaced: that loop tested only the `.md` suffix, so this adds an `isFile` guard for it — matching what
+ * `checkAdrNumbers` already did, and keeping a directory named `something.md` from entering the checked
+ * set and throwing on read. Intentional and harmless on any real tree (no such directory exists), but
+ * called out rather than smuggled in under "shared helper" (issue #163).
+ */
 function markdownFilesIn(absolute: string): string[] {
   try {
     return readdirSync(absolute)
