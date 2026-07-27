@@ -21,10 +21,16 @@ import { COMMANDS, type Command, preflight, preflightDirect, renderHelp, resolve
 // oversubscription on a 2-vCPU CI runner, where four cold `tsx` starts could push a legitimately slow
 // child past the 10s kill — reintroducing contention-driven flakiness one level below where it was
 // fixed. `availableParallelism()` rather than `cpus().length` because it honors container and cgroup
-// limits, which is exactly the CI case. The floor of 2 keeps the wall clock bounded, and the budget
-// below follows the cap automatically, so a smaller runner simply gets more waves and a larger budget.
+// limits, which is exactly the CI case. The budget below follows the cap automatically, so a smaller
+// runner simply gets more waves and a correspondingly larger budget.
+//
+// It goes down to 1, and an earlier floor of 2 was a third delta-review finding: a single-CPU container
+// reports 1, and forcing two cold `tsx` processes onto it is the same oversubscription this derivation
+// exists to prevent, just at the smallest size. Sequential IS the correct plan on one core, and because
+// the budget is derived it expands to cover that (1 wide -> 13 waves -> 135s) instead of timing out.
+// `Math.max(1, ...)` only guards a pathological 0; Node documents a minimum of 1.
 const SPAWN_TIMEOUT_MS = 10_000;
-const SPAWN_CONCURRENCY = Math.max(2, Math.min(4, availableParallelism()));
+const SPAWN_CONCURRENCY = Math.max(1, Math.min(4, availableParallelism()));
 
 // Module scope, not test-body scope, because the test's TIMEOUT argument is evaluated at collection
 // time and must derive from this length. Holding the list here is what lets adding a fourteenth entry
