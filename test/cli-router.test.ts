@@ -29,8 +29,15 @@ const COMPAT_ENTRYPOINTS = [
 // Worst case is one full per-spawn bound per wave, so the budget is waves x bound. Derived, never
 // picked: the original case bounded thirteen sequential ~4s spawns at 30s and passed only on a fast,
 // warm machine (issue #176).
+//
+// The slack is not padding, and leaving it out was a delta-review finding on this very PR. `timeout`
+// KILLS a child at SPAWN_TIMEOUT_MS; its `close` event, the worker promises settling, and the `finally`
+// cleanup all happen AFTER that. So a budget of exactly waves x bound expires at the same instant the
+// last wave's children are killed, and Vitest reports a timeout even though every child honored its
+// own bound — the failure mode this case was rewritten to remove, reintroduced one layer up.
+const SPAWN_CLEANUP_SLACK_MS = 5_000;
 const COMPAT_TEST_TIMEOUT_MS =
-  Math.ceil(COMPAT_ENTRYPOINTS.length / SPAWN_CONCURRENCY) * SPAWN_TIMEOUT_MS;
+  Math.ceil(COMPAT_ENTRYPOINTS.length / SPAWN_CONCURRENCY) * SPAWN_TIMEOUT_MS + SPAWN_CLEANUP_SLACK_MS;
 
 const validArgs: Record<string, string[]> = {
   "report player": ["--id", "1"],
