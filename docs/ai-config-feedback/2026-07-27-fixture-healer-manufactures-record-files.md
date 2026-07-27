@@ -10,8 +10,8 @@ sound while the link scope holds only prose. It stops being sound the moment the
 directory whose **filenames carry meaning** — and the baseline ships exactly one such directory,
 `docs/adr/`, whose `NNNN-` prefix is validated for uniqueness by `checkAdrNumbers`.
 
-Widening the scope to `docs/adr/` in bryce #163 exposed the interaction. Probed directly, before any fix,
-with the tree's real dead link (`docs/adr/0040-…md` → `0029-per-game-stat-line-identity.md`, whose actual
+Widening the scope to `docs/adr/` exposed the interaction. Probed directly, before any fix, with the
+tree's then-real dead link (`docs/adr/0040-…md` → `0029-per-game-stat-line-identity.md`, whose actual
 filename is `0029-stat-lines-per-game-keyed-by-game-id.md`):
 
 ```
@@ -31,6 +31,12 @@ error — "renumber all but one" — is actively wrong.
 own category (`/^Dead link /`, `/^Rules pointer /`, …) before asserting. An error moving *between*
 categories is invisible to every one of them. The probe above had to dump the unfiltered array to see it.
 
+**And why it is latent on `main` right now.** Issue #164 (PR #172) landed the scope widening — putting
+`docs/adr/` in the healer's reach — and repaired both of the tree's dead ADR links in the same change. The
+healer therefore has nothing to stub today, and the defect is invisible: it arms itself again the moment
+anyone writes the next dead ADR citation, which is precisely what a link checker exists to catch. The
+widening and this guard belong together; they shipped apart, which is itself the thing worth recording.
+
 ## Why this is `upstream`, not host-only
 
 Nothing here is specific to bryce's stack or domain. The three ingredients — a fixture that heals dead
@@ -48,7 +54,12 @@ in the same rule; an earlier draft matched the ADR filename pattern and would ha
 non-`.md` target. A dead ADR link now surfaces *as a dead link* in fixture copies too, which is the honest
 outcome — the bundle copy is a test fixture, not a place to invent records.
 
-Two regression tests pin it, and both fail if the containment is removed.
+Four regression tests cover it. Measured, not assumed: removing the containment line fails **three** of
+them — the duplicate-number case, the traversal/non-ADR-shaped case, and the case-fold case. The fourth
+("leaves `docs/adr` byte-for-byte identical to the real repository's listing") does **not** fail, because
+`main` currently has no dead ADR link for the healer to stub, so a pristine bundle copy is unpolluted
+either way. It is a forward-looking detector — it catches pollution from a link shape nobody predicted,
+once one exists — not a guard against this containment being reverted. The other three are that guard.
 
 ## Suggested upstream shape
 

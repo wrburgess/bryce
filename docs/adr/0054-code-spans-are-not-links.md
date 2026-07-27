@@ -1,6 +1,8 @@
 # ADR 0054 — Parse markdown to find links; a link inside code is not a node
 
-**Status:** Accepted
+**Status:** Accepted — the `docs/adr/*.md` exclusion under *Consequences* is superseded by
+[ADR 0057](0057-adr-links-repair-identity-annotate-loss.md) (issue #164); the parser decision stands
+unchanged.
 **Date:** 2026-07-27
 **Context:** [#159](https://github.com/wrburgess/bryce/issues/159) (deferred from
 [#154](https://github.com/wrburgess/bryce/issues/154) / PR #155)

@@ -1,9 +1,20 @@
-import { describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { describe, expect, it, vi } from "vitest";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, parse, relative, resolve } from "node:path";
 import {
+  RepositoryReadError,
   linkCheckedFiles,
+  main,
   markdownLinks,
   resolveInsideRoot,
   runParityCheck,
@@ -245,7 +256,8 @@ describe("parity check - dead links in the widened scope", () => {
   });
 
   // ADRs are the most fence-dense documents in the tree, so the widened scope leans hard on the parser
-  // here. Over-masking would silently un-check all 47 of them while the gate still printed OK.
+  // here. Over-masking would silently un-check all 50 of them while the gate still printed OK — and the
+  // real-repository case cannot catch that, because masking hides errors rather than inventing them.
   it("ignores a dead link inside a fence in an ADR but reports one after it closes", () => {
     const body = [
       "# ADR 0001",
@@ -263,9 +275,9 @@ describe("parity check - dead links in the widened scope", () => {
     });
   });
 
-  // The exact shape of the ADR 0011 bug this issue repaired: docs/adr/ is TWO levels down, so a link is
-  // written `../../scripts/x`. Resolving from the repo root instead of the file's own directory would
-  // make both of these agree with the filesystem by accident, and the bug would stay invisible.
+  // The exact shape of the ADR 0011 bug ADR 0057 answered: docs/adr/ is TWO levels down, so a citation
+  // out of the directory is written `../../scripts/x`. Resolving from the repo root instead of the file's
+  // own directory would make both of these agree with the filesystem by accident, hiding the bug.
   it("resolves an ADR's relative-traversal link from the ADR's own directory", () => {
     const body = [
       "# ADR 0001",
@@ -300,33 +312,6 @@ describe("parity check - the checked file set", () => {
     expect(files).toContain("CONTEXT.md");
   });
 
-  // Issue #163. Compared against a fresh listing rather than a sample: spot-checking one ADR passes just
-  // as happily against a derivation that truncated, sorted wrong, or dropped every file but the first.
-  it("derives every top-level ADR", () => {
-    const onDisk = readdirSync(join(REPO_ROOT, "docs/adr"))
-      .filter((n) => n.endsWith(".md"))
-      .map((n) => `docs/adr/${n}`)
-      .sort();
-    const derived = linkCheckedFiles(REPO_ROOT).filter((f) => f.startsWith("docs/adr/")).sort();
-
-    expect(onDisk.length).toBeGreaterThan(40); // the listing itself must not be silently empty
-    expect(derived).toEqual(onDisk);
-  });
-
-  // The scope is top-level BY DECISION, matching checkAdrNumbers, which reads the same directory
-  // non-recursively and is what defines an ADR here. Pinned so that widening it is a deliberate act
-  // rather than something that drifts in the first time somebody adds a subdirectory.
-  it("does not descend into a subdirectory of docs/adr", () => {
-    withBundleCopy((root) => {
-      const nested = join(root, "docs/adr/archive/0056-nested.md");
-      mkdirSync(dirname(nested), { recursive: true });
-      writeFileSync(nested, "# ADR 0056\n\n[gone](./nowhere-163.md)\n");
-
-      expect(linkCheckedFiles(root)).not.toContain("docs/adr/archive/0056-nested.md");
-      expect(runParityCheck(root).errors.filter((e) => DEAD_LINK.test(e))).toEqual([]);
-    });
-  });
-
   it("contains no duplicate entries", () => {
     const files = linkCheckedFiles(REPO_ROOT);
     expect(new Set(files).size).toBe(files.length);
@@ -341,7 +326,7 @@ describe("parity check - the checked file set", () => {
     ["a command shim", ".claude/commands/assess.md"],
     ["the deep-doc README", "docs/rules/README.md"],
     ["the glossary", "CONTEXT.md"],
-    ["an ADR", "docs/adr/0001-distribute-as-copy-in-sync-script.md"],
+    ["an ADR", "docs/adr/0011-ascii-safe-stdout-stays-doc-only.md"],
   ])("resolves links in %s", (_label, rel) => {
     withMarkdownFile(rel, `# probe\n\n[gone](${ABSENT})\n`, (errors) => {
       expect(errors).toEqual([`Dead link in ${rel}: \`${ABSENT}\` does not resolve`]);
@@ -361,7 +346,194 @@ describe("parity check - the checked file set", () => {
   });
 });
 
+// Issue #164. `docs/adr/*.md` was the last markdown surface outside the dead-link scope — 47 files of
+// accepted decisions citing each other, with nothing resolving those citations, and two of them dead.
+// The repair rule is ADR 0057 (repair a rename, de-link a deletion); these tests are about the scope.
+describe("parity check - docs/adr joins the derived scope (issue #164)", () => {
+  const ADR_DIR = "docs/adr";
+
+  /** Every `*.md` regular file the checker should be deriving from a real `docs/adr` on disk. */
+  const adrFilesOn = (root: string): string[] =>
+    readdirSync(join(root, ADR_DIR))
+      .sort()
+      .filter((name) => name.endsWith(".md") && statSync(join(root, ADR_DIR, name)).isFile())
+      .map((name) => `${ADR_DIR}/${name}`);
+
+  // THE test for the widening, and the one a hand-kept list cannot pass. A complete hardcoded roster of
+  // today's ADRs satisfies the set comparison below it — but this file did not exist when any list was
+  // written, so only a derivation from disk finds it.
+  it("discovers an ADR that did not exist when the scope was written", () => {
+    withBundleCopy((root) => {
+      const rel = `${ADR_DIR}/9999-derivation-probe-164.md`;
+      writeFileSync(join(root, rel), `# ADR 9999 - probe\n\n[gone](${ABSENT})\n`);
+
+      expect(runParityCheck(root).errors.filter((e) => DEAD_LINK.test(e)))
+        .toEqual([`Dead link in ${rel}: \`${ABSENT}\` does not resolve`]);
+    });
+  });
+
+  it("covers every ADR currently on disk", () => {
+    const derived = linkCheckedFiles(REPO_ROOT).filter((rel) => rel.startsWith(`${ADR_DIR}/`));
+    expect(derived).toEqual(adrFilesOn(REPO_ROOT));
+    expect(derived.length).toBeGreaterThan(40); // the surface this issue was about, not a sample of it
+  });
+
+  // Both call sites of the shared `markdownFilesIn` helper: a DIRECTORY whose name ends in `.md` passes a
+  // name-only filter. `checkLinks` would merely skip it, so this bug is invisible from the checker's own
+  // output — but `healDeadLinks` guards with existsSync (true for a directory) and then readFileSync's
+  // it, which is EISDIR and takes down every bundle-copy test in this file.
+  it.each([[ADR_DIR], [".claude/commands"]])("excludes a directory named like a markdown file in %s", (dir) => {
+    withBundleCopy((root) => {
+      mkdirSync(join(root, dir, "nested.md"), { recursive: true });
+
+      expect(linkCheckedFiles(root)).not.toContain(`${dir}/nested.md`);
+      expect(() => runParityCheck(root)).not.toThrow();
+    });
+  });
+
+  // The surface neither PR tested alone: #164 put ADRs in scope BEFORE #165 made `checkLinks` decide
+  // containment, and #165 added containment BEFORE ADRs were in scope. Their merge is where an escaping
+  // ADR citation first becomes reportable, and a merge is exactly where a gap like this opens silently.
+  it("reports an ADR link that escapes the repository, not merely one that is missing", () => {
+    withBundleCopy((root) => {
+      const rel = `${ADR_DIR}/9998-escape-probe-164.md`;
+      writeFileSync(join(root, rel), "# ADR 9998 - probe\n\n[out](../../../escaped-164.md)\n");
+
+      expect(runParityCheck(root).errors.filter((e) => DEAD_LINK.test(e)))
+        .toEqual([`Dead link in ${rel}: \`../../../escaped-164.md\` escapes the repository`]);
+    });
+  });
+
+  it("excludes a non-markdown file", () => {
+    withBundleCopy((root) => {
+      writeFileSync(join(root, ADR_DIR, "notes.txt"), "not markdown\n");
+      expect(linkCheckedFiles(root)).not.toContain(`${ADR_DIR}/notes.txt`);
+    });
+  });
+
+  // The scope is top-level BY DECISION, matching checkAdrNumbers, which reads the same directory
+  // non-recursively and is what defines an ADR here. A link scope reaching wider than the numbering scope
+  // would imply a nested file is an ADR, which nothing else in the repo believes. Pinned so that widening
+  // it is a deliberate act rather than something that drifts in with the first subdirectory.
+  it("does not descend into a subdirectory of docs/adr", () => {
+    withBundleCopy((root) => {
+      const nested = join(root, ADR_DIR, "archive/0056-nested.md");
+      mkdirSync(dirname(nested), { recursive: true });
+      writeFileSync(nested, "# ADR 0056\n\n[gone](./nowhere-163.md)\n");
+
+      expect(linkCheckedFiles(root)).not.toContain(`${ADR_DIR}/archive/0056-nested.md`);
+      expect(runParityCheck(root).errors.filter((e) => DEAD_LINK.test(e))).toEqual([]);
+    });
+  });
+
+  // Absent is a FACT about a bundle that ships a subset, so it fails soft...
+  it("fails soft when docs/adr is absent, keeping the rest of the scope", () => {
+    withBundleCopy((root) => {
+      rmSync(join(root, ADR_DIR), { recursive: true, force: true });
+
+      const files = linkCheckedFiles(root);
+      expect(files.filter((rel) => rel.startsWith(`${ADR_DIR}/`))).toEqual([]);
+      expect(files).toContain("rules/testing.md");
+    });
+  });
+
+  it("contributes nothing, and does not throw, for an empty docs/adr", () => {
+    withBundleCopy((root) => {
+      rmSync(join(root, ADR_DIR), { recursive: true, force: true });
+      mkdirSync(join(root, ADR_DIR), { recursive: true });
+
+      expect(linkCheckedFiles(root).filter((rel) => rel.startsWith(`${ADR_DIR}/`))).toEqual([]);
+    });
+  });
+
+  // ...but UNREADABLE is a malformed bundle, and returning "no ADRs" for it is the false green
+  // rules/scripting.md forbids: the gate would print OK while checking none of them. A path that is a
+  // regular file raises ENOTDIR portably, with none of the chmod games that behave differently as root.
+  it("raises a typed read failure rather than silently emptying the scope", () => {
+    withBundleCopy((root) => {
+      rmSync(join(root, ADR_DIR), { recursive: true, force: true });
+      writeFileSync(join(root, ADR_DIR), "a file where a directory belongs\n");
+
+      // The TYPE is the contract, not just the fact of throwing: `main` discriminates on it to decide
+      // what is a read failure and what is a bug it must not relabel.
+      expect(() => linkCheckedFiles(root)).toThrow(RepositoryReadError);
+      try {
+        linkCheckedFiles(root);
+      } catch (error) {
+        expect(error).toBeInstanceOf(RepositoryReadError);
+        expect((error as RepositoryReadError).code).toBe("ENOTDIR");
+        expect((error as RepositoryReadError).path).toContain(ADR_DIR);
+      }
+    });
+  });
+
+  // The same rule per file. A child that VANISHED between the read and the stat is absent, so it is
+  // skipped; an unreadable one must not be quietly demoted to "not a markdown file", which would
+  // re-open the false green one level down from where it was closed.
+  it("skips a child that vanished, but raises on one that cannot be statted", () => {
+    withBundleCopy((root) => {
+      symlinkSync(join(root, ADR_DIR, "no-such-target.md"), join(root, ADR_DIR, "dangling.md"));
+      expect(linkCheckedFiles(root)).not.toContain(`${ADR_DIR}/dangling.md`);
+
+      symlinkSync(join(root, ADR_DIR, "loop-b.md"), join(root, ADR_DIR, "loop-a.md"));
+      symlinkSync(join(root, ADR_DIR, "loop-a.md"), join(root, ADR_DIR, "loop-b.md"));
+      expect(() => linkCheckedFiles(root)).toThrow(RepositoryReadError);
+    });
+  });
+
+  // ...and being loud must not mean being unreadable. Left unguarded, that throw escapes `main` as a
+  // stack trace, which is not the deterministic, greppable output rules/scripting.md requires of a
+  // bundled script — the exit code is right and the line a Host App greps for is gone.
+  it("reports an unreadable repository in the CLI's own failure grammar, not as a stack trace", () => {
+    withBundleCopy((root) => {
+      rmSync(join(root, ADR_DIR), { recursive: true, force: true });
+      writeFileSync(join(root, ADR_DIR), "a file where a directory belongs\n");
+
+      const stderr: string[] = [];
+      const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+        stderr.push(String(chunk));
+        return true;
+      });
+
+      try {
+        expect(main(["--root", root])).toBe(1);
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(stderr.join("")).toMatch(/^parity_check: FAILED - cannot read .*docs\/adr - .*ENOTDIR/);
+    });
+  });
+
+  // The other half of that guard, and the reason it catches ONE error type instead of all of them: a
+  // catch-all would relabel a genuine internal bug as a repository-read failure and swallow the stack
+  // trace pointing at it. A false diagnosis is worse than a crash — the log now names the wrong cause.
+  it("lets a non-read error crash with its stack trace instead of relabelling it", () => {
+    const boom = new TypeError("an internal bug, not a read failure");
+    const stderr: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderr.push(String(chunk));
+      return true;
+    });
+
+    try {
+      expect(() => main(["--root", REPO_ROOT], () => { throw boom; })).toThrow(boom);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(stderr.join("")).toBe("");
+  });
+});
+
 describe("parity check - ADR citation numbers", () => {
+  // The 0040 repair repointed a citation at a renamed file; its `ADR 0029` label must still match the
+  // number in the new filename. Asserted against the REAL tree, so a future repair that repoints at the
+  // wrong ADR is caught here rather than by a reader.
+  it("reports no citation mismatch anywhere in the real repository", () => {
+    expect(runParityCheck(REPO_ROOT).errors.filter((e) => ADR_MISMATCH.test(e))).toEqual([]);
+  });
+
   it("still reports a label/target mismatch in ordinary prose", () => {
     withBundleCopy((root) => {
       writeFileSync(join(root, "docs/adr-number-probe.md"), "See [ADR 0001](0002-some-decision.md).\n");
@@ -417,13 +589,16 @@ describe("parity fixture - healDeadLinks shares the checker's link extraction", 
     });
   });
 
-  // Issue #163, and the reason the ADR containment rule exists at all. Healing a dead ADR link stubs
-  // `0029-<something>.md` into docs/adr/, which collides with the REAL ADR 0029 — so the run reports
-  // "Duplicate ADR number" for a file nobody wrote, and the dead link that caused it disappears from the
-  // output. Probed before the fix: the dead-link error was gone and that was the only error left.
+  // Issue #163, and the reason the ADR containment rule exists at all. Issue #164 put docs/adr/ in the
+  // healer's reach without giving it this rule, so healing a dead ADR link stubs `0029-<something>.md`
+  // into docs/adr/, colliding with the REAL ADR 0029 — the run then reports "Duplicate ADR number" for a
+  // file nobody wrote, and the dead link that caused it disappears from the output. Probed against main
+  // before the fix: the dead-link error was gone and the numbering error was the only one left.
   //
   // Both halves are asserted. Checking only "no stub" would still pass if the resulting error were
-  // useless; checking only the error would pass against a healer that stubbed somewhere else.
+  // useless; checking only the error would pass against a healer that stubbed somewhere else. Neither
+  // existing suite caught this on its own, because each filters `errors` to its own category before
+  // asserting — an error moving BETWEEN categories is invisible to all of them.
   it("does not heal a dead ADR link into a duplicate ADR number", () => {
     withBundleCopy((root) => {
       const stub = join(root, "docs/adr/0029-per-game-stat-line-identity.md");
@@ -466,7 +641,7 @@ describe("parity fixture - healDeadLinks shares the checker's link extraction", 
   // string arithmetic and never touches the filesystem, so on a case-INSENSITIVE volume (APFS, NTFS) a
   // link spelled `../ADR/…` resolved to a path that failed an exact prefix test while `writeFileSync`
   // still landed the stub in the same physical `docs/adr/`. Confirmed end to end: the stub appeared, the
-  // "Duplicate ADR number 0029" error came back, and the dead-link error disappeared -- the exact defect
+  // "Duplicate ADR number 0029" error came back, and the dead-link error disappeared — the exact defect
   // this guard exists to close, on the platform the repo is developed on.
   //
   // Asserted on BOTH spellings deliberately, so the case is not a no-op on either kind of filesystem:

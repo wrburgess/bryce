@@ -85,9 +85,10 @@ export function copyBundle(
  * (`resolveInsideRoot`) rather than being re-derived: this file used to carry its own copy of that
  * expression, and a rule written three times and enforced twice is what issue #165 was.
  *
- * It is contained AWAY from `docs/adr/` for the opposite reason — see the rule in the body. Healing there
- * manufactures a record file and converts a dead link into a duplicate-ADR-number error naming a file
- * nobody wrote (issue #163).
+ * It is contained AWAY from `docs/adr/` for the opposite reason — see the rule in the body. Issue #164
+ * put that directory in the checked scope, and therefore in this healer's reach, without the rule:
+ * healing there manufactures a record file and converts a dead link into a duplicate-ADR-number error
+ * naming a file nobody wrote (issue #163).
  *
  * The file list and the link EXTRACTION both come from scripts/parity-check.ts (issue #159) rather than
  * being mirrored here, so the healer and the checker cannot drift apart on either. Sharing

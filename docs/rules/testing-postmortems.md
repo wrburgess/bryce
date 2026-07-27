@@ -158,3 +158,46 @@ error naming a file nobody deleted; any filter written as `path.includes("some/s
 _(Reference: issue #139 / PR #147 (merged `8852524`); the empty-copy failure reproduced on every
 revision from a worktree, the containment fix landed in `8cba06b`, and the regression cases live in
 `test/tooling/parity-fixture.test.ts`.)_
+
+## Generated coverage and real coverage answer different questions — and neither is a mutation test (Reference: PR #162)
+
+**The case.** Issue #159 / PR #162 replaced a hand-rolled markdown code-masker with a CommonMark parse
+(see `docs/rules/scripting-postmortems.md` and ADR 0054 for the guard-design half of that story). The
+*testing* half is how the broken masker kept being pronounced correct. Its evidence was a differential
+fuzzer: generate a synthetic markdown document, run the masker's link extraction and the CommonMark
+reference parser's over it, diff the results. That harness was genuinely good — it falsified four
+successive bounds, including one whose reasoning was locally airtight (removing candidates from a
+run-length pairing search can make it match strictly *more*, in 373 of 4,000 cases). The failures below
+are not the fuzzer's; they are what was claimed *on top of* it.
+
+**What shipped and was caught in review.** Three things, each a green signal that measured something
+other than what was asserted.
+
+- **A synthetic corpus stood in for the real one.** The claim "no checked file contains a multi-line code
+  span" — load-bearing, because the surviving line-bounded design was correct only if that held — rested
+  on **33,000 green synthetic documents**. It was never run over the 39 files actually in scope. Two of
+  them, `docs/api/README.md` and `docs/mcp/README.md`, wrap a JSON example across a line break inside one
+  code span, and both mis-paired. The generator answered *is the masker consistent with the parser on
+  documents shaped like the ones I emit*; nobody had asked *is it correct on ours*.
+- **Load-bearing guards had no failing test without them.** Twice, a branch the implementation depended
+  on could have been deleted with the suite still green. A test suite that passes with the guard removed
+  is not evidence about the guard.
+- **A fuzz run reported clean against a revision already known to be broken.** The harness, not the
+  masker, was what that run measured — and it went unnoticed until someone deliberately re-broke the code
+  and the numbers did not move.
+
+**The rule it yields.** Two, and they compose. First: **a generated corpus's silence is not a statement
+about the real corpus.** Run the guard over the actual inputs before claiming it is clean on them; keep
+both, because they answer different questions, and never let the cheaper one stand in for the other.
+Second: **mutation is the only evidence that a green test is about the thing you think it is about.**
+Break the guard on purpose — delete it, invert it — confirm a *named* test fails for the stated reason,
+then restore it. This applies to the harness as much as to the code: a differential fuzzer, a
+coverage-floor script, a parity check are all guards, and an unmutated one has never been tested.
+
+**Symptom to watch for.** A correctness claim about the repository whose evidence is a generator seed
+count; a guard whose deletion you cannot name a failing test for; a suite that goes green on the first
+run after a risky change; a fuzz report whose numbers are identical before and after a deliberate break.
+
+_(Reference: issue #159 / PR #162; the round-by-round reasoning errors are recorded in ADR 0054, and the
+guard-design lesson in `docs/rules/scripting-postmortems.md`. The Tier-1 bullets were folded in issue
+#166.)_

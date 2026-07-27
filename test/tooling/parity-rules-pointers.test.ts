@@ -43,7 +43,8 @@ describe("parity check - Tier-2 deep-doc pointers", () => {
   });
 
   // docs/rules/README.md: a deep doc stays "absent until a host has a real postmortem to record".
-  // rules/frontend.md, rules/security.md and rules/scripting.md all rely on this today.
+  // rules/frontend.md and rules/security.md rely on this today (rules/scripting.md did until issue
+  // #166 wrote its deep doc).
   it("accepts a `**Deep doc:**` header that forward-references an absent deep doc", () => {
     withRuleBody(`**Deep doc:** \`${ABSENT_DEEP_DOC}\` (Tier 2 — deferred)`, (errors) => {
       expect(errors).toEqual([]);
@@ -168,17 +169,25 @@ describe("issue #148 - the moved content is reachable and intact", () => {
   const doc = readFileSync(join(REPO_ROOT, DEEP_DOC), "utf-8");
   const sections = doc.split(/\n(?=## )/).slice(1);
 
+  // Issue #166: this asserted `toContain(DEEP_DOC)` over the whole README, which also spells the path
+  // in its convention prose -- deleting the trigger-table row left the test green (proved by mutation).
+  // Assert the ROW that binds this Tier-1 rule to this deep doc.
   it("is listed in the Tier-2 trigger table", () => {
     expect(existsSync(join(REPO_ROOT, DEEP_DOC))).toBe(true);
-    expect(readFileSync(join(REPO_ROOT, "docs/rules/README.md"), "utf-8")).toContain(DEEP_DOC);
+    const row = readFileSync(join(REPO_ROOT, "docs/rules/README.md"), "utf-8")
+      .split("\n")
+      .find((l) => l.startsWith("|") && l.includes(`\`${RULE}\``));
+    expect(row, `no trigger-table row for ${RULE}`).toBeTypeOf("string");
+    expect(row).toContain(DEEP_DOC);
   });
 
-  // A single section citing all four incidents would satisfy a file-wide check; these assert the
-  // one-entry-per-incident structure the trim depends on.
-  it("carries exactly four case studies, one per incident", () => {
-    expect(sections).toHaveLength(4);
-    expect(sections.map((s) => (s.match(/#(25|28|67|139)\b/) ?? [])[0]))
-      .toEqual(expect.arrayContaining(["#67", "#25", "#28", "#139"]));
+  // A single section citing all five incidents would satisfy a file-wide check; these assert the
+  // one-entry-per-incident structure the trim depends on. Issue #166 added the fifth (#159's fuzzer
+  // and mutation lessons); the count is hardcoded so a merge that drops an entry turns red.
+  it("carries exactly five case studies, one per incident", () => {
+    expect(sections).toHaveLength(5);
+    expect(sections.map((s) => (s.match(/#(25|28|67|139|159)\b/) ?? [])[0]))
+      .toEqual(expect.arrayContaining(["#67", "#25", "#28", "#139", "#159"]));
   });
 
   it("gives every case study the required structure", () => {
@@ -213,6 +222,11 @@ describe("issue #148 - every trimmed Tier-1 bullet kept its instruction", () => 
     "Never test a gate's logic without also pinning what invokes it",
     "Never scope a fixture's copy filter by substring-matching an absolute path",
     "Never construct a default/real provider client in a default-suite test",
+    // Issue #166 (#159's testing lessons): one added bullet, one sharpened to absorb the mutation
+    // lesson. Both point at the deep doc, so both must be listed here or the coverage test below
+    // catches the omission.
+    "Never read a generated corpus's silence as a statement about the real one",
+    "Never believe a guard you have not broken on purpose",
   ];
 
   const bullets = readFileSync(join(REPO_ROOT, RULE), "utf-8").split("\n").filter((l) => l.startsWith("- **"));
@@ -228,5 +242,61 @@ describe("issue #148 - every trimmed Tier-1 bullet kept its instruction", () => 
   it("covers every bullet that carries a case-study pointer", () => {
     const pointing = bullets.filter((b) => b.includes(DEEP_DOC));
     expect(pointing).toHaveLength(TRIMMED_BULLETS.length);
+  });
+});
+
+// Issue #166 stood up the scripting domain's first Tier-2 deep doc. The #148 block above pins the
+// testing one and nothing pinned this; the same failure mode applies — a pointer whose target loses
+// its content is invisible to `checkLinks` (the path is backticked, not linked) and the parity
+// pointer check only proves the FILE exists, not that a case study is still in it.
+describe("issue #166 - the scripting deep doc is reachable and intact", () => {
+  const SCRIPTING_RULE = "rules/scripting.md";
+  const SCRIPTING_DEEP_DOC = "docs/rules/scripting-postmortems.md";
+  const doc = readFileSync(join(REPO_ROOT, SCRIPTING_DEEP_DOC), "utf-8");
+  const sections = doc.split(/\n(?=## )/).slice(1);
+
+  // A file-wide `toContain` would pass on the convention prose further down docs/rules/README.md,
+  // which also spells this path -- so it would stay green with the trigger-table row deleted. Assert
+  // the ROW: the line that binds this Tier-1 rule to this deep doc.
+  it("is listed in the Tier-2 trigger table", () => {
+    expect(existsSync(join(REPO_ROOT, SCRIPTING_DEEP_DOC))).toBe(true);
+    const row = readFileSync(join(REPO_ROOT, "docs/rules/README.md"), "utf-8")
+      .split("\n")
+      .find((l) => l.startsWith("|") && l.includes(`\`${SCRIPTING_RULE}\``));
+    expect(row, `no trigger-table row for ${SCRIPTING_RULE}`).toBeTypeOf("string");
+    expect(row).toContain(SCRIPTING_DEEP_DOC);
+  });
+
+  it("carries one case study per incident", () => {
+    expect(sections).toHaveLength(1);
+    expect(sections.map((s) => (s.match(/#159\b/) ?? [])[0])).toEqual(["#159"]);
+  });
+
+  it("gives every case study the required structure", () => {
+    for (const section of sections) {
+      const heading = (section.split("\n")[0] ?? "").slice(0, 60);
+      for (const required of ["**The case.**", "**What shipped", "**The rule it yields.**", "**Symptom to watch for.**"]) {
+        expect(section, `${heading} is missing ${required}`).toContain(required);
+      }
+    }
+  });
+
+  it("closes every case study with a reference naming a specific artifact", () => {
+    for (const section of sections) {
+      const reference = section.split("\n").filter((l) => l.startsWith("_(Reference:")).at(-1) ?? "";
+      expect(reference, `${(section.split("\n")[0] ?? "").slice(0, 60)} has no _(Reference: …)_ line`).not.toBe("");
+      expect(reference).toMatch(/#\d+/);
+      expect(reference).toMatch(/PR #\d+|`[0-9a-f]{7,40}`/);
+    }
+  });
+
+  // The instruction never moves behind the pointer (rules/skills.md): the imperative and its
+  // rationale stay resident in Tier 1, and only the narrative moves down.
+  it("keeps the pointing Tier-1 bullet's imperative and rationale resident", () => {
+    const bullets = readFileSync(join(REPO_ROOT, SCRIPTING_RULE), "utf-8").split("\n").filter((l) => l.startsWith("- **"));
+    const pointing = bullets.filter((b) => b.includes(SCRIPTING_DEEP_DOC));
+    expect(pointing).toHaveLength(1);
+    expect(pointing[0]).toContain("Never model a format yourself to check something about it");
+    expect(pointing[0]).toMatch(/because|rather than|instead of/);
   });
 });
