@@ -86,7 +86,8 @@ describe("parity check - Tier-1 per-bullet narrative guard", () => {
       expect(errors).toEqual([
         'Tier-1 narrative rules/testing.md: bullet "Never write the case study inline" is 700 characters ' +
         "(limit 600) and carries no case-study pointer; move the case narrative to " +
-        "`docs/rules/testing-postmortems.md` and leave a backticked pointer to it, or shorten the bullet",
+        "`docs/rules/testing-postmortems.md` and leave a pointer to it - either the backticked path or a " +
+        "link relative to rules/ (docs/rules/README.md) - or shorten the bullet",
       ]);
     });
   });
@@ -112,6 +113,59 @@ describe("parity check - Tier-1 per-bullet narrative guard", () => {
       expect(narrative).toHaveLength(1);
       expect(narrative[0]).toContain("move the case narrative to `docs/rules/backend-postmortems.md`");
       expect(narrative[0]).not.toContain("does not exist yet");
+    });
+  });
+});
+
+// docs/rules/README.md (issue #154) sanctions TWO pointer spellings: the backticked repo-root path,
+// and a promoted markdown link relative to the referring file once the target exists. Both are
+// validated by checkRulesPointers, so this guard must accept both -- otherwise a contributor who
+// promotes a pointer exactly as the convention instructs is told by a second check to un-promote it.
+// Each is still required to RESOLVE, against the base Markdown itself uses for that form.
+describe("parity check - both sanctioned pointer forms exempt, and only when they resolve", () => {
+  const OVER = longBullet(NARRATIVE_MAX_CHARS + 120, "Never write the case study inline");
+
+  it("accepts a promoted link written relative to the rule file", () => {
+    withRuleBody("rules/testing.md", `${OVER} See [the deep doc](../docs/rules/testing-postmortems.md).`, (errors) => {
+      expect(errors).toEqual([]);
+    });
+  });
+
+  it("accepts the backticked repo-root path", () => {
+    withRuleBody("rules/testing.md", `${OVER} *(Host case study: \`docs/rules/testing-postmortems.md\`.)*`, (errors) => {
+      expect(errors).toEqual([]);
+    });
+  });
+
+  // The repo-root spelling INSIDE a link is a 404 from `rules/`. checkRulesPointers rejects it; this
+  // guard must not quietly accept what that check calls broken.
+  it("rejects a link using the repo-root spelling, which does not resolve from rules/", () => {
+    withRuleBody("rules/testing.md", `${OVER} See [the deep doc](docs/rules/testing-postmortems.md).`, (errors) => {
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain("carries no case-study pointer");
+    });
+  });
+
+  it("rejects a promoted link to a deep doc that does not exist", () => {
+    withRuleBody("rules/frontend.md", `${OVER} See [the deep doc](../docs/rules/frontend-postmortems.md).`, (errors) => {
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain("does not exist yet, so author it first");
+    });
+  });
+
+  // The own-domain rule survives promotion: a resolving link to the WRONG domain still exempts nothing.
+  it("rejects a promoted link to another domain's deep doc", () => {
+    withRuleBody("rules/backend.md", `${OVER} See [the deep doc](../docs/rules/testing-postmortems.md).`, (errors) => {
+      const bulletErrors = errors.filter((e) => e.includes(': bullet "'));
+      expect(bulletErrors).toHaveLength(1);
+      expect(bulletErrors[0]).toContain("`docs/rules/backend-postmortems.md`");
+    });
+  });
+
+  it("names both spellings in the remedy when the deep doc exists", () => {
+    withRuleBody("rules/testing.md", OVER, (errors) => {
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain("either the backticked path or a link relative to rules/");
     });
   });
 });

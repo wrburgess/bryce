@@ -595,11 +595,45 @@ class ParityCheck {
     return bullets;
   }
 
+  /**
+   * Does this bullet carry a case-study pointer to its OWN domain's deep doc, in either form the
+   * convention allows, that actually RESOLVES?
+   *
+   * Both forms are accepted because docs/rules/README.md (issue #154) sanctions both, and each is
+   * validated against the base Markdown itself uses -- a backticked path is prose naming a REPO-ROOT
+   * path, a promoted link resolves relative to the REFERRING FILE. Those are exactly the two bases
+   * checkRulesPointers() uses, so the two checks cannot disagree about what a valid pointer is: a
+   * contributor who promotes a pointer the way the convention tells them to must not be told by this
+   * guard to un-promote it.
+   *
+   * Resolution is required, not just presence. An unresolvable path exempts nothing -- otherwise a
+   * bullet could buy its way out with a pointer to a file no check verifies, which is the false green
+   * this whole guard exists to prevent.
+   */
+  private narrativePointerResolves(rel: string, text: string): boolean {
+    const deepDoc = RULE_DEEP_DOC[rel];
+    if (deepDoc === null || deepDoc === undefined) return false;
+
+    for (const match of text.matchAll(DEEP_DOC_TOKEN)) {
+      const target = (match[0] as string).split("#")[0] as string;
+      if (target !== deepDoc) continue;   // another domain's deep doc exempts nothing
+
+      const before = text.slice(0, match.index);
+      const link = DEEP_DOC_LINKED.exec(before);
+      if (link) {
+        if (this.resolvesFrom(rel, (link[1] ?? "") + target)) return true;
+        continue;
+      }
+      if (/[./]$|:\/\/\S*$/.test(before)) continue;   // a traversal or URL in bare form: unresolvable here
+      if (this.exists(target)) return true;
+    }
+    return false;
+  }
+
   /** A bullet is over the limit and not exempted by its own domain's case-study pointer. */
   private narrativeTrips(rel: string, text: string): boolean {
     if (text.length <= NARRATIVE_MAX_CHARS) return false;
-    const deepDoc = RULE_DEEP_DOC[rel];
-    return !(deepDoc !== null && deepDoc !== undefined && text.includes(`\`${deepDoc}\``));
+    return !this.narrativePointerResolves(rel, text);
   }
 
   /**
@@ -621,7 +655,10 @@ class ParityCheck {
       return `${rel} has no Tier-2 deep doc, so shorten the bullet - keep the imperative and its rationale, drop the case narrative`;
     }
     if (this.exists(deepDoc)) {
-      return `move the case narrative to \`${deepDoc}\` and leave a backticked pointer to it, or shorten the bullet`;
+      return (
+        `move the case narrative to \`${deepDoc}\` and leave a pointer to it - either the backticked path or a ` +
+        `link relative to ${dirname(rel)}/ (${RULES_DEEP_DOC_README}) - or shorten the bullet`
+      );
     }
     return (
       `\`${deepDoc}\` does not exist yet, so author it first (${RULES_DEEP_DOC_README}) and then leave a ` +

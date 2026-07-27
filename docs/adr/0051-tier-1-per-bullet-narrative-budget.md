@@ -158,11 +158,18 @@ domain.
   a fence for the remainder of the file, so every later bullet is skipped. This is `checkRulesPointers`'s
   fence handling, mirrored deliberately so the two checks agree on what is code; fixing it belongs in one
   place, for both. It is loud rather than silent — an unclosed fence renders visibly wrong.
-- **The exemption requires the bare backticked path** (`` `docs/rules/backend-postmortems.md` ``), not a
-  `../`-relative spelling. That is not an oversight either: `checkRulesPointers` deliberately *ignores*
-  traversal forms, so it never verifies that a `../` target exists. Accepting one here would create an
-  exemption backed by a path nothing validates — trading a small false red, which the error message
-  tells the contributor how to fix, for a silent false green.
+- **The exemption accepts both sanctioned pointer spellings, and requires each to resolve.** This
+  reversed during the PR, and the reversal is instructive. The Reviewer first asked for `../`-relative
+  pointers to be accepted; that was declined, correctly at the time, because `checkRulesPointers` then
+  *ignored* traversal forms and so never verified such a target existed — accepting one would have been
+  an exemption backed by a path nothing validates. Then issue #154 landed on `main` and **changed that
+  premise**: `resolvesFrom` now resolves and validates a promoted link, and `docs/rules/README.md` now
+  instructs contributors to promote a pointer to `[…](../docs/rules/x-postmortems.md)` once its target
+  exists. Holding the original position past that point would have meant one check telling a
+  contributor to promote a pointer and another telling them to un-promote it. So the guard now accepts
+  a backticked repo-root path **or** a promoted link, each validated against the base Markdown itself
+  uses for that form — the same two bases `checkRulesPointers` uses, so the two checks cannot disagree
+  about what a valid pointer is. Resolution is still required: presence alone exempts nothing.
 - Completing #151 becomes a **measurable** ratchet step: five allowlist entries must be deleted, and the
   gate enforces it.
 - Documented for contributors in `docs/rules/README.md` → *Convention: a Tier-1 bullet carries the
