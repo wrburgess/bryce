@@ -301,12 +301,24 @@ it.
 
 **A due entry never survives its own sweep as active — whichever branch it takes.** It is archived on no
 recurrence; archived **with a pointer to what it became** when it is promoted and that outcome is applied;
-and archived as *considered and dropped* when it resolves to *do nothing*, **including** the outcome-4
-default a `pending HC decision` row inherits at merge. Only entries whose review date has not yet passed
-stay active. Bounding just the archived side would leave the promotion side unbounded — a promoted entry
-that is presented, never answered, and defaults to *do nothing* would still be active, still carry the
-same past review date, and be re-presented identically by every later `final` run: the same
-re-report-forever failure this outcome exists to prevent, one branch over.
+and archived as *presented, pending* when a `pending HC decision` row is still open. Only entries whose
+review date has not yet passed stay active. Bounding just the archived side would leave the promotion side
+unbounded — a promoted entry that is presented, never answered, and defaults to *do nothing* would still
+be active, still carry the same past review date, and be re-presented identically by every later `final`
+run: the same re-report-forever failure this outcome exists to prevent, one branch over.
+
+**The pending row is archived by the run that presents it, not by the merge.** Merge is the last event in
+the lifecycle — no stage runs after it — so a rule that waited for the merge to close the entry would
+never execute, and the entry would stay active forever. So `final` archives it **in the same run**, with
+its disposition recorded honestly as *presented, awaiting HC*. If the HC answers before merge, the
+approved outcome is applied in that PR and the archived entry's pointer is updated in the same run. If
+they never answer, the row inherits outcome 4 at merge and the archived entry already says what happened:
+considered, presented, unanswered. Archival records that an entry was **considered**, never that it was
+resolved a particular way, so nothing is misfiled by archiving before the answer arrives.
+
+**A later recurrence opens a NEW entry** citing the archived one, rather than reviving it — archival stays
+terminal without discarding genuine recurrence signal, and the new entry's recurrence count carries
+forward so a finding that keeps coming back visibly escalates toward outcome 1.
 
 **The recursion bound.** Any post-`verify` change that moves `HEAD` past the reviewed SHA triggers a
 delta review — an `autonomous-fold`, an HC-approved fold under `present-to-hc`, a `listen` fix, or a

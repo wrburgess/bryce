@@ -59,13 +59,21 @@ skipped: stop and recheck.
 
    Apply the rule the Project Config declares — no recurrence and nothing having cited it → archive;
    recurrence → eligible for a real outcome, entering this step's disposition beside the new suggestions.
-   Then close the entry out, because **a due entry never survives its own sweep as active, whichever
-   branch it took**: archived on no recurrence; archived **with a pointer to what it became** once a
-   promoted outcome is applied; archived as *considered and dropped* when it resolves to *do nothing* —
-   **including** the outcome-4 default a `pending HC decision` row inherits at merge. Bounding only the
-   archived side leaves the promotion side unbounded: an entry presented, never answered, and defaulted to
-   *do nothing* would still be active with the same past review date, and every later run would re-present
-   it identically.
+   Then close the entry out **before this run ends**, because **a due entry never survives its own sweep
+   as active, whichever branch it took**: archived on no recurrence; archived **with a pointer to what it
+   became** once a promoted outcome is applied; archived as *presented, awaiting HC* while a `pending HC
+   decision` row is still open. Bounding only the archived side leaves the promotion side unbounded: an
+   entry presented, never answered, and defaulted to *do nothing* would still be active with the same past
+   review date, and every later run would re-present it identically.
+
+   **Archive the pending one here — do not wait for the merge.** Merge is the last event in the lifecycle;
+   no stage runs after it, so a step that deferred the archival to it would simply never run. Record the
+   disposition honestly as *presented, awaiting HC*: if the HC answers before merge, apply the approved
+   outcome in this PR and update the entry's pointer in the same run; if they never answer, the row
+   inherits *do nothing* at merge and the entry already reads considered, presented, unanswered. Archival
+   records that an entry was **considered**, never how it resolved, so archiving ahead of the answer
+   misfiles nothing. A later recurrence opens a **new** entry citing the archived one rather than reviving
+   it, carrying its recurrence count forward.
 
    **Archiving by the declared rule is executing the policy, not proposing one**, so the setting does not
    gate it; promoting an entry to a retained rule **is** a suggestion, and does. Report the sweep in the
