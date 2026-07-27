@@ -265,14 +265,25 @@ export interface MarkdownLink {
   readonly destination: string;
 }
 
-/** Flatten a node's rendered text, so an `[`ADR 0007`](…)` label reads the same as a plain one. */
+/**
+ * Flatten a node's rendered text, so an `[`ADR 0007`](…)` label reads the same as a plain one.
+ *
+ * A line break inside a label is its own node — `softbreak` for a wrap, `linebreak` for a hard break —
+ * carrying no literal, so it must be turned back into the space a reader sees. Dropping it concatenates
+ * the runs either side: a label wrapped as `[ADR\n0007](…)` flattens to `ADR0007`, which
+ * `ADR_LINK_LABEL` does not match, so the citation check silently decides this is not a citation and
+ * never compares its number to the target. That is a false green reachable by a formatter or a hand
+ * wrap, with no error anywhere (PR #162 delta round 6).
+ */
 function nodeText(node: Node): string {
   let text = "";
   const walker = node.walker();
   let event = walker.next();
   while (event !== null) {
-    if (event.entering && (event.node.type === "text" || event.node.type === "code")) {
-      text += event.node.literal ?? "";
+    if (event.entering) {
+      const type = event.node.type;
+      if (type === "text" || type === "code") text += event.node.literal ?? "";
+      else if (type === "softbreak" || type === "linebreak") text += " ";
     }
     event = walker.next();
   }

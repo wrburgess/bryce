@@ -65,6 +65,22 @@ describe("markdownLinks - what counts as a link", () => {
   it("handles an angle-bracket destination", () => {
     expect(destinations("[text](<a path.md>)")).toEqual(["a path.md"]);
   });
+
+  // PR #162 delta round 6, High. A line break inside a label is its own node carrying no literal, so
+  // dropping it concatenates the runs either side — `[ADR\n0007](…)` flattens to `ADR0007`, which
+  // `ADR_LINK_LABEL` does not match, so the ADR-number check silently decides this is not a citation.
+  // A formatter or a hand wrap is all it takes.
+  it("preserves the word boundary at a soft line break in a label", () => {
+    expect(markdownLinks("[ADR\n0007](0007-x.md)")).toEqual([
+      { label: "ADR 0007", destination: "0007-x.md" },
+    ]);
+  });
+
+  it("preserves the word boundary at a hard line break in a label", () => {
+    expect(markdownLinks("[ADR\\\n0007](0007-x.md)")).toEqual([
+      { label: "ADR 0007", destination: "0007-x.md" },
+    ]);
+  });
 });
 
 describe("markdownLinks - a link inside code is not a link", () => {
@@ -259,6 +275,16 @@ describe("parity check - ADR citation numbers", () => {
   it("reads a label through a code span", () => {
     withBundleCopy((root) => {
       writeFileSync(join(root, "docs/adr-number-probe.md"), "See [`ADR 0001`](0002-some-decision.md).\n");
+      expect(runParityCheck(root).errors.filter((e) => ADR_MISMATCH.test(e)))
+        .toEqual(["ADR link number mismatch in docs/adr-number-probe.md: label ADR 0001 targets ADR 0002"]);
+    });
+  });
+
+  // End-to-end for the round-6 High: a wrapped label is still a citation, so the mismatch is still
+  // reported. Without the break handling this reports nothing at all — silently.
+  it("still catches a mismatch when the label wraps across a line", () => {
+    withBundleCopy((root) => {
+      writeFileSync(join(root, "docs/adr-number-probe.md"), "See [ADR\n0001](0002-some-decision.md).\n");
       expect(runParityCheck(root).errors.filter((e) => ADR_MISMATCH.test(e)))
         .toEqual(["ADR link number mismatch in docs/adr-number-probe.md: label ADR 0001 targets ADR 0002"]);
     });
