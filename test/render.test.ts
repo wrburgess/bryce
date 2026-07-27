@@ -654,20 +654,20 @@ describe("renderDigest — non-ASCII name fidelity (#65 / ADR 0041)", () => {
       const mail = renderDigest(gameCountAssembly([harperGames]));
       expect(mail.text).toContain("GP");
       expect(mail.text).toContain("Span");
-      expect(mail.text).toContain("Jul 12–Jul 18");
+      expect(mail.text).toContain("Jul 12-18");
       // GP is the aggregate's own games count (2), the "report 4, not 10" contract.
       expect(mail.html).toContain("Span");
-      expect(mail.html).toContain("Jul 12–Jul 18");
+      expect(mail.html).toContain("Jul 12-18");
     });
 
     it("carries the Span column into the Markdown and CSV surfaces too", () => {
       const assembly = gameCountAssembly([harperGames]);
       const md = renderDigestMarkdown(assembly);
       expect(md).toContain("| Span |");
-      expect(md).toContain("Jul 12–Jul 18");
+      expect(md).toContain("Jul 12-18");
       const csv = digestTableRows(assembly, "batters");
       expect(csv.headers).toContain("Span");
-      expect(csv.rows[0]).toContain("Jul 12–Jul 18");
+      expect(csv.rows[0]).toContain("Jul 12-18");
     });
 
     it("collapses a single-game span to one date", () => {

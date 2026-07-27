@@ -1,6 +1,6 @@
 import type { DigestAssembly, DigestRow } from "./assemble.js";
 import type { ResolvedWindow } from "../domain/window.js";
-import { gameCountTitle, isGameCountSpec, isLongWindow, shortDate } from "../domain/window.js";
+import { formatDateRange, gameCountTitle, isGameCountSpec, isLongWindow, shortDate } from "../domain/window.js";
 import type { DigestFreshness } from "../jobs/refresh-run.js";
 import type { Level } from "../mlb/levels.js";
 import { deriveRate } from "../stats/aggregate.js";
@@ -210,11 +210,12 @@ function leadColumns(window: ResolvedWindow): Column[] {
 }
 
 /** A row's real date span for a game-count report: a single date when both ends
- * coincide, else `from–to` in the digest's short-date style. Empty when absent
- * (a date-window row, which never renders this column). */
+ * coincide, else the digest's own `formatDateRange` (same-month collapse, single
+ * hyphen — consistent with the window labels). Empty when absent (a date-window
+ * row, which never renders this column). */
 function formatSpan(from: string | undefined, to: string | undefined): string {
   if (from === undefined || to === undefined) return "";
-  return from === to ? shortDate(from) : `${shortDate(from)}–${shortDate(to)}`;
+  return from === to ? shortDate(from) : formatDateRange(from, to);
 }
 
 function battingColumns(window: ResolvedWindow): Column[] {

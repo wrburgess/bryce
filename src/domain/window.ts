@@ -145,7 +145,7 @@ export function shortDate(isoDate: string): string {
 }
 
 /** Format a date range, collapsing the month if both dates are in the same month. */
-function formatDateRange(from: string, to: string): string {
+export function formatDateRange(from: string, to: string): string {
   const [fromY, fromM] = from.split("-");
   const [toY, toM] = to.split("-");
 

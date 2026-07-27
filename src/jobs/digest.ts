@@ -171,14 +171,10 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   // on-demand for the identical reason (#140 / ADR 0050) — the slot key has no
   // tag dimension, so two cohorts on one date would fight over one slot. A
   // game-count report (issue #153) is likewise on-demand: it has no single date
-  // to key a daily slot on. Route any run with a list, a tag scope, a game-count
-  // window, or any non-1d date window to the on-demand path.
-  if (
-    deps.spec !== "1d" ||
-    isGameCountSpec(deps.spec) ||
-    deps.listId !== undefined ||
-    deps.tagScope !== undefined
-  ) {
+  // to key a daily slot on, and every game-count spec is non-1d, so the
+  // `!== "1d"` test already routes it here. Route any run with a list, a tag
+  // scope, or any non-1d window (date OR game-count) to the on-demand path.
+  if (deps.spec !== "1d" || deps.listId !== undefined || deps.tagScope !== undefined) {
     return runOnDemandReport(deps, warn);
   }
 

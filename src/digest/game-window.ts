@@ -79,14 +79,17 @@ export function rankedGameLinesQuery(
   const tagCondition =
     args.tagScope === undefined ? undefined : tagScopeCondition(db, args.tagScope.tokens);
 
-  // distinct_games: one row per (player, distinct GAME) — dedup FIRST so a
-  // doubleheader or a batting+fielding+pitching game is ONE game, not several
-  // rows (ADR 0029 per-game identity). `MAX(id)` is the game's stable tiebreaker,
-  // reproducing the single-player card's `game_date DESC, game_number DESC,
-  // id DESC` ordering (src/reports/player-card.ts) — since (game_date,
-  // game_number) is not unique per player, dropping it would make the N boundary
-  // nondeterministic.
-  const distinctGames = db.$with("distinct_games").as(
+  // game_rows: every scoped stat-line, tagged with a WITHIN-GAME rank so we can
+  // pick ONE representative row per distinct game. The game's identity is
+  // (player, source, game_id) — ADR 0029, and exactly the key `player-card.ts`'s
+  // `selectGames` dedups on. `game_date`/`game_number` are attributes of the
+  // game, NOT part of its identity: batting/pitching/fielding are fetched as
+  // three independent calls (src/jobs/refresh.ts) and a suspended-then-resumed
+  // game can carry two dates, so grouping BY date/number would split one game
+  // into two — double-counting it and consuming two of the N slots. Ranking the
+  // rows and keeping the top one per game picks the representative the way the
+  // card does (its first row in game_date/number/id DESC order).
+  const gameRows = db.$with("game_rows").as(
     db
       .select({
         playerId: statLines.playerId,
@@ -94,7 +97,11 @@ export function rankedGameLinesQuery(
         gameId: statLines.gameId,
         gameDate: statLines.gameDate,
         gameNumber: statLines.gameNumber,
-        maxId: sql<number>`max(${statLines.id})`.as("max_id"),
+        id: statLines.id,
+        withinGameRank:
+          sql<number>`row_number() over (partition by ${statLines.playerId}, ${statLines.source}, ${statLines.gameId} order by ${statLines.gameDate} desc, ${statLines.gameNumber} desc, ${statLines.id} desc)`.as(
+            "within_game_rank",
+          ),
       })
       .from(statLines)
       .innerJoin(players, eq(players.id, statLines.playerId))
@@ -106,38 +113,35 @@ export function rankedGameLinesQuery(
           ...(listCondition !== undefined ? [listCondition] : []),
           ...(tagCondition !== undefined ? [tagCondition] : []),
         ),
-      )
-      .groupBy(
-        statLines.playerId,
-        statLines.source,
-        statLines.gameId,
-        statLines.gameDate,
-        statLines.gameNumber,
       ),
   );
 
-  // ranked: number each player's distinct games most-recent-first; the outer
-  // query keeps only rn <= N. ROW_NUMBER() OVER (PARTITION BY player) ranks
-  // DISTINCT games (not raw stat_lines rows), so a doubleheader counts as two.
+  // ranked: number each player's DISTINCT games (the representative rows,
+  // within_game_rank = 1) most-recent-first; the outer query keeps only rn <= N.
+  // Ordering on the representative's (game_date DESC, game_number DESC, id DESC)
+  // reproduces the single-player card exactly; the id tiebreaker keeps the N
+  // boundary deterministic when two games tie on (game_date, game_number).
   const ranked = db.$with("ranked").as(
     db
-      .with(distinctGames)
+      .with(gameRows)
       .select({
-        playerId: distinctGames.playerId,
-        source: distinctGames.source,
-        gameId: distinctGames.gameId,
-        rn: sql<number>`row_number() over (partition by ${distinctGames.playerId} order by ${distinctGames.gameDate} desc, ${distinctGames.gameNumber} desc, ${distinctGames.maxId} desc)`.as(
+        playerId: gameRows.playerId,
+        source: gameRows.source,
+        gameId: gameRows.gameId,
+        rn: sql<number>`row_number() over (partition by ${gameRows.playerId} order by ${gameRows.gameDate} desc, ${gameRows.gameNumber} desc, ${gameRows.id} desc)`.as(
           "rn",
         ),
       })
-      .from(distinctGames),
+      .from(gameRows)
+      .where(eq(gameRows.withinGameRank, 1)),
   );
 
   // Load every stat-type row (batting/pitching/fielding) for the selected games
   // in ONE statement — the ranked CTE joined back to stat_lines — so there is no
-  // query-per-player (rules/backend.md: no N+1).
+  // query-per-player (rules/backend.md: no N+1). Each selected game has exactly
+  // one ranked row (the dedup above), so no stat-line is joined twice.
   return db
-    .with(distinctGames, ranked)
+    .with(gameRows, ranked)
     .select({ line: statLines, player: players })
     .from(statLines)
     .innerJoin(players, eq(players.id, statLines.playerId))

@@ -103,6 +103,30 @@ describe("cohort game-count report", () => {
     }
   });
 
+  it("counts a game ONCE even when its companion stat-type rows disagree on the game date (per-game identity is (source, game_id))", async () => {
+    // A game's batting and fielding rows are fetched by independent calls and can
+    // carry different dates (a suspended-then-resumed game — ADR 0029). The game
+    // is still ONE game: keying dedup on (source, game_id) alone, never on the
+    // date, so it consumes one slot and its rows are summed once (not twice).
+    const opened = testDb();
+    try {
+      const p = await insertPlayer(opened.db, { fullName: "Sus Pended" });
+      await insertStatLine(opened.db, { playerId: p.id, gameId: 990, gameDate: "2026-07-15", gameNumber: 1, statType: "batting", stats: { hits: 2, atBats: 4 } });
+      await insertStatLine(opened.db, { playerId: p.id, gameId: 990, gameDate: "2026-07-14", gameNumber: 1, statType: "fielding", stats: { errors: 1 } });
+      await insertStatLine(opened.db, { playerId: p.id, gameId: 991, gameDate: "2026-07-10", gameNumber: 1, statType: "batting", stats: { hits: 3, atBats: 4 } });
+
+      const report = await assembleGameWindow(opened.db, { now: clock(), tz: TEST_TZ, spec: "last10games" });
+      const row = report.batters.find((r) => r.player.fullName === "Sus Pended")!;
+      expect(row.agg.games).toBe(2); // 990 and 991 — NOT 3 (990 split by date)
+      expect(row.agg.counters.hits).toBe(5); // 2 + 3, the 990 batting row summed once
+      expect(row.agg.counters.errors).toBe(1); // the 990 fielding companion folded in once
+      expect(row.spanFrom).toBe("2026-07-10");
+      expect(row.spanTo).toBe("2026-07-15");
+    } finally {
+      opened.close();
+    }
+  });
+
   it("resolves the N boundary deterministically when two distinct games tie on (date, game_number)", async () => {
     const opened = testDb();
     try {
