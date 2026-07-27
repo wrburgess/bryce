@@ -266,14 +266,23 @@ export interface MarkdownLink {
 }
 
 /**
- * Flatten a node's rendered text, so an `[`ADR 0007`](…)` label reads the same as a plain one.
+ * Flatten a node's rendered text, WHITESPACE-NORMALIZED, so `[`ADR 0007`](…)`, `[ADR 0007](…)` and a
+ * copy of either that a formatter has wrapped all produce the same label.
  *
- * A line break inside a label is its own node — `softbreak` for a wrap, `linebreak` for a hard break —
- * carrying no literal, so it must be turned back into the space a reader sees. Dropping it concatenates
- * the runs either side: a label wrapped as `[ADR\n0007](…)` flattens to `ADR0007`, which
- * `ADR_LINK_LABEL` does not match, so the citation check silently decides this is not a citation and
- * never compares its number to the target. That is a false green reachable by a formatter or a hand
- * wrap, with no error anywhere (PR #162 delta round 6).
+ * Three inline node types carry an effect but no literal — `softbreak` (a wrap), `linebreak` (a hard
+ * break), and `html_inline` (e.g. an inline comment). Skipping them concatenates the runs either side,
+ * so `[ADR\n0007](…)` or `[ADR<!-- c -->0007](…)` flattens to `ADR0007`, which `ADR_LINK_LABEL` does not
+ * match — and the citation check then silently decides this is not a citation at all and never compares
+ * its number to the target. A false green reachable by a formatter or a hand wrap, with no error
+ * anywhere (PR #162 delta rounds 6 and 7).
+ *
+ * Each becomes a space, and the result is then collapsed and trimmed. The normalization is not
+ * decoration: emitting a space for `html_inline` is what a reader does NOT see (a comment renders to
+ * nothing), so without a trim, `[ADR 0007<!-- note -->](…)` would gain a trailing space and stop
+ * matching — trading round 6's false green for a new one. Both halves are needed, and both fail toward
+ * MORE checking, which is the direction `rules/scripting.md` asks for.
+ *
+ * `emph` and `strong` need no case: they are pure containers whose `text` children are already walked.
  */
 function nodeText(node: Node): string {
   let text = "";
@@ -283,11 +292,11 @@ function nodeText(node: Node): string {
     if (event.entering) {
       const type = event.node.type;
       if (type === "text" || type === "code") text += event.node.literal ?? "";
-      else if (type === "softbreak" || type === "linebreak") text += " ";
+      else if (type === "softbreak" || type === "linebreak" || type === "html_inline") text += " ";
     }
     event = walker.next();
   }
-  return text;
+  return strip(text.replace(/\s+/g, " "));
 }
 
 /**

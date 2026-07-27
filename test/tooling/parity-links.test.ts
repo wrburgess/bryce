@@ -81,6 +81,29 @@ describe("markdownLinks - what counts as a link", () => {
       { label: "ADR 0007", destination: "0007-x.md" },
     ]);
   });
+
+  // PR #162 delta round 7, Medium: `html_inline` is the third node type that carries an effect and no
+  // literal, so it glues label fragments together exactly as an unhandled line break did.
+  it("preserves the word boundary at an inline HTML comment in a label", () => {
+    expect(markdownLinks("[ADR<!-- c -->0007](0007-x.md)")).toEqual([
+      { label: "ADR 0007", destination: "0007-x.md" },
+    ]);
+  });
+
+  // The other half of the same fix, and the reason it is a normalization rather than one more branch:
+  // an inline comment renders to NOTHING, so emitting a space for it would add a trailing one here and
+  // stop this label matching — swapping round 6's false green for a new one.
+  it("does not let a trailing inline comment push a label out of the citation grammar", () => {
+    expect(markdownLinks("[ADR 0007<!-- note -->](0008-x.md)")).toEqual([
+      { label: "ADR 0007", destination: "0008-x.md" },
+    ]);
+  });
+
+  it("collapses a doubled space inside a label", () => {
+    expect(markdownLinks("[ADR  0007](0007-x.md)")).toEqual([
+      { label: "ADR 0007", destination: "0007-x.md" },
+    ]);
+  });
 });
 
 describe("markdownLinks - a link inside code is not a link", () => {
