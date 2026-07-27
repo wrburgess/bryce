@@ -360,6 +360,42 @@ function subdirectories(absolute: string): string[] {
 }
 
 /**
+ * Immediate `*.md` REGULAR FILES of `absolute`, sorted, with the two read failures answered differently
+ * (issue #164).
+ *
+ * `isFile()` is not tidiness: a DIRECTORY named `nested.md` passes a name-only filter, and this list is
+ * consumed by test/tooling/parity-fixture.ts `healDeadLinks()`, which guards with `existsSync` (true for a
+ * directory) and then `readFileSync`s it — `EISDIR`, taking the fixture down. `checkLinks` itself only
+ * skips such an entry, so the name-only bug would have been invisible from the checker's own output.
+ *
+ * ENOENT is swallowed and every other error rethrown, rather than a blanket catch: a bundle legitimately
+ * ships a subset of the tree, but an unreadable directory (a permission error, an `ENOTDIR` from a path
+ * that is a file) is a MALFORMED bundle, and returning "no files" for it silently empties the scope —
+ * `rules/scripting.md`'s false green, where the gate reports OK while checking nothing. Absent is a fact;
+ * unreadable is a failure.
+ */
+function markdownFilesIn(absolute: string): string[] {
+  let children: string[];
+  try {
+    children = readdirSync(absolute);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+
+  return children
+    .sort()
+    .filter((child) => {
+      if (!child.endsWith(".md")) return false;
+      try {
+        return statSync(join(absolute, child)).isFile();
+      } catch {
+        return false;
+      }
+    });
+}
+
+/**
  * The files whose markdown links `checkLinks` resolves (issue #159).
  *
  * DERIVED, not hand-kept, for everything below the authored seed: a tenth Skill or a new command shim is
@@ -367,10 +403,15 @@ function subdirectories(absolute: string): string[] {
  * hardcoded paths this replaced — is how `rules/*.md` went unchecked for its entire life while carrying
  * links the whole time.
  *
- * `docs/adr/*.md` is deliberately absent: it carries two dead links whose repair means editing accepted
- * ADRs, which is a records decision rather than a validator one. Tracked as a follow-up, not silently
- * dropped. A path listed here but absent from disk is skipped by the caller, so the derivation is safe
- * against a bundle that ships a subset.
+ * `docs/adr/*.md` joined that derivation in issue #164, closing the last unchecked markdown surface: a
+ * directory of accepted decisions that cite each other constantly, with nothing resolving those
+ * citations. Two were dead. Repairing them was a records question, not a validator one, and its answer is
+ * [ADR 0057](../docs/adr/0057-adr-links-repair-identity-annotate-loss.md) — repair a link whose target
+ * kept its identity, de-link and annotate one whose target ceased to exist. The standing cost is stated
+ * there: renaming a file an ADR cites now reddens this check, which is the point.
+ *
+ * A path listed here but absent from disk is skipped by the caller, so the derivation is safe against a
+ * bundle that ships a subset.
  */
 export function linkCheckedFiles(root: string): string[] {
   const seen = new Set<string>();
@@ -384,16 +425,8 @@ export function linkCheckedFiles(root: string): string[] {
   for (const rel of LINK_CHECKED) add(rel);
   for (const rel of REQUIRED_RULES) add(rel);
   for (const name of subdirectories(join(root, SKILLS_DIR))) add(`${SKILLS_DIR}/${name}/SKILL.md`);
-
-  let shims: string[] = [];
-  try {
-    shims = readdirSync(join(root, CLAUDE_COMMANDS_DIR)).sort();
-  } catch {
-    shims = [];
-  }
-  for (const name of shims) {
-    if (name.endsWith(".md")) add(`${CLAUDE_COMMANDS_DIR}/${name}`);
-  }
+  for (const name of markdownFilesIn(join(root, CLAUDE_COMMANDS_DIR))) add(`${CLAUDE_COMMANDS_DIR}/${name}`);
+  for (const name of markdownFilesIn(join(root, ADR_DIR))) add(`${ADR_DIR}/${name}`);
 
   return out;
 }
