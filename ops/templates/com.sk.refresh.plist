@@ -1,8 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- `npm run refresh -- --quiet`: the `--` carries the load here. Without it npm
+     swallows the flag and the scheduled job silently reverts to the verbose
+     per-player stream, which would grow logs/refresh.log by orders of magnitude
+     (and that file has no rotation). Quiet mode is exactly the pre-#146 output:
+     one summary line, plus the stderr failure summary when anything failed.
+     scripts/check-operational-templates.ts pins this invocation. -->
 <plist version="1.0"><dict>
   <key>Label</key><string>com.sk.refresh</string>
   <key>WorkingDirectory</key><string>BRYCE_ROOT</string>
-  <key>ProgramArguments</key><array><string>/bin/zsh</string><string>-lc</string><string>mkdir -p "BRYCE_ROOT/logs" &amp;&amp; npm run refresh &gt;&gt; "BRYCE_ROOT/logs/refresh.log" 2&gt;&amp;1</string></array>
+  <key>ProgramArguments</key><array><string>/bin/zsh</string><string>-lc</string><string>mkdir -p "BRYCE_ROOT/logs" &amp;&amp; npm run refresh -- --quiet &gt;&gt; "BRYCE_ROOT/logs/refresh.log" 2&gt;&amp;1</string></array>
   <key>StartCalendarInterval</key><dict><key>Hour</key><integer>3</integer><key>Minute</key><integer>30</integer></dict>
 </dict></plist>

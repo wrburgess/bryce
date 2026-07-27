@@ -183,14 +183,14 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0043)", () => {
   it("persists live progress only while the run still owns its running row", () => {
     const claim = claimRefreshRun(opened.db, { now: at(T0), playersTotal: 3 });
     if (!claim.claimed) throw new Error("expected claim");
-    const counts = { playersRefreshed: 1, playersTotal: 3, statLinesInserted: 4, statLinesUpdated: 2 };
+    const counts = { playersRefreshed: 1, playersSkipped: 1, playersFailed: 1, playersTotal: 3, statLinesInserted: 4, statLinesUpdated: 2 };
 
     expect(updateRefreshRunProgress(opened.db, claim.runId, counts)).toBe(true);
     expect(opened.db.select().from(refreshRuns).all()[0]).toMatchObject(counts);
 
     settleRefreshRun(opened.db, { runId: claim.runId, now: at(WITHIN_LEASE), status: "partial", counts });
     expect(updateRefreshRunProgress(opened.db, claim.runId, {
-      playersRefreshed: 3, playersTotal: 3, statLinesInserted: 9, statLinesUpdated: 9,
+      playersRefreshed: 3, playersSkipped: 0, playersFailed: 0, playersTotal: 3, statLinesInserted: 9, statLinesUpdated: 9,
     })).toBe(false);
     expect(opened.db.select().from(refreshRuns).all()[0]).toMatchObject(counts);
   });
@@ -229,7 +229,7 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0043)", () => {
         runId: b.runId,
         now: at("2026-07-19T07:12:00.000Z"),
         status: "ok",
-        counts: { playersRefreshed: 3, playersTotal: 3, statLinesInserted: 5, statLinesUpdated: 1 },
+        counts: { playersRefreshed: 3, playersSkipped: 0, playersFailed: 0, playersTotal: 3, statLinesInserted: 5, statLinesUpdated: 1 },
       }),
     ).toBe(true);
     // A was reaped by B's claim, so its late settle owns nothing → false, no write.
@@ -238,7 +238,7 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0043)", () => {
         runId: a.runId,
         now: at("2026-07-19T07:20:00.000Z"),
         status: "partial",
-        counts: { playersRefreshed: 1, playersTotal: 2, statLinesInserted: 2, statLinesUpdated: 0 },
+        counts: { playersRefreshed: 1, playersSkipped: 0, playersFailed: 1, playersTotal: 2, statLinesInserted: 2, statLinesUpdated: 0 },
       }),
     ).toBe(false);
 
@@ -263,7 +263,7 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0043)", () => {
       runId: okClaim.runId,
       now: at(WITHIN_LEASE),
       status: "failed",
-      counts: { playersRefreshed: 0, playersTotal: 1, statLinesInserted: 0, statLinesUpdated: 0 },
+      counts: { playersRefreshed: 0, playersSkipped: 0, playersFailed: 1, playersTotal: 1, statLinesInserted: 0, statLinesUpdated: 0 },
       errorMessage: "MLB Stats API request failed with HTTP 503",
     });
     const row = opened.db.select().from(refreshRuns).all()[0];
@@ -425,6 +425,50 @@ describe("refreshHealth derivation (ADR 0043)", () => {
     const health = refreshHealth(opened.db, at(PAST_LEASE), TEST_TZ);
     expect(health?.state).not.toBe("running");
     expect(health?.state).toBe("stale"); // no terminal run to trust
+  });
+
+  // #146: the durable Accounting must carry the SAME three-way per-player
+  // classification the console's Liveness stream shows, or the two surfaces
+  // report different runs. Reading them off `refreshHealth` is what makes
+  // `/health` and MCP `status` agree with the terminal for free.
+  it("surfaces the passed-over and failed counts of the latest run", async () => {
+    await insertRefreshRun(opened.db, {
+      status: "partial",
+      startedAt: T0,
+      claimedAt: T0,
+      playersRefreshed: 4,
+      playersSkipped: 2,
+      playersFailed: 1,
+      playersTotal: 7,
+      statLinesInserted: 11,
+      statLinesUpdated: 3,
+    });
+    const health = refreshHealth(opened.db, at(WITHIN_LEASE), TEST_TZ);
+    expect(health).toMatchObject({
+      state: "partial",
+      playersRefreshed: 4,
+      playersSkipped: 2,
+      playersFailed: 1,
+      playersTotal: 7,
+    });
+    // The identity the CLI's terminal line asserts, holding on the durable row.
+    expect(
+      (health?.playersRefreshed ?? 0) + (health?.playersSkipped ?? 0) + (health?.playersFailed ?? 0),
+    ).toBe(health?.playersTotal);
+  });
+
+  // A row written before #146 has no recorded value: it reads 0/0. Pinned so a
+  // future reader (and any consumer arithmetic) knows a pre-migration row cannot
+  // satisfy the refreshed+skipped+failed identity, and that is not a defect.
+  it("reports 0/0 for a run that predates the two columns, without inventing a total", async () => {
+    await insertRefreshRun(opened.db, {
+      status: "partial", startedAt: T0, claimedAt: T0, playersRefreshed: 1, playersTotal: 5,
+    });
+    const health = refreshHealth(opened.db, at(WITHIN_LEASE), TEST_TZ);
+    expect(health).toMatchObject({ playersSkipped: 0, playersFailed: 0, playersTotal: 5 });
+    expect(health!.playersRefreshed + health!.playersSkipped + health!.playersFailed).not.toBe(
+      health!.playersTotal,
+    );
   });
 });
 

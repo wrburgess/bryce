@@ -6,10 +6,25 @@ const TEMPLATE_DIR = join("ops", "templates");
 const ALLOWED_TOKENS = new Set(["BRYCE_ROOT", "BRYCE_DATA_DIR", "R2_BUCKET", "R2_ENDPOINT"]);
 const SECRET_ASSIGNMENT = /(?:AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|POSTMARK_SERVER_TOKEN|API_TOKEN|SMTP_PASS)\s*[:=]/;
 
-interface PlistSpec { file: string; label: string; command: string; log: string; hour: number; minute: number }
+interface PlistSpec {
+  file: string;
+  label: string;
+  command: string;
+  log: string;
+  hour: number;
+  minute: number;
+  /**
+   * Arguments the scheduled job passes THROUGH npm to the CLI, exactly as they
+   * must appear. Pinned here rather than left free-form because the `--`
+   * separator is the whole contract: without it npm swallows the flag and the
+   * job silently runs in the wrong mode, which is the failure this gate exists
+   * to catch (#146, ops/templates/com.sk.refresh.plist).
+   */
+  args?: string;
+}
 const PLISTS: readonly PlistSpec[] = [
   { file: "com.sk.backup.plist", label: "com.sk.backup", command: "db:backup", log: "backup", hour: 3, minute: 0 },
-  { file: "com.sk.refresh.plist", label: "com.sk.refresh", command: "refresh", log: "refresh", hour: 3, minute: 30 },
+  { file: "com.sk.refresh.plist", label: "com.sk.refresh", command: "refresh", log: "refresh", hour: 3, minute: 30, args: "-- --quiet" },
   { file: "com.sk.digest.plist", label: "com.sk.digest", command: "digest", log: "digest", hour: 5, minute: 0 },
 ];
 
@@ -88,7 +103,8 @@ export function validateOperationalTemplates(root: string): string[] {
     if (dict === undefined) { issues.push(`${spec.file}: invalid plist hierarchy`); continue; }
     if (dict.get("Label")?.value !== spec.label) issues.push(`${spec.file}: Label must be ${spec.label}`);
     if (dict.get("WorkingDirectory")?.value !== "BRYCE_ROOT") issues.push(`${spec.file}: WorkingDirectory must be BRYCE_ROOT`);
-    const expected = `mkdir -p "BRYCE_ROOT/logs" && npm run ${spec.command} >> "BRYCE_ROOT/logs/${spec.log}.log" 2>&1`;
+    const invocation = spec.args === undefined ? `npm run ${spec.command}` : `npm run ${spec.command} ${spec.args}`;
+    const expected = `mkdir -p "BRYCE_ROOT/logs" && ${invocation} >> "BRYCE_ROOT/logs/${spec.log}.log" 2>&1`;
     const args = dict.get("ProgramArguments");
     if (args?.tag !== "array" || args.children?.join("\0") !== ["/bin/zsh", "-lc", expected].join("\0")) issues.push(`${spec.file}: ProgramArguments must provision logs and run npm script ${spec.command}`);
     const calendar = dict.get("StartCalendarInterval")?.children;

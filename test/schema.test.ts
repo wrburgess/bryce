@@ -660,6 +660,141 @@ describe("digest_deliveries claim columns and lock behaviour (ADR 0034)", () => 
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("rebuilds refresh_runs for the #146 accounting columns, keeping every prior invariant and row", () => {
+    // 0011 is a FULL TABLE REBUILD (SQLite has no ALTER TABLE ... ADD
+    // CONSTRAINT), so the risk is not the two new CHECKs but everything the
+    // rebuild could silently DROP: the six pre-existing CHECKs, the composite
+    // index, AUTOINCREMENT, and the historical rows themselves.
+    const dir = mkdtempSync(join(tmpdir(), "bryce-migrate-"));
+    const sqlite = new Database(join(dir, "bryce.db"));
+    try {
+      for (const f of [
+        "0000_gray_brood.sql",
+        "0001_overconfident_sally_floyd.sql",
+        "0002_ambiguous_vapor.sql",
+        "0003_reconciled_at.sql",
+        "0004_steep_justin_hammer.sql",
+        "0005_yummy_tony_stark.sql",
+        "0006_misty_flatman.sql",
+        "0007_tiresome_enchantress.sql",
+        "0008_highlightly_ncaa.sql",
+        "0009_dizzy_zodiak.sql",
+        "0010_player_card_indexes.sql",
+      ]) {
+        applyMigration(sqlite, f);
+      }
+      // Two historical rows: one settled, and one still `running` — a live sweep
+      // may be mid-flight when the host self-heals its schema at startup, and the
+      // rebuild must copy it verbatim (the finished_iff_terminal CHECK holds
+      // either way; the startup lock is what makes it safe).
+      sqlite
+        .prepare(
+          `INSERT INTO refresh_runs
+             (id, started_at, finished_at, status, claimed_at, players_refreshed,
+              players_total, stat_lines_inserted, stat_lines_updated, error_message, created_at)
+           VALUES (41, '2026-07-19T07:00:00.000Z', '2026-07-19T07:05:00.000Z', 'partial',
+                   '2026-07-19T07:00:00.000Z', 4, 7, 11, 3, 'x failed', '2026-07-19T07:00:00.000Z')`,
+        )
+        .run();
+      sqlite
+        .prepare(
+          `INSERT INTO refresh_runs
+             (id, started_at, finished_at, status, claimed_at, players_refreshed,
+              players_total, stat_lines_inserted, stat_lines_updated, error_message, created_at)
+           VALUES (42, '2026-07-20T07:00:00.000Z', NULL, 'running',
+                   '2026-07-20T07:00:00.000Z', 1, 7, 0, 0, NULL, '2026-07-20T07:00:00.000Z')`,
+        )
+        .run();
+
+      applyMigration(sqlite, "0011_refresh_run_accounting.sql");
+
+      // Both rows survive with their IDS UNCHANGED (the AUTOINCREMENT identity a
+      // positional `SELECT *` copy would have been free to renumber), and the two
+      // new columns backfill to 0.
+      const rows = sqlite
+        .prepare("SELECT * FROM refresh_runs ORDER BY id")
+        .all() as Array<Record<string, unknown>>;
+      expect(rows.map((r) => r.id)).toEqual([41, 42]);
+      expect(rows[0]).toMatchObject({
+        id: 41, status: "partial", players_refreshed: 4, players_total: 7,
+        stat_lines_inserted: 11, stat_lines_updated: 3, error_message: "x failed",
+        players_skipped: 0, players_failed: 0,
+      });
+      expect(rows[1]).toMatchObject({ id: 42, status: "running", finished_at: null, players_skipped: 0 });
+
+      // AUTOINCREMENT survives: the next insert continues PAST the copied ids
+      // rather than restarting, so no future run can collide with a historical one.
+      sqlite
+        .prepare(
+          `INSERT INTO refresh_runs (started_at, finished_at, status, claimed_at, created_at)
+           VALUES ('2026-07-21T07:00:00.000Z', NULL, 'running', '2026-07-21T07:00:00.000Z', 'x')`,
+        )
+        .run();
+      const nextId = (sqlite.prepare("SELECT max(id) AS id FROM refresh_runs").get() as { id: number }).id;
+      expect(nextId).toBe(43);
+
+      // The composite hot-read index survives the drop/rename.
+      const indexes = (
+        sqlite.prepare("PRAGMA index_list(refresh_runs)").all() as Array<Record<string, unknown>>
+      ).map((i) => i.name);
+      expect(indexes).toContain("refresh_runs_status_started_idx");
+
+      // The TWO NEW CHECKs each reject -1...
+      expect(() =>
+        sqlite.prepare(
+          `INSERT INTO refresh_runs (started_at, finished_at, status, claimed_at, players_skipped, created_at)
+           VALUES ('x', 'y', 'ok', 'x', -1, 'x')`,
+        ).run(),
+      ).toThrow(/CHECK constraint failed/);
+      expect(() =>
+        sqlite.prepare(
+          `INSERT INTO refresh_runs (started_at, finished_at, status, claimed_at, players_failed, created_at)
+           VALUES ('x', 'y', 'ok', 'x', -1, 'x')`,
+        ).run(),
+      ).toThrow(/CHECK constraint failed/);
+
+      // ...and ALL SIX pre-existing CHECKs still enforce after the rebuild. Each
+      // insert is valid under every OTHER constraint, so it can only be refused
+      // by the one it targets (rules/testing.md).
+      const stillRejected: Array<[string, string]> = [
+        ["status enum", `('x', 'y', 'bogus', 'x', 0, 0, 0, 'x')`],
+        ["finished iff terminal (terminal without finished_at)", `('x', NULL, 'ok', 'x', 0, 0, 0, 'x')`],
+        ["players_refreshed nonneg", `('x', 'y', 'ok', 'x', -1, 0, 0, 'x')`],
+        ["players_total nonneg", `('x', 'y', 'ok', 'x', 0, -1, 0, 'x')`],
+        ["stat_lines_inserted nonneg", `('x', 'y', 'ok', 'x', 0, 0, -1, 'x')`],
+      ];
+      for (const [label, values] of stillRejected) {
+        expect(() =>
+          sqlite.prepare(
+            `INSERT INTO refresh_runs (started_at, finished_at, status, claimed_at,
+               players_refreshed, players_total, stat_lines_inserted, created_at)
+             VALUES ${values}`,
+          ).run(),
+          label,
+        ).toThrow(/CHECK constraint failed/);
+      }
+      // The sixth: running WITH a finished_at is the other half of the iff.
+      expect(() =>
+        sqlite.prepare(
+          `INSERT INTO refresh_runs (started_at, finished_at, status, claimed_at, created_at)
+           VALUES ('x', 'y', 'running', 'x', 'x')`,
+        ).run(),
+      ).toThrow(/CHECK constraint failed/);
+      // ...and stat_lines_updated, the last nonneg.
+      expect(() =>
+        sqlite.prepare(
+          `INSERT INTO refresh_runs (started_at, finished_at, status, claimed_at, stat_lines_updated, created_at)
+           VALUES ('x', 'y', 'ok', 'x', -1, 'x')`,
+        ).run(),
+      ).toThrow(/CHECK constraint failed/);
+
+      expect(sqlite.prepare("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+    } finally {
+      sqlite.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 /**
