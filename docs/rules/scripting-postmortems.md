@@ -19,9 +19,10 @@ checker tell a link from prose about one?**
 
 **What shipped and was caught in review.** The first implementation answered that question by hand: blank
 every code span and fenced block, run the old regex over the masked text, preserve offsets. It went
-through **eight independent review rounds**. **Five found a silent false green** — a link the CommonMark
-reference parser renders live that the masker hid — and **two of those five were introduced while fixing
-the round before**:
+through **eight independent Reviewer rounds** — numbered 1 through 8 in PR #162's own review thread,
+which is the source for that count; ADR 0054 tables only the five that mattered. Those **five each found
+a silent false green** — a link the CommonMark reference parser renders live that the masker hid — and
+**two of the five were introduced while fixing the round before**:
 
 | Round | The bound it tried | What a differential fuzzer found it missed |
 |---|---|---|
@@ -77,6 +78,7 @@ after an example was found; a review round whose remedy is "add the spelling we 
 correctness argument is a claim about what *cannot* happen rather than a property the input satisfies;
 any comment in a validator that begins "this is a subset of".
 
-_(Reference: issue #159 / PR #162, deferred from issue #154 / PR #155; the decision and the round-by-round
-reasoning errors are recorded in [ADR 0054](../adr/0054-code-spans-are-not-links.md). The Tier-1 lesson
-was folded in issue #166.)_
+_(Reference: issue #159 / PR #162, deferred from issue #154 / PR #155. The decision, the five-round table
+and the reasoning errors are recorded in [ADR 0054](../adr/0054-code-spans-are-not-links.md); the count of
+**eight** Reviewer rounds comes from PR #162's review thread, whose artifacts are numbered round 1
+through round 8, not from the ADR. The Tier-1 lesson was folded in issue #166.)_

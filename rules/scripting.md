@@ -10,7 +10,6 @@
 - **Dependency-free by default.** A bundled script must run on a bare runtime in an unknown CI — use the standard library only (no third-party packages, no package manager) unless the host explicitly opts in.
 - **Deterministic, greppable output.** Emit stable, parseable lines and exit non-zero on failure, so a Host App or CI can assert on the result.
 - **Assume an unknown environment.** Locale, terminal encoding, and redirected pipes vary across hosts and CI runners; write for the least-capable one.
-- **Bound a guard by a property, and let a format's own parser read the format.** Before writing a checker, ask what *states* the bound you need — a property the input either satisfies or does not — rather than what you would have to enumerate. When the question is about a structured format, reach for that format's parser; where a dependency is not available to you, change the question to one that does not require parsing the format at all. Both are choices available only before the code exists.
 
 ## Anti-Patterns
 
