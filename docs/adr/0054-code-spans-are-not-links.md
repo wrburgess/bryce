@@ -97,17 +97,37 @@ Where the two trade off, take the red.
   link, including the two documents this change brought with it.)
 - An **unclosed fence is not a fence.** Its content stays visible to the link checker, so a malformed
   document produces dead-link errors rather than silent coverage loss.
-- **A fence delimiter never participates in inline pairing.** Declining to mask a fence-opener candidate
-  leaves a bare backtick run behind, and the inline pass would otherwise pair it with the next unrelated
-  delimiter line and blank every link between them. Its run is therefore hidden from the inline pass in a
-  scratch view. This was a regression the container bounds themselves introduced, found in the delta
-  review of PR #162 — the two halves of this masker constrain each other, and a bound added to one side
-  has to be checked against the other.
+- **An inline span stops at a block opener, not only at a blank line.** A code span lives in one
+  paragraph, and a list item, heading, blockquote, or fence interrupts a paragraph just as a blank line
+  does. Without that bound, a mid-line run of three backticks pairs with a run in a *later block* and
+  blanks every link between. This was a regression the container bounds themselves introduced — the two
+  halves of the masker constrain each other, and a bound added to one has to be re-checked against the
+  other.
 - The masker is **cross-checked against the CommonMark reference parser** (`commonmark` npm), not merely
   against today's files: over all 39 in-scope files it misses **0** of the links a real parser calls live
-  (364 at merge). **Zero missed is the invariant worth holding**; the totals around it drift with the
-  tree. That cross-check is the evidence behind every claim above, and it is how both the container bug
-  and the declined-delimiter regression were proved rather than argued.
+  (364 at merge), and **0** across 8,000 generated inputs mixing fences, blockquotes, nested lists, lazy
+  continuations, and multi-line spans. **Zero missed is the invariant worth holding**; the totals around
+  it drift with the tree.
+
+## The reasoning error worth remembering
+
+Two of the three bugs in this masker were introduced by the *fix* for the one before it, and both were
+defended with the same shape of argument: *"this change can only mask less."* Both times that was
+asserted from the local edit, and both times it was false.
+
+The clearest case: suppressing a fence delimiter's backtick run so it could not pair as an inline span.
+Locally, removing a candidate can only remove pairings. But run-length pairing is **not local** — delete
+a run-3 candidate from the middle of a search and an *earlier* run-3 opener skips past it and reaches a
+*farther* partner, masking strictly **more** than before. Differential fuzzing against the reference
+parser falsified the claim in 373 of 4,000 cases; no amount of re-reading the diff would have.
+
+The structural lesson is the distinction between a **bound** and a **filter**. Thinning the candidate set
+changes which pairs form and can grow a span. Stopping the search at a block boundary cannot. The final
+design has exactly one mechanism for this — `inlineBarriers` — because the second one, added first,
+turned out to be both redundant with it and the source of a bug.
+
+So the standing rule for this code: a monotonicity claim about masking is not reviewable by reading it.
+Fuzz it against a real parser, and mutate the guard to confirm a test actually fails without it.
 - Links inside fenced blocks — including the output templates in the skill bodies — are no longer
   resolved. That is a deliberate consequence of treating a fence as code, and it removes nothing that
   was previously checked: none of these files were in scope before.

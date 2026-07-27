@@ -387,6 +387,35 @@ function blankLineFlags(text: string): boolean[] {
   return flags;
 }
 
+/**
+ * Where an inline code-span search must stop: every blank-line position, plus the FIRST offset of any
+ * line that opens a new block.
+ *
+ * A code span lives inside one paragraph, so it cannot reach into a different block. A blank line is
+ * only the most common way a paragraph ends — a list item, an ATX heading, a blockquote, and a fence all
+ * interrupt one too, and a mid-line run of three backticks pairing with a run in a LATER BLOCK is a
+ * false green (PR #162 delta round 3, found by differential fuzzing against the reference parser):
+ *
+ *     abc ``` def [L0](x.md)      <- opener, in its own paragraph
+ *     stu ~~~ vwx [L1](y.md)      <- CommonMark: both links live
+ *     - ```                       <- a list item: a different block, and the accidental partner
+ *
+ * `RULE_BLOCK_OPENER` already encodes CommonMark's block-opener spellings for the Tier-1 narrative
+ * guard, so it is reused here rather than restated.
+ *
+ * Only the line's FIRST offset is marked, never the whole line. Marking the line would stop the pass
+ * finding a span that opens and closes ON that line — and `rules/security.md`'s `` `![x](url)` `` sits
+ * on a `- ` bullet, so that would un-mask the very false positive this whole change exists to suppress.
+ * A search entering the line from above still hits the mark; one starting inside it does not.
+ */
+function inlineBarriers(text: string, lines: readonly LineInfo[]): boolean[] {
+  const flags = blankLineFlags(text);
+  for (const line of lines) {
+    if (line.start < flags.length && RULE_BLOCK_OPENER.test(line.text)) flags[line.start] = true;
+  }
+  return flags;
+}
+
 /** The closing run of exactly `len` backticks, or -1 if the opener is unmatched within its paragraph. */
 function findCloser(text: string, from: number, len: number, blankAt: readonly boolean[]): number {
   let k = from;
@@ -456,25 +485,16 @@ export function maskCode(text: string): string {
   // immediately after it — the single property that stops one stray backtick from blanking the rest of
   // a file, which is the silent failure this whole guard exists to avoid.
   //
-  // A fence DELIMITER never participates in inline pairing, so its run is hidden from this pass — in a
-  // scratch view only, never in the output. Recognized fences are already blank; what this covers is the
-  // DECLINED candidate, and it closes a hazard the container bounds above would otherwise reopen from
-  // the other side (PR #162 delta review, Critical). Without it, `` ```js `x` `` (declined: a backtick
-  // fence's info string may not contain a backtick) leaves a bare 3-run that the inline pass happily
-  // pairs with the next unrelated ``` line, blanking every real link in between — a link CommonMark
-  // renders live. Suppressing these runs can only make FEWER spans, never more, so it moves strictly
-  // toward the loud failure.
-  const inlineView = chars.slice();
-  for (const line of lines) {
-    const delim = FENCE_DELIM.exec(line.text);
-    if (delim === null) continue;
-
-    const runStart = line.start + (delim[1] as string).length;
-    maskRange(inlineView, runStart, runStart + (delim[2] as string).length);
-  }
-
-  const fenced = inlineView.join("");
-  const blankAt = blankLineFlags(fenced);
+  // The search is BOUNDED by inlineBarriers(), not merely fed a thinner set of candidates — see there
+  // for why a block opener ends a span. That distinction is the whole lesson of PR #162's delta rounds
+  // and is recorded in ADR 0054: the first attempt bounded nothing and instead *removed* the delimiter
+  // runs of declined fence openers from a scratch view, on the reasoning that "suppressing candidates
+  // can only mask less". Differential fuzzing against the reference parser falsified that in 373 of 4000
+  // cases. Run-length pairing is not local: delete a run-3 candidate from the middle of a search and an
+  // EARLIER run-3 opener skips past it to a FARTHER partner, masking strictly MORE than before —
+  // including links CommonMark renders live. A bound cannot do that; a filter can.
+  const fenced = chars.join("");
+  const blankAt = inlineBarriers(fenced, lines);
 
   let i = 0;
   while (i < fenced.length) {

@@ -270,6 +270,37 @@ describe("maskCode - a fence may not escape its container", () => {
 
     expect(masked).toContain("[y](dead.md)");
   });
+
+  // PR #162 delta round 3, Critical — a false green found by differential fuzzing against the CommonMark
+  // reference parser. A mid-line run of three backticks paired with a run in a LATER BLOCK, masking the
+  // live link between them. CommonMark renders `[l1](dead.md)` inside the opening paragraph.
+  it("does not let an inline span skip past fence-delimiter lines to a farther partner", () => {
+    const masked = maskCode(
+      "abc ``` def [l0](dead0.md)\n```js `x`\nghi [l1](dead.md) jkl\n```js\nmno [l2](dead2.md) pqr\nstu ``` vwx\n",
+    );
+
+    expect(masked).toContain("[l1](dead.md)");
+  });
+
+  // The same class, but reached through a block opener that is NOT a fence — a list item. These two
+  // inputs came out of the fuzzer while validating the first fix for the case above, which handled only
+  // fence lines and left these masked. Together they pin `inlineBarriers`: revert the block-opener
+  // barrier to blank-lines-only and both redden.
+  it("stops an inline span at a list item that opens a new block", () => {
+    const masked = maskCode("abc ``` def [L8](t.md)\nstu ~~~ vwx [L6](t.md)\n- ```\n");
+
+    expect(masked).toContain("[L8](t.md)");
+    expect(masked).toContain("[L6](t.md)");
+  });
+
+  // No blank lines here, deliberately: with them, the blank-line barrier alone would carry the case and
+  // this would pin nothing. An ATX heading can interrupt a paragraph, so these are three blocks.
+  it("stops an inline span at a heading that opens a new block", () => {
+    const masked = maskCode("abc ``` def [L0](t.md)\n# Heading\nstu ``` vwx [L1](t.md)\n");
+
+    expect(masked).toContain("[L0](t.md)");
+    expect(masked).toContain("[L1](t.md)");
+  });
 });
 
 describe("parity check - dead links in the widened scope", () => {
