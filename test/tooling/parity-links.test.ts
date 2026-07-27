@@ -98,6 +98,23 @@ describe("maskCode - inline code spans", () => {
   it("does not let a backslash-escaped backtick open a span", () => {
     expect(maskCode("\\` [x](dead.md) still prose")).toContain("[x](dead.md)");
   });
+
+  // The single highest-frequency link shape in this repo — `[`PROJECT.md`](../../PROJECT.md)` — puts a
+  // code span INSIDE the label. A masker even slightly greedier here would silently stop resolving
+  // hundreds of real links across the skill bodies while the gate still printed OK.
+  it("leaves a link whose LABEL contains a code span fully matchable", () => {
+    const masked = maskCode("see [`PROJECT.md`](../../PROJECT.md) and [`x`](one.md) too");
+
+    expect(masked).toContain("](../../PROJECT.md)");
+    expect(masked).toContain("](one.md)");
+  });
+
+  it("does not let a span between two links swallow either of them", () => {
+    const masked = maskCode("[a](one.md) `code` [b](two.md)");
+
+    expect(masked).toContain("[a](one.md)");
+    expect(masked).toContain("[b](two.md)");
+  });
 });
 
 describe("maskCode - fenced blocks", () => {
