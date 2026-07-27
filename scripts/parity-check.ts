@@ -455,7 +455,25 @@ export function maskCode(text: string): string {
   // opens, and ONLY a run of exactly N closes it. An UNMATCHED run is literal text and scanning resumes
   // immediately after it — the single property that stops one stray backtick from blanking the rest of
   // a file, which is the silent failure this whole guard exists to avoid.
-  const fenced = chars.join("");
+  //
+  // A fence DELIMITER never participates in inline pairing, so its run is hidden from this pass — in a
+  // scratch view only, never in the output. Recognized fences are already blank; what this covers is the
+  // DECLINED candidate, and it closes a hazard the container bounds above would otherwise reopen from
+  // the other side (PR #162 delta review, Critical). Without it, `` ```js `x` `` (declined: a backtick
+  // fence's info string may not contain a backtick) leaves a bare 3-run that the inline pass happily
+  // pairs with the next unrelated ``` line, blanking every real link in between — a link CommonMark
+  // renders live. Suppressing these runs can only make FEWER spans, never more, so it moves strictly
+  // toward the loud failure.
+  const inlineView = chars.slice();
+  for (const line of lines) {
+    const delim = FENCE_DELIM.exec(line.text);
+    if (delim === null) continue;
+
+    const runStart = line.start + (delim[1] as string).length;
+    maskRange(inlineView, runStart, runStart + (delim[2] as string).length);
+  }
+
+  const fenced = inlineView.join("");
   const blankAt = blankLineFlags(fenced);
 
   let i = 0;
@@ -1214,7 +1232,7 @@ class ParityCheck {
   private checkAdrLinkNumbers(): void {
     for (const rel of this.markdownFiles()) {
       // Masked for the same reason checkLinks() is (issue #159): a citation inside a code span is a
-      // worked EXAMPLE of the convention, not a citation. Verified to change no verdict across all 110
+      // worked EXAMPLE of the convention, not a citation. Verified to change no verdict across all 112
       // markdown files in the tree at the time it landed — this closes a latent gap, it does not move
       // today's result.
       for (const match of maskCode(this.read(rel)).matchAll(MARKDOWN_LINK)) {

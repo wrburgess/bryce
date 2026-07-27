@@ -46,7 +46,7 @@ domain hit the same thing?"* — without qualification.
   typed. Consumed by `checkLinks` and `checkAdrLinkNumbers`; deliberately **not** by
   `checkRulesPointers` / `ruleBullets`, which exist to read backticked text.
 - `linkCheckedFiles(root)` — the dead-link scope **derived** rather than hand-kept, so a tenth Skill is
-  covered the day it lands. **12 files / 189 resolved internal links → 39 files / 361.**
+  covered the day it lands. **12 files → 39** (189 resolved internal links → 364, measured at merge).
 - `RENDER_SCANNED` split out of `LINK_CHECKED`, because a `parity:render` marker is an Adapter concern
   and should not follow the link scope.
 - Decisions recorded in [ADR 0054](../adr/0054-code-spans-are-not-links.md).

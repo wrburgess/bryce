@@ -249,6 +249,27 @@ describe("maskCode - a fence may not escape its container", () => {
   it("finds a closer across a blank line inside the same container", () => {
     expect(maskCode("```\n[x](dead.md)\n\nstill code\n```\n")).not.toContain("[x](dead.md)");
   });
+
+  // PR #162 DELTA review, High. Cases A-C above are all saved by the must-close bound alone, so none of
+  // them would notice if the container bound were deleted. This one would: the opener has real
+  // in-container content AND a matching delimiter exists later at top level, so only `leavesContainer`
+  // stops the search from reaching it. Neuter that function and this test — and only this test — reddens.
+  it("stops the closer search at the container boundary even when a later delimiter exists", () => {
+    const masked = maskCode("> ```\n> real content\n\nParagraph one [x](dead.md)\n\n```\nend fence\n```\n");
+
+    expect(masked).toContain("[x](dead.md)");
+  });
+
+  // PR #162 DELTA review, Critical, and a regression this PR introduced rather than inherited: once a
+  // declined opener stopped being masked, its bare delimiter run fell through to the INLINE pass and
+  // paired with the next unrelated ``` line. CommonMark renders the link between them live — a fenced
+  // block can interrupt a paragraph, so the ``` on line 3 opens a NEW block and cannot close a span
+  // started on line 1.
+  it("does not let a DECLINED fence delimiter pair as an inline span", () => {
+    const masked = maskCode("```js `x`\n[y](dead.md)\n```\nafter [z](dead2.md)\n");
+
+    expect(masked).toContain("[y](dead.md)");
+  });
 });
 
 describe("parity check - dead links in the widened scope", () => {

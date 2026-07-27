@@ -92,13 +92,22 @@ Where the two trade off, take the red.
 
 - The dead-link scope is **derived**, not hand-kept: the authored seed plus every Tier-1 rule, every
   `skills/<name>/SKILL.md`, and every `.claude/commands/*.md`. A tenth Skill is link-checked the day it
-  lands. Coverage went from **12 files / 189 resolved internal links** to **39 files / 361**.
+  lands. Coverage went from **12 files** to **39** — measured at this ADR's merge, 189 resolved internal
+  links to 364. (The file count is the durable figure; a link total goes stale on any commit that adds a
+  link, including the two documents this change brought with it.)
 - An **unclosed fence is not a fence.** Its content stays visible to the link checker, so a malformed
   document produces dead-link errors rather than silent coverage loss.
+- **A fence delimiter never participates in inline pairing.** Declining to mask a fence-opener candidate
+  leaves a bare backtick run behind, and the inline pass would otherwise pair it with the next unrelated
+  delimiter line and blank every link between them. Its run is therefore hidden from the inline pass in a
+  scratch view. This was a regression the container bounds themselves introduced, found in the delta
+  review of PR #162 — the two halves of this masker constrain each other, and a bound added to one side
+  has to be checked against the other.
 - The masker is **cross-checked against the CommonMark reference parser** (`commonmark` npm), not merely
-  against today's files: over all 39 in-scope files it misses **0** of the 361 links a real parser calls
-  live. That cross-check is the evidence behind every claim above, and it is how the container bug was
-  proved rather than argued.
+  against today's files: over all 39 in-scope files it misses **0** of the links a real parser calls live
+  (364 at merge). **Zero missed is the invariant worth holding**; the totals around it drift with the
+  tree. That cross-check is the evidence behind every claim above, and it is how both the container bug
+  and the declined-delimiter regression were proved rather than argued.
 - Links inside fenced blocks — including the output templates in the skill bodies — are no longer
   resolved. That is a deliberate consequence of treating a fence as code, and it removes nothing that
   was previously checked: none of these files were in scope before.
