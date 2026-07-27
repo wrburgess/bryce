@@ -35,8 +35,9 @@ The rules encoded are CommonMark's, not the shape today's files happen to have
   run is literal text** and scanning resumes immediately after it.
 - A span may cross a line break but not a blank line.
 - A backslash-escaped backtick opens nothing.
-- A fence is closed by a delimiter of the same character, at least as long, alone on its line. An
-  unclosed fence masks to EOF.
+- A fence is closed by a delimiter of the same character, at least as long, alone on its line — and the
+  closer must be **reachable inside the opener's own container** (see below). An opener with no such
+  closer is not a fence and masks nothing.
 
 `checkRulesPointers` and `ruleBullets` deliberately do **not** adopt the masker: they exist to read
 *backticked* deep-doc paths, and masked input would blank the very substring they search for.
@@ -56,10 +57,27 @@ This is not hypothetical. `> ``` … > ``` ` reached the correct answer only bec
 runs happened to match as an inline span; a closer written one backtick longer — still a valid fence
 close — sends the scanner hunting into the prose that follows.
 
-Consuming these as fences **removes** the hazard rather than documenting it, and it costs nothing: a
-fence run inside a blockquote *is* a fence, and a line indented ≥ 4 outside a list is an indented code
-block. Already code, either way. It also brings this file's third fence walker into agreement with the
-two already in it.
+Consuming these as fences **removes** that hazard rather than documenting it. But recognizing a fence
+that loosely needs two bounds, or it trades one silent failure for a worse one. The PR #162 review found
+both, cross-checked against the CommonMark reference parser:
+
+- **A fence must CLOSE to mask anything.** CommonMark runs an unclosed fence to end of document, which
+  is right for a renderer and catastrophic for a guard: one dropped ` ``` ` line disables dead-link
+  checking for the rest of the file, silently. Declining to mask reports the links inside instead —
+  wrong *out loud*. An unclosed fence in a shipped document is a defect worth surfacing anyway.
+- **The closer must be reachable inside the opener's container.** A blockquote ends at a blank line and
+  a list item ends where the indentation drops, so a line carrying fewer `>` markers or less indentation
+  than the opener has left the block the fence lives in, and the search stops there. Without this,
+  `> ``` ` followed by a blank line and an ordinary paragraph masked that paragraph — which CommonMark
+  renders with a live link in it.
+
+The original draft of this ADR claimed "a line indented ≥ 4 outside a list is an indented code block:
+already code." That is **false**: CommonMark requires a preceding blank line, so an indented fence-look
+line directly under a paragraph is a lazy continuation of it, and masking from there ran to EOF. The
+claim is struck; the container bound is what makes the loose recognition safe.
+
+Both bounds fail toward the red. A legitimate fence whose content dedents below its opener stops being
+recognized and its links get reported — loud, and fixable by indenting the content.
 
 **2. Indented (4-space) code blocks are NOT masked.**
 
@@ -74,10 +92,13 @@ Where the two trade off, take the red.
 
 - The dead-link scope is **derived**, not hand-kept: the authored seed plus every Tier-1 rule, every
   `skills/<name>/SKILL.md`, and every `.claude/commands/*.md`. A tenth Skill is link-checked the day it
-  lands. Coverage went from 12 files to 39, and from ~200 resolved links to 386.
-- A fence's **container** is not tracked, so a fence opened inside a list item or blockquote is closed
-  by the next matching delimiter anywhere. Consistent with the existing walkers; no file in the tree
-  depends on the difference.
+  lands. Coverage went from **12 files / 189 resolved internal links** to **39 files / 361**.
+- An **unclosed fence is not a fence.** Its content stays visible to the link checker, so a malformed
+  document produces dead-link errors rather than silent coverage loss.
+- The masker is **cross-checked against the CommonMark reference parser** (`commonmark` npm), not merely
+  against today's files: over all 39 in-scope files it misses **0** of the 361 links a real parser calls
+  live. That cross-check is the evidence behind every claim above, and it is how the container bug was
+  proved rather than argued.
 - Links inside fenced blocks — including the output templates in the skill bodies — are no longer
   resolved. That is a deliberate consequence of treating a fence as code, and it removes nothing that
   was previously checked: none of these files were in scope before.

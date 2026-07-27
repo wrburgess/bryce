@@ -52,8 +52,8 @@ describe("maskCode - the offset contract", () => {
   it("handles empty input, backtick-free input, and a bare fence run", () => {
     expect(maskCode("")).toBe("");
     expect(maskCode("plain [x](y.md) prose")).toBe("plain [x](y.md) prose");
-    // A lone ``` opens a fence that never closes, so it masks to EOF — see the unclosed-fence case.
-    expect(maskCode("```")).toBe("   ");
+    // A lone ``` never closes, so it is not a fence and masks nothing — see the unclosed-fence case.
+    expect(maskCode("```")).toBe("```");
   });
 });
 
@@ -139,10 +139,22 @@ describe("maskCode - fenced blocks", () => {
     expect(maskCode("```js `x`\n[y](dead.md)\n")).toContain("[y](dead.md)");
   });
 
-  // Spec-faithful and deliberate: a renderer shows everything after an unclosed fence as code too, so
-  // this is content genuinely being code, not coverage quietly dropped (ADR 0053).
-  it("masks to EOF when a fence is never closed", () => {
-    expect(maskCode("```\n[x](dead.md)\nstill inside\n")).not.toContain("[x](dead.md)");
+  // PR #162 review, Critical. CommonMark runs an unclosed fence to end of document — correct for a
+  // renderer, catastrophic for a guard: one dropped ``` line would silently disable dead-link checking
+  // for the whole rest of the file. Declining to mask reports the links inside instead, which is wrong
+  // OUT LOUD. This is the asymmetry rule applied to its hardest case.
+  it("masks NOTHING when a fence is never closed", () => {
+    expect(maskCode("```\n[x](dead.md)\nstill inside\n")).toContain("[x](dead.md)");
+  });
+
+  // An unrecognized opener must not poison the rest of the file in the other direction either: a later,
+  // properly closed fence still masks. (The unclosed opener here is container-scoped — at top level a
+  // stray delimiter would simply pair with the next one, which is correct.)
+  it("still masks a later, properly closed fence after an unrecognized opener", () => {
+    const masked = maskCode("- item\n  ```\n  loose [a](one.md)\n\nTop level:\n\n```\n[b](two.md)\n```\n");
+
+    expect(masked).toContain("[a](one.md)");
+    expect(masked).not.toContain("[b](two.md)");
   });
 
   // Issue #159 plan review, finding 1. Under CommonMark's container-relative ` {0,3}` opener rule, a
@@ -183,11 +195,59 @@ describe("maskCode - fenced blocks", () => {
     expect(masked).toContain("[b](dead.md)");
   });
 
-  // The other named limitation: at this altitude a 4-space indent is indistinguishable from a wrapped
+  // The named limitation: at this altitude a 4-space indent is indistinguishable from a wrapped
   // continuation under a nested list item, and the checked files are made of those. Under-masking here
   // is the safe direction.
   it("does NOT mask a 4-space indented code block", () => {
     expect(maskCode("prose\n\n    [x](dead.md)\n")).toContain("[x](dead.md)");
+  });
+});
+
+// PR #162 review, Critical finding. Each case below was cross-checked against the CommonMark reference
+// parser: a renderer shows the trailing link as LIVE, so masking it is a real dead link going silently
+// unreported. All three are the same bug — a fence recognized without regard for the container it was
+// opened in — and all three are fixed by requiring a closer to be reachable inside that container.
+describe("maskCode - a fence may not escape its container", () => {
+  it("does not let an unclosed fence in a BLOCKQUOTE mask the paragraph after it", () => {
+    const masked = maskCode("> ```\n> code inside quote\n\nReal paragraph: [x](dead.md)\n");
+
+    expect(masked).toContain("[x](dead.md)");
+  });
+
+  it("does not let an unclosed fence in a LIST ITEM mask the paragraph after it", () => {
+    const masked = maskCode("- item\n  ```\n  code\n\nNext paragraph outside list: [x](dead.md)\n");
+
+    expect(masked).toContain("[x](dead.md)");
+  });
+
+  // A fence-look line indented under a paragraph with no blank line between is a lazy CONTINUATION of
+  // that paragraph, not a code block — which is why the old comment's "a line indented >= 4 outside a
+  // list is already code" was wrong.
+  it("does not let an indented fence-look line inside a paragraph mask the rest of the file", () => {
+    const masked = maskCode("Some paragraph text here\n    ```\nMore text with a link [x](dead.md)\n");
+
+    expect(masked).toContain("[x](dead.md)");
+  });
+
+  // The other direction, so the bound is not just a blanket refusal: a fence that DOES close inside its
+  // container still masks, and only up to its closer.
+  it("still masks a closed fence inside a blockquote, and stops at its closer", () => {
+    const masked = maskCode("> ```\n> [x](inside.md)\n> ```\n\nAfter: [y](dead.md)\n");
+
+    expect(masked).not.toContain("[x](inside.md)");
+    expect(masked).toContain("[y](dead.md)");
+  });
+
+  it("still masks a closed fence inside a list item, and stops at its closer", () => {
+    const masked = maskCode("- item\n  ```\n  [x](inside.md)\n  ```\n\nAfter: [y](dead.md)\n");
+
+    expect(masked).not.toContain("[x](inside.md)");
+    expect(masked).toContain("[y](dead.md)");
+  });
+
+  // A blank line does not end a fenced block, so a closer on the far side of one is still reachable.
+  it("finds a closer across a blank line inside the same container", () => {
+    expect(maskCode("```\n[x](dead.md)\n\nstill code\n```\n")).not.toContain("[x](dead.md)");
   });
 });
 

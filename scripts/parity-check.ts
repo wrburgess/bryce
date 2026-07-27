@@ -259,30 +259,81 @@ function inspectArray(arr: string[]): string {
 // removes becomes a space, and newlines are preserved. Callers keep matching the same regexes at the
 // same offsets, and keep reporting the raw href a contributor actually typed.
 //
-// Two deliberate departures from CommonMark, recorded in ADR 0053. Both are chosen so the residual
-// failure is a false RED (loud, cheap, self-announcing) rather than a false GREEN (silent, and it takes
-// the whole guard with it) — rules/scripting.md's asymmetry rule:
-//
-//   * INDENTED (4-space) code blocks are NOT masked. At this altitude they cannot be told apart from a
-//     wrapped continuation under a nested list item, and rules/*.md and the skill bodies are made of
-//     those; masking them would blank real links.
-//   * A fence's CONTAINER is not tracked, so a fence opened inside a list item or a blockquote is
-//     closed by the next matching delimiter anywhere, not only one in the same container.
+// One deliberate departure from CommonMark, recorded in ADR 0053, chosen so the residual failure is a
+// false RED (loud, cheap, self-announcing) rather than a false GREEN (silent, and it takes the whole
+// guard with it) — rules/scripting.md's asymmetry rule: INDENTED (4-space) code blocks are NOT masked.
+// At this altitude they cannot be told apart from a wrapped continuation under a nested list item, and
+// rules/*.md and the skill bodies are made of those; masking them would blank real links.
 //
 // Fence delimiters are recognized after any run of whitespace and/or blockquote markers, rather than
-// CommonMark's container-relative ` {0,3}`. That is the SAFER direction, not merely the simpler one.
-// Under ` {0,3}`, a fence nested beneath a wide list marker (`10. `, a nested sub-list) or inside a
-// blockquote goes unrecognized — and its delimiter backticks then fall through to the INLINE scanner as
-// an ordinary backtick run, free to pair with some distant run and blank every real link in between.
-// That was not theoretical: `> ``` … > ``` ` reached the right answer only because its two 3-backtick
-// runs happened to match as an inline span, and a closer written one backtick longer — still a valid
-// fence close — would have sent the scanner hunting into unrelated prose. Consuming these as fences
-// REMOVES the hazard rather than documenting it.
+// CommonMark's container-relative ` {0,3}`. Under ` {0,3}`, a fence nested beneath a wide list marker
+// (`10. `, a nested sub-list) or inside a blockquote goes unrecognized — and its delimiter backticks
+// then fall through to the INLINE scanner as an ordinary backtick run, free to pair with some distant
+// run and blank every real link in between. That was not theoretical: `> ``` … > ``` ` reached the right
+// answer only because its two 3-backtick runs happened to match as an inline span, and a closer written
+// one backtick longer — still a valid fence close — would have sent the scanner hunting into unrelated
+// prose.
 //
-// The only lines this newly claims are ones prefixed with indentation or `>` and carrying a fence run:
-// inside a blockquote it IS a fence, and a line indented >= 4 outside a list is an indented code block.
-// Already code, either way.
+// Recognizing a fence that loosely, though, needs TWO bounds, or it trades one silent failure for a
+// worse one. Both were found by the PR #162 review, cross-checked against the CommonMark reference
+// parser, and both are false greens: a real link a renderer shows as live, silently unchecked.
+//
+//   1. A fence MUST CLOSE to mask anything. An opener with no closer masks NOTHING — it is not a fence.
+//      The alternative, CommonMark's "an unclosed fence runs to end of document", is correct for a
+//      renderer and catastrophic for a guard: one dropped ``` line disables dead-link checking for the
+//      rest of the file, silently. Declining to mask instead reports the links inside as dead, which is
+//      wrong out loud. An unclosed fence in a shipped document is a defect worth surfacing anyway.
+//   2. The closer must be found INSIDE THE OPENER'S CONTAINER. A blockquote ends at a blank line and a
+//      list item ends where the indentation drops, so a line that carries fewer `>` markers or less
+//      indentation than the opener has left the block the fence lives in, and the search stops there.
+//      Without this, `> ``` ` + a blank line + an ordinary paragraph masks the paragraph — which
+//      CommonMark renders with a live link in it.
+//
+// Both bounds fail toward the red. A legitimate fence whose content dedents below its opener stops being
+// recognized, and its links get reported: loud, and fixable by indenting the content.
 const FENCE_DELIM = /^([\s>]*)(`{3,}|~{3,})(.*)$/;
+const LINE_PREFIX = /^[\s>]*/;
+
+interface LineInfo {
+  readonly start: number;
+  readonly end: number;
+  readonly text: string;
+  readonly blank: boolean;
+  /** Leading whitespace width before any blockquote marker; a tab counts as 4, as CommonMark does. */
+  readonly indent: number;
+  /** How many blockquote markers the line's prefix carries. */
+  readonly quotes: number;
+}
+
+function scanLines(text: string): LineInfo[] {
+  const lines: LineInfo[] = [];
+  let start = 0;
+
+  while (start <= text.length) {
+    let end = text.indexOf("\n", start);
+    if (end === -1) end = text.length;
+
+    const body = text.slice(start, end);
+    const prefix = (LINE_PREFIX.exec(body)?.[0] ?? "");
+    const quotes = (prefix.match(/>/g) ?? []).length;
+    const leading = quotes === 0 ? prefix : prefix.slice(0, prefix.indexOf(">"));
+
+    let indent = 0;
+    for (const ch of leading) indent += ch === "\t" ? 4 : 1;
+
+    lines.push({ start, end, text: body, blank: strip(body) === "", indent, quotes });
+
+    if (end === text.length) break;
+    start = end + 1;
+  }
+  return lines;
+}
+
+/** Has this line left the container the fence was opened in? A blank line has not — it may be code. */
+function leavesContainer(line: LineInfo, opener: LineInfo): boolean {
+  if (line.blank) return false;
+  return line.quotes < opener.quotes || line.indent < opener.indent;
+}
 
 /** Overwrite `[start, end)` with spaces, leaving newlines in place so every offset survives. */
 function maskRange(chars: string[], start: number, end: number): void {
@@ -361,38 +412,41 @@ function findCloser(text: string, from: number, len: number, blankAt: readonly b
 export function maskCode(text: string): string {
   const chars = text.split("");
 
-  // --- Fenced blocks, line-scoped. An UNCLOSED fence masks to EOF: that is what CommonMark says and
-  // what a renderer shows, so the content genuinely is code, not coverage quietly dropped.
-  let lineStart = 0;
-  let fence: { char: string; len: number } | null = null;
+  // --- Fenced blocks, line-scoped. A fence masks only once its CLOSER is found, and only searching
+  // within the opener's own container — see the two bounds documented at FENCE_DELIM. An opener that
+  // satisfies neither is left alone, so its delimiter is just a line of text and the links around it
+  // stay checked.
+  const lines = scanLines(text);
 
-  while (lineStart <= text.length) {
-    let lineEnd = text.indexOf("\n", lineStart);
-    if (lineEnd === -1) lineEnd = text.length;
+  for (let i = 0; i < lines.length; i++) {
+    const opener = lines[i] as LineInfo;
+    const delim = FENCE_DELIM.exec(opener.text);
+    if (delim === null) continue;
 
-    const delim = FENCE_DELIM.exec(text.slice(lineStart, lineEnd));
-    if (fence === null) {
-      if (delim !== null) {
-        const run = delim[2] as string;
-        // A backtick fence's info string may not contain a backtick (CommonMark); a tilde fence's may.
-        if (run[0] !== "`" || !(delim[3] as string).includes("`")) {
-          fence = { char: run[0] as string, len: run.length };
-          maskRange(chars, lineStart, lineEnd);
-        }
+    const run = delim[2] as string;
+    // A backtick fence's info string may not contain a backtick (CommonMark); a tilde fence's may.
+    if (run[0] === "`" && (delim[3] as string).includes("`")) continue;
+
+    let close = -1;
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j] as LineInfo;
+      if (leavesContainer(line, opener)) break;
+
+      const candidate = FENCE_DELIM.exec(line.text);
+      if (
+        candidate !== null &&
+        (candidate[2] as string)[0] === run[0] &&
+        (candidate[2] as string).length >= run.length &&
+        strip(candidate[3] as string) === ""
+      ) {
+        close = j;
+        break;
       }
-    } else {
-      const run = delim === null ? "" : (delim[2] as string);
-      const closes =
-        delim !== null &&
-        run[0] === fence.char &&
-        run.length >= fence.len &&
-        strip(delim[3] as string) === "";
-      maskRange(chars, lineStart, lineEnd);
-      if (closes) fence = null;
     }
+    if (close === -1) continue;   // not a fence: an opener with no reachable closer masks nothing
 
-    if (lineEnd === text.length) break;
-    lineStart = lineEnd + 1;
+    maskRange(chars, opener.start, (lines[close] as LineInfo).end);
+    i = close;
   }
 
   // --- Inline code spans, over what the fence pass left behind.
@@ -1160,7 +1214,7 @@ class ParityCheck {
   private checkAdrLinkNumbers(): void {
     for (const rel of this.markdownFiles()) {
       // Masked for the same reason checkLinks() is (issue #159): a citation inside a code span is a
-      // worked EXAMPLE of the convention, not a citation. Verified to change no verdict across all 108
+      // worked EXAMPLE of the convention, not a citation. Verified to change no verdict across all 110
       // markdown files in the tree at the time it landed — this closes a latent gap, it does not move
       // today's result.
       for (const match of maskCode(this.read(rel)).matchAll(MARKDOWN_LINK)) {
