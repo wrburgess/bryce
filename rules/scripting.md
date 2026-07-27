@@ -28,7 +28,8 @@
   extend per host.)*
 - **Never case-fold a containment check that GRANTS permission** — because on a case-sensitive volume
   `/repo/docs/ADR/x` then reads as a descendant of `/repo/docs/adr`, and the guard approves a write outside
-  its anchor. Canonicalize both sides instead; where the target does not exist yet and `realpath` would
-  throw, canonicalize the nearest existing ancestor and compare the remainder case-sensitively — never widen
-  to a fold to make the check pass. *(Provenance: issue #163 / PR #170; extend per host.)*
+  its anchor. Canonicalize both sides instead; where either does not exist yet and `realpath` would throw,
+  canonicalize each one's nearest existing ancestor and compare the remainder case-sensitively, failing
+  closed on a missing anchor — never widen to a fold to make the check pass. *(Provenance: issue #163 / PR
+  #170; extend per host.)*
 - **Never build a guard around the shape the current files happen to have when a format's own spec is what it must enforce** — because a checker calibrated on today's habits (one item per line, one marker spelling, one punctuation) passes every conforming spelling it never saw, and a routine reformat disables it everywhere at once, silently; encode what the format permits, and test each permitted spelling. *(Provenance: issue #152 / PR #157; extend per host.)*
