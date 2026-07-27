@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { linkCheckedFiles, main, markdownLinks, runParityCheck } from "../../scripts/parity-check.js";
+import { RepositoryReadError, linkCheckedFiles, main, markdownLinks, runParityCheck } from "../../scripts/parity-check.js";
 import { REPO_ROOT, healDeadLinks, withBundleCopy } from "./parity-fixture.js";
 
 // Issue #159. `rules/*.md` carried markdown links its whole life and none of them were ever resolved:
@@ -354,12 +354,35 @@ describe("parity check - docs/adr joins the derived scope (issue #164)", () => {
   // ...but UNREADABLE is a malformed bundle, and returning "no ADRs" for it is the false green
   // rules/scripting.md forbids: the gate would print OK while checking none of them. A path that is a
   // regular file raises ENOTDIR portably, with none of the chmod games that behave differently as root.
-  it("throws rather than silently emptying the scope when docs/adr cannot be read", () => {
+  it("raises a typed read failure rather than silently emptying the scope", () => {
     withBundleCopy((root) => {
       rmSync(join(root, ADR_DIR), { recursive: true, force: true });
       writeFileSync(join(root, ADR_DIR), "a file where a directory belongs\n");
 
-      expect(() => linkCheckedFiles(root)).toThrow(/ENOTDIR/);
+      // The TYPE is the contract, not just the fact of throwing: `main` discriminates on it to decide
+      // what is a read failure and what is a bug it must not relabel.
+      expect(() => linkCheckedFiles(root)).toThrow(RepositoryReadError);
+      try {
+        linkCheckedFiles(root);
+      } catch (error) {
+        expect(error).toBeInstanceOf(RepositoryReadError);
+        expect((error as RepositoryReadError).code).toBe("ENOTDIR");
+        expect((error as RepositoryReadError).path).toContain(ADR_DIR);
+      }
+    });
+  });
+
+  // The same rule per file. A child that VANISHED between the read and the stat is absent, so it is
+  // skipped; an unreadable one must not be quietly demoted to "not a markdown file", which would
+  // re-open the false green one level down from where it was closed.
+  it("skips a child that vanished, but raises on one that cannot be statted", () => {
+    withBundleCopy((root) => {
+      symlinkSync(join(root, ADR_DIR, "no-such-target.md"), join(root, ADR_DIR, "dangling.md"));
+      expect(linkCheckedFiles(root)).not.toContain(`${ADR_DIR}/dangling.md`);
+
+      symlinkSync(join(root, ADR_DIR, "loop-b.md"), join(root, ADR_DIR, "loop-a.md"));
+      symlinkSync(join(root, ADR_DIR, "loop-a.md"), join(root, ADR_DIR, "loop-b.md"));
+      expect(() => linkCheckedFiles(root)).toThrow(RepositoryReadError);
     });
   });
 
@@ -383,8 +406,28 @@ describe("parity check - docs/adr joins the derived scope (issue #164)", () => {
         spy.mockRestore();
       }
 
-      expect(stderr.join("")).toMatch(/^parity_check: FAILED - cannot read the repository at .*ENOTDIR/);
+      expect(stderr.join("")).toMatch(/^parity_check: FAILED - cannot read .*docs\/adr - .*ENOTDIR/);
     });
+  });
+
+  // The other half of that guard, and the reason it catches ONE error type instead of all of them: a
+  // catch-all would relabel a genuine internal bug as a repository-read failure and swallow the stack
+  // trace pointing at it. A false diagnosis is worse than a crash — the log now names the wrong cause.
+  it("lets a non-read error crash with its stack trace instead of relabelling it", () => {
+    const boom = new TypeError("an internal bug, not a read failure");
+    const stderr: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk) => {
+      stderr.push(String(chunk));
+      return true;
+    });
+
+    try {
+      expect(() => main(["--root", REPO_ROOT], () => { throw boom; })).toThrow(boom);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(stderr.join("")).toBe("");
   });
 });
 

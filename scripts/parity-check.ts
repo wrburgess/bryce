@@ -374,24 +374,36 @@ function subdirectories(absolute: string): string[] {
  * `rules/scripting.md`'s false green, where the gate reports OK while checking nothing. Absent is a fact;
  * unreadable is a failure.
  */
-function markdownFilesIn(absolute: string): string[] {
-  let children: string[];
-  try {
-    children = readdirSync(absolute);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
+export class RepositoryReadError extends Error {
+  constructor(readonly path: string, readonly code: string | undefined, reason: string) {
+    super(`cannot read ${path} - ${reason}`);
+    this.name = "RepositoryReadError";
   }
+}
+
+/** Absent is a fact (skip it); any other read failure is a malformed bundle (raise it, typed). */
+function readOrRaise<T>(path: string, absent: T, read: () => T): T {
+  try {
+    return read();
+  } catch (error) {
+    const failure = error as NodeJS.ErrnoException;
+    if (failure.code === "ENOENT") return absent;
+    throw new RepositoryReadError(path, failure.code, failure.message);
+  }
+}
+
+function markdownFilesIn(absolute: string): string[] {
+  const children = readOrRaise(absolute, [] as string[], () => readdirSync(absolute));
 
   return children
     .sort()
     .filter((child) => {
       if (!child.endsWith(".md")) return false;
-      try {
-        return statSync(join(absolute, child)).isFile();
-      } catch {
-        return false;
-      }
+      // The same rule one level down (issue #164 review, Low): a child that vanished between the read
+      // and the stat is absent, but an unreadable one is not — dropping it silently would re-open, per
+      // file, exactly the false green the directory-level rule closes.
+      const path = join(absolute, child);
+      return readOrRaise(path, false, () => statSync(path).isFile());
     });
 }
 
@@ -1233,7 +1245,13 @@ export function formatParityResult(result: ParityResult): string {
   );
 }
 
-export function main(args: string[]): number {
+/**
+ * `run` is an injection seam for the self-test only — the CLI never passes it. It exists so the
+ * discrimination below (a read failure is reported; anything else keeps its stack trace) can be proven
+ * by a test rather than asserted in a comment: no tree in this repository throws a NON-read error from
+ * `runParityCheck` on demand, since every other read is guarded by an existence check.
+ */
+export function main(args: string[], run: (root: string) => ParityResult = runParityCheck): number {
   let root = ".";
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -1255,14 +1273,19 @@ export function main(args: string[]): number {
   }
   // A read failure that is NOT "absent" reaches here as a throw (see `markdownFilesIn`), and a stack
   // trace is not the greppable, deterministic output a Host App or CI asserts on (rules/scripting.md).
-  // Report it in this script's own failure grammar and keep the exit non-zero: the point of rethrowing
-  // was to be loud, not to be unreadable.
+  // Report it in this script's own failure grammar and keep the exit non-zero: the point of raising was
+  // to be loud, not to be unreadable.
+  //
+  // Only `RepositoryReadError` is handled, deliberately. Catching every throw would relabel a genuine
+  // internal bug — a TypeError, a parser edge case — as a repository-read failure and discard the stack
+  // trace pointing at it, which is a FALSE DIAGNOSIS: worse than a crash, because the log now names the
+  // wrong cause. An unrecognized error keeps its trace and crashes (issue #164 review, Medium).
   let result: ParityResult;
   try {
-    result = runParityCheck(root);
+    result = run(root);
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`parity_check: FAILED - cannot read the repository at ${root} - ${reason}\n`);
+    if (!(error instanceof RepositoryReadError)) throw error;
+    process.stderr.write(`parity_check: FAILED - ${error.message}\n`);
     return 1;
   }
 
