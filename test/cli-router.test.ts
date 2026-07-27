@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { COMMANDS, type Command, preflight, preflightDirect, renderHelp, resolve, runRouter } from "../src/cli/router.js";
@@ -11,11 +11,20 @@ import { COMMANDS, type Command, preflight, preflightDirect, renderHelp, resolve
 // bounds it must accommodate cannot drift apart again (issue #176).
 //
 // The concurrency cap is not a politeness knob. Running all thirteen at once makes each child contend
-// for CPU, so per-child wall clock grows WITH the fleet size — measured at ~9.5s against the 10s
-// per-spawn kill, which would turn load into a false "not bounded" failure. Capping the fleet keeps
-// each child near its uncontended cost and leaves the per-spawn bound meaning what it says.
+// for CPU, so per-child wall clock grows WITH the fleet size: the whole case took ~9.5s with all
+// thirteen in flight — an upper bound on any one child of them, against the 10s per-spawn kill —
+// versus ~4s for a single uncontended spawn. Capping the fleet keeps each child near its uncontended
+// cost and leaves the per-spawn bound meaning what it says.
+//
+// So the cap is DERIVED from the machine rather than picked for the author's, which was a delta-review
+// finding on this PR: a hardcoded 4 is comfortable on the 8-core box this was written on and 2x
+// oversubscription on a 2-vCPU CI runner, where four cold `tsx` starts could push a legitimately slow
+// child past the 10s kill — reintroducing contention-driven flakiness one level below where it was
+// fixed. `availableParallelism()` rather than `cpus().length` because it honors container and cgroup
+// limits, which is exactly the CI case. The floor of 2 keeps the wall clock bounded, and the budget
+// below follows the cap automatically, so a smaller runner simply gets more waves and a larger budget.
 const SPAWN_TIMEOUT_MS = 10_000;
-const SPAWN_CONCURRENCY = 4;
+const SPAWN_CONCURRENCY = Math.max(2, Math.min(4, availableParallelism()));
 
 // Module scope, not test-body scope, because the test's TIMEOUT argument is evaluated at collection
 // time and must derive from this length. Holding the list here is what lets adding a fourteenth entry
