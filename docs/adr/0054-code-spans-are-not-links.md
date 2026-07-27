@@ -33,7 +33,7 @@ The rules encoded are CommonMark's, not the shape today's files happen to have
 
 - A run of *N* backticks opens an inline span and only a run of exactly *N* closes it. An **unmatched
   run is literal text** and scanning resumes immediately after it.
-- A span may cross a line break but not a blank line.
+- A span **must open and close on one line** — a deliberate narrowing of CommonMark, argued below.
 - A backslash-escaped backtick opens nothing.
 - A fence is closed by a delimiter of the same character, at least as long, alone on its line — and the
   closer must be **reachable inside the opener's own container** (see below). An opener with no such
@@ -42,9 +42,33 @@ The rules encoded are CommonMark's, not the shape today's files happen to have
 `checkRulesPointers` and `ruleBullets` deliberately do **not** adopt the masker: they exist to read
 *backticked* deep-doc paths, and masked input would blank the very substring they search for.
 
-## The two decisions a future reader will want to re-litigate
+## The three decisions a future reader will want to re-litigate
 
-**1. Fence delimiters are recognized after any whitespace and/or `>`, not CommonMark's
+**1. An inline code span may not cross a line break — the bound that ended a four-round loop.**
+
+CommonMark lets a span cross a line break within its paragraph, so the honest implementation of "stop at
+the paragraph edge" is to detect where paragraphs end. Four review rounds of PR #162 tried exactly that,
+and each attempt shipped a **silent false green** that a differential fuzzer then found:
+
+| Round | The bound tried | What a fuzzer found it missed |
+|---|---|---|
+| 1 | blank lines only | a fence in a blockquote/list; a lazy continuation |
+| 2 | + the fence's own container | a *declined* fence delimiter, pairing as an inline span |
+| 3 | + hide declined delimiters' runs | run-length pairing is not local: an earlier opener reached a **farther** partner and masked **more** |
+| 4 | + `RULE_BLOCK_OPENER`'s spellings | thematic breaks (`***`, `___`, `---`), setext underlines, `1)` lists, HTML blocks — 835/25,000 |
+
+The pattern, not any one miss, is the finding: **enumerating CommonMark's block starts by regex is a game
+this file cannot win**, and every loss is invisible — a run of backticks in one block pairing with a run
+in a later one, blanking every real link between them, with a green gate.
+
+A span that cannot leave its line cannot leave its block, whatever a block turns out to be. The property
+holds without knowing the enumeration, so it cannot be defeated by an entry missing from one. Two fuzzers
+over 33,000 generated documents now report **0** false greens, where the round-4 code reports 161–835.
+
+The cost is a genuine multi-line span going unmasked: a **false RED**, loud and cheap, and no file in the
+checked set contains one. That is the trade `rules/scripting.md` asks for by name.
+
+**2. Fence delimiters are recognized after any whitespace and/or `>`, not CommonMark's
 container-relative `` {0,3}``.**
 
 CommonMark measures a fence's indentation from its container's content column, so a flat per-line
@@ -79,12 +103,12 @@ claim is struck; the container bound is what makes the loose recognition safe.
 Both bounds fail toward the red. A legitimate fence whose content dedents below its opener stops being
 recognized and its links get reported — loud, and fixable by indenting the content.
 
-**2. Indented (4-space) code blocks are NOT masked.**
+**3. Indented (4-space) code blocks are NOT masked.**
 
 At this altitude a four-space indent cannot be told apart from a wrapped continuation under a nested
 list item, and `rules/*.md` and the skill bodies are made of those. Masking them would blank real links.
 
-Both choices follow the same asymmetry. Under-masking is a false **red**: loud, cheap, and it names
+All three choices follow the same asymmetry. Under-masking is a false **red**: loud, cheap, and it names
 itself. Over-masking is a false **green**: real dead links stop being reported and the gate says fine.
 Where the two trade off, take the red.
 
@@ -97,37 +121,12 @@ Where the two trade off, take the red.
   link, including the two documents this change brought with it.)
 - An **unclosed fence is not a fence.** Its content stays visible to the link checker, so a malformed
   document produces dead-link errors rather than silent coverage loss.
-- **An inline span stops at a block opener, not only at a blank line.** A code span lives in one
-  paragraph, and a list item, heading, blockquote, or fence interrupts a paragraph just as a blank line
-  does. Without that bound, a mid-line run of three backticks pairs with a run in a *later block* and
-  blanks every link between. This was a regression the container bounds themselves introduced — the two
-  halves of the masker constrain each other, and a bound added to one has to be re-checked against the
-  other.
+- A **multi-line inline code span is not masked.** No file in the checked set has one; if one is written
+  later, its contents are link-checked, which is a loud failure and not a silent one.
 - The masker is **cross-checked against the CommonMark reference parser** (`commonmark` npm), not merely
   against today's files: over all 39 in-scope files it misses **0** of the links a real parser calls live
-  (364 at merge), and **0** across 8,000 generated inputs mixing fences, blockquotes, nested lists, lazy
-  continuations, and multi-line spans. **Zero missed is the invariant worth holding**; the totals around
-  it drift with the tree.
-
-## The reasoning error worth remembering
-
-Two of the three bugs in this masker were introduced by the *fix* for the one before it, and both were
-defended with the same shape of argument: *"this change can only mask less."* Both times that was
-asserted from the local edit, and both times it was false.
-
-The clearest case: suppressing a fence delimiter's backtick run so it could not pair as an inline span.
-Locally, removing a candidate can only remove pairings. But run-length pairing is **not local** — delete
-a run-3 candidate from the middle of a search and an *earlier* run-3 opener skips past it and reaches a
-*farther* partner, masking strictly **more** than before. Differential fuzzing against the reference
-parser falsified the claim in 373 of 4,000 cases; no amount of re-reading the diff would have.
-
-The structural lesson is the distinction between a **bound** and a **filter**. Thinning the candidate set
-changes which pairs form and can grow a span. Stopping the search at a block boundary cannot. The final
-design has exactly one mechanism for this — `inlineBarriers` — because the second one, added first,
-turned out to be both redundant with it and the source of a bug.
-
-So the standing rule for this code: a monotonicity claim about masking is not reviewable by reading it.
-Fuzz it against a real parser, and mutate the guard to confirm a test actually fails without it.
+  (364 at merge), and **0** across 33,000 generated documents from two independently written fuzzers.
+  **Zero missed is the invariant worth holding**; the totals around it drift with the tree.
 - Links inside fenced blocks — including the output templates in the skill bodies — are no longer
   resolved. That is a deliberate consequence of treating a fence as code, and it removes nothing that
   was previously checked: none of these files were in scope before.
@@ -136,3 +135,28 @@ Fuzz it against a real parser, and mutate the guard to confirm a test actually f
 - A CommonMark link **title** — `[text](path "title")` — is still mis-parsed by `MARKDOWN_LINK`. No file
   uses the syntax; handling it half-way risks a target that resolves by accident, which is the wrong
   side of the asymmetry above.
+
+## The reasoning error worth remembering
+
+Every bug in this masker was introduced by the *fix* for the one before it, and the first three were
+defended with the same shape of argument: *"this change can only mask less."* Each time that was asserted
+from the local edit, and each time it was false.
+
+The clearest case: suppressing a fence delimiter's backtick run so it could not pair as an inline span.
+Locally, removing a candidate can only remove pairings. But run-length pairing is **not local** — delete
+a run-3 candidate from the middle of a search and an *earlier* run-3 opener skips past it and reaches a
+*farther* partner, masking strictly **more** than before. Differential fuzzing against the reference
+parser falsified the claim in 373 of 4,000 cases; no amount of re-reading the diff would have.
+
+Two lessons, in the order they were learned:
+
+1. **A bound is not a filter.** Thinning the candidate set changes which pairs form and can grow a span;
+   stopping the search cannot. Prefer the bound.
+2. **Prefer a bound you can state as a property over one you have to enumerate.** Rounds 1–4 each bounded
+   the search by *listing* what ends a paragraph, and a fuzzer found a missing entry every time. "A span
+   may not leave its line" needs no list, and no round-5 entry can be missing from it.
+
+So the standing rule for this code: a claim about what masking can and cannot do is not reviewable by
+reading it. Fuzz it against a real parser, and mutate the guard to confirm a test actually fails without
+it — twice in this PR a guard was load-bearing and had no test, and once a fuzzer reported clean against
+a version already known to be broken.

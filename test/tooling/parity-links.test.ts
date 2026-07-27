@@ -81,17 +81,27 @@ describe("maskCode - inline code spans", () => {
     expect(masked).toContain("[b](two.md)");
   });
 
-  it("lets a span cross ONE line break", () => {
-    expect(maskCode("`[a](one.md)\n[b](two.md)`")).toBe(" ".repeat(12) + "\n" + " ".repeat(12));
+  // CommonMark DOES allow a span to cross a line break. This deliberately does not — the line is the
+  // bound that keeps a span inside its block without anyone having to enumerate what a block is (four
+  // review rounds' worth of misses; ADR 0054). The cost is a genuine multi-line span going unmasked,
+  // which is a false RED: loud, and absent from every checked file.
+  it("does NOT let a span cross a line break", () => {
+    const masked = maskCode("`[a](one.md)\n[b](two.md)`");
+
+    expect(masked).toContain("[a](one.md)");
+    expect(masked).toContain("[b](two.md)");
   });
 
-  // A blank line ends the paragraph, so the opener is unmatched and both links survive. Without this
-  // stop, an opener could reach arbitrarily far down a document hunting for a partner.
   it("does not let a span cross a BLANK line", () => {
     const masked = maskCode("`[a](one.md)\n\n[b](two.md)`");
 
     expect(masked).toContain("[a](one.md)");
     expect(masked).toContain("[b](two.md)");
+  });
+
+  it("still masks a span that opens and closes on the same line, anywhere on it", () => {
+    expect(maskCode("- **Rule** — `![x](url)` escapes it. See [ok](AGENTS.md)."))
+      .toBe("- **Rule** — " + " ".repeat(11) + " escapes it. See [ok](AGENTS.md).");
   });
 
   // CommonMark honors backslash escapes everywhere except inside a code span, so `\`` opens nothing.

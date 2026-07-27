@@ -362,65 +362,27 @@ function runLength(text: string, index: number): number {
 }
 
 /**
- * Per-character flags marking every position on a whitespace-only line, and that line's terminating
- * newline. A blank line ends a paragraph, so a code span may not cross one.
+ * The closing run of exactly `len` backticks BEFORE `end`, or -1 if the opener is unmatched.
  *
- * This does double duty: a masked fence line is all spaces, hence blank, so these flags ALSO stop an
- * inline span from reaching across a fenced block into unrelated prose.
+ * `end` is the end of the opener's own line, and that bound is the whole design (PR #162, delta rounds
+ * 3 and 4). CommonMark does let a code span cross a line break; this deliberately does not, because the
+ * bound is what makes the guard's failure mode provable instead of enumerated.
+ *
+ * The four review rounds are the argument. Each earlier attempt bounded the search by naming the things
+ * that end a paragraph — a blank line, then a fence delimiter, then `RULE_BLOCK_OPENER`'s spellings —
+ * and each time a differential fuzzer found another opener nobody had listed: thematic breaks (`***`,
+ * `___`, `---`), setext underlines, `1)` ordered lists, HTML blocks. Every miss was a FALSE GREEN, the
+ * silent kind: a run of backticks in one block pairing with a run in a later one, blanking every real
+ * link in between. Enumerating CommonMark's block starts by regex is a game this file cannot win, and
+ * losing it silently is exactly the outcome rules/scripting.md warns about.
+ *
+ * A span that cannot leave its line cannot leave its block, whatever the block turns out to be. The cost
+ * is a genuine multi-line span going unmasked — a false RED, loud and cheap, and no file in the checked
+ * set contains one. Recorded in ADR 0054.
  */
-function blankLineFlags(text: string): boolean[] {
-  const flags = new Array<boolean>(text.length).fill(false);
-  let start = 0;
-
-  while (start <= text.length) {
-    let end = text.indexOf("\n", start);
-    if (end === -1) end = text.length;
-
-    if (strip(text.slice(start, end)) === "") {
-      for (let k = start; k < end; k++) flags[k] = true;
-      if (end < text.length) flags[end] = true;
-    }
-
-    if (end === text.length) break;
-    start = end + 1;
-  }
-  return flags;
-}
-
-/**
- * Where an inline code-span search must stop: every blank-line position, plus the FIRST offset of any
- * line that opens a new block.
- *
- * A code span lives inside one paragraph, so it cannot reach into a different block. A blank line is
- * only the most common way a paragraph ends — a list item, an ATX heading, a blockquote, and a fence all
- * interrupt one too, and a mid-line run of three backticks pairing with a run in a LATER BLOCK is a
- * false green (PR #162 delta round 3, found by differential fuzzing against the reference parser):
- *
- *     abc ``` def [L0](x.md)      <- opener, in its own paragraph
- *     stu ~~~ vwx [L1](y.md)      <- CommonMark: both links live
- *     - ```                       <- a list item: a different block, and the accidental partner
- *
- * `RULE_BLOCK_OPENER` already encodes CommonMark's block-opener spellings for the Tier-1 narrative
- * guard, so it is reused here rather than restated.
- *
- * Only the line's FIRST offset is marked, never the whole line. Marking the line would stop the pass
- * finding a span that opens and closes ON that line — and `rules/security.md`'s `` `![x](url)` `` sits
- * on a `- ` bullet, so that would un-mask the very false positive this whole change exists to suppress.
- * A search entering the line from above still hits the mark; one starting inside it does not.
- */
-function inlineBarriers(text: string, lines: readonly LineInfo[]): boolean[] {
-  const flags = blankLineFlags(text);
-  for (const line of lines) {
-    if (line.start < flags.length && RULE_BLOCK_OPENER.test(line.text)) flags[line.start] = true;
-  }
-  return flags;
-}
-
-/** The closing run of exactly `len` backticks, or -1 if the opener is unmatched within its paragraph. */
-function findCloser(text: string, from: number, len: number, blankAt: readonly boolean[]): number {
+function findCloser(text: string, from: number, len: number, end: number): number {
   let k = from;
-  while (k < text.length) {
-    if (blankAt[k]) return -1;
+  while (k < end) {
     if (text[k] !== "`" || isEscaped(text, k)) {
       k++;
       continue;
@@ -485,36 +447,31 @@ export function maskCode(text: string): string {
   // immediately after it — the single property that stops one stray backtick from blanking the rest of
   // a file, which is the silent failure this whole guard exists to avoid.
   //
-  // The search is BOUNDED by inlineBarriers(), not merely fed a thinner set of candidates — see there
-  // for why a block opener ends a span. That distinction is the whole lesson of PR #162's delta rounds
-  // and is recorded in ADR 0054: the first attempt bounded nothing and instead *removed* the delimiter
-  // runs of declined fence openers from a scratch view, on the reasoning that "suppressing candidates
-  // can only mask less". Differential fuzzing against the reference parser falsified that in 373 of 4000
-  // cases. Run-length pairing is not local: delete a run-3 candidate from the middle of a search and an
-  // EARLIER run-3 opener skips past it to a FARTHER partner, masking strictly MORE than before —
-  // including links CommonMark renders live. A bound cannot do that; a filter can.
+  // Each line is scanned on its own, which is what bounds a span to its block — see findCloser for why
+  // four review rounds landed there rather than on a list of block openers.
   const fenced = chars.join("");
-  const blankAt = inlineBarriers(fenced, lines);
 
-  let i = 0;
-  while (i < fenced.length) {
-    if (fenced[i] !== "`") {
-      i++;
-      continue;
-    }
-    if (isEscaped(fenced, i)) {
-      i++;   // `\`` is a literal backtick: it opens nothing, and the rest of the run is re-measured
-      continue;
-    }
+  for (const line of lines) {
+    let i = line.start;
+    while (i < line.end) {
+      if (fenced[i] !== "`") {
+        i++;
+        continue;
+      }
+      if (isEscaped(fenced, i)) {
+        i++;   // `\`` is a literal backtick: it opens nothing, and the rest of the run is re-measured
+        continue;
+      }
 
-    const open = runLength(fenced, i);
-    const close = findCloser(fenced, i + open, open, blankAt);
-    if (close === -1) {
-      i += open;
-      continue;
+      const open = runLength(fenced, i);
+      const close = findCloser(fenced, i + open, open, line.end);
+      if (close === -1) {
+        i += open;
+        continue;
+      }
+      maskRange(chars, i, close + open);
+      i = close + open;
     }
-    maskRange(chars, i, close + open);
-    i = close + open;
   }
 
   return chars.join("");
