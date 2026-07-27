@@ -1,8 +1,18 @@
 # 2026-07-27 — The baseline's dead-link scope silently excluded its own Rules Layer (bryce issue #159)
 
-## F16 — `checkLinks` had a hardcoded file list, and `rules/*.md` was never on it
+## F17 — `checkLinks` had a hardcoded file list, and `rules/*.md` was never on it
 
 **Disposition: `upstream` · Status: recorded**
+
+> **Same root cause as [F16](2026-07-27-rules-readme-links-unvalidated.md), reached from the other end,
+> and the two were filed within a day of each other by sessions that did not see one another.** F16 came
+> at it through `docs/rules/README.md` and issue #160; this came through `rules/*.md` and issue #159.
+> Both found a prose-heavy document that no link validator covers, both found the naive
+> `LINK_CHECKED` addition reddens on illustrative examples, and both landed on the same underlying fact:
+> **the checker had no notion of code.** F16 priced a fencing pass over the prose as too large and
+> deferred; #159 changed what the validator considers a link instead, which fixes both files and costs no
+> prose edit. That two independent sessions hit the identical wall in two days is the pattern the ledger
+> exists to promote — this is not one anecdote, it is two.
 
 `scripts/parity-check.ts` — a Generic Baseline file — resolved markdown links only for a hardcoded list
 of twelve paths. Every Tier-1 rule file in `rules/` carried links from the day the Rules Layer shipped,
@@ -39,7 +49,7 @@ domain hit the same thing?"* — without qualification.
   covered the day it lands. **12 files / 189 resolved internal links → 39 files / 361.**
 - `RENDER_SCANNED` split out of `LINK_CHECKED`, because a `parity:render` marker is an Adapter concern
   and should not follow the link scope.
-- Decisions recorded in [ADR 0053](../adr/0053-code-spans-are-not-links.md).
+- Decisions recorded in [ADR 0054](../adr/0054-code-spans-are-not-links.md).
 
 **A second-order note worth carrying upstream with it.** Two Tier-1 anti-patterns in
 `rules/scripting.md` — *"never widen a guard's matching rule without asking which way the new failure

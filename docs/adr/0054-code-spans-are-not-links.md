@@ -1,4 +1,4 @@
-# ADR 0053 — A markdown link inside code is not a link
+# ADR 0054 — A markdown link inside code is not a link
 
 **Status:** Accepted
 **Date:** 2026-07-27

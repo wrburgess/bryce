@@ -247,7 +247,7 @@ function inspectArray(arr: string[]): string {
   return "[" + arr.map(esc).join(", ") + "]";
 }
 
-// --- Code masking: a link inside code is not a link (issue #159, ADR 0053) -------------------------
+// --- Code masking: a link inside code is not a link (issue #159, ADR 0054) -------------------------
 //
 // `rules/security.md` writes `![x](url)` while TEACHING escaping; `docs/rules/README.md` writes
 // `[text](path)` four times while teaching the deep-doc form rule. Those are prose ABOUT markdown, and
@@ -259,7 +259,7 @@ function inspectArray(arr: string[]): string {
 // removes becomes a space, and newlines are preserved. Callers keep matching the same regexes at the
 // same offsets, and keep reporting the raw href a contributor actually typed.
 //
-// One deliberate departure from CommonMark, recorded in ADR 0053, chosen so the residual failure is a
+// One deliberate departure from CommonMark, recorded in ADR 0054, chosen so the residual failure is a
 // false RED (loud, cheap, self-announcing) rather than a false GREEN (silent, and it takes the whole
 // guard with it) — rules/scripting.md's asymmetry rule: INDENTED (4-space) code blocks are NOT masked.
 // At this altitude they cannot be told apart from a wrapped continuation under a nested list item, and

@@ -38,7 +38,7 @@ target pattern. That is deliberate and load-bearing:
   disagreement between their displayed and target ADR numbers; it does not resolve additional links.
 - Both scans first blank every **fenced block and inline code span**, so a worked example like the
   `[text](path)` on this line is prose about markdown, not a link. That is what made covering these
-  prose-heavy files possible at all ([ADR 0053](../adr/0053-code-spans-are-not-links.md)).
+  prose-heavy files possible at all ([ADR 0054](../adr/0054-code-spans-are-not-links.md)).
 - This is what lets the Rules Layer ship a trigger table — and any forward-reference to a
   planned-but-absent file — **without creating empty placeholder files** just to satisfy the checker.
 
