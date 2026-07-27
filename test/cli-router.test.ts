@@ -382,6 +382,38 @@ describe("CLI router metadata", () => {
     }
   }, 30_000);
 
+  it("validates the report-player Presentation flags at the ROUTER layer, before the leaf loads", async () => {
+    const command = COMMANDS.find((c) => c.path.join(" ") === "report player")!;
+    // Declared in BOTH layers on purpose: preflight must reject a bad --format
+    // BEFORE ./report.js (and `startupDb`) is ever imported, and report.ts
+    // re-checks because its parser is also reachable directly.
+    expect(preflight(command, ["--id", "1", "--format", "console"])).toBeNull();
+    expect(preflight(command, ["--id", "1", "--format=html"])).toBeNull();
+    expect(preflight(command, ["--id", "1", "--out", "card.html"])).toBeNull();
+    expect(preflight(command, ["--id", "1", "--open"])).toBeNull();
+    expect(preflight(command, ["--id", "1", "--format", "pdf"])).toContain("invalid value 'pdf'");
+    // The rejection ENUMERATES the accepted values rather than saying "invalid".
+    expect(preflight(command, ["--id", "1", "--format", "pdf"])).toContain("console, json, html");
+    expect(preflight(command, ["--id", "1", "--out"])).toContain("requires a value");
+    // --open is a boolean flag, so a value is a usage error either way it is
+    // spelled — never a silent accept that leaves the operator guessing.
+    expect(preflight(command, ["--id", "1", "--open=true"])).toContain("does not support '=' syntax");
+    expect(preflight(command, ["--id", "1", "--open", "true"])).toContain("unexpected argument");
+
+    // Reachable through the real entry point with no leaf loaded.
+    const loader = vi.fn(async () => ({ main: vi.fn(async () => 0) }));
+    const commands = COMMANDS.map((c) => (c.path.join(" ") === "report player" ? { ...c, load: loader } : c));
+    const output = vi.fn();
+    expect(await runRouter(["report", "player", "--id", "1", "--format", "pdf"], output, commands)).toBe(1);
+    expect(loader).not.toHaveBeenCalled();
+
+    // The help text advertises all three flags and the accepted format values.
+    const help = renderHelp(["report", "player"]);
+    for (const fragment of ["--format", "--out", "--open", "console | json | html"]) {
+      expect(help, fragment).toContain(fragment);
+    }
+  });
+
   it("reports unknown and incomplete commands without loading a leaf", async () => {
     const output = vi.fn();
     expect(await runRouter(["unknown"], output)).toBe(1);

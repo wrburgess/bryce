@@ -25,6 +25,7 @@ import {
   fakeClock,
   insertCalendars2026,
   insertPlayer,
+  insertStatLine,
   makeGameLogBody,
   makePerson,
   makeSeasonBody,
@@ -129,6 +130,60 @@ async function connect(deps: AppDeps): Promise<Client> {
 }
 
 describe("REST/MCP semantic conformance", () => {
+  /**
+   * The Player Card is the ONE place REST and MCP intentionally disagree, and
+   * only about their DEFAULT (#141 / ADR 0055): REST's audience is the
+   * programmatic caller, so it keeps `json`; MCP's is an agent, which should
+   * receive a finished artifact to display rather than ~315 key/value pairs.
+   *
+   * This is asserted as an INTENT, not waved through as an "expected
+   * divergence": for an EXPLICIT format the two surfaces must still produce the
+   * same bytes. A bare "they differ" assertion would be indistinguishable from
+   * papering over a real regression, so both halves are pinned — the defaults
+   * differ, AND the explicit formats are identical.
+   */
+  it("differs ONLY in the player-card default, and is byte-identical for an explicit format", async () => {
+    const fixture = await makeFixture();
+    try {
+      const player = await insertPlayer(fixture.opened.db, { fullName: "Conformance Cardguy" });
+      await insertStatLine(fixture.opened.db, { playerId: player.id, gameDate: "2026-07-18", stats: { hits: 2, atBats: 4 } });
+      const before = await snapshot(fixture);
+      const client = await connect(fixture.deps);
+      try {
+        const restJson = async (query: string): Promise<Response> =>
+          createApp(fixture.deps).request(`/api/reports/player/${player.id}?windows=last10${query}`, { headers: AUTH });
+        const mcp = async (format?: string): Promise<McpResult & { structuredContent?: unknown }> =>
+          client.callTool({
+            name: "report_player",
+            arguments: { id: player.id, windows: ["last10"], ...(format === undefined ? {} : { format }) },
+          }) as Promise<McpResult & { structuredContent?: unknown }>;
+
+        // THE DEFAULTS DIVERGE, deliberately.
+        const restDefault = await restJson("");
+        expect(restDefault.headers.get("content-type")).toContain("application/json");
+        const mcpDefault = await mcp();
+        expect(mcpDefault.structuredContent, "MCP defaults to the console Presentation").toBeUndefined();
+        expect(mcpDefault.content[0]?.text).toContain("Conformance Cardguy");
+
+        // EVERY EXPLICIT FORMAT IS IDENTICAL across the two surfaces.
+        expect(JSON.stringify((await mcp("json")).structuredContent)).toBe(JSON.stringify(await restDefault.clone().json()));
+        expect((await mcp("console")).content[0]?.text).toBe(await (await restJson("&format=console")).text());
+        expect((await mcp("html")).content[0]?.text).toBe(await (await restJson("&format=html")).text());
+
+        // And both still reject an unsupported format rather than defaulting.
+        expect((await restJson("&format=pdf")).status).toBe(400);
+        expect((await mcp("pdf")).isError).toBe(true);
+
+        // A card is read-only on both surfaces, in every format.
+        expect(await snapshot(fixture)).toEqual(before);
+      } finally {
+        await client.close();
+      }
+    } finally {
+      fixture.close();
+    }
+  });
+
   it("projects the four shared rejection contracts without mutation or provider fetches", async () => {
     type Variant = {
       name: string;

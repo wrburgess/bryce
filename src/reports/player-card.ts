@@ -1,7 +1,10 @@
 import type Database from "better-sqlite3";
 import type { Db } from "../db/client.js";
+import { countQualityStarts, countReliefLosses, countReliefWins } from "../digest/rows.js";
 import { canonicalizeName } from "../domain/names.js";
 import { hostDate, sportIdForPlayer } from "../domain/season.js";
+import type { ReportWindowSpec } from "../domain/window.js";
+import { isLongWindow } from "../domain/window.js";
 import { levelAbbrev, levelRank } from "../mlb/levels.js";
 import { aggregate, deriveAllRates } from "../stats/aggregate.js";
 import type { Aggregate } from "../stats/aggregate.js";
@@ -9,6 +12,29 @@ import type { Aggregate } from "../stats/aggregate.js";
 /** Player-relative windows are intentionally distinct from date WindowSpec. */
 export const PLAYER_CARD_WINDOWS = ["last10", "last30", "ytd"] as const;
 export type PlayerCardWindowSpec = (typeof PLAYER_CARD_WINDOWS)[number];
+
+/**
+ * The Card Window vocabulary expressed in the REPORT window vocabulary, so the
+ * Card can reuse `isLongWindow` (`src/domain/window.ts`) instead of restating
+ * the "is thirty games enough for a rate to mean something" threshold.
+ *
+ * A TOTAL `Record<PlayerCardWindowSpec, ReportWindowSpec>` on purpose, and never
+ * a cast: `isLongWindow` accepts only a `ReportWindowSpec`, and casting a raw
+ * `"last30"` through it lands on `SPAN_DAYS["last30"] -> undefined >= 21 ->
+ * false`, silently dropping BB%/K% from the one window that must show them —
+ * green tests, wrong output. Typed as a total record, adding a fourth Card
+ * Window fails to COMPILE rather than silently returning false.
+ */
+const CARD_WINDOW_REPORT_SPEC: Readonly<Record<PlayerCardWindowSpec, ReportWindowSpec>> = {
+  last10: "last10games",
+  last30: "last30games",
+  ytd: "ytd",
+};
+
+/** True for the Card Windows the display-only BB%/K% rates are shown on. */
+export function cardWindowIsLong(spec: PlayerCardWindowSpec): boolean {
+  return isLongWindow(CARD_WINDOW_REPORT_SPEC[spec]);
+}
 
 export interface PlayerCardInput {
   id?: number;
@@ -32,6 +58,17 @@ export interface PlayerCardRow {
   lvlRank: number;
   aggregate: Aggregate;
   rates: Record<string, string>;
+  /**
+   * QS / relief decisions are per-game COUNTS the summed aggregate cannot
+   * recover (ADR 0036), so they are counted here at assembly exactly as the
+   * Digest counts them. APPENDED after `rates`: every field the Card carried
+   * before #141 keeps its name, position, and value (ADR 0055 consequence 2,
+   * pinned by test/player-card-contract.test.ts). Always 0 on a batting row,
+   * matching `DigestRow`.
+   */
+  qualityStarts: number;
+  reliefWins: number;
+  reliefLosses: number;
 }
 
 export interface PlayerCardWindow {
@@ -235,7 +272,17 @@ function groupRows(
   }
   return [...groups].map(([key, stats]) => {
     const aggregateResult = aggregate(statType, stats);
-    return { ...metadata.get(key)!, aggregate: aggregateResult, rates: deriveAllRates(aggregateResult) };
+    // The bucket is ALREADY Record<string, unknown>[] (built above and handed to
+    // `aggregate`), so the shared counters are called directly — no `.map(s => s.stats)`
+    // projection, which is what src/digest/rows.ts's own caller needs and this one does not.
+    return {
+      ...metadata.get(key)!,
+      aggregate: aggregateResult,
+      rates: deriveAllRates(aggregateResult),
+      qualityStarts: statType === "pitching" ? countQualityStarts(stats) : 0,
+      reliefWins: statType === "pitching" ? countReliefWins(stats) : 0,
+      reliefLosses: statType === "pitching" ? countReliefLosses(stats) : 0,
+    };
   }).sort((a, b) => a.lvlRank - b.lvlRank || a.lvl.localeCompare(b.lvl));
 }
 

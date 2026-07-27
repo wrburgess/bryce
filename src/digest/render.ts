@@ -3,6 +3,15 @@ import type { ResolvedWindow } from "../domain/window.js";
 import { formatDateRange, gameCountTitle, isGameCountSpec, isLongWindow, shortDate } from "../domain/window.js";
 import type { DigestFreshness } from "../jobs/refresh-run.js";
 import type { Level } from "../mlb/levels.js";
+import type { Column as PresentationColumn } from "../presentation/table.js";
+import {
+  escapeHtml,
+  htmlDocument,
+  htmlTable,
+  levelBreakIndexes,
+  mlbDividerIndex,
+  textTable,
+} from "../presentation/table.js";
 import { deriveRate } from "../stats/aggregate.js";
 import { formatOuts } from "./rates.js";
 
@@ -121,28 +130,11 @@ function digestPresentation(assembly: DigestAssembly): DigestPresentation {
 }
 
 /**
- * Escape the four characters that are unsafe in the two contexts a name reaches
- * in this renderer: an element text node and a double-quoted attribute value.
- * A raw apostrophe (`O'Reilly`) is deliberately NOT escaped — it is safe in both
- * of those contexts, and every value here is emitted in one of them (`<td>`
- * text, `text-align: "..."`), never in a single-quoted attribute. Non-ASCII
- * letters (accents, wide characters) pass through untouched — the digest is a
- * UTF-8 mail part (#65 / ADR 0041).
+ * The digest's own column type: the shared presentation `Column<T>` bound to
+ * `DigestRow`, so every column definition below reads exactly as it did before
+ * the primitives moved to `src/presentation/table.ts` (#141).
  */
-export function escapeHtml(s: string): string {
-  return s
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;");
-}
-
-interface Column {
-  header: string;
-  /** Right-aligned for numbers, left for names. */
-  align: "left" | "right";
-  value: (row: DigestRow) => string;
-}
+type Column = PresentationColumn<DigestRow>;
 
 /**
  * "Bryce Harper" -> "Harper, B"; a single-word name is left alone. The first
@@ -283,82 +275,6 @@ function pitchingColumns(window: ResolvedWindow): Column[] {
     { header: "RW", align: "right", value: (r) => String(r.reliefWins) },
     { header: "RL", align: "right", value: (r) => String(r.reliefLosses) },
   ];
-}
-
-const GUTTER = "  ";
-
-/**
- * Row index to draw the MLB / Other-Levels rule at: after the last MLB
- * (lvlRank===0) row, but only when the table has BOTH an MLB row and a
- * non-MLB row. null => no rule (one side absent).
- */
-function mlbDividerIndex(rows: DigestRow[]): number | null {
-  const lastMlb = rows.reduce((idx, r, i) => (r.lvlRank === 0 ? i : idx), -1);
-  const hasOther = rows.some((r) => r.lvlRank > 0);
-  return lastMlb >= 0 && hasOther ? lastMlb + 1 : null;
-}
-
-/** Indexes before rows that begin a new level. */
-function levelBreakIndexes(rows: DigestRow[]): number[] {
-  return rows.flatMap((row, index) => (index > 0 && row.lvlRank !== rows[index - 1]!.lvlRank ? [index] : []));
-}
-
-function textTable(
-  columns: Column[],
-  rows: DigestRow[],
-  dividerAfter: number | null = null,
-  levelBreaks: number[] = [],
-): string[] {
-  const cells = rows.map((row) => columns.map((col) => col.value(row)));
-  // Column widths use String#length (UTF-16 code units), which equals the
-  // monospace display width for the Latin (incl. NFC-accented) names both
-  // sources actually emit. It would UNDER-count an East-Asian wide glyph
-  // (`鈴木`.length === 2, but it occupies 4 columns), misaligning that one
-  // row. That case is deliberately out of scope (#65 / ADR 0041): the MLB and
-  // NCAA sources return Latin transliterations only, the HTML part (the primary
-  // artifact) aligns via <td> regardless of glyph width, and a full
-  // East-Asian-width table would align characters the data cannot contain. Such
-  // a name still round-trips intact — only its plain-text column may be ragged.
-  const widths = columns.map((col, i) =>
-    cells.reduce((max, rowCells) => Math.max(max, rowCells[i]!.length), col.header.length),
-  );
-  const line = (values: string[]): string =>
-    values
-      .map((value, i) =>
-        columns[i]!.align === "left" ? value.padEnd(widths[i]!) : value.padStart(widths[i]!),
-      )
-      .join(GUTTER)
-      // Trailing pad on the last column is invisible noise in a mail client.
-      .trimEnd();
-  const lines = [line(columns.map((c) => c.header)), ...cells.map(line)];
-  const maxLineWidth = lines.reduce((max, l) => Math.max(max, l.length), 0);
-  for (const index of [...levelBreaks].reverse()) {
-    const insertAt = 1 + index;
-    const divider = dividerAfter === index ? ["-".repeat(maxLineWidth)] : [];
-    lines.splice(insertAt, 0, ...divider, line(columns.map((c) => c.header)));
-  }
-  return lines;
-}
-
-function htmlTable(
-  columns: Column[],
-  rows: DigestRow[],
-  dividerAfter: number | null = null,
-  levelBreaks: number[] = [],
-): string {
-  const cell = (tag: "th" | "td", align: Column["align"], value: string): string =>
-    `<${tag} style="text-align: ${align}; padding: 2px 6px">${escapeHtml(value)}</${tag}>`;
-  const head = columns.map((col) => cell("th", col.align, col.header)).join("");
-  const bodyRows = rows.map(
-    (row) => `<tr>${columns.map((col) => cell("td", col.align, col.value(row))).join("")}</tr>`,
-  );
-  for (const index of [...levelBreaks].reverse()) {
-    const divider = dividerAfter === index
-      ? [`<tr><td colspan="${columns.length}" style="padding: 0"><hr style="border: none; border-top: 1px solid #ccc; margin: 4px 0" /></td></tr>`]
-      : [];
-    bodyRows.splice(index, 0, ...divider, `<tr>${head}</tr>`);
-  }
-  return `<table cellspacing="0" cellpadding="0"><thead><tr>${head}</tr></thead><tbody>${bodyRows.join("")}</tbody></table>`;
 }
 
 interface Table {
@@ -510,14 +426,8 @@ export function renderDigestMarkdown(assembly: DigestAssembly): string {
 export function renderDigestHtmlDocument(assembly: DigestAssembly): string {
   // Document metadata (the browser tab / saved-file name) mirrors the email
   // subject; the body h1 is the bare title, from the reused renderDigest fragment.
-  const title = escapeHtml(digestPresentation(assembly).subject);
-  return (
-    "<!doctype html>\n" +
-    "<html>\n" +
-    `<head><meta charset="utf-8"><title>${title}</title><style>${DIGEST_HTML_STYLE}</style></head>\n` +
-    `<body>\n${renderDigest(assembly).html}\n</body>\n` +
-    "</html>\n"
-  );
+  // The subject is passed RAW — `htmlDocument` owns escaping the title.
+  return htmlDocument(digestPresentation(assembly).subject, DIGEST_HTML_STYLE, renderDigest(assembly).html);
 }
 
 /**
