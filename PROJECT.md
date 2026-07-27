@@ -295,7 +295,9 @@ slower form. At the review
 date: recurrence `0` and nothing having cited it → **archive** the entry (move it under an `## Archived`
 heading — do not delete, because the record of what was considered and dropped is the point);
 recurrence `≥ 1` → it becomes eligible for outcome 1 or 2. **The default at expiry is archival, never
-promotion**, so an unattended finding shrinks the corpus rather than growing it.
+promotion**, so an unattended finding shrinks the corpus rather than growing it. **Archival is terminal
+and the sweep reads only the active entries** — an archived entry still carries a past review date, so a
+sweep that did not exclude it would re-archive and re-report the same finding forever.
 
 **The recursion bound.** Any post-`verify` change that moves `HEAD` past the reviewed SHA triggers a
 delta review — an `autonomous-fold`, an HC-approved fold under `present-to-hc`, a `listen` fix, or a

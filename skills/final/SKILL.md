@@ -51,10 +51,12 @@ skipped: stop and recheck.
    The `create-skill` review-PR gate is **out of scope** — never auto-dispose it.
 
    **Sweep the findings log first**, before disposing of anything new. Read the findings log the Project
-   Config names — absent is fine, and means nothing is due — and process every entry whose **review date
-   has passed**, by the rule that Config declares: no recurrence and no work having cited it →
-   **archive** it; recurrence → it is eligible for a real outcome and enters this step's disposition
-   beside the new suggestions. Without this sweep an entry recorded once and never met again would sit
+   Config names — absent is fine, and means nothing is due — and process every **active** entry whose
+   **review date has passed**, by the rule that Config declares: no recurrence and no work having cited
+   it → **archive** it; recurrence → it is eligible for a real outcome and enters this step's disposition
+   beside the new suggestions. **Archival is terminal**: an already-archived entry still carries a past
+   review date, so a sweep that did not exclude it would re-archive and re-report the same finding on
+   every later run — read past the archive, never through it. Without this sweep an entry recorded once and never met again would sit
    in the log forever, which is the accretion *record as an expiring finding* exists to avoid, in a
    slower form. **Archiving by the declared rule is executing the policy, not proposing one**, so the
    setting does not gate it; promoting an entry to a retained rule **is** a suggestion, and does. Report
