@@ -58,6 +58,20 @@ Two findings decided it:
   contradiction #160's own step 3 forbids; consolidating both is a Rules-Layer-wide rewrite that removes
   roughly fifteen Anti-Pattern bullets and hollows out a section ADR 0004 makes required.
 
+**The count is a judgment under the stated definition, not a mechanical tally.** A pair is counted when
+one invariant appears in both moods; reasonable readers could score one or two differently, and the
+argument does not rest on the exact number — it rests on the shape being the norm in five of six files
+while `rules/backend.md` carries one.
+
+**The bar is not a rubber stamp, and the thinnest pair is worth naming rather than leaving for a
+reviewer to find.** `rules/frontend.md`'s "Behavior in named, testable units" ↔ "Never write untestable
+inline behavior scripting in a template/view" is the marginal case: the Anti-Pattern's remedy ("move it
+into a named, testable behavior unit") restates the Pattern almost exactly, and what the Pattern
+uniquely adds — *discoverable*, easy to **find** — is thin. It passes, because the Anti-Pattern still
+carries a mechanism the Pattern does not ("it can't be reused or tested") and the Pattern still names
+the positive action. But it passes narrowly, and it is the pair to revisit first if this convention is
+ever tightened. Every other pair clears the bar with room.
+
 ## The audit corrected the bar — the case that shaped it
 
 The bar was first drafted as "an invariant gets at most two bullets, one per mood." Applying it to the
