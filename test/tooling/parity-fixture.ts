@@ -2,7 +2,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, write
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ADR_DIR, linkCheckedFiles, markdownLinks } from "../../scripts/parity-check.js";
+import { ADR_DIR, linkCheckedFiles, markdownLinks, resolveInsideRoot } from "../../scripts/parity-check.js";
 
 // Shared fixture copier for the parity self-tests (issue #139). Both tooling tests hand
 // `runParityCheck` a real tree in an OS tmpdir; this module owns HOW that tree is built so there is
@@ -79,8 +79,11 @@ export function copyBundle(
  * Self-healing: once the target exists, nothing is created.
  *
  * Stub creation is CONTAINED to `root`: the target comes from file content, so a relative link that
- * climbs out (`../../elsewhere.md`) would otherwise have this helper write into the real filesystem
- * outside the throwaway copy. An escaping link is skipped, not healed.
+ * climbs out (`../../elsewhere.md`) would otherwise have this helper WRITE into the real filesystem
+ * outside the throwaway copy — the stakes here are higher than the checker's, which only reads. An
+ * escaping link is skipped, not healed, and the containment test itself comes from the checker
+ * (`resolveInsideRoot`) rather than being re-derived: this file used to carry its own copy of that
+ * expression, and a rule written three times and enforced twice is what issue #165 was.
  *
  * It is contained AWAY from `docs/adr/` for the opposite reason — see the rule in the body. Healing there
  * manufactures a record file and converts a dead link into a duplicate-ADR-number error naming a file
@@ -95,7 +98,6 @@ export function copyBundle(
  * checker ignores those either way — so it has its own test in parity-links.test.ts.
  */
 export function healDeadLinks(root: string): void {
-  const contained = resolve(root);
   const adrDir = resolve(root, ADR_DIR);
 
   for (const rel of linkCheckedFiles(root)) {
@@ -109,28 +111,28 @@ export function healDeadLinks(root: string): void {
       const target = raw.split("#")[0] ?? "";
       if (target === "") continue;
 
-      const resolved = resolve(dirname(file), target);
-      if (resolved !== contained && !resolved.startsWith(contained + sep)) continue;
-      // Never synthesize a record file. A stub under docs/adr/ named `NNNN-*.md` collides with the real
-      // ADR of that number, so checkAdrNumbers reports "Duplicate ADR number" for a file nobody wrote and
-      // the dead link that caused it vanishes from the output entirely (issue #163). Healing it was never
-      // the honest outcome: a dead ADR link is a defect, so it stays visible AS a dead link.
+      // Root containment comes from the checker's ONE authored copy (issue #165), not a fourth
+      // hand-written prefix test -- this file used to carry its own and that is how #165 happened.
+      const resolved = resolveInsideRoot(root, dirname(file), target);
+      if (resolved === null) continue;
+
+      // Then a SECOND, narrower rule: never synthesize a record file. A stub under docs/adr/ named
+      // `NNNN-*.md` collides with the real ADR of that number, so checkAdrNumbers reports "Duplicate ADR
+      // number" for a file nobody wrote and the dead link that caused it vanishes from the output
+      // entirely (issue #163). A dead ADR link is a defect; it stays visible AS a dead link.
       //
-      // Tested on the RESOLVED path, not the raw href, so `../adr/x`, `./0001-y.md`, and a plain name all
-      // land in the same test -- an equivalent spelling cannot slip past. Deliberately not limited to the
-      // ADR filename pattern or to `.md`: the rule is "this directory holds records", and a narrower rule
-      // just moves the hole.
+      // Tested on the RESOLVED path, so `../adr/x`, `./0001-y.md`, and a plain name all land in it.
+      // Deliberately not limited to the ADR filename pattern or to `.md`: the rule is "this directory
+      // holds records", and a narrower rule just moves the hole.
       //
-      // Compared CASE-INSENSITIVELY, which is load-bearing rather than defensive. `resolve()` is pure
-      // string arithmetic and never consults the filesystem, so on a case-insensitive volume -- APFS and
-      // NTFS, i.e. the machines this repo is developed on -- a link spelled `../ADR/0029-x.md` resolves to
-      // a path that fails an exact prefix test, yet `mkdirSync`/`writeFileSync` land the stub in the very
-      // same physical `docs/adr/`. `checkAdrNumbers` then enumerates it and the duplicate-number masking
-      // is back, which is the entire defect this guard exists to close. Verified by reproducing it.
-      //
-      // Safe on a case-sensitive volume too: there `docs/ADR/` is genuinely a different directory, and
-      // declining to stub into it costs nothing -- the link is simply reported as the dead link it is.
-      // ADR_DIR is a fixed ASCII lowercase literal, so `toLowerCase()` needs no locale care.
+      // CASE-INSENSITIVE, and deliberately NOT delegated to `resolveInsideRoot`, which is exact. The two
+      // are different guards pointing different ways. `resolve()` never consults the filesystem, so on a
+      // case-insensitive volume (APFS, NTFS -- what this repo is developed on) `../ADR/0029-x.md` fails an
+      // exact test while `writeFileSync` still lands the stub in that very directory; reproduced before
+      // fixing. Folding is safe HERE because this guard DENIES: on a case-sensitive volume `docs/ADR/` is
+      // genuinely separate and declining to stub into it merely reports the dead link. Folding
+      // `resolveInsideRoot` instead would loosen a guard whose callers ask the permissive question --
+      // exactly what `rules/scripting.md` forbids. ADR_DIR is fixed ASCII lowercase, so no locale care.
       const resolvedKey = resolved.toLowerCase();
       const adrKey = adrDir.toLowerCase();
       if (resolvedKey === adrKey || resolvedKey.startsWith(adrKey + sep)) continue;

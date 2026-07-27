@@ -4,6 +4,8 @@ import type { OpenedDb } from "../src/db/client.js";
 import { digestDeliveries, players, statLines } from "../src/db/schema.js";
 import { MlbClient } from "../src/mlb/client.js";
 import { claimRefreshRun } from "../src/jobs/refresh-run.js";
+import { assemblePlayerCard } from "../src/reports/player-card.js";
+import { renderPlayerCardHtml, renderPlayerCardText } from "../src/reports/player-card-render.js";
 import type { AppDeps } from "../src/server.js";
 import { createApp } from "../src/server.js";
 import {
@@ -96,6 +98,48 @@ describe("REST API", () => {
     expect(await opened.db.select().from(statLines)).toEqual(before);
     expect((await app().request("/api/reports/player/99999", { headers: AUTH })).status).toBe(404);
     expect((await app().request(`/api/reports/player/${player.id}?windows=oops`, { headers: AUTH })).status).toBe(400);
+  });
+
+  it("serves console and html Presentations of a player card on BOTH routes, keeping json the default", async () => {
+    const player = await insertPlayer(opened.db, { fullName: "Rest Cardguy" });
+    await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18", stats: { hits: 2, atBats: 4 } });
+    const before = await opened.db.select().from(statLines);
+    const card = assemblePlayerCard(opened.db, { id: player.id, windows: ["last10"], now: clock.now, tz: TEST_TZ });
+
+    // BOTH routes, BOTH non-json formats: headers AND the exact body. A wrong
+    // content type, a JSON-stringified body, or the wrong renderer is caught
+    // here at the surface rather than only in the renderer's own unit test.
+    const routes = [
+      `/api/reports/player/${player.id}?windows=last10`,
+      "/api/reports/player?name=Rest%20Cardguy&windows=last10",
+    ];
+    for (const route of routes) {
+      const html = await app().request(`${route}&format=html`, { headers: AUTH });
+      expect(html.status, route).toBe(200);
+      expect(html.headers.get("content-type"), route).toBe("text/html; charset=utf-8");
+      // The RESOLVED player id, so the ?name= route gets a deterministic filename too.
+      expect(html.headers.get("content-disposition"), route).toBe(`attachment; filename="bryce-player-card-${player.id}.html"`);
+      expect(await html.text(), route).toBe(renderPlayerCardHtml(card));
+
+      const console_ = await app().request(`${route}&format=console`, { headers: AUTH });
+      expect(console_.status, route).toBe(200);
+      expect(console_.headers.get("content-type"), route).toBe("text/plain; charset=utf-8");
+      expect(console_.headers.get("content-disposition"), route).toBe(`attachment; filename="bryce-player-card-${player.id}.txt"`);
+      expect(await console_.text(), route).toBe(renderPlayerCardText(card));
+
+      // REST's DEFAULT stays json — its audience is the programmatic caller.
+      const bare = await app().request(route, { headers: AUTH });
+      expect(bare.headers.get("content-type"), route).toContain("application/json");
+      expect(await bare.json(), route).toEqual(JSON.parse(JSON.stringify(card)));
+
+      // An unsupported format is a 400, never a silent fall back to json.
+      const bogus = await app().request(`${route}&format=pdf`, { headers: AUTH });
+      expect(bogus.status, route).toBe(400);
+      expect((await bogus.json()) as { error: string }, route).toMatchObject({ error: "invalid-input" });
+    }
+
+    // Still read-only in every format.
+    expect(await opened.db.select().from(statLines)).toEqual(before);
   });
 
   it("returns the explicit targeted deferral contract while a whole refresh owns the lease", async () => {

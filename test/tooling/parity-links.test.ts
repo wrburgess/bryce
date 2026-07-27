@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { linkCheckedFiles, markdownLinks, runParityCheck } from "../../scripts/parity-check.js";
-import { REPO_ROOT, healDeadLinks, withBundleCopy } from "./parity-fixture.js";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, parse, relative, resolve } from "node:path";
+import {
+  linkCheckedFiles,
+  markdownLinks,
+  resolveInsideRoot,
+  runParityCheck,
+} from "../../scripts/parity-check.js";
+import { REPO_ROOT, copyBundle, healDeadLinks, withBundleCopy } from "./parity-fixture.js";
 
 // Issue #159. `rules/*.md` carried markdown links its whole life and none of them were ever resolved:
 // the files sat outside `checkLinks`' scope because ONE of their lines — rules/security.md's
@@ -22,6 +28,16 @@ const ABSENT = "./no-such-target-159.md";
 
 /** Every destination the checker would consider, for a source string. */
 const destinations = (source: string): string[] => markdownLinks(source).map((l) => l.destination);
+
+/** A throwaway directory for a test that needs real paths to reason about, always removed. */
+function withScratch(fn: (scratch: string) => void): void {
+  const scratch = mkdtempSync(join(tmpdir(), "parity-scratch-165-"));
+  try {
+    fn(scratch);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
 
 /** Replace `rel` in a copied bundle with a synthetic body, then return only its dead-link errors. */
 function withMarkdownFile(rel: string, body: string, assert: (errors: string[]) => void): void {
@@ -480,6 +496,26 @@ describe("parity fixture - healDeadLinks shares the checker's link extraction", 
     });
   });
 
+  // Issue #165, and the reason this test builds its own harness instead of using `withBundleCopy`:
+  // the healer WRITES, so if containment regressed, the file it must not create lands OUTSIDE the
+  // bundle root that `withBundleCopy` cleans up — the test for the leak would itself leak. So the
+  // bundle is nested inside a scratch parent, and the parent is what gets removed.
+  it("creates no stub for a link that climbs out of the copy", () => {
+    withScratch((scratch) => {
+      const root = join(scratch, "bundle");
+      mkdirSync(root, { recursive: true });
+      copyBundle(REPO_ROOT, root);
+
+      const escaped = join(scratch, "escaped-heal-165.md");
+      writeFileSync(join(root, "CONTEXT.md"), "# Context\n\n[out](../escaped-heal-165.md)\n");
+      expect(existsSync(escaped)).toBe(false);
+
+      healDeadLinks(root);
+
+      expect(existsSync(escaped), "healDeadLinks wrote outside its root").toBe(false);
+    });
+  });
+
   it("still heals a genuine dead link that is not inside code", () => {
     withBundleCopy((root) => {
       const probe = join(root, "docs/heal-probe-target-159.md");
@@ -494,5 +530,153 @@ describe("parity fixture - healDeadLinks shares the checker's link extraction", 
       expect(existsSync(probe)).toBe(true);
       expect(existsSync(join(root, "docs/heal-probe-span-159.md"))).toBe(false);
     });
+  });
+});
+
+// Issue #165. `resolvesFrom` rejected an href that escapes the repository and `checkLinks` did not, so
+// a link written `../../../etc/passwd` was reported GREEN whenever that path happened to exist on the
+// runner. The rule was authored three times across the tree and enforced twice; it is now authored once
+// here and shared, so these are the first direct tests it has ever had.
+//
+// Every path is CONSTRUCTED from a scratch directory rather than written as a literal, because the
+// behavior under test IS path shape (rules/testing.md: construct the environment a test claims to
+// cover) — a hardcoded `/x/repo` asserts nothing on a runner whose paths do not look like that.
+describe("resolveInsideRoot - the containment rule, once", () => {
+  it("returns the resolved path for an ordinary intra-repo href", () => {
+    withScratch((scratch) => {
+      expect(resolveInsideRoot(scratch, join(scratch, "skills"), "../PROJECT.md"))
+        .toBe(join(scratch, "PROJECT.md"));
+    });
+  });
+
+  // The boundary: `..` from an immediate child lands ON the root, which is inside it. A guard written
+  // as `startsWith(base + sep)` alone rejects exactly this, so the `resolved !== base` half is what
+  // this case pins -- and nothing else does.
+  it("accepts an href that resolves to the root itself", () => {
+    withScratch((scratch) => {
+      expect(resolveInsideRoot(scratch, join(scratch, "skills"), "..")).toBe(scratch);
+    });
+  });
+
+  it("rejects a relative href that climbs past the root", () => {
+    withScratch((scratch) => {
+      expect(resolveInsideRoot(scratch, join(scratch, "skills"), "../../outside.md")).toBeNull();
+    });
+  });
+
+  // A root-absolute link (`/docs/x.md`) resolves against the filesystem root, not the repo root, so it
+  // is broken on the lifecycle host however the runner's disk looks. Built from `parse().root` so the
+  // case means the same thing on a drive-lettered filesystem.
+  it("rejects a root-absolute href", () => {
+    withScratch((scratch) => {
+      const filesystemRoot = parse(scratch).root;
+      expect(resolveInsideRoot(scratch, scratch, join(filesystemRoot, "etc", "passwd"))).toBeNull();
+    });
+  });
+
+  // The near miss the `+ sep` exists for: `<root>-old` shares every character of `<root>` as a prefix
+  // and is a different tree. Drop the separator and this reads as contained -- a guard loosened just
+  // enough to print a false green (rules/scripting.md).
+  it("rejects a sibling directory that merely shares the root's name prefix", () => {
+    withScratch((scratch) => {
+      const root = join(scratch, "repo");
+      expect(resolveInsideRoot(root, root, "../repo-old/README.md")).toBeNull();
+    });
+  });
+
+  // The contract says the helper normalizes `root` itself rather than requiring an absolute one. Without
+  // that, `base` stays "." while `resolved` is absolute, nothing starts with "./", and every href on a
+  // relative root is rejected -- a silent, total false red.
+  it("normalizes a relative root rather than requiring the caller to", () => {
+    expect(resolveInsideRoot(".", ".", "AGENTS.md")).toBe(resolve("AGENTS.md"));
+  });
+});
+
+describe("parity check - a link that escapes the repository", () => {
+  /** Run `body` as `rel` inside a bundle copy and return only its dead-link errors, with the copy root. */
+  function inBundle(rel: string, body: (root: string) => string, assert: (errors: string[]) => void): void {
+    withBundleCopy((root) => {
+      mkdirSync(dirname(join(root, rel)), { recursive: true });
+      writeFileSync(join(root, rel), body(root));
+      assert(runParityCheck(root).errors.filter((e) => DEAD_LINK.test(e)));
+    });
+  }
+
+  /** A relative href from `fromDir` to a real file that lives OUTSIDE the bundle copy. */
+  const escapeToRealFile = (fromDir: string): string =>
+    relative(fromDir, join(REPO_ROOT, "AGENTS.md")).split("\\").join("/");
+
+  // THE case the issue is about, and the one that fails on main: the target genuinely exists, so
+  // `statSync` succeeds and the checker reports nothing at all. On GitHub the link is a 404.
+  it("reports an escaping link whose target really exists on disk", () => {
+    let target = "";
+    inBundle(
+      "CONTEXT.md",
+      (root) => {
+        target = escapeToRealFile(root);
+        return `# Context\n\n[canonical](<${target}>)\n`;
+      },
+      (errors) => {
+        expect(errors).toEqual([`Dead link in CONTEXT.md: \`${target}\` escapes the repository`]);
+      },
+    );
+  });
+
+  // `decodeDestination` (PR #162) turns a percent-encoded traversal into a real one before resolution,
+  // which reaches this same gap. The diagnostic must name the DECODED path -- the decode happens inside
+  // `markdownLinks`, so `checkLinks` never sees the `%2F` spelling and must not appear to.
+  it("reports the percent-encoded spelling of the same escape, decoded", () => {
+    let target = "";
+    inBundle(
+      "CONTEXT.md",
+      (root) => {
+        target = escapeToRealFile(root);
+        return `# Context\n\n[canonical](<${target.split("/").join("%2F")}>)\n`;
+      },
+      (errors) => {
+        expect(errors).toEqual([`Dead link in CONTEXT.md: \`${target}\` escapes the repository`]);
+        expect(errors[0]).not.toContain("%2F");
+      },
+    );
+  });
+
+  // Containment is decided WITHOUT consulting the disk, so the verdict may not depend on whether the
+  // far end happens to be there. Same rejection, different reason from "does not resolve".
+  it("reports an escaping link whose target does not exist, and says why", () => {
+    inBundle(
+      "CONTEXT.md",
+      () => "# Context\n\n[out](../../no-such-target-165.md)\n",
+      (errors) => {
+        expect(errors).toEqual([
+          "Dead link in CONTEXT.md: `../../no-such-target-165.md` escapes the repository",
+        ]);
+      },
+    );
+  });
+
+  // The happy path, and the reason it is not optional: every sad case above passes under a guard that
+  // rejects EVERYTHING, and `../../PROJECT.md` from a skill body is the repo's single most common link.
+  // rules/scripting.md: never ship a guard without running its own governing convention through it.
+  it("still accepts a legitimate ../ link inside the repository", () => {
+    inBundle(
+      "skills/assess/SKILL.md",
+      () => "---\nname: assess\n---\n\nSee [`PROJECT.md`](../../PROJECT.md).\n",
+      (errors) => {
+        expect(errors).toEqual([]);
+      },
+    );
+  });
+
+  // `checkLinks` accepts a DIRECTORY where `resolvesFrom` requires a file, and that difference is
+  // deliberate: `[Rules Layer](../../rules/)` is a valid link. Folding a stat into the shared helper
+  // would break this and nothing else would notice.
+  it("still accepts a link to a directory inside the repository", () => {
+    inBundle(
+      "skills/assess/SKILL.md",
+      () => "---\nname: assess\n---\n\nSee the [Rules Layer](../../rules).\n",
+      (errors) => {
+        expect(errors).toEqual([]);
+      },
+    );
   });
 });

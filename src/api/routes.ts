@@ -43,7 +43,10 @@ import {
   HighlightlyUpstreamError,
 } from "../highlightly/client.js";
 import { queryStatLines } from "../queries/statLines.js";
+import type { PlayerCardFormat } from "../presentation/format.js";
+import type { PlayerCard } from "../reports/player-card.js";
 import { AmbiguousPlayerCardNameError, PlayerCardNotFoundError, assemblePlayerCard } from "../reports/player-card.js";
+import { renderPlayerCardHtml, renderPlayerCardText } from "../reports/player-card-render.js";
 import type { ServiceDeps } from "../server/deps.js";
 import {
   ManualWriteToDerivedNamespaceError,
@@ -113,6 +116,29 @@ function fileResponse(c: Context, body: string, contentType: string, filename: s
   c.header("Content-Type", `${contentType}; charset=utf-8`);
   c.header("Content-Disposition", `attachment; filename="${filename}"`);
   return c.body(body);
+}
+
+/**
+ * Emit a Player Card in the requested format (ADR 0055). `json` is the DEFAULT
+ * and is unchanged — REST's audience is the programmatic caller — so a
+ * non-json value only ADDS an alternative body.
+ *
+ * The two Presentations go through `fileResponse`, exactly as the digest's
+ * html/md/csv do, so they carry a charset-tagged Content-Type and an attachment
+ * disposition. `c.json(renderedString)` would instead have returned a
+ * JSON-ENCODED string under the wrong media type.
+ *
+ * The filename uses the RESOLVED `card.player.id`, so the `?name=` route yields
+ * a deterministic filename too.
+ */
+function playerCardResponse(c: Context, card: PlayerCard, format: PlayerCardFormat): Response {
+  if (format === "html") {
+    return fileResponse(c, renderPlayerCardHtml(card), "text/html", `bryce-player-card-${card.player.id}.html`);
+  }
+  if (format === "console") {
+    return fileResponse(c, renderPlayerCardText(card), "text/plain", `bryce-player-card-${card.player.id}.txt`);
+  }
+  return c.json(card);
 }
 
 export function createApiRoutes(deps: ServiceDeps): Hono {
@@ -311,7 +337,8 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
     try {
       const query = PlayerCardQuerySchema.parse(c.req.query());
       const id = PersonIdSchema.parse(c.req.param("id"));
-      return c.json(assemblePlayerCard(deps.db, { id, windows: query.windows, now: deps.now, tz: deps.tz }));
+      const card = assemblePlayerCard(deps.db, { id, windows: query.windows, now: deps.now, tz: deps.tz });
+      return playerCardResponse(c, card, query.format);
     } catch (err) {
       if (err instanceof ZodError) return c.json({ error: "invalid-input", issues: err.issues }, 400);
       throw err;
@@ -321,7 +348,8 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
   api.get("/reports/player", async (c) => {
     try {
       const query = PlayerCardNameQuerySchema.parse(c.req.query());
-      return c.json(assemblePlayerCard(deps.db, { name: query.name, windows: query.windows, now: deps.now, tz: deps.tz }));
+      const card = assemblePlayerCard(deps.db, { name: query.name, windows: query.windows, now: deps.now, tz: deps.tz });
+      return playerCardResponse(c, card, query.format);
     } catch (err) {
       if (err instanceof ZodError) return c.json({ error: "invalid-input", issues: err.issues }, 400);
       throw err;
