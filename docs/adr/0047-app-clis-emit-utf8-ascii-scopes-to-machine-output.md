@@ -37,7 +37,8 @@ UTF-8 — not raw upstream bytes.
 | `digest` (`MAILER_PROVIDER=console`) | yes (rendered email) | human-facing app CLI | **UTF-8** (already) |
 | `players:batch-add` | yes, but **folded + forgery-proofed** | greppable bulk-outcome reporter | ASCII |
 | `ncaa:probe` | parsed name/school (folded) | machine diagnostic | ASCII |
-| `refresh`, `db:migrate`, `db:backup`, `db:restore`, `players:backup`, `players:restore`, `server` | no identity field | — | ASCII by construction |
+| `refresh` | yes, **folded + forgery-proofed** (amended for #146; was "no identity field") | greppable per-player liveness reporter | ASCII |
+| `db:migrate`, `db:backup`, `db:restore`, `players:backup`, `players:restore`, `server` | no identity field | — | ASCII by construction |
 | `scripts/*` (`summon-reviewer`, `human-gates`, `check-action-pins`, `connector-smoke`) | n/a | portable / CI tooling | ASCII |
 
 `players:batch-add` is the deliberate exception on the app-CLI side: its `asciiField()` fold is
@@ -45,6 +46,22 @@ UTF-8 — not raw upstream bytes.
 upstream name cannot forge a fake `key=value` token on a greppable bulk line (PR #84). Option 1's
 "the HC should see `Acuña`" does not override that forgery-proofing, so `batch-add` keeps folding on
 its `outcome` line (its malformed-invocation error path shares the sad-path gap noted below).
+
+**Amendment (#146).** `refresh` was classified "no identity field" because it printed exactly one
+summary line and never named a Player. Issue #146 gives it a live per-Player progress stream
+([ADR 0054](0054-refresh-emits-typed-progress-events-cli-is-the-only-presenter.md)), so that premise
+no longer holds and the row is re-classified into `batch-add`'s existing class rather than onto the
+UTF-8 side. Two reasons, in the order that decided it. First, the **forgery-proofing argument is
+sharper here than anywhere else in this table**: `canonicalizeName` ([ADR 0041](0041-normalize-player-names-nfc-at-ingestion.md))
+collapses `\s+`, so a stored name cannot contain a newline — but `\s` does not cover `\x1b`/`\x07`/`\x08`,
+so an ANSI escape from the MLB Stats API or Highlightly survives ingestion verbatim. The liveness
+stream drives **cursor control** of its own on a TTY, so an escape reaching stdout could move the
+cursor and overwrite lines already printed — corrupting the one display whose trustworthiness is the
+entire point of #146. Second, by this ADR's own *what-is-the-output-for* criterion, the stream's
+primary purpose is **liveness**; the Player's name is a label identifying which Player, not the
+artifact being rendered. That is structurally `players:batch-add`, not `seed`. Consequently
+`asciiField()` moves out of `src/cli/batch-add.ts` (module-private today) into a shared home rather
+than being copied.
 
 ## Scope boundaries
 
