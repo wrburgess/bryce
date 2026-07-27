@@ -177,9 +177,11 @@ _Avoid_: overloading the delivery-ledger sense ("guarantee restored across the d
   **Offseason Sleep** a weekly heartbeat replaces it, and the daily cadence resumes automatically
   at the earliest opening day among watched levels
   ([ADR 0031](../adr/0031-offseason-sleep-world-series-to-opening-day.md)).
-- A **Presentation** carries the same content as the report it renders — a PDF of the `7d` **Digest**
-  shows exactly what the email would; a **Player Card** PDF shows exactly what its JSON does. Only
-  the format differs.
+- A **Presentation** carries the same content as the report it renders — the HTML document of the
+  `7d` **Digest** shows exactly what the email would; a **Player Card**'s console and HTML renderings
+  show exactly what its JSON does. Only the format differs.
+  ([ADR 0055](../adr/0055-player-card-presentation-per-surface-defaults-no-pdf.md) deferred PDF a
+  second time: the HTML Presentation carries a `@media print` block instead.)
 - **Presentation = document, Export = table.** A **Presentation** renders a whole report — a
   **Digest**'s two tables, or a **Player Card**'s every Card Window — as one human-readable artifact;
   an **Export** carries exactly one table — a query result, or one of the Digest's two tables — for a

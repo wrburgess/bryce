@@ -1,5 +1,7 @@
 import { z } from "zod";
 import { GAME_COUNT_WINDOW_SPECS, WINDOW_SPECS } from "../domain/window.js";
+import type { PlayerCardFormat } from "../presentation/format.js";
+import { PLAYER_CARD_FORMATS } from "../presentation/format.js";
 import { PLAYER_CARD_WINDOWS } from "../reports/player-card.js";
 import { StatLineFilterShape, StatLineQuerySchema, refineFromTo } from "../queries/statLines.js";
 
@@ -43,13 +45,43 @@ export function parsePlayerCardWindows(value: string | undefined): (typeof PLAYE
   return tokens as (typeof PLAYER_CARD_WINDOWS)[number][];
 }
 
+/**
+ * Player Card Presentation `format` (ADR 0055). Declared ONCE here and consumed
+ * by both REST and MCP, the same way `DIGEST_FORMAT_DESCRIPTION` /
+ * `DigestPreviewInputShape` are, so the three surfaces cannot drift on which
+ * values exist.
+ *
+ * The DEFAULT is applied by the SURFACE, not here, because the surfaces
+ * genuinely disagree: a Card must arrive as a finished artifact for a human
+ * (CLI) and for an agent (MCP), while a programmatic REST caller keeps `json`
+ * unchanged. Baking one default into the shared schema would force one of the
+ * three to be wrong. `parsePlayerCardWindows` above and the CLI's own flag
+ * parser derive their accepted values from the same `PLAYER_CARD_FORMATS`
+ * tuple, so a value added there reaches every surface at once.
+ */
+export const PLAYER_CARD_FORMAT_DESCRIPTION =
+  "Output format: 'console' renders the finished, ready-to-display text card (one table per Card Window); 'html' renders a standalone, printable HTML document; 'json' returns the raw structured card. The DEFAULT differs per surface: CLI 'console', MCP 'console', REST 'json'.";
+
+export function playerCardFormatSchema(surfaceDefault: PlayerCardFormat) {
+  return z
+    .enum(PLAYER_CARD_FORMATS)
+    .default(surfaceDefault)
+    .describe(`${PLAYER_CARD_FORMAT_DESCRIPTION} On this surface the default is '${surfaceDefault}'.`);
+}
+
 /** REST query form: window tokens are strings, player names remain canonical exact. */
 const PlayerCardWindowsQuery = z.string().optional().transform(parsePlayerCardWindows);
-export const PlayerCardQuerySchema = z.object({ windows: PlayerCardWindowsQuery }).strict();
+export const PlayerCardQuerySchema = z.object({
+  windows: PlayerCardWindowsQuery,
+  // REST keeps `json`: its audience is the actual programmatic caller, so every
+  // existing caller's body is byte-identical and a non-json value only ADDS one.
+  format: playerCardFormatSchema("json"),
+}).strict();
 
 export const PlayerCardNameQuerySchema = z.object({
   name: z.string().refine((value) => value.trim().length > 0, "name must be non-blank"),
   windows: PlayerCardWindowsQuery,
+  format: playerCardFormatSchema("json"),
 }).strict();
 
 /** MCP receives typed JSON, so it does not coerce IDs or accept a CSV string. */
@@ -57,6 +89,9 @@ export const PlayerCardInputShape = {
   id: StrictPersonIdSchema.optional().describe("Internal Bryce player id (players.id), not an external provider ID."),
   name: z.string().refine((value) => value.trim().length > 0, "name must be non-blank").optional().describe("Canonical exact player name; case-sensitive after NFC/whitespace canonicalization."),
   windows: z.array(PlayerCardWindowToken).min(1).refine((values) => new Set(values).size === values.length, "windows must not contain duplicates").optional().describe("Ordered subset of last10, last30, ytd; omitted returns all three."),
+  // MCP defaults to `console`: an agent should receive a finished artifact to
+  // show, not ~315 key/value pairs it then has to lay out itself (ADR 0055).
+  format: playerCardFormatSchema("console"),
 };
 
 export const PlayerCardInputSchema = z.object(PlayerCardInputShape).strict().superRefine((value, ctx) => {

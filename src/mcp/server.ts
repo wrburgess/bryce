@@ -21,6 +21,7 @@ import { runRefresh, runRefreshForPlayer } from "../jobs/refresh.js";
 import { MlbApiError } from "../mlb/client.js";
 import { queryStatLines } from "../queries/statLines.js";
 import { AmbiguousPlayerCardNameError, PlayerCardNotFoundError, assemblePlayerCard } from "../reports/player-card.js";
+import { renderPlayerCardHtml, renderPlayerCardText } from "../reports/player-card-render.js";
 import type { ServiceDeps } from "../server/deps.js";
 import { healthSnapshot } from "../server/health.js";
 import {
@@ -305,14 +306,24 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
   server.registerTool(
     "report_player",
     {
+      // The description LEADS WITH THE OUTCOME on purpose (ADR 0055): an agent
+      // picks and interprets a tool from this string, so a description reading
+      // as a data-structure spec makes it re-invent a layout no matter what the
+      // default is. Flipping the default without rewriting this would not work.
       description:
-        "Build a read-only multi-window card for exactly one tracked player. Address with internal Bryce id or canonical exact name (not an external provider id). windows is an ordered subset of last10, last30, ytd; last windows count distinct regular-season games, ytd runs from the player sport's calendar start through the last completed host date. Batting and pitching rows stay split by level; no digest is sent and no state is written.",
+        "Returns a FORMATTED, READY-TO-DISPLAY card for exactly one tracked player — show it to the user verbatim; do not reformat, summarize, or rebuild it as a table. By default (format 'console') the result is a finished monospace text card: a header line, then one table per Card Window with the batting and pitching lines already laid out. Pass format 'html' for a standalone printable document (its @media print rules make browser print -> Save as PDF paginate correctly), or format 'json' ONLY when you need the raw numbers to compute with — it is a large payload and carries no layout. Address the player with internal Bryce id or canonical exact name (not an external provider id). windows is an ordered subset of last10, last30, ytd; the last windows count distinct regular-season games, ytd runs from the player sport's calendar start through the last completed host date. Batting and pitching rows stay split by the level each game was played at, so a player promoted mid-window gets one row per level. Read-only: no digest is sent and no state is written.",
       inputSchema: PlayerCardInputShape,
     },
     (args) =>
       guarded(async () => {
-        const input = PlayerCardInputSchema.parse(args);
-        return jsonResult(assemblePlayerCard(deps.db, { ...input, now: deps.now, tz: deps.tz }) as unknown as JsonPayload);
+        const { format, ...selection } = PlayerCardInputSchema.parse(args);
+        const card = assemblePlayerCard(deps.db, { ...selection, now: deps.now, tz: deps.tz });
+        // Branches exactly like digest_preview: a Presentation is TEXT, the
+        // structured payload is JSON. The console rendering is the SAME pure
+        // function the CLI prints, so the two surfaces cannot drift.
+        if (format === "console") return textResult(renderPlayerCardText(card));
+        if (format === "html") return textResult(renderPlayerCardHtml(card));
+        return jsonResult(card as unknown as JsonPayload);
       }),
   );
 
