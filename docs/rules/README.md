@@ -30,11 +30,16 @@ Notice that every deferred deep doc above (e.g. `docs/rules/scripting-postmortem
 target pattern. That is deliberate and load-bearing:
 
 - The parity check's dead-link validator (`checkLinks` in `scripts/parity-check.ts`) resolves **only
-  markdown links**, and **only** in its explicit `LINK_CHECKED` file list. In one of those files, a
-  markdown link to a file that doesn't exist yet
-  reddens CI with a dead-link failure; a backticked path is inert text the validator ignores. A
-  separate repository-wide Markdown scan checks only local `[ADR NNNN](MMMM-...md)` links for a
+  markdown links** — and, since [#159](https://github.com/wrburgess/bryce/issues/159), **`rules/*.md` is
+  one of the files it resolves them in** (along with the skill bodies, the command shims, this file, and
+  `CONTEXT.md`; the file set is derived, not a hand-kept list). A markdown link to a file that doesn't
+  exist yet reddens CI with a dead-link failure; a backticked path is inert text the validator ignores.
+  A separate repository-wide Markdown scan checks only local `[ADR NNNN](MMMM-...md)` links for a
   disagreement between their displayed and target ADR numbers; it does not resolve additional links.
+- Both scans find links by **parsing** the file rather than pattern-matching it, so a worked example like
+  the `[text](path)` on this line is prose about markdown and is never reported as a link — it is not a
+  link node ([ADR 0054](../adr/0054-code-spans-are-not-links.md)). That is what made covering these
+  prose-heavy files possible at all.
 - This is what lets the Rules Layer ship a trigger table — and any forward-reference to a
   planned-but-absent file — **without creating empty placeholder files** just to satisfy the checker.
 
@@ -50,12 +55,14 @@ The repo-root spelling `[the deep doc](docs/rules/x-postmortems.md)` names a rea
 a repo-root path**; a **link is a link**.
 
 **The resolution rule (Tier-1 rule files).** Inside `rules/*.md` a deep-doc path must additionally
-**resolve** — checked by `checkRulesPointers` in `scripts/parity-check.ts`, which is the *only*
-validator these files get, since `rules/*.md` is deliberately not in `LINK_CHECKED`. One exception: the
+**resolve** — checked by `checkRulesPointers` in `scripts/parity-check.ts`. Since #159 that check no
+longer stands alone, but it is still the *only* validator of the **backticked** form: `checkLinks`
+resolves links, and the convention's default spelling here is deliberately not a link. The two are
+complementary. One exception: the
 `**Deep doc:**` header **may forward-reference a deep doc that does not exist yet**, in bare form. That
-header is a *declaration* of where the domain's deep doc lives; `rules/frontend.md`,
-`rules/security.md`, and `rules/scripting.md` all rely on it today. A dead *link* in that same header is
-still dead, and is still rejected.
+header is a *declaration* of where the domain's deep doc lives; `rules/frontend.md` and
+`rules/security.md` rely on it today (`rules/scripting.md` did until issue #166 wrote its deep doc). A
+dead *link* in that same header is still dead, and is still rejected.
 
 A **body** pointer gets no such exemption, because it means something different: it stands in for a case
 study that was **moved** out of Tier 1 (the trim in issue #148), so a pointer at a file that does not
@@ -87,8 +94,8 @@ one applies, read from disk:
 
 | Your domain's deep doc | Remedy |
 |---|---|
-| **exists** (`backend`, `skills`, `testing`) | Move the narrative into it and leave a pointer in the bullet — **either** the backticked repo-root path **or** a promoted link written relative to the rule file, per *Promotion* above — **or** shorten the bullet. |
-| **declared but not yet written** (`frontend`, `security`, `scripting`) | **Author the deep doc first** (per *Baseline note* above), then point at it — **or** shorten the bullet. Pointing at a file that does not exist fails the rules-pointer check. |
+| **exists** (`backend`, `skills`, `testing`, `scripting`) | Move the narrative into it and leave a pointer in the bullet — **either** the backticked repo-root path **or** a promoted link written relative to the rule file, per *Promotion* above — **or** shorten the bullet. |
+| **declared but not yet written** (`frontend`, `security`) | **Author the deep doc first** (per *Baseline note* above), then point at it — **or** shorten the bullet. Pointing at a file that does not exist fails the rules-pointer check. |
 | **none by design** (`self-review`) | Shorten the bullet. |
 
 Whichever remedy you pick, **the instruction never moves behind the pointer** — `rules/skills.md`

@@ -150,8 +150,11 @@ state, so re-running a Window always sends the same content.
 ## `report player` — a read-only single-player card
 
 ```sh
-sk report player --id 42 --windows last10,last30,ytd
+sk report player --id 42 --windows last10,last30,ytd     # the console card
 sk report player --name "José Test" --windows last10,ytd
+sk report player --id 42 --format json                   # the machine contract
+sk report player --id 42 --format html --out card.html   # a printable document
+sk report player --id 42 --open                          # render HTML, open it
 npm run report -- player --id 42
 ```
 
@@ -159,10 +162,36 @@ Use exactly one internal Bryce `--id` or canonical exact `--name`. `--windows`
 is optional and defaults to `last10,last30,ytd`; its comma-separated values are
 case-insensitive tokens. `last10` and `last30` count distinct regular-season
 games, not stat-line rows; `ytd` uses the current Player sport's cached season
-start through the last completed host date. Output is one JSON card with
-level-split batting/pitching aggregates and actual game/date-span provenance.
-It never sends a Digest or writes database state. An unknown/ambiguous selector
-or invalid window writes `error: …` to stderr and exits `1`.
+start through the last completed host date. The card carries level-split
+batting/pitching aggregates and actual game/date-span provenance. It never sends
+a Digest or writes database state. An unknown/ambiguous selector or invalid
+window writes `error: …` to stderr and exits `1`.
+
+### Formats and destinations (`#141` / [ADR 0055](../adr/0055-player-card-presentation-per-surface-defaults-no-pdf.md))
+
+`--format` **defaults to `console`** here, not `json`: the audience at a terminal
+is a human, who should receive a finished artifact rather than a data structure.
+`--format json` remains the machine contract, unchanged. The `format` default
+follows each surface's audience — CLI `console`, MCP `console`, REST `json` —
+so a programmatic REST caller is untouched.
+
+| Format | Output |
+|--------|--------|
+| `console` (default) | One monospace table per Card Window: a header line, then the batting and pitching lines. `BB%`/`K%` appear on `last30`/`ytd` only, exactly as in the Digest. |
+| `html` | A standalone document with a `@media print` block (page break per Card Window, repeating table headers, grayscale-safe colors), so browser print → *Save as PDF* paginates correctly. There is no `--format pdf`. |
+| `json` | The raw structured card — every counter and derived rate. |
+
+| Invocation | Behavior |
+|------------|----------|
+| no `--format` | `console` |
+| `--out PATH` | Valid with **every** format. Renders, writes the payload to `PATH`, prints nothing on stdout, exits `0`. |
+| `--open` alone | Implies `--format html`; renders to a temp path, then launches it. |
+| `--open --out PATH` | Writes `PATH` (not a temp path), then launches `PATH`. |
+| `--open --format console\|json` | **Usage error, exit `1`** — a console or JSON rendering is not a browser document, and silently upgrading the format would hide the mistake. |
+
+The write must **succeed before** the launcher runs: a failed write reports to
+stderr, exits non-zero, and never opens a browser. A failed launch exits
+non-zero and names the path, so the already-written file is still usable.
 
 ## `players:lists` — manage named player lists (`#70`)
 

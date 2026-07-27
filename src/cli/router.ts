@@ -4,6 +4,7 @@ import { readFileSync, statSync } from "node:fs";
 // on its way to exit 1 (#140 / PR #150). The window tuples derive the digest
 // `--window` value list here so it cannot drift from the specs the schemas accept.
 import { GAME_COUNT_WINDOW_SPECS, WINDOW_SPECS } from "../domain/window.js";
+import { PLAYER_CARD_FORMATS } from "../presentation/format.js";
 import { validateTagSelector } from "../tags/selector.js";
 
 /**
@@ -140,7 +141,7 @@ const tagSelector = (candidate: string): string | null => {
 
 /** Canonical built-in syntax/help metadata. Operational detail belongs in docs/cli. */
 export const COMMANDS: readonly Command[] = [
-  leaf(["report", "player"], "Build a read-only single-player card.", "sk report player (--id ID|--name NAME) [--windows SPECS]", "sk report player --id 1 --windows last10,last30,ytd", () => import("./report.js"), [value("id", "Internal Bryce player id.", undefined, undefined, positiveInteger), value("name", "Canonical exact player name."), inlineValue("windows", "Comma-separated card windows.")], { exactlyOneOf: [["id", "name"]] }),
+  leaf(["report", "player"], "Build a read-only single-player card.", "sk report player (--id ID|--name NAME) [--windows SPECS] [--format FORMAT] [--out PATH] [--open]", "sk report player --id 1 --windows last10,last30,ytd", () => import("./report.js"), [value("id", "Internal Bryce player id.", undefined, undefined, positiveInteger), value("name", "Canonical exact player name."), inlineValue("windows", "Comma-separated card windows."), inlineValue("format", "Card rendering (default console).", PLAYER_CARD_FORMATS), value("out", "Write the rendered card to this file instead of stdout."), flag("open", "Render HTML and open it in a browser.")], { exactlyOneOf: [["id", "name"]] }),
   leaf(["digest"], "Build and send a digest.", "sk digest [--window SPEC|-w SPEC] [--list NAME] [--tags SELECTOR] [--force|-f]", "sk digest -w 28d --tags level:aaa,status:rostered", () => import("./digest.js"), [inlineValue("window", "Digest window (date or per-player game-count).", [...WINDOW_SPECS, ...GAME_COUNT_WINDOW_SPECS], ["w"]), inlineValue("list", "Named player list."), inlineValue("tags", "Tag selector scoping the report to a cohort.", undefined, undefined, validateTagSelector), flag("force", "Replay the daily slot when allowed.", ["f"])]),
   leaf(["refresh"], "Refresh the active watch list.", "sk refresh [--quiet|-q]", "sk refresh --quiet", () => import("./refresh.js"), [flag("quiet", "Suppress live progress; print only the terminal summary.", ["q"])]),
   leaf(["players", "lists", "create"], "Create a named player list.", "sk players lists create --name NAME", "sk players lists create --name Prospects", () => import("./lists.js"), [value("name", "List name.")], { required: ["name"] }),

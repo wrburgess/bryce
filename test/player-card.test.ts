@@ -1,8 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { AmbiguousPlayerCardNameError, PlayerCardNotFoundError, assemblePlayerCard } from "../src/reports/player-card.js";
+import { AmbiguousPlayerCardNameError, PlayerCardNotFoundError, assemblePlayerCard, cardWindowIsLong } from "../src/reports/player-card.js";
 import { MID_SEASON, TEST_TZ, fakeClock, insertCalendars2026, insertPlayer, insertStatLine, testDb } from "./factories.js";
 
 describe("single-player card", () => {
+  /**
+   * The BB%/K% threshold, which the Card reaches through an explicit
+   * PlayerCardWindowSpec -> ReportWindowSpec mapping rather than a cast.
+   *
+   * VERIFIED to fail against the cast: replacing the mapping's body with
+   * `isLongWindow(spec as unknown as ReportWindowSpec)` makes last30 return
+   * false (SPAN_DAYS["last30"] is undefined, and `undefined >= 21` is false),
+   * and this test goes red — which is the whole reason it exists, since the
+   * cast produces a green suite with BB%/K% silently missing from the one
+   * window that must show them.
+   */
+  it("maps every Card Window onto the report window vocabulary for the BB%/K% threshold", () => {
+    expect(cardWindowIsLong("last10")).toBe(false);
+    expect(cardWindowIsLong("last30")).toBe(true);
+    expect(cardWindowIsLong("ytd")).toBe(true);
+  });
+
   it("selects distinct regular-season games before loading companion lines and retains level splits", async () => {
     const opened = testDb();
     const clock = fakeClock(MID_SEASON);
@@ -84,6 +101,41 @@ describe("single-player card", () => {
       expect(card.windows[0]?.pitchers).toHaveLength(1);
       expect(card.windows[0]?.pitchers[0]?.aggregate.counters.strikeOuts).toBe(7);
       expect(card.windows[0]?.batters).toEqual([]);
+    } finally { opened.close(); }
+  });
+
+  it("counts quality starts and relief decisions from the SAME implementation the digest uses", async () => {
+    const opened = testDb();
+    const clock = fakeClock(MID_SEASON);
+    try {
+      const pitcher = await insertPlayer(opened.db, { fullName: "Counting Arm", position: "P" });
+      // A qualifying start (6.0 IP, 2 ER) ...
+      await insertStatLine(opened.db, { playerId: pitcher.id, gameId: 801, gameDate: "2026-07-18", statType: "pitching", stats: { inningsPitched: "6.0", earnedRuns: 2, gamesStarted: 1 } });
+      // ... a start that misses the threshold on earned runs (6.0 IP, 4 ER) ...
+      await insertStatLine(opened.db, { playerId: pitcher.id, gameId: 802, gameDate: "2026-07-17", statType: "pitching", stats: { inningsPitched: "6.0", earnedRuns: 4, gamesStarted: 1 } });
+      // ... a relief win and a relief loss (gamesStarted PRESENT and 0) ...
+      await insertStatLine(opened.db, { playerId: pitcher.id, gameId: 803, gameDate: "2026-07-16", statType: "pitching", stats: { inningsPitched: "1.0", earnedRuns: 0, gamesStarted: 0, wins: 1 } });
+      await insertStatLine(opened.db, { playerId: pitcher.id, gameId: 804, gameDate: "2026-07-15", statType: "pitching", stats: { inningsPitched: "1.0", earnedRuns: 3, gamesStarted: 0, losses: 1 } });
+      // ... and a STARTER's decision, which is never surfaced as a relief one.
+      await insertStatLine(opened.db, { playerId: pitcher.id, gameId: 805, gameDate: "2026-07-14", statType: "pitching", stats: { inningsPitched: "7.0", earnedRuns: 1, gamesStarted: 1, wins: 1 } });
+
+      const row = assemblePlayerCard(opened.db, { id: pitcher.id, windows: ["last10"], now: clock.now, tz: TEST_TZ }).windows[0]!.pitchers[0]!;
+      expect(row).toMatchObject({ qualityStarts: 2, reliefWins: 1, reliefLosses: 1 });
+
+      // NCAA fail-closed: `gamesStarted` ABSENT is unknown-not-relief, so the
+      // decision is not counted. The Digest pins this same semantic in
+      // test/digest-preview.test.ts; re-asserting it on the Card is what shows
+      // both callers demonstrably share ONE implementation.
+      const ncaa = await insertPlayer(opened.db, { fullName: "Ncaa Arm", position: "P" });
+      await insertStatLine(opened.db, { playerId: ncaa.id, source: "ncaa_html_legacy", gameId: 811, gameDate: "2026-07-18", sportId: 22, statType: "pitching", stats: { inningsPitched: "2.0", earnedRuns: 0, wins: 1, losses: 1 } });
+      const ncaaRow = assemblePlayerCard(opened.db, { id: ncaa.id, windows: ["last10"], now: clock.now, tz: TEST_TZ }).windows[0]!.pitchers[0]!;
+      expect(ncaaRow).toMatchObject({ qualityStarts: 0, reliefWins: 0, reliefLosses: 0 });
+
+      // A BATTER's row always reports 0 for all three, matching the Digest.
+      const batter = await insertPlayer(opened.db, { fullName: "Plain Batter", position: "SS" });
+      await insertStatLine(opened.db, { playerId: batter.id, gameId: 821, gameDate: "2026-07-18", stats: { hits: 2, atBats: 4, wins: 1 } });
+      const battingRow = assemblePlayerCard(opened.db, { id: batter.id, windows: ["last10"], now: clock.now, tz: TEST_TZ }).windows[0]!.batters[0]!;
+      expect(battingRow).toMatchObject({ qualityStarts: 0, reliefWins: 0, reliefLosses: 0 });
     } finally { opened.close(); }
   });
 

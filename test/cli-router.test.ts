@@ -1,10 +1,58 @@
-import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
+import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { COMMANDS, type Command, preflight, preflightDirect, renderHelp, resolve, runRouter } from "../src/cli/router.js";
+
+// How long any ONE compatibility entry point may take to bail on a bare environment, and how many may
+// be in flight at once. The case below derives its own test budget from both, so the budget and the
+// bounds it must accommodate cannot drift apart again (issue #176).
+//
+// The concurrency cap is not a politeness knob. Running all thirteen at once makes each child contend
+// for CPU, so per-child wall clock grows WITH the fleet size: the whole case took ~9.5s with all
+// thirteen in flight — an upper bound on any one child of them, against the 10s per-spawn kill —
+// versus ~4s for a single uncontended spawn. Capping the fleet keeps each child near its uncontended
+// cost and leaves the per-spawn bound meaning what it says.
+//
+// So the cap is DERIVED from the machine rather than picked for the author's, which was a delta-review
+// finding on this PR: a hardcoded 4 is comfortable on the 8-core box this was written on and 2x
+// oversubscription on a 2-vCPU CI runner, where four cold `tsx` starts could push a legitimately slow
+// child past the 10s kill — reintroducing contention-driven flakiness one level below where it was
+// fixed. `availableParallelism()` rather than `cpus().length` because it honors container and cgroup
+// limits, which is exactly the CI case. The budget below follows the cap automatically, so a smaller
+// runner simply gets more waves and a correspondingly larger budget.
+//
+// It goes down to 1, and an earlier floor of 2 was a third delta-review finding: a single-CPU container
+// reports 1, and forcing two cold `tsx` processes onto it is the same oversubscription this derivation
+// exists to prevent, just at the smallest size. Sequential IS the correct plan on one core, and because
+// the budget is derived it expands to cover that (1 wide -> 13 waves -> 135s) instead of timing out.
+// `Math.max(1, ...)` only guards a pathological 0; Node documents a minimum of 1.
+const SPAWN_TIMEOUT_MS = 10_000;
+const SPAWN_CONCURRENCY = Math.max(1, Math.min(4, availableParallelism()));
+
+// Module scope, not test-body scope, because the test's TIMEOUT argument is evaluated at collection
+// time and must derive from this length. Holding the list here is what lets adding a fourteenth entry
+// point widen the budget automatically instead of quietly spending its headroom.
+const COMPAT_ENTRYPOINTS = [
+  "src/cli/backup.ts", "src/cli/batch-add.ts", "src/cli/connector-smoke.ts", "src/cli/digest.ts", "src/cli/report.ts",
+  "src/cli/lists.ts", "src/cli/migrate.ts", "src/cli/players-backup.ts",
+  "src/cli/players-restore.ts", "src/cli/refresh.ts", "src/cli/restore.ts", "src/cli/seed.ts", "src/server.ts",
+];
+
+// Worst case is one full per-spawn bound per wave, so the budget is waves x bound. Derived, never
+// picked: the original case bounded thirteen sequential ~4s spawns at 30s and passed only on a fast,
+// warm machine (issue #176).
+//
+// The slack is not padding, and leaving it out was a delta-review finding on this very PR. `timeout`
+// KILLS a child at SPAWN_TIMEOUT_MS; its `close` event, the worker promises settling, and the `finally`
+// cleanup all happen AFTER that. So a budget of exactly waves x bound expires at the same instant the
+// last wave's children are killed, and Vitest reports a timeout even though every child honored its
+// own bound — the failure mode this case was rewritten to remove, reintroduced one layer up.
+const SPAWN_CLEANUP_SLACK_MS = 5_000;
+const COMPAT_TEST_TIMEOUT_MS =
+  Math.ceil(COMPAT_ENTRYPOINTS.length / SPAWN_CONCURRENCY) * SPAWN_TIMEOUT_MS + SPAWN_CLEANUP_SLACK_MS;
 
 const validArgs: Record<string, string[]> = {
   "report player": ["--id", "1"],
@@ -383,34 +431,99 @@ describe("CLI router metadata", () => {
     }
   }, 60_000);
 
-  // Budget note: this spawns THIRTEEN real `tsx` processes and already allows each
-  // one 10s of its own, so a 30s test budget was inconsistent with the test's own
-  // rules — it could time out while every spawn was still inside its allowance.
-  // Under a loaded full-suite run (many vitest workers competing for CPU) tsx
-  // startup alone crosses it. Sized to the work the test actually permits.
-  it("keeps every direct compatibility entry point bounded and exit-draining on default argv", () => {
+  // Issue #176. This case spawns a real `tsx` per entry point, and a cold `tsx` start costs ~4s on the
+  // HC's machine — so thirteen of them RUN SEQUENTIALLY took ~52s against a 30s test budget, and the
+  // case passed only when every spawn happened to come in under ~2.3s. Worse, the per-spawn bound is
+  // 10s each: 13 x 10s = 130s worst case, so the test's own timeout could never accommodate its own
+  // per-spawn timeouts. The arithmetic was never right; a fast, warm machine just usually won.
+  //
+  // The fix is concurrency, not a bigger number. Raising the budget until the flake stops is how a
+  // wall-clock-sensitive assertion gets re-tuned forever; running the spawns concurrently makes the
+  // wall clock ~one spawn instead of thirteen, so a budget that clears a single SPAWN_TIMEOUT_MS is
+  // provably sufficient rather than empirically lucky.
+  //
+  // Each entry point also gets its OWN working directory. Sharing one was harmless while the spawns
+  // were sequential; running them at the same time in a shared cwd would couple thirteen processes
+  // through the filesystem and reintroduce flakiness by a different route.
+  it("keeps every direct compatibility entry point bounded and exit-draining on default argv", async () => {
     const work = mkdtempSync(join(tmpdir(), "bryce-compat-"));
     try {
-      const entrypoints = [
-        "src/cli/backup.ts", "src/cli/batch-add.ts", "src/cli/connector-smoke.ts", "src/cli/digest.ts", "src/cli/report.ts",
-        "src/cli/lists.ts", "src/cli/migrate.ts", "src/cli/players-backup.ts",
-        "src/cli/players-restore.ts", "src/cli/refresh.ts", "src/cli/restore.ts", "src/cli/seed.ts", "src/server.ts",
-      ];
-      for (const entrypoint of entrypoints) {
-        const result = spawnSync(join(process.cwd(), "node_modules", ".bin", "tsx"), [join(process.cwd(), entrypoint)], {
-          cwd: work,
-          encoding: "utf8",
+      const entrypoints = COMPAT_ENTRYPOINTS;
+
+      const runEntrypoint = async (entrypoint: string) => {
+        const cwd = join(work, entrypoint.replace(/[/.]/g, "_"));
+        mkdirSync(cwd, { recursive: true });
+        const child = spawn(join(process.cwd(), "node_modules", ".bin", "tsx"), [join(process.cwd(), entrypoint)], {
+          cwd,
           env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
-          timeout: 10_000,
+          stdio: ["ignore", "ignore", "pipe"],
+          timeout: SPAWN_TIMEOUT_MS,
         });
-        expect(result.error).toBeUndefined();
-        expect(result.status).not.toBeNull();
-        expect(`${result.stderr}`).toMatch(/error[=:]/);
+        let stderr = "";
+        child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+        // `status` is null exactly when the child was KILLED rather than exiting on its own — which is
+        // what `timeout` above does when it fires. So resolving with the exit status preserves the
+        // original `expect(result.status).not.toBeNull()` as the real boundedness assertion, rather
+        // than degrading it into "the promise settled".
+        return await new Promise<{ entrypoint: string; error?: Error; status: number | null; stderr: string }>((resolve) => {
+          child.once("error", (error: Error) => resolve({ entrypoint, error, status: null, stderr }));
+          child.once("close", (status) => resolve({ entrypoint, status, stderr }));
+        });
+      };
+
+      // A shared index each worker pulls from, so a slow entry point delays only itself rather than a
+      // whole fixed slice — with thirteen items over four workers, static chunking would idle three of
+      // them behind the chunk that happens to hold the slowest spawn.
+      let next = 0;
+      const results: Awaited<ReturnType<typeof runEntrypoint>>[] = [];
+      await Promise.all(Array.from({ length: SPAWN_CONCURRENCY }, async () => {
+        for (let i = next++; i < entrypoints.length; i = next++) {
+          results.push(await runEntrypoint(entrypoints[i] as string));
+        }
+      }));
+
+      expect(results).toHaveLength(entrypoints.length);
+      for (const result of results) {
+        expect(result.error, result.entrypoint).toBeUndefined();
+        expect(result.status, result.entrypoint).not.toBeNull();
+        expect(result.stderr, result.entrypoint).toMatch(/error[=:]/);
       }
     } finally {
       rmSync(work, { recursive: true, force: true });
     }
-  }, 180_000);
+  }, COMPAT_TEST_TIMEOUT_MS);
+
+  it("validates the report-player Presentation flags at the ROUTER layer, before the leaf loads", async () => {
+    const command = COMMANDS.find((c) => c.path.join(" ") === "report player")!;
+    // Declared in BOTH layers on purpose: preflight must reject a bad --format
+    // BEFORE ./report.js (and `startupDb`) is ever imported, and report.ts
+    // re-checks because its parser is also reachable directly.
+    expect(preflight(command, ["--id", "1", "--format", "console"])).toBeNull();
+    expect(preflight(command, ["--id", "1", "--format=html"])).toBeNull();
+    expect(preflight(command, ["--id", "1", "--out", "card.html"])).toBeNull();
+    expect(preflight(command, ["--id", "1", "--open"])).toBeNull();
+    expect(preflight(command, ["--id", "1", "--format", "pdf"])).toContain("invalid value 'pdf'");
+    // The rejection ENUMERATES the accepted values rather than saying "invalid".
+    expect(preflight(command, ["--id", "1", "--format", "pdf"])).toContain("console, json, html");
+    expect(preflight(command, ["--id", "1", "--out"])).toContain("requires a value");
+    // --open is a boolean flag, so a value is a usage error either way it is
+    // spelled — never a silent accept that leaves the operator guessing.
+    expect(preflight(command, ["--id", "1", "--open=true"])).toContain("does not support '=' syntax");
+    expect(preflight(command, ["--id", "1", "--open", "true"])).toContain("unexpected argument");
+
+    // Reachable through the real entry point with no leaf loaded.
+    const loader = vi.fn(async () => ({ main: vi.fn(async () => 0) }));
+    const commands = COMMANDS.map((c) => (c.path.join(" ") === "report player" ? { ...c, load: loader } : c));
+    const output = vi.fn();
+    expect(await runRouter(["report", "player", "--id", "1", "--format", "pdf"], output, commands)).toBe(1);
+    expect(loader).not.toHaveBeenCalled();
+
+    // The help text advertises all three flags and the accepted format values.
+    const help = renderHelp(["report", "player"]);
+    for (const fragment of ["--format", "--out", "--open", "console | json | html"]) {
+      expect(help, fragment).toContain(fragment);
+    }
+  });
 
   it("reports unknown and incomplete commands without loading a leaf", async () => {
     const output = vi.fn();

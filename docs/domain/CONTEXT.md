@@ -90,6 +90,18 @@ A Window's aggregate numbers for one Player at one Level: counting stats summed,
 from those sums** — never averaged across games, which over-weights low-denominator games while
 staying in a plausible range.
 
+**Player Card**:
+One Player's own report: his **Roll-up** for each of several player-relative **Card Windows**
+(`last10`, `last30`, `ytd`) side by side, split batting/pitching by **Level**. The one report shaped
+around a single Player rather than a cohort.
+_Avoid_: "player profile", "player page" (a Card is an artifact, not a screen), "player digest"
+
+**Card Window**:
+A **Player Card**'s player-relative window — `last10` and `last30` count that Player's own last N
+regular-season games, `ytd` runs from his sport's calendar start. Deliberately distinct from a
+**Window**, which is one shared date range for everyone in a **Digest**.
+_Avoid_: "window" unqualified (the two resolve differently for the same Player)
+
 **In Season**:
 A Player whose competition still has games left to play. An out-of-season Player drops out of the
 Digest entirely — no "no new stats" mention — and rejoins automatically when his games resume.
@@ -104,10 +116,10 @@ domain — no Stat Lines, no early wake. MCP and the API stay live; only the pip
 _Avoid_: "shutdown", "hibernate" (history remains queryable all winter)
 
 **Presentation**:
-A human-readable rendering of a whole **Digest** — both the Batters and Pitchers **Roll-up** tables
-in one multi-section artifact — as HTML, PDF, or Markdown, instead of (or alongside) the email. Same
-content as the Digest for a given **Window**; only the format differs.
-_Avoid_: "report" (the Digest is the report; a Presentation is one rendering of it), "document"
+A human-readable rendering of a whole *report* — a **Digest** (both Roll-up tables) or a **Player
+Card** (every Card Window) — as one multi-section artifact: console text, HTML, PDF, or Markdown,
+instead of (or alongside) the email. Same content as the report it renders; only the format differs.
+_Avoid_: "report" (the Digest or Player Card is the report; a Presentation is one rendering of it), "document"
 
 **Export**:
 Raw tabular rows for a spreadsheet or data tool, as CSV or Excel — *one table per file*. Targets a
@@ -165,11 +177,18 @@ _Avoid_: overloading the delivery-ledger sense ("guarantee restored across the d
   **Offseason Sleep** a weekly heartbeat replaces it, and the daily cadence resumes automatically
   at the earliest opening day among watched levels
   ([ADR 0031](../adr/0031-offseason-sleep-world-series-to-opening-day.md)).
-- A **Presentation** carries the same content as the **Digest** email for a given **Window** — a PDF
-  of `7d` shows exactly what the email would; only the format differs.
-- **Presentation = document, Export = table.** A **Presentation** renders a whole **Digest** (both
-  tables) as one human-readable artifact; an **Export** carries exactly one table — a query result,
-  or one of the Digest's two tables — for a spreadsheet.
+- A **Presentation** carries the same content as the report it renders — the HTML document of the
+  `7d` **Digest** shows exactly what the email would; a **Player Card**'s console and HTML renderings
+  show exactly what its JSON does. Only the format differs.
+  ([ADR 0055](../adr/0055-player-card-presentation-per-surface-defaults-no-pdf.md) deferred PDF a
+  second time: the HTML Presentation carries a `@media print` block instead.)
+- **Presentation = document, Export = table.** A **Presentation** renders a whole report — a
+  **Digest**'s two tables, or a **Player Card**'s every Card Window — as one human-readable artifact;
+  an **Export** carries exactly one table — a query result, or one of the Digest's two tables — for a
+  spreadsheet.
+- A **Digest** is scoped to a *cohort* over one shared **Window**; a **Player Card** is scoped to one
+  **Player** over several **Card Windows**. Same Roll-up math, transposed axis — which is why a Card
+  is its own report shape and not a one-player Digest.
 - A **Snapshot** captures the whole database — every **Player**, **Stat Line**, and delivery record —
   at one instant; a **Player List Backup** captures only the **Player** rows.
 - A **Player List Backup** protects the one thing no **Refresh** can rebuild — the human's **Player**
@@ -212,6 +231,11 @@ _Avoid_: overloading the delivery-ledger sense ("guarantee restored across the d
   "presentation and export" set — resolved: a **Presentation** is a human-readable rendering of a
   **Digest** (HTML/PDF/Markdown); an **Export** is raw rows for a spreadsheet (CSV/Excel) over any
   tabular result. Two concepts, not five loose formats.
+- **"player profile" vs "player card"** (issue #141) — the issue used "profile", "single-player
+  profile", and "player card" interchangeably while the code had already settled on `PlayerCard` —
+  resolved: **Player Card** is the term. "Profile" is retired; it reads as a screen, and this is an
+  artifact. Consequently **Presentation** widened from *a rendering of a Digest* to *a rendering of a
+  report*, so a Card inherits the Presentation rules rather than spawning a parallel concept.
 - **"backup" vs "export"** (issue #67) — a **Backup** exists for *recovery* (a **Snapshot** or a
   **Player List Backup**, re-importable), while an **Export** exists for *consumption* (raw rows for a
   spreadsheet). Resolved: different purposes, different artifacts — never conflate them.

@@ -29,6 +29,7 @@ import {
   DEFAULTS as DEFAULT_HUMAN_GATES,
 } from "./human-gates.js";
 import { fromFile as attributionFromFile } from "./attribution.js";
+import { Parser, type Node } from "commonmark";
 
 const CANONICAL = "AGENTS.md";
 
@@ -37,7 +38,11 @@ const NATIVE_CAPABLE_ADAPTERS = ["GEMINI.md"];
 const COPILOT_ADAPTER = ".github/copilot-instructions.md";
 const PROJECT_CONFIG = "PROJECT.md";
 
-const LINK_CHECKED = [
+// The Adapter surface `checkRenderedRegions` scans for a `parity:render` block. This was once the same
+// list as the dead-link scope; issue #159 split them because they answer different questions. A render
+// marker is an ADAPTER concern, so folding it into the (much wider) link scope would silently start
+// scanning ~30 more files for a marker that has no business appearing in them.
+const RENDER_SCANNED = [
   "AGENTS.md",
   "CLAUDE.md",
   "GEMINI.md",
@@ -52,6 +57,15 @@ const LINK_CHECKED = [
   "docs/mcp/README.md",
 ];
 
+// The AUTHORED seed of the dead-link scope; `linkCheckedFiles()` derives the rest. Every render-scanned
+// file is also link-checked (the containment runs one way only, which is why this is derived rather
+// than a second hand-kept copy), plus the two prose-heavy documents that have no other home.
+const LINK_CHECKED = [
+  ...RENDER_SCANNED,
+  "CONTEXT.md",
+  "docs/rules/README.md",
+];
+
 const GUIDES_DIR = "docs/guides";
 const REQUIRED_GUIDES = ["docs/guides/usage.md"];
 
@@ -59,9 +73,6 @@ const ADR_DIR = "docs/adr";
 const ADR_FILENAME = /^(\d+)-.+\.md$/;
 const ADR_LINK_LABEL = /^ADR (\d{4})$/;
 const ADR_LINK_TARGET = /^(\d{4})-[^/]+\.md$/;
-// Inline links cannot cross a line boundary. Keeping this deliberately narrow
-// means a malformed opening link cannot consume and misclassify a later line.
-const MARKDOWN_LINK = /\[([^\]\r\n]*)\]\(([^)\r\n]+)\)/g;
 const MARKDOWN_SCAN_EXCLUDED_DIRS = new Set([".git", "node_modules", ".claude/worktrees", ".codex-worktrees"]);
 
 const RULES_DIR = "rules";
@@ -227,6 +238,249 @@ function inspectArray(arr: string[]): string {
   return "[" + arr.map(esc).join(", ") + "]";
 }
 
+// --- Links come from a parser, not a regex (issue #159, ADR 0054) ---------------------------------
+//
+// `rules/security.md` writes `![x](url)` while TEACHING escaping; `docs/rules/README.md` writes
+// `[text](path)` four times while teaching the deep-doc form rule. Those are prose ABOUT markdown, and
+// resolving them as hrefs is a false RED — which is exactly why both files sat outside the dead-link
+// scope entirely, an unchecked gap that announced itself to nobody (rules/scripting.md: nothing tells
+// you it isn't checking).
+//
+// A link inside a code span or a fenced block is not a link because IT IS NOT A NODE. The parser settles
+// that, and every question like it, by construction. ADR 0054 records why this is a parser rather than
+// the hand-rolled masker it replaced: five independent review rounds of PR #162 each found a silent
+// FALSE GREEN in that masker — a link the reference parser renders live that the masker hid — and two of
+// the five were introduced while fixing the round before. Enumerating CommonMark's block structure in
+// regexes is a game a structural checker cannot win, and every loss is invisible.
+//
+// The dependency is deliberate and narrow: `commonmark` is a devDependency used by tooling only, never
+// by the app, under the host opt-in in rules/scripting.md (ADR 0039) that scopes `scripts/*.ts` to the
+// app's own toolchain. The masker it replaces was ~180 lines with five known-and-fixed defect classes.
+const MARKDOWN_PARSER = new Parser();
+
+export interface MarkdownLink {
+  /** The link's visible text, with code spans flattened — what `[ADR 0007](...)` shows a reader. */
+  readonly label: string;
+  /** The href, already unescaped by the parser. */
+  readonly destination: string;
+}
+
+/**
+ * Flatten a node's rendered text, WHITESPACE-NORMALIZED, so `[`ADR 0007`](…)`, `[ADR 0007](…)` and a
+ * copy of either that a formatter has wrapped all produce the same label.
+ *
+ * Three inline node types carry an effect but no literal — `softbreak` (a wrap), `linebreak` (a hard
+ * break), and `html_inline` (e.g. an inline comment). Skipping them concatenates the runs either side,
+ * so `[ADR\n0007](…)` or `[ADR<!-- c -->0007](…)` flattens to `ADR0007`, which `ADR_LINK_LABEL` does not
+ * match — and the citation check then silently decides this is not a citation at all and never compares
+ * its number to the target. A false green reachable by a formatter or a hand wrap, with no error
+ * anywhere (PR #162 delta rounds 6 and 7).
+ *
+ * Each becomes a space, and the result is then collapsed and trimmed. The normalization is not
+ * decoration: emitting a space for `html_inline` is what a reader does NOT see (a comment renders to
+ * nothing), so without a trim, `[ADR 0007<!-- note -->](…)` would gain a trailing space and stop
+ * matching — trading round 6's false green for a new one. Both halves are needed, and both fail toward
+ * MORE checking, which is the direction `rules/scripting.md` asks for.
+ *
+ * `emph` and `strong` need no case: they are pure containers whose `text` children are already walked.
+ */
+function nodeText(node: Node): string {
+  let text = "";
+  const walker = node.walker();
+  let event = walker.next();
+  while (event !== null) {
+    if (event.entering) {
+      const type = event.node.type;
+      if (type === "text" || type === "code") text += event.node.literal ?? "";
+      else if (type === "softbreak" || type === "linebreak" || type === "html_inline") text += " ";
+    }
+    event = walker.next();
+  }
+  return strip(text.replace(/\s+/g, " "));
+}
+
+/**
+ * Undo the parser's URI normalization so a destination names a path on disk again.
+ *
+ * CommonMark normalizes destinations for rendering — `[t](<a path.md>)` comes back as `a%20path.md` —
+ * which is right for an href and wrong for `statSync`. Decoding is attempted, never assumed: a malformed
+ * escape throws, and the raw text is the better answer then. No file in the repo needs this today; it is
+ * here because the parser silently introduced the difference, and a path that fails to resolve for an
+ * invisible reason is the least debuggable failure this checker can produce.
+ */
+function decodeDestination(destination: string): string {
+  if (!destination.includes("%")) return destination;
+  try {
+    return decodeURIComponent(destination);
+  } catch {
+    return destination;
+  }
+}
+
+/**
+ * Resolve `href` against `fromDir` and return the absolute path ONLY when it stays inside `root`;
+ * `null` when it escapes.
+ *
+ * An href that escapes the repo (a root-absolute `/docs/...`, or a `../../` that climbs past the root)
+ * is never a resolvable intra-repo link, so it is rejected WITHOUT consulting the disk. That is a
+ * correctness rule first — such a link is broken on the lifecycle host however the runner's filesystem
+ * happens to look — and it is what keeps the verdict from depending on files that happen to exist
+ * outside the checkout (`rules/testing.md`: an environment-dependent assertion is green on one machine
+ * and red on another).
+ *
+ * ONE authored copy, because the rule being written three times and enforced twice is exactly how issue
+ * #165 happened: `resolvesFrom` guarded it, the test fixture's healer guarded it, and `checkLinks` — the
+ * widest surface of the three — did not. A fourth resolution site now inherits the rule instead of
+ * having to remember it.
+ *
+ * It deliberately performs NO `stat`. The three callers ask genuinely different disk questions —
+ * `resolvesFrom` requires `.isFile()`, `checkLinks` accepts a directory (a link to `rules/` is valid),
+ * and the fixture asks `existsSync` — so containment is the shared part and the stat is not.
+ *
+ * `root` is normalized here rather than being a precondition on the caller: the parameter is a plain
+ * `string`, and an unstated "must already be absolute" is how the next caller gets it wrong.
+ */
+export function resolveInsideRoot(root: string, fromDir: string, href: string): string | null {
+  const base = resolvePath(root);
+  const resolved = resolvePath(fromDir, href);
+  // The `+ sep` is load-bearing: without it a sibling sharing a name prefix (`<root>-old`) reads as
+  // inside `<root>`, which is a guard loosened just enough to print a false green (`rules/scripting.md`).
+  if (resolved !== base && !resolved.startsWith(base + sep)) return null;
+  return resolved;
+}
+
+/**
+ * Every inline link and image in `source`, in document order.
+ *
+ * IMAGES are included because the old regex could not tell `![alt](x.png)` from `[alt](x.png)` and so
+ * checked both; an image href is a path that can rot exactly like a link's, so this keeps the coverage
+ * rather than narrowing it on a technicality.
+ *
+ * REFERENCE links (`[text][ref]`) resolve here and never did before — the parser hands back the
+ * definition's destination. That is new coverage, not a behavior change to argue about.
+ */
+export function markdownLinks(source: string): MarkdownLink[] {
+  const links: MarkdownLink[] = [];
+  const walker = MARKDOWN_PARSER.parse(source).walker();
+
+  let event = walker.next();
+  while (event !== null) {
+    const node = event.node;
+    if (event.entering && (node.type === "link" || node.type === "image")) {
+      links.push({ label: nodeText(node), destination: decodeDestination(node.destination ?? "") });
+    }
+    event = walker.next();
+  }
+  return links;
+}
+
+/** Immediate subdirectory names of `absolute`, sorted; empty when it is not a readable directory. */
+function subdirectories(absolute: string): string[] {
+  try {
+    return readdirSync(absolute)
+      .sort()
+      .filter((child) => {
+        try {
+          return statSync(join(absolute, child)).isDirectory();
+        } catch {
+          return false;
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * A repository read that failed for a reason other than "absent" (issue #164). Typed so `main` can
+ * report it in this script's own failure grammar while letting a genuine internal bug keep its stack
+ * trace — catching both alike would relabel the bug as a read failure and name the wrong cause.
+ */
+export class RepositoryReadError extends Error {
+  constructor(readonly path: string, readonly code: string | undefined, reason: string) {
+    super(`cannot read ${path} - ${reason}`);
+    this.name = "RepositoryReadError";
+  }
+}
+
+/**
+ * Absent is a fact (return `absent`); any other read failure is a malformed bundle (raise it, typed).
+ *
+ * The split is the whole point, and it is not a blanket catch: a bundle legitimately ships a subset of
+ * the tree, but an unreadable path (a permission error, an `ENOTDIR` from a path that is a file, an
+ * `ELOOP` from a symlink cycle) answered with "nothing here" silently empties whatever scope was being
+ * derived — `rules/scripting.md`'s false green, where the gate reports OK while checking nothing.
+ */
+function readOrRaise<T>(path: string, absent: T, read: () => T): T {
+  try {
+    return read();
+  } catch (error) {
+    const failure = error as NodeJS.ErrnoException;
+    if (failure.code === "ENOENT") return absent;
+    throw new RepositoryReadError(path, failure.code, failure.message);
+  }
+}
+
+/**
+ * Immediate `*.md` REGULAR FILES of `absolute`, sorted, with both reads going through `readOrRaise`
+ * above (issue #164).
+ *
+ * `isFile()` is not tidiness: a DIRECTORY named `nested.md` passes a name-only filter, and this list is
+ * consumed by test/tooling/parity-fixture.ts `healDeadLinks()`, which guards with `existsSync` (true for a
+ * directory) and then `readFileSync`s it — `EISDIR`, taking the fixture down. `checkLinks` itself only
+ * skips such an entry, so the name-only bug would have been invisible from the checker's own output.
+ */
+function markdownFilesIn(absolute: string): string[] {
+  const children = readOrRaise(absolute, [] as string[], () => readdirSync(absolute));
+
+  return children
+    .sort()
+    .filter((child) => {
+      if (!child.endsWith(".md")) return false;
+      // The same rule one level down (issue #164 review, Low): a child that vanished between the read
+      // and the stat is absent, but an unreadable one is not — dropping it silently would re-open, per
+      // file, exactly the false green the directory-level rule closes.
+      const path = join(absolute, child);
+      return readOrRaise(path, false, () => statSync(path).isFile());
+    });
+}
+
+/**
+ * The files whose markdown links `checkLinks` resolves (issue #159).
+ *
+ * DERIVED, not hand-kept, for everything below the authored seed: a tenth Skill or a new command shim is
+ * link-checked the day it lands, with nobody having to remember a list. The alternative — the twelve
+ * hardcoded paths this replaced — is how `rules/*.md` went unchecked for its entire life while carrying
+ * links the whole time.
+ *
+ * `docs/adr/*.md` joined that derivation in issue #164, closing the last unchecked markdown surface: a
+ * directory of accepted decisions that cite each other constantly, with nothing resolving those
+ * citations. Two were dead. Repairing them was a records question, not a validator one, and its answer is
+ * [ADR 0057](../docs/adr/0057-adr-links-repair-identity-annotate-loss.md) — repair a link whose target
+ * kept its identity, de-link and annotate one whose target ceased to exist. The standing cost is stated
+ * there: renaming a file an ADR cites now reddens this check, which is the point.
+ *
+ * A path listed here but absent from disk is skipped by the caller, so the derivation is safe against a
+ * bundle that ships a subset.
+ */
+export function linkCheckedFiles(root: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const add = (rel: string): void => {
+    if (seen.has(rel)) return;
+    seen.add(rel);
+    out.push(rel);
+  };
+
+  for (const rel of LINK_CHECKED) add(rel);
+  for (const rel of REQUIRED_RULES) add(rel);
+  for (const name of subdirectories(join(root, SKILLS_DIR))) add(`${SKILLS_DIR}/${name}/SKILL.md`);
+  for (const name of markdownFilesIn(join(root, CLAUDE_COMMANDS_DIR))) add(`${CLAUDE_COMMANDS_DIR}/${name}`);
+  for (const name of markdownFilesIn(join(root, ADR_DIR))) add(`${ADR_DIR}/${name}`);
+
+  return out;
+}
+
 export interface ParityResult {
   readonly status: 0 | 1;
   readonly errors: readonly string[];
@@ -283,17 +537,14 @@ class ParityCheck {
    * the other question (does this repo-root path exist), and the two are deliberately distinct: a
    * backticked path is prose naming a repo path, a link is a link (issue #154).
    *
-   * An href that escapes the repo (a root-absolute `/docs/...`, or a `../../` that climbs past the
-   * root) is never a resolvable intra-repo link, so it is rejected WITHOUT consulting the disk. That
-   * is a correctness rule first — such a link is broken on the lifecycle host however the runner's
-   * filesystem happens to look — and it is what keeps the verdict from depending on files that
-   * happen to exist outside the checkout (rules/testing.md: an environment-dependent assertion is
-   * green on one machine and red on another).
+   * Containment — an href that escapes the repo is rejected without consulting the disk — lives in
+   * `resolveInsideRoot`, which documents why and is shared with `checkLinks` and the test fixture's
+   * healer (issue #165). What remains local here is the `.isFile()` requirement: a rules pointer names
+   * a document, never a directory.
    */
   private resolvesFrom(rel: string, href: string): boolean {
-    const root = resolvePath(this.root);
-    const resolved = resolvePath(dirname(this.path(rel)), href);
-    if (resolved !== root && !resolved.startsWith(root + sep)) return false;
+    const resolved = resolveInsideRoot(this.root, dirname(this.path(rel)), href);
+    if (resolved === null) return false;
     try {
       return statSync(resolved).isFile();
     } catch {
@@ -367,7 +618,7 @@ class ParityCheck {
     if (!this.exists(CANONICAL)) return;
 
     const canonical = this.read(CANONICAL);
-    for (const rel of LINK_CHECKED) {
+    for (const rel of RENDER_SCANNED) {
       if (!this.exists(rel)) continue;
 
       const lines = toLines(this.read(rel));
@@ -474,10 +725,16 @@ class ParityCheck {
   // paragraph below says why they differ. The single exception is a BARE-PATH `**Deep doc:**`
   // header declaration, which may forward-reference a deep doc that does not exist yet.
   //
-  // Why it matters here and nowhere else: `rules/*.md` is deliberately absent from LINK_CHECKED, so
-  // checkLinks() never sees these files and this check is the ONLY validator they get. A Tier-1
-  // bullet pointing at a deep doc stands in for content that was MOVED there, so a broken pointer
-  // silently loses the case study with nothing else to notice.
+  // Why it still matters now that `rules/*.md` IS link-checked (issue #159): checkLinks() validates the
+  // LINK form only, and the convention's default form for a deep doc is a BACKTICKED path — precisely so
+  // a pointer can be written before its target lands without reddening the gate. Nothing but this check
+  // ever resolves a backticked path, and a Tier-1 bullet pointing at a deep doc stands in for content
+  // that was MOVED there, so a broken bare pointer still loses the case study with nothing else to
+  // notice. The two checks are complementary, not redundant.
+  //
+  // Corollary, and the reason the fenced-line walk below is NOT replaced by markdownLinks(): this check
+  // exists to READ backticked text, which an AST walk does not surface as a link at all — it would go
+  // blind. Same for ruleBullets(). Do not "finish the refactor".
   //
   // The two reference forms resolve against different bases, because Markdown does: a BACKTICKED
   // path is prose naming a REPO-ROOT path (this.exists), while a LINK is a link and resolves
@@ -486,9 +743,9 @@ class ParityCheck {
   // spelling inside `](…)` is a 404 that this check must still reject.
   //
   // The header exemption covers the bare form ONLY. docs/rules/README.md declares that a deep doc
-  // stays "absent until a host has a real postmortem to record", and rules/frontend.md,
-  // rules/security.md and rules/scripting.md all forward-reference one today; a dead LINK in that
-  // same header is still dead, so it is still rejected.
+  // stays "absent until a host has a real postmortem to record", and rules/frontend.md and
+  // rules/security.md forward-reference one today (rules/scripting.md did until issue #166 wrote
+  // its deep doc); a dead LINK in that same header is still dead, so it is still rejected.
   private checkRulesPointers(): void {
     if (!this.dirExists(RULES_DIR)) return;
 
@@ -896,12 +1153,13 @@ class ParityCheck {
    */
   private checkAdrLinkNumbers(): void {
     for (const rel of this.markdownFiles()) {
-      for (const match of this.read(rel).matchAll(MARKDOWN_LINK)) {
-        const label = match[1] ?? "";
+      // Parsed, not matched (issue #159): a citation inside a code span is a worked EXAMPLE of the
+      // convention, not a citation, and the parser simply does not report one.
+      for (const { label, destination } of markdownLinks(this.read(rel))) {
         const labelMatch = ADR_LINK_LABEL.exec(label);
         if (labelMatch === null) continue;
 
-        const rawTarget = (match[2] ?? "").trim();
+        const rawTarget = destination.trim();
         if (
           rawTarget === "" ||
           rawTarget.startsWith("#") ||
@@ -964,12 +1222,14 @@ class ParityCheck {
   }
 
   private checkLinks(): void {
-    for (const rel of LINK_CHECKED) {
+    for (const rel of linkCheckedFiles(this.root)) {
       if (!this.exists(rel)) continue;
 
       const dir = dirname(this.path(rel));
-      for (const m of this.read(rel).matchAll(MARKDOWN_LINK)) {
-        let target = (m[2] ?? "").trim();
+      // Parsed, not matched: a `[text](path)` inside a code span is prose about markdown, so the parser
+      // never reports it as a link at all (issue #159, ADR 0054).
+      for (const { destination } of markdownLinks(this.read(rel))) {
+        let target = destination.trim();
         if (target === "") continue;
         if (
           target.startsWith("http://") ||
@@ -983,7 +1243,16 @@ class ParityCheck {
         target = target.split("#")[0] as string; // drop any #anchor fragment
         if (target === "") continue;
 
-        const resolved = resolvePath(dir, target);
+        // Issue #165. Containment is decided BEFORE the disk is consulted, so a `../../` chain that
+        // climbs out is dead whether or not the runner happens to have something at the far end. The
+        // two messages stay distinct because they send a reader to different places: "escapes the
+        // repository" is a fact about the path, "does not resolve" is a fact about the filesystem.
+        const resolved = resolveInsideRoot(this.root, dir, target);
+        if (resolved === null) {
+          this.err(`Dead link in ${rel}: \`${target}\` escapes the repository`);
+          continue;
+        }
+
         try {
           statSync(resolved);
         } catch {
@@ -1020,7 +1289,13 @@ export function formatParityResult(result: ParityResult): string {
   );
 }
 
-export function main(args: string[]): number {
+/**
+ * `run` is an injection seam for the self-test only — the CLI never passes it. It exists so the
+ * discrimination below (a read failure is reported; anything else keeps its stack trace) can be proven
+ * by a test rather than asserted in a comment: no tree in this repository throws a NON-read error from
+ * `runParityCheck` on demand, since every other read is guarded by an existence check.
+ */
+export function main(args: string[], run: (root: string) => ParityResult = runParityCheck): number {
   let root = ".";
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -1040,7 +1315,24 @@ export function main(args: string[]): number {
       return 2;
     }
   }
-  const result = runParityCheck(root);
+  // A read failure that is NOT "absent" reaches here as a throw (see `markdownFilesIn`), and a stack
+  // trace is not the greppable, deterministic output a Host App or CI asserts on (rules/scripting.md).
+  // Report it in this script's own failure grammar and keep the exit non-zero: the point of raising was
+  // to be loud, not to be unreadable.
+  //
+  // Only `RepositoryReadError` is handled, deliberately. Catching every throw would relabel a genuine
+  // internal bug — a TypeError, a parser edge case — as a repository-read failure and discard the stack
+  // trace pointing at it, which is a FALSE DIAGNOSIS: worse than a crash, because the log now names the
+  // wrong cause. An unrecognized error keeps its trace and crashes (issue #164 review, Medium).
+  let result: ParityResult;
+  try {
+    result = run(root);
+  } catch (error) {
+    if (!(error instanceof RepositoryReadError)) throw error;
+    process.stderr.write(`parity_check: FAILED - ${error.message}\n`);
+    return 1;
+  }
+
   process.stdout.write(formatParityResult(result));
   return result.status;
 }
