@@ -23,11 +23,12 @@
 - **Never test path containment with a case-sensitive compare when the guard's job is to DENY** — because
   `resolve()` never consults the filesystem, so on a case-insensitive volume (APFS, NTFS) a differently-cased
   spelling fails the compare while the write still lands in the very directory being protected: the guard
-  reports "outside" and the thing it exists to prevent happens anyway. Case-fold both sides when the anchor
-  is a known-case literal. *(Provenance: issue #163 / PR #170; extend per host.)*
+  reports "outside" and the thing it exists to prevent happens anyway. Fold both sides whatever the anchor;
+  a non-literal anchor needs a locale-safe fold, not a skipped one. *(Provenance: issue #163 / PR #170;
+  extend per host.)*
 - **Never case-fold a containment check that GRANTS permission** — because on a case-sensitive volume
   `/repo/docs/ADR/x` then reads as a descendant of `/repo/docs/adr`, and the guard approves a write outside
-  its anchor; folding is safe only where the wrong answer is the harmless one. Canonicalize instead — noting
-  that `realpath` throws on a path that does not exist yet, which is why a guard deciding about a
-  not-yet-created file cannot simply reach for it. *(Provenance: issue #163 / PR #170; extend per host.)*
+  its anchor. Canonicalize both sides instead; where the target does not exist yet and `realpath` would
+  throw, canonicalize the nearest existing ancestor and compare the remainder case-sensitively — never widen
+  to a fold to make the check pass. *(Provenance: issue #163 / PR #170; extend per host.)*
 - **Never build a guard around the shape the current files happen to have when a format's own spec is what it must enforce** — because a checker calibrated on today's habits (one item per line, one marker spelling, one punctuation) passes every conforming spelling it never saw, and a routine reformat disables it everywhere at once, silently; encode what the format permits, and test each permitted spelling. *(Provenance: issue #152 / PR #157; extend per host.)*
