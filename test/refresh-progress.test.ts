@@ -518,6 +518,28 @@ describe("a presenter fault is never a sweep fault (ADR 0056 s7)", () => {
     expect(summary.playersRefreshed).toBe(1);
   });
 
+  it("a sink throwing at a CALL site is contained too, not just at player boundaries", async () => {
+    // `call-started`/`call-finished` fire from INSIDE the per-player try, and from
+    // the calendar phase inside the MF1 boundary — so a throw there has two
+    // distinct ways to be misread (a fabricated player failure, or a fatal run)
+    // that a throw at `player-settled` does not. safeEmit is shared, but "shared"
+    // is an implementation fact, and this is the contract.
+    await insertPlayer(opened.db, { externalId: 691185 });
+    let thrown = 0;
+    const summary = await runRefresh(deps((event) => {
+      if (event.kind === "call-started" || event.kind === "call-finished") {
+        thrown += 1;
+        throw new Error("presenter blew up mid-call");
+      }
+    }));
+
+    expect(thrown).toBeGreaterThan(0); // the sink really did throw, repeatedly
+    expect(summary.status).toBe("ok");
+    expect(summary.playerFailures).toEqual([]);
+    expect(summary.calendarFailures).toEqual([]);
+    expect(summary.playersRefreshed).toBe(1);
+  });
+
   it("a sink returning a REJECTED promise neither fails the sweep nor raises an unhandled rejection", async () => {
     await insertPlayer(opened.db, { externalId: 691185 });
     const unhandled: unknown[] = [];

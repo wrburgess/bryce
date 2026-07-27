@@ -115,11 +115,20 @@ function tokenField(raw: string): string {
   return folded.length === 0 ? "?" : folded;
 }
 
-/** The call's own payload keys, in their declared order (`RefreshCall` is the source of truth). */
+/**
+ * The call's own payload keys, in their declared order (`RefreshCall` is the source of truth).
+ *
+ * `tokenField`, not `asciiField`, DELIBERATELY. Every payload field today is a
+ * number or the fixed `StatGroup` enum, so the two are identical here and this
+ * changes no output. It is written this way so the safe choice is the DEFAULT
+ * for the next call variant: a future payload carrying provider-supplied free
+ * text would otherwise silently inherit space-preserving folding and reopen the
+ * token-forgery hole `tokenField` exists to close.
+ */
 function callFields(call: RefreshCall): string {
   const record = call as unknown as Record<string, unknown>;
   return REFRESH_CALL_KEYS[call.call]
-    .map((key) => ` ${key}=${asciiField(String(record[key]))}`)
+    .map((key) => ` ${key}=${tokenField(String(record[key]))}`)
     .join("");
 }
 
@@ -323,6 +332,12 @@ export function createRefreshPresenter(deps: RefreshCliDeps, quiet: boolean): Pr
 
 export async function runRefreshCli(argv: string[], deps: RefreshCliDeps): Promise<number> {
   const writeError = deps.writeError ?? deps.write;
+  // Validated HERE as well as in main(), and that duplication is INTENTIONAL:
+  // main() must reject a bad invocation before it opens the database, while
+  // runRefreshCli is the injectable seam every test drives — so collapsing the
+  // two would either leave the tested entry point unvalidated or make the
+  // validation untestable. Both write to their own error sink, so neither is
+  // reachable from the other's tests. (Mirrors src/cli/digest.ts.)
   const syntaxFailure = preflightDirect(["refresh"], argv);
   if (syntaxFailure !== null) {
     writeError(`error: ${syntaxFailure}`);
