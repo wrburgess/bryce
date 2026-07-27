@@ -209,6 +209,16 @@ export function admitTargetedRefresh(db: Db, now: Date, leaseMs = REFRESH_LEASE_
 
 export interface RefreshCounts {
   playersRefreshed: number;
+  /**
+   * Passed-Over Players so far (#146) — never a Skipped Sweep, which records no
+   * run at all. Persisted alongside `playersRefreshed` so the durable Accounting
+   * carries the SAME three-way classification the console's Liveness stream
+   * shows (ADR 0056), and `refreshed + skipped + failed = playersTotal` holds
+   * for a sweep whose loop ran to completion.
+   */
+  playersSkipped: number;
+  /** Collected per-player failures so far (#23), persisted for the same reason. */
+  playersFailed: number;
   playersTotal: number;
   statLinesInserted: number;
   statLinesUpdated: number;
@@ -229,6 +239,8 @@ export function updateRefreshRunProgress(db: Db, runId: number, counts: RefreshC
     .update(refreshRuns)
     .set({
       playersRefreshed: counts.playersRefreshed,
+      playersSkipped: counts.playersSkipped,
+      playersFailed: counts.playersFailed,
       playersTotal: counts.playersTotal,
       statLinesInserted: counts.statLinesInserted,
       statLinesUpdated: counts.statLinesUpdated,
@@ -267,6 +279,8 @@ export function settleRefreshRun(db: Db, args: SettleRefreshArgs): boolean {
           finishedAt: nowIso,
           status: args.status,
           playersRefreshed: args.counts.playersRefreshed,
+          playersSkipped: args.counts.playersSkipped,
+          playersFailed: args.counts.playersFailed,
           playersTotal: args.counts.playersTotal,
           statLinesInserted: args.counts.statLinesInserted,
           statLinesUpdated: args.counts.statLinesUpdated,
@@ -342,6 +356,13 @@ export interface RefreshHealth {
   /** finished_at of the latest ok/partial run — when good data last landed. */
   lastSuccessAt: string | null;
   playersRefreshed: number;
+  /**
+   * Passed-Over Players on the latest run (#146). Additive: a pre-#146 row
+   * reports the backfilled `0` (see drizzle/0011), which means "not recorded".
+   */
+  playersSkipped: number;
+  /** Collected per-player failures on the latest run (#146). Same backfill caveat. */
+  playersFailed: number;
   playersTotal: number;
   statLinesInserted: number;
   statLinesUpdated: number;
@@ -409,6 +430,8 @@ export function refreshHealth(db: Db, now: Date, tz: string): RefreshHealth | nu
     lastFinishedAt: latest.finishedAt,
     lastSuccessAt: lastSuccess?.finishedAt ?? null,
     playersRefreshed: latest.playersRefreshed,
+    playersSkipped: latest.playersSkipped,
+    playersFailed: latest.playersFailed,
     playersTotal: latest.playersTotal,
     statLinesInserted: latest.statLinesInserted,
     statLinesUpdated: latest.statLinesUpdated,

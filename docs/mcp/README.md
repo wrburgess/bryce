@@ -202,7 +202,9 @@ Re-ingest the current season now.
   refresh **every** active Player.
 - **Success:** a per-player result such as `{ skipped, inserted, updated }` when a Player is
   specified; otherwise a whole-watch-list result with `status` (`ok`, `partial`, or `failed`),
-  `playersRefreshed`, `statLinesInserted`, `statLinesUpdated`, and any per-player failures. A
+  `playersRefreshed`, `playersSkipped`, `playersFailed`, `statLinesInserted`, `statLinesUpdated`,
+  and any per-player failures. This tool attaches **no progress sink**, so its output is unchanged by
+  the #146 live-console work. A
   concurrent sweep or Offseason Sleep returns a skipped result instead of doing work.
 - **Side effects:** upserts Stat Lines. Only a whole-watch-list Refresh records the freshness run
   surfaced by `status` and `GET /health`; a single-player Refresh does not.
@@ -260,7 +262,11 @@ Health snapshot, the same shape as `GET /health`.
 - **Inputs:** none.
 - **Success:** `{ ok, players, statLines, lastDelivery, refresh }` — active Player count, stored Stat Line
   count, the last digest/heartbeat delivery (including an in-flight `sending` status), and Refresh
-  freshness/progress when a whole-watch-list Refresh has run.
+  freshness/progress when a whole-watch-list Refresh has run. `refresh` carries `playersRefreshed`,
+  **`playersSkipped`**, **`playersFailed`**, `playersTotal`, and the two stat-line counts; the two
+  bolded fields are additive in #146 so the durable **Accounting** matches the CLI's live
+  classification exactly ([ADR 0056](../adr/0056-refresh-emits-typed-progress-events-cli-is-the-only-presenter.md)).
+  For a run settled before #146 they read `0`, which means *not recorded*, not *nothing happened*.
 - **Side effects:** none.
 
 ### Named player lists (`#70`)

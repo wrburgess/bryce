@@ -35,3 +35,30 @@
 export function canonicalizeName(raw: string): string {
   return raw.normalize("NFC").replace(/\s+/g, " ").trim();
 }
+
+/**
+ * Make a runtime-derived value safe for one greppable ASCII line
+ * (rules/scripting.md): strip diacritics, collapse any whitespace/control run
+ * (incl. newlines that would forge extra lines) to a single space, and replace
+ * any residual non-ASCII byte with '?'. (PR #84 review.)
+ *
+ * NOTE what this does NOT do: `canonicalizeName` collapses `\s+`, which does
+ * NOT cover `\x1b` — an ANSI escape surviving in an upstream name is stripped
+ * HERE and nowhere else. That matters for any reporter whose presenter drives
+ * cursor control, because an escape in a name could otherwise overwrite lines
+ * the presenter already printed
+ * ([ADR 0047](../../docs/adr/0047-app-clis-emit-utf8-ascii-scopes-to-machine-output.md),
+ * amended for #146).
+ *
+ * It lives beside `canonicalizeName` — the other end of the same identity
+ * pipeline — because it now has two callers: `players:batch-add`'s bulk outcome
+ * reporter and the `refresh` liveness stream's presenter.
+ */
+export function asciiField(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // strip combining accent marks (U+0300..U+036F)
+    .replace(/\s+/g, " ") // collapse whitespace/newlines -> single space
+    .replace(/[^\x20-\x7e]/g, "?") // any residual non-ASCII byte -> '?'
+    .trim();
+}

@@ -24,6 +24,27 @@ describe("operational templates", () => {
       expect(template).toContain("&amp;&amp;");
       expect(template).toContain("2&gt;&amp;1");
     }
+    // #146: the scheduled sweep opts into quiet mode, and the `--` separator is
+    // the whole contract — without it npm eats the flag and the job silently
+    // runs verbose, writing a per-player stream into an unrotated log.
+    const refresh = readFileSync(join(ROOT, "ops/templates/com.sk.refresh.plist"), "utf8");
+    expect(refresh).toContain("npm run refresh -- --quiet");
+  });
+
+  it("rejects a scheduled invocation that drops the npm argument separator", () => {
+    const root = copyRoot();
+    try {
+      const refresh = join(root, "ops/templates/com.sk.refresh.plist");
+      // The exact silent failure mode: the flag is still there, but npm keeps it.
+      // replaceAll, not replace: the same invocation appears in the explanatory
+      // comment above ProgramArguments, and a first-match edit would rewrite the
+      // COMMENT and leave the real command line intact — a case that passes
+      // whether or not the gate works.
+      writeFileSync(refresh, readFileSync(refresh, "utf8").replaceAll("npm run refresh -- --quiet", "npm run refresh --quiet"));
+      expect(validateOperationalTemplates(root)).toContain(
+        "com.sk.refresh.plist: ProgramArguments must provision logs and run npm script refresh",
+      );
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
   it("documents the constrained path contract used by the shell-backed templates", () => {

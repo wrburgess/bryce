@@ -208,6 +208,20 @@ export const refreshRuns = sqliteTable(
      */
     claimedAt: text("claimed_at").notNull(),
     playersRefreshed: integer("players_refreshed").notNull().default(0),
+    /**
+     * Passed-Over Players this sweep — watched players a running sweep chose not
+     * to fetch (out-of-season NCAA, no external id). NOT a Skipped Sweep, which
+     * records no run at all (docs/domain/CONTEXT.md, #146). Recorded so the
+     * Accounting surfaces (`/health`, MCP `status`) carry the SAME three-way
+     * classification the console's Liveness stream shows, and
+     * `refreshed + skipped + failed = players_total` holds for a settled run.
+     *
+     * Historical rows migrated before #146 carry a backfilled `0` that means
+     * "not recorded", not "nothing was passed over" — see drizzle/0011.
+     */
+    playersSkipped: integer("players_skipped").notNull().default(0),
+    /** Watched players whose refresh threw and was collected, not fatal (#23). Same backfill caveat. */
+    playersFailed: integer("players_failed").notNull().default(0),
     playersTotal: integer("players_total").notNull().default(0),
     statLinesInserted: integer("stat_lines_inserted").notNull().default(0),
     statLinesUpdated: integer("stat_lines_updated").notNull().default(0),
@@ -230,6 +244,8 @@ export const refreshRuns = sqliteTable(
       sql`(${t.status} = 'running' and ${t.finishedAt} is null) or (${t.status} <> 'running' and ${t.finishedAt} is not null)`,
     ),
     check("refresh_runs_players_refreshed_nonneg_ck", sql`${t.playersRefreshed} >= 0`),
+    check("refresh_runs_players_skipped_nonneg_ck", sql`${t.playersSkipped} >= 0`),
+    check("refresh_runs_players_failed_nonneg_ck", sql`${t.playersFailed} >= 0`),
     check("refresh_runs_players_total_nonneg_ck", sql`${t.playersTotal} >= 0`),
     check("refresh_runs_stat_lines_inserted_nonneg_ck", sql`${t.statLinesInserted} >= 0`),
     check("refresh_runs_stat_lines_updated_nonneg_ck", sql`${t.statLinesUpdated} >= 0`),

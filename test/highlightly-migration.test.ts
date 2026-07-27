@@ -8,6 +8,35 @@ import { openDb } from "../src/db/client.js";
 
 const ROOT = join(fileURLToPath(new URL("..", import.meta.url)));
 
+/**
+ * Copy the real migrations into `dest`, then TRUNCATE the history AT `tag`:
+ * every migration from `tag` onward is removed — its SQL file, its snapshot, and
+ * its journal entry — so `openDb` sees exactly the schema as it stood before
+ * that migration.
+ *
+ * Anchored on the TAG, never on a count from the END of the journal. The
+ * previous `entries.splice(-N)` silently retargeted the moment a new migration
+ * landed (#146 added 0011 and did exactly that), and the failure surfaced as a
+ * missing-file error far from its cause. Nothing here depends on how many
+ * migrations exist today.
+ */
+function migrationsBefore(dest: string, tag: string): string {
+  cpSync(join(ROOT, "drizzle"), dest, { recursive: true });
+  const journalPath = join(dest, "meta", "_journal.json");
+  const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
+    entries: { idx: number; tag: string }[];
+  };
+  const cut = journal.entries.findIndex((entry) => entry.tag === tag);
+  if (cut === -1) throw new Error(`no migration tagged ${tag} in the journal`);
+  for (const entry of journal.entries.slice(cut)) {
+    unlinkSync(join(dest, `${entry.tag}.sql`));
+    unlinkSync(join(dest, "meta", `${String(entry.idx).padStart(4, "0")}_snapshot.json`));
+  }
+  journal.entries = journal.entries.slice(0, cut);
+  writeFileSync(journalPath, JSON.stringify(journal));
+  return dest;
+}
+
 describe("Highlightly migration", () => {
   const dirs: string[] = [];
 
@@ -18,14 +47,7 @@ describe("Highlightly migration", () => {
   it("preserves legacy NCAA rows under their immutable source namespace", () => {
     const dir = mkdtempSync(join(tmpdir(), "bryce-highlightly-migration-"));
     dirs.push(dir);
-    const oldMigrations = join(dir, "old-migrations");
-    cpSync(join(ROOT, "drizzle"), oldMigrations, { recursive: true });
-    unlinkSync(join(oldMigrations, "0008_highlightly_ncaa.sql"));
-    unlinkSync(join(oldMigrations, "meta", "0008_snapshot.json"));
-    const journalPath = join(oldMigrations, "meta", "_journal.json");
-    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: unknown[] };
-    journal.entries.splice(-3);
-    writeFileSync(journalPath, JSON.stringify(journal));
+    const oldMigrations = migrationsBefore(join(dir, "old-migrations"), "0008_highlightly_ncaa");
 
     const dbPath = join(dir, "bryce.db");
     const old = openDb(dbPath, { migrationsFolder: oldMigrations });
@@ -50,14 +72,7 @@ describe("Highlightly migration", () => {
   it("normalizes a stale dual professional/NCAA row without changing its local id", () => {
     const dir = mkdtempSync(join(tmpdir(), "bryce-promotion-normalization-"));
     dirs.push(dir);
-    const before0009 = join(dir, "before-0009");
-    cpSync(join(ROOT, "drizzle"), before0009, { recursive: true });
-    unlinkSync(join(before0009, "0009_dizzy_zodiak.sql"));
-    unlinkSync(join(before0009, "meta", "0009_snapshot.json"));
-    const journalPath = join(before0009, "meta", "_journal.json");
-    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: unknown[] };
-    journal.entries.splice(-2);
-    writeFileSync(journalPath, JSON.stringify(journal));
+    const before0009 = migrationsBefore(join(dir, "before-0009"), "0009_dizzy_zodiak");
     const dbPath = join(dir, "bryce.db");
     const old = openDb(dbPath, { migrationsFolder: before0009 });
     // Model a real stale database written before the old guard existed. The
@@ -111,14 +126,7 @@ describe("Highlightly migration", () => {
   it("aborts 0009 with an actionable identity diagnostic and leaves the old triggers intact", () => {
     const dir = mkdtempSync(join(tmpdir(), "bryce-identity-audit-"));
     dirs.push(dir);
-    const before0009 = join(dir, "before-0009");
-    cpSync(join(ROOT, "drizzle"), before0009, { recursive: true });
-    unlinkSync(join(before0009, "0009_dizzy_zodiak.sql"));
-    unlinkSync(join(before0009, "meta", "0009_snapshot.json"));
-    const journalPath = join(before0009, "meta", "_journal.json");
-    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: unknown[] };
-    journal.entries.splice(-2);
-    writeFileSync(journalPath, JSON.stringify(journal));
+    const before0009 = migrationsBefore(join(dir, "before-0009"), "0009_dizzy_zodiak");
 
     const dbPath = join(dir, "bryce.db");
     const pre = openDb(dbPath, { migrationsFolder: before0009 });
@@ -157,14 +165,7 @@ describe("Highlightly migration", () => {
   it("audits a deployed active Highlightly row missing its provider identity", () => {
     const dir = mkdtempSync(join(tmpdir(), "bryce-active-highlightly-audit-"));
     dirs.push(dir);
-    const before0009 = join(dir, "before-0009");
-    cpSync(join(ROOT, "drizzle"), before0009, { recursive: true });
-    unlinkSync(join(before0009, "0009_dizzy_zodiak.sql"));
-    unlinkSync(join(before0009, "meta", "0009_snapshot.json"));
-    const journalPath = join(before0009, "meta", "_journal.json");
-    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as { entries: unknown[] };
-    journal.entries.splice(-2);
-    writeFileSync(journalPath, JSON.stringify(journal));
+    const before0009 = migrationsBefore(join(dir, "before-0009"), "0009_dizzy_zodiak");
 
     const dbPath = join(dir, "bryce.db");
     const pre = openDb(dbPath, { migrationsFolder: before0009 });

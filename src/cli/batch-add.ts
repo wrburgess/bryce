@@ -4,6 +4,7 @@ import { loadConfig } from "../config.js";
 import { loadDotEnv } from "../env.js";
 import type { Db } from "../db/client.js";
 import { startupDb } from "../db/startup.js";
+import { asciiField } from "../domain/names.js";
 import type { MlbClient } from "../mlb/client.js";
 import { MlbClient as MlbClientImpl } from "../mlb/client.js";
 import type { HighlightlyClient } from "../highlightly/client.js";
@@ -155,20 +156,6 @@ function parseBatchFile(raw: string): { entries: BatchEntryInput[]; error: strin
     }
   }
   return { entries, error: null };
-}
-
-/**
- * Make a runtime-derived value safe for one greppable ASCII line (rules/scripting.md): strip
- * diacritics, collapse any whitespace/control run (incl. newlines that would forge extra lines) to a
- * single space, and replace any residual non-ASCII byte with '?'. (PR #84 review.)
- */
-function asciiField(value: string): string {
-  return value
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "") // strip combining accent marks (U+0300..U+036F)
-    .replace(/\s+/g, " ") // collapse whitespace/newlines -> single space
-    .replace(/[^\x20-\x7e]/g, "?") // any residual non-ASCII byte -> '?'
-    .trim();
 }
 
 /** Describe the identity an entry addressed, for a per-entry outcome line. */

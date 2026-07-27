@@ -61,7 +61,10 @@ entire point of #146. Second, by this ADR's own *what-is-the-output-for* criteri
 primary purpose is **liveness**; the Player's name is a label identifying which Player, not the
 artifact being rendered. That is structurally `players:batch-add`, not `seed`. Consequently
 `asciiField()` moves out of `src/cli/batch-add.ts` (module-private today) into a shared home rather
-than being copied.
+than being copied. **Implemented:** it now lives in `src/domain/names.ts`, beside `canonicalizeName`
+— the other end of the same identity pipeline, and the reason the fold is needed at all
+(`canonicalizeName` collapses `\s+`, which does not cover `\x1b`). Both `players:batch-add` and the
+`refresh` presenter import it from there.
 
 ## Scope boundaries
 

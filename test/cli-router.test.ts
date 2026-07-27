@@ -297,6 +297,31 @@ describe("CLI router metadata", () => {
     expect(preflight(batch, ["--person-ids", "1", "--person-ids", "2"])).toBeNull();
   });
 
+  // #146: `refresh` gained its first option. It is declared in the router's
+  // table, so BOTH entrypoints (`sk refresh` and `npm run refresh --`) validate
+  // it from one definition — and no such guard existed before, because the leaf
+  // had no options at all.
+  it("accepts --quiet/-q on refresh and refuses every malformed spelling", () => {
+    const refresh = COMMANDS.find((command) => command.path.join(" ") === "refresh")!;
+    expect(preflight(refresh, [])).toBeNull();
+    expect(preflight(refresh, ["--quiet"])).toBeNull();
+    expect(preflight(refresh, ["-q"])).toBeNull();
+    // It is a FLAG, not a value option: the `=` form must not silently pass.
+    expect(preflight(refresh, ["--quiet=1"])).toContain("does not support '=' syntax");
+    expect(preflight(refresh, ["--quiet", "--quiet"])).toContain("may not be repeated");
+    expect(preflight(refresh, ["--loud"])).toContain("unknown option '--loud'");
+    expect(preflight(refresh, ["surprise"])).toContain("unexpected argument");
+    // The same rules through the direct npm-script entry point.
+    expect(preflightDirect(["refresh"], ["--quiet"])).toBeNull();
+    expect(preflightDirect(["refresh"], ["-q"])).toBeNull();
+    expect(preflightDirect(["refresh"], ["--quiet=1"])).toContain("does not support '=' syntax");
+    // Usage and example advertise the flag, so `sk refresh --help` is not a lie.
+    expect(refresh.usage).toBe("sk refresh [--quiet|-q]");
+    expect(refresh.example).toBe("sk refresh --quiet");
+    expect(renderHelp(["refresh"])).toContain("--quiet, -q");
+    expect(renderHelp(["refresh"])).toContain("Suppress live progress; print only the terminal summary.");
+  });
+
   it("uses the router schema before direct compatibility entry-point initialization", () => {
     expect(preflightDirect(["digest"], ["-f", "--force"])).toContain("may not be repeated");
     expect(preflightDirect(["digest"], ["--window=7d"])).toBeNull();
@@ -358,6 +383,11 @@ describe("CLI router metadata", () => {
     }
   }, 60_000);
 
+  // Budget note: this spawns THIRTEEN real `tsx` processes and already allows each
+  // one 10s of its own, so a 30s test budget was inconsistent with the test's own
+  // rules — it could time out while every spawn was still inside its allowance.
+  // Under a loaded full-suite run (many vitest workers competing for CPU) tsx
+  // startup alone crosses it. Sized to the work the test actually permits.
   it("keeps every direct compatibility entry point bounded and exit-draining on default argv", () => {
     const work = mkdtempSync(join(tmpdir(), "bryce-compat-"));
     try {
@@ -380,7 +410,7 @@ describe("CLI router metadata", () => {
     } finally {
       rmSync(work, { recursive: true, force: true });
     }
-  }, 30_000);
+  }, 180_000);
 
   it("reports unknown and incomplete commands without loading a leaf", async () => {
     const output = vi.fn();
