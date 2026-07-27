@@ -60,9 +60,9 @@ longer stands alone, but it is still the *only* validator of the **backticked** 
 resolves links, and the convention's default spelling here is deliberately not a link. The two are
 complementary. One exception: the
 `**Deep doc:**` header **may forward-reference a deep doc that does not exist yet**, in bare form. That
-header is a *declaration* of where the domain's deep doc lives; `rules/frontend.md`,
-`rules/security.md`, and `rules/scripting.md` all rely on it today. A dead *link* in that same header is
-still dead, and is still rejected.
+header is a *declaration* of where the domain's deep doc lives; `rules/frontend.md` and
+`rules/security.md` rely on it today (`rules/scripting.md` did until issue #166 wrote its deep doc). A
+dead *link* in that same header is still dead, and is still rejected.
 
 A **body** pointer gets no such exemption, because it means something different: it stands in for a case
 study that was **moved** out of Tier 1 (the trim in issue #148), so a pointer at a file that does not
@@ -94,8 +94,8 @@ one applies, read from disk:
 
 | Your domain's deep doc | Remedy |
 |---|---|
-| **exists** (`backend`, `skills`, `testing`) | Move the narrative into it and leave a pointer in the bullet — **either** the backticked repo-root path **or** a promoted link written relative to the rule file, per *Promotion* above — **or** shorten the bullet. |
-| **declared but not yet written** (`frontend`, `security`, `scripting`) | **Author the deep doc first** (per *Baseline note* above), then point at it — **or** shorten the bullet. Pointing at a file that does not exist fails the rules-pointer check. |
+| **exists** (`backend`, `skills`, `testing`, `scripting`) | Move the narrative into it and leave a pointer in the bullet — **either** the backticked repo-root path **or** a promoted link written relative to the rule file, per *Promotion* above — **or** shorten the bullet. |
+| **declared but not yet written** (`frontend`, `security`) | **Author the deep doc first** (per *Baseline note* above), then point at it — **or** shorten the bullet. Pointing at a file that does not exist fails the rules-pointer check. |
 | **none by design** (`self-review`) | Shorten the bullet. |
 
 Whichever remedy you pick, **the instruction never moves behind the pointer** — `rules/skills.md`

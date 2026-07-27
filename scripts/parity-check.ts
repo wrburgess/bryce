@@ -743,9 +743,9 @@ class ParityCheck {
   // spelling inside `](…)` is a 404 that this check must still reject.
   //
   // The header exemption covers the bare form ONLY. docs/rules/README.md declares that a deep doc
-  // stays "absent until a host has a real postmortem to record", and rules/frontend.md,
-  // rules/security.md and rules/scripting.md all forward-reference one today; a dead LINK in that
-  // same header is still dead, so it is still rejected.
+  // stays "absent until a host has a real postmortem to record", and rules/frontend.md and
+  // rules/security.md forward-reference one today (rules/scripting.md did until issue #166 wrote
+  // its deep doc); a dead LINK in that same header is still dead, so it is still rejected.
   private checkRulesPointers(): void {
     if (!this.dirExists(RULES_DIR)) return;
 
