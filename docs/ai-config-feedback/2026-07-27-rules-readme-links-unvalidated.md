@@ -14,13 +14,19 @@ file you are writing in, not to the repo root"). **Its own markdown links are ch
 | Validator | Covers `docs/rules/README.md`? | Why not |
 |---|---|---|
 | `checkLinks` (dead-link resolution) | **No** | Resolves links only in the explicit `LINK_CHECKED` list (`scripts/parity-check.ts:40-53`); the file is absent from it |
-| Repo-wide ADR-number scan | **No** | `ADR_LINK_TARGET = /^(\d{4})-[^/]+\.md$/` matches a **bare sibling filename only** — any target containing `/` (`../adr/0053-….md`, `docs/adr/0053-….md`) is not matched at all, so only links written *from inside* `docs/adr/` are checked |
+| Repo-wide ADR-number scan | **Partly — and not in the way that matters** | It *does* see the link: `ADR_LINK_TARGET.exec(basename(target))` (`scripts/parity-check.ts:915`) strips the directory first, so `docs/adr/0053-….md` and `../adr/0053-….md` both match. But it only compares the **displayed number against the target's number**. It never resolves the path, so both spellings agree with `ADR 0053` and both pass |
 | `checkRulesPointers` | **No** | Scoped to `rules/*.md`, not `docs/rules/` |
 
 Demonstrated on the #160 change: writing this file's new ADR reference in the **repo-root spelling** —
 `[ADR 0053](docs/adr/0053-….md)`, the exact form the file's own *Promotion* rule rejects because it
 "names a real file yet renders as a 404" — left `npx tsx scripts/parity-check.ts` **green**. The negative
 check written to prove the gate could go red instead proved it could not.
+
+The precise shape is worth stating, because the intuitive explanation is wrong (this entry asserted it
+before an independent review corrected it): the gap is **not** that the scan cannot see traversal or
+repo-root paths. It sees them — `basename()` runs first. The gap is that **no validator resolves a link
+in this file at all**: the ADR scan checks number agreement and stops, and `checkLinks`, the only
+validator that resolves, never looks here.
 
 ### The exclusion is correct, which is the point
 
@@ -55,10 +61,12 @@ Any of these would close it; the first is the cheapest and the least clever:
 - **Fence the examples.** `checkLinks` already skips fenced code, so moving each illustrative link into a
   fence would let the file join `LINK_CHECKED` with real links checked and examples ignored. Costs the
   examples their inline rendering, and is a larger edit than it looks — the examples are woven into prose.
-- **Widen `ADR_LINK_TARGET` to traversal forms.** `[ADR NNNN](../adr/NNNN-….md)` is the spelling the
-  *Promotion* rule tells contributors to use from a sibling directory, and it is precisely the spelling
-  the scan cannot see. Matching it repo-wide would have caught the #160 case in any file, not just this
-  one. Narrower than link-checking the whole file, and it targets the exact form the docs promote.
+- **Make the ADR-number scan resolve the path it already matched.** It sees every `[ADR NNNN](…NNNN-….md)`
+  link repo-wide and checks number agreement; adding a resolution check for that one link shape would
+  have caught the #160 case in **any** file, not just this one, without link-checking whole documents.
+  Narrower than the fencing pass, and it targets exactly the form the *Promotion* rule tells contributors
+  to write. The caveat is this file again: its illustrative `[ADR NNNN](MMMM-...md)` example would need
+  excluding, which is an argument for fencing the examples first.
 
 This belongs upstream rather than in an overlay: `scripts/parity-check.ts`, `LINK_CHECKED`, and
 `docs/rules/README.md` are all vendored baseline files, and any Host App vendoring them inherits the same

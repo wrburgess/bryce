@@ -45,10 +45,15 @@ seven Tier-1 files. Every pair was checked against the bar, not merely counted:
 | `rules/security.md` | 5 | **3** | The Anti-Pattern carries the **threat model** the Pattern has no room for — who repoints a mutable tag, and what `"   "` or `["", nil]` does to a presence check |
 | `rules/testing.md` | 8 | **4** | Includes a **same-provenance pair** (issue #25) — structurally identical to the one #160 proposed to remove |
 | `rules/scripting.md` | 3 | **3** | Each Anti-Pattern is a specific failure mode of a general Pattern, carrying host opt-ins and ADR references |
+| `rules/self-review.md` | 5 | **4** | Quality gate ↔ never declare done on a red check; worktree base ↔ never diff against a worktree's local `main`; planned-item tests ↔ never ship minimal assertions; cite what states the claim ↔ never cite a source that doesn't support it |
 | `rules/backend.md` | 8 | **1** | The `#54 / PR #62` pair |
-| `rules/self-review.md` | — | 0 | The checklist is the whole rule |
 
-Two findings decided it:
+**21 pairs across seven files. `rules/backend.md` mirrors one invariant in eight; every other file
+mirrors at least three.** Five of the seven mirror a *majority* of their Patterns
+(`scripting.md` 3/3, `self-review.md` 4/5, `frontend.md` 3/4, `skills.md` 3/4, `security.md` 3/5);
+`testing.md` mirrors exactly half (4/8); `backend.md` is alone at 1/8.
+
+Three findings decided it:
 
 - **Consolidating `rules/backend.md`'s single pair would make it the one file that does not follow the
   convention** — the opposite of the consistency the change was reaching for.
@@ -57,10 +62,29 @@ Two findings decided it:
   a default-suite test, or reach a live service." Consolidating one and not the other is exactly the
   contradiction #160's own step 3 forbids; consolidating both is a Rules-Layer-wide rewrite that removes
   roughly fifteen Anti-Pattern bullets and hollows out a section ADR 0004 makes required.
+- **The disputed lesson's own provenance is already mirrored in a second file.**
+  `rules/self-review.md` pairs "In a git worktree, base your diff and any reviewer-summon on
+  `origin/main`" with "Never diff, self-review, or summon a reviewer against a git worktree's local
+  `main`" — and the Anti-Pattern carries `(Provenance: issue #54 / PR #62)`, **the same issue and PR as
+  the `rules/backend.md` pair #160 asked about.** The same piece of work produced a mirrored pair in two
+  different rule files. Whatever else the mirroring is, it is not a one-off accident in `backend.md`.
+
+**This last finding was missed on the first pass and caught by the independent Reviewer**, which is
+worth recording because the error was structural rather than careless. `docs/rules/README.md`'s trigger
+table lists `rules/self-review.md`'s deep doc as *"(none — the checklist is the whole rule)"*, and that
+phrase was carried over as though it meant the file had no pairs to count. It has `## Patterns` and
+`## Anti-Patterns` sections like every other Tier-1 file, and four pairs — the second-highest ratio in
+the tree.
+
+The first draft's own measurement table contradicted it: the verbatim-overlap ranking below places
+`rules/self-review.md` **first**, at 39 characters, and the text it ranks
+(``on `origin/main` (after `git fetch`)``) is precisely the pair the audit table had scored as zero. Two
+tables in one document disagreeing is a harder failure than a debatable judgment call, and it survived
+authoring, a self-review, and an adversarial pass before an independent model caught it.
 
 **The count is a judgment under the stated definition, not a mechanical tally.** A pair is counted when
 one invariant appears in both moods; reasonable readers could score one or two differently, and the
-argument does not rest on the exact number — it rests on the shape being the norm in five of six files
+argument does not rest on the exact number — it rests on the shape being the norm in six of seven files
 while `rules/backend.md` carries one.
 
 **The bar is not a rubber stamp, and the thinnest pair is worth naming rather than leaving for a

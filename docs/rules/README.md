@@ -112,8 +112,9 @@ nothing asked whether its narrative belonged in Tier 2.)*
 ## Convention: an invariant may be stated in both moods, keyed on the failure mode
 
 A Tier-1 invariant **may** appear in both `## Patterns` and `## Anti-Patterns`. The mirrored pair is the
-Lean Core's shape, not accretion — five of the six domain rule files mirror a majority of their Patterns,
-and [ADR 0004](../adr/0004-two-tier-rules-layer-progressive-context.md) makes the imperative-negative
+Lean Core's shape, not accretion — 21 such pairs across the seven Tier-1 files, five of which mirror a
+*majority* of their Patterns, and [ADR 0004](../adr/0004-two-tier-rules-layer-progressive-context.md)
+makes the imperative-negative
 form a *required* section precisely because it steers effectively where the positive framing does not
 ([ADR 0053](../adr/0053-mirrored-pattern-anti-pattern-pairs-are-the-tier-1-convention.md)).
 
