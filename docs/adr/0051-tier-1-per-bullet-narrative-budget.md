@@ -59,9 +59,20 @@ Calibrated against the tree at the time it landed: 90 Tier-1 bullets, of which *
 any length, so the number never asks more of a bullet that has already been trimmed. It is the length
 above which an un-pointered bullet is worth a second look.
 
-Five of the eight grandfathered bullets are `rules/backend.md` bullets that #151 independently targets —
+Five of the eight grandfathered bullets were `rules/backend.md` bullets that #151 independently targets —
 the check rediscovered that list from shape alone, which is the evidence that it tracks the real
 invariant rather than a proxy.
+
+**The ratchet was exercised for real before this ever merged.** While the guard was in review, #151
+landed on `main` and trimmed exactly those five bullets. Merging `main` in turned parity **red**, with
+five "no longer needed — remove the entry" errors, and stayed red until they were deleted. In the same
+window two *other* bullets grew past the limit on `main` — `rules/scripting.md` (1,078 chars) and
+`rules/skills.md` (753, up from 390) — and were grandfathered in turn. The delivered baseline is
+therefore **five**, not eight, with `rules/backend.md` cleared entirely.
+
+That churn is worth stating plainly, because it is the argument: in the days it took to review a guard
+against Tier-1 accretion, Tier-1 accreted twice more and was trimmed once. The premise of issue #152
+restated itself three times during the fix.
 
 **The measurement is wrap-invariant, and the marker is matched as CommonMark defines it.** Both of
 these were wrong in the first implementation, and both were false greens of the worst kind — reachable

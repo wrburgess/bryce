@@ -439,19 +439,16 @@ describe("issue #152 - the shipped tables are pinned", () => {
   // Hardcoded, NOT derived from the constant: an assertion built from the thing it checks shrinks
   // silently along with it (test/tooling/coverage-floors.test.ts makes the same choice).
   const EXPECTED_ALLOWLIST: Record<string, string[]> = {
-    "rules/backend.md": [
-      "Anchor a freshness or completeness claim on when a job _started_, not when it _finished_.",
-      "A freshness/completeness verdict must not sit over data a consumer silently drops because a filter's own prerequisite was missing or unusable.",
-      "Never swap a live data file into place by moving the old one aside and then renaming the new one in",
-      "Never assume a framework's central error handler catches every route's thrown error",
-      "Never embed a raw control byte (most often a literal NUL) as a delimiter or sentinel in a text source file",
-    ],
     "rules/security.md": [
       "Never reuse a *coercing* validator at a typed-JSON boundary",
     ],
     "rules/scripting.md": [
       "Never emit non-ASCII bytes from a bundled script's stdout/stderr",
       "Never widen a guard's matching rule to clear a false alarm without asking which way the new failure points",
+      "Never ship a guard without first running its own governing convention through it",
+    ],
+    "rules/skills.md": [
+      "Never trim length by moving a load-bearing instruction behind a link",
     ],
   };
 
@@ -463,9 +460,13 @@ describe("issue #152 - the shipped tables are pinned", () => {
     expect([...(NARRATIVE_ALLOWLIST[file] ?? [])].sort()).toEqual([...expected].sort());
   });
 
-  it("grandfathers exactly eight bullets - five of them the rules/backend.md ones issue #151 targets", () => {
-    expect(Object.values(NARRATIVE_ALLOWLIST).flatMap((v) => [...v])).toHaveLength(8);
-    expect(NARRATIVE_ALLOWLIST["rules/backend.md"]).toHaveLength(5);
+  // The baseline was 8, five of them rules/backend.md bullets. Issue #151 trimmed exactly those five
+  // on main while this guard was in review, the "no longer needed" rule turned parity red until they
+  // were deleted, and two other bullets grew past the limit in the same window. Pinning the count --
+  // and pinning that rules/backend.md is now absent entirely -- makes the next movement visible.
+  it("grandfathers exactly five bullets, with rules/backend.md fully cleared by issue #151", () => {
+    expect(Object.values(NARRATIVE_ALLOWLIST).flatMap((v) => [...v])).toHaveLength(5);
+    expect(NARRATIVE_ALLOWLIST["rules/backend.md"]).toBeUndefined();
   });
 
   // A new Tier-1 rule file with no mapping would be checked against `undefined` and could never be

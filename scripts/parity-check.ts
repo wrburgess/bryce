@@ -18,7 +18,7 @@
 //                              (the region between the markers must equal AGENTS.md byte-for-byte)
 
 import { lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { basename, join, dirname, resolve as resolvePath } from "node:path";
+import { basename, join, dirname, sep, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { argv } from "node:process";
 import { fromFile as protectedBranchesFromFile } from "./protected-branches.js";
@@ -79,8 +79,10 @@ const DEEP_DOC_LABEL = "**Deep doc:**";
 const DEEP_DOC_TOKEN = /docs\/rules\/[a-z0-9-]+-postmortems\.md(?:#[A-Za-z0-9._-]+)?/g;
 // A link opener may be followed by a relative prefix before the token — `](../docs/rules/x.md)` is
 // the spelling a contributor writing from `rules/` would actually reach for, so the link form must
-// be recognized THROUGH `./`, `../`, and `/` rather than mistaken for an unresolvable path.
-const DEEP_DOC_LINKED = /\]\(\s*(?:\.{0,2}\/)*$|\]:\s*(?:\.{0,2}\/)*$/;
+// be recognized THROUGH `./`, `../`, and `/` rather than mistaken for an unresolvable path. The
+// prefix is CAPTURED, not just matched: a link's href is `prefix + token`, and the href is what has
+// to resolve from the referring file (issue #154).
+const DEEP_DOC_LINKED = /\](?:\(|:)\s*((?:\.{0,2}\/)*)$/;
 const RULES_DEEP_DOC_README = "docs/rules/README.md";
 
 // --- Tier-1 accretion guard (issue #152, ADR 0051) -------------------------
@@ -146,21 +148,24 @@ export const RULE_DEEP_DOC: Record<string, string | null> = {
 // other edit; ADDING one is a deliberate, reviewable act. An entry that is stale, ambiguous, or no
 // longer needed is itself an error, so the backlog cannot quietly stop shrinking -- the same
 // fail-closed discipline scripts/coverage-floors.ts applies to a floored path missing from the report.
-// Five of the eight are rules/backend.md bullets that issue #151 exists to trim.
+//
+// The ratchet has already been exercised once, before this guard even merged. The baseline was eight
+// bullets, five of them in rules/backend.md; issue #151 then trimmed exactly those five on main, and
+// this check turned RED demanding their removal until they were deleted here -- which is the mechanism
+// working, not a merge accident. In the same window two OTHER bullets grew past the limit on main
+// (rules/scripting.md and rules/skills.md), so the list is now five. That churn, in the days it took to
+// review this guard, is the clearest possible restatement of why issue #152 was filed.
 export const NARRATIVE_ALLOWLIST: Record<string, readonly string[]> = {
-  "rules/backend.md": [
-    "Anchor a freshness or completeness claim on when a job _started_, not when it _finished_.",
-    "A freshness/completeness verdict must not sit over data a consumer silently drops because a filter's own prerequisite was missing or unusable.",
-    "Never swap a live data file into place by moving the old one aside and then renaming the new one in",
-    "Never assume a framework's central error handler catches every route's thrown error",
-    "Never embed a raw control byte (most often a literal NUL) as a delimiter or sentinel in a text source file",
-  ],
   "rules/security.md": [
     "Never reuse a *coercing* validator at a typed-JSON boundary",
   ],
   "rules/scripting.md": [
     "Never emit non-ASCII bytes from a bundled script's stdout/stderr",
     "Never widen a guard's matching rule to clear a false alarm without asking which way the new failure points",
+    "Never ship a guard without first running its own governing convention through it",
+  ],
+  "rules/skills.md": [
+    "Never trim length by moving a load-bearing instruction behind a link",
   ],
 };
 
@@ -267,6 +272,30 @@ class ParityCheck {
   private exists(rel: string): boolean {
     try {
       return statSync(this.path(rel)).isFile();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Resolve `href` the way Markdown does — relative to the DIRECTORY OF THE REFERRING FILE, not the
+   * repo root — and report whether it lands on a real file inside the repo. `exists()` above answers
+   * the other question (does this repo-root path exist), and the two are deliberately distinct: a
+   * backticked path is prose naming a repo path, a link is a link (issue #154).
+   *
+   * An href that escapes the repo (a root-absolute `/docs/...`, or a `../../` that climbs past the
+   * root) is never a resolvable intra-repo link, so it is rejected WITHOUT consulting the disk. That
+   * is a correctness rule first — such a link is broken on the lifecycle host however the runner's
+   * filesystem happens to look — and it is what keeps the verdict from depending on files that
+   * happen to exist outside the checkout (rules/testing.md: an environment-dependent assertion is
+   * green on one machine and red on another).
+   */
+  private resolvesFrom(rel: string, href: string): boolean {
+    const root = resolvePath(this.root);
+    const resolved = resolvePath(dirname(this.path(rel)), href);
+    if (resolved !== root && !resolved.startsWith(root + sep)) return false;
+    try {
+      return statSync(resolved).isFile();
     } catch {
       return false;
     }
@@ -439,16 +468,27 @@ class ParityCheck {
     }
   }
 
-  // A Tier-1 bullet that points at a Tier-2 deep doc stands in for content that was MOVED there
-  // (issue #148), so the pointer must resolve — a broken one silently loses the case study, and
-  // nothing else would notice: these paths are deliberately backticked rather than linked, so
-  // checkLinks() never sees them.
+  // The invariant (issue #154, refining #148): EVERY Tier-2 deep-doc path named in a Tier-1 rule
+  // file must point at a file that is really there — a BARE path at the repo root (this.exists), a
+  // LINK at wherever the link actually leads (this.resolvesFrom). Two bases, one requirement; the
+  // paragraph below says why they differ. The single exception is a BARE-PATH `**Deep doc:**`
+  // header declaration, which may forward-reference a deep doc that does not exist yet.
   //
-  // The `**Deep doc:**` header is exempt from the existence check on purpose: docs/rules/README.md
-  // declares that a deep doc stays "absent until a host has a real postmortem to record", and
-  // rules/frontend.md, rules/security.md and rules/scripting.md all forward-reference one today.
-  // The link-form rule below still applies to it — a markdown link to a not-yet-existing file is
-  // exactly what reddens the dead-link validator, which is why that convention exists.
+  // Why it matters here and nowhere else: `rules/*.md` is deliberately absent from LINK_CHECKED, so
+  // checkLinks() never sees these files and this check is the ONLY validator they get. A Tier-1
+  // bullet pointing at a deep doc stands in for content that was MOVED there, so a broken pointer
+  // silently loses the case study with nothing else to notice.
+  //
+  // The two reference forms resolve against different bases, because Markdown does: a BACKTICKED
+  // path is prose naming a REPO-ROOT path (this.exists), while a LINK is a link and resolves
+  // relative to the REFERRING FILE (this.resolvesFrom) — the same base checkLinks() uses. So a
+  // promoted link out of `rules/` reads `[…](../docs/rules/x-postmortems.md)`, and the repo-root
+  // spelling inside `](…)` is a 404 that this check must still reject.
+  //
+  // The header exemption covers the bare form ONLY. docs/rules/README.md declares that a deep doc
+  // stays "absent until a host has a real postmortem to record", and rules/frontend.md,
+  // rules/security.md and rules/scripting.md all forward-reference one today; a dead LINK in that
+  // same header is still dead, so it is still rejected.
   private checkRulesPointers(): void {
     if (!this.dirExists(RULES_DIR)) return;
 
@@ -469,24 +509,34 @@ class ParityCheck {
           const before = line.slice(0, match.index);
           const target = (match[0] as string).split("#")[0] as string;
 
-          // The link-form rule is checked FIRST and independently of the path's shape: a relative
+          // The link form is recognized FIRST and independently of the path's shape: a relative
           // link (`](../docs/rules/x.md)`) is still a link, and skipping it as "unresolvable" would
           // let the likeliest real spelling through.
-          if (DEEP_DOC_LINKED.test(before)) {
-            this.err(
-              `Rules pointer ${rel}: \`${target}\` is written as a markdown link; a deep-doc path must be a ` +
-              `backticked path (${RULES_DEEP_DOC_README}) so it cannot redden the dead-link check before its target lands`,
-            );
+          const link = DEEP_DOC_LINKED.exec(before);
+          if (link) {
+            const href = (link[1] ?? "") + target;
+            if (this.resolvesFrom(rel, href)) continue;   // a promoted link that works — the convention allows it
+
+            // Two different mistakes, two different fixes: the target isn't written yet (keep it
+            // backticked), or it is written but the link can't reach it from here (fix the path).
+            this.err(this.exists(target)
+              ? `Rules pointer ${rel}: markdown link \`${href}\` does not resolve from ${dirname(rel)}/; ` +
+                `a promoted link is relative to the referring file`
+              : `Rules pointer ${rel}: \`${target}\` is written as a markdown link; a deep-doc path must be a ` +
+                `backticked path (${RULES_DEEP_DOC_README}) so it cannot redden the dead-link check before its target lands`);
             continue;
           }
 
-          // Not a pointer this check can resolve: an absolute path, a `../` traversal, or a URL that
-          // merely contains the path.
+          // Not a bare pointer this check can resolve: an absolute path, a `../` traversal, or a URL
+          // that merely contains the path.
           if (/[./]$|:\/\/\S*$/.test(before)) continue;
 
           if (isHeader) continue;   // a declaration, not a stand-in for moved content
           if (!this.exists(target)) {
-            this.err(`Rules pointer ${rel}: case-study pointer \`${target}\` does not exist`);
+            this.err(
+              `Rules pointer ${rel}: case-study pointer \`${target}\` does not exist; a deep doc that is not ` +
+              `written yet is forward-referenced from the \`${DEEP_DOC_LABEL}\` header, not from a body bullet`,
+            );
           }
         }
       }
