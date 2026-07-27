@@ -2,6 +2,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, write
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { linkCheckedFiles, markdownLinks } from "../../scripts/parity-check.js";
 
 // Shared fixture copier for the parity self-tests (issue #139). Both tooling tests hand
 // `runParityCheck` a real tree in an OS tmpdir; this module owns HOW that tree is built so there is
@@ -36,27 +37,6 @@ export const BUNDLE_ENTRIES: readonly string[] = [
   "scripts",
   "skills",
 ];
-
-// Mirrors LINK_CHECKED in scripts/parity-check.ts — the files whose relative links parity resolves.
-const LINK_CHECKED = [
-  "AGENTS.md",
-  "CLAUDE.md",
-  "GEMINI.md",
-  "PROJECT.md",
-  ".github/copilot-instructions.md",
-  "README.md",
-  "docs/standards/development-lifecycle.md",
-  "docs/guides/usage.md",
-  "docs/guides/branch-protection.md",
-  "docs/cli/README.md",
-  "docs/api/README.md",
-  "docs/mcp/README.md",
-];
-
-// One capture group: the link TARGET. (scripts/parity-check.ts also captures the label, so its
-// target is group 2 there and group 1 here — reading group 2 off this pattern yields undefined and
-// silently heals nothing.)
-const MARKDOWN_LINK = /\[[^\]\r\n]*\]\(([^)\r\n]+)\)/g;
 
 /**
  * Reject agent worktree runtime state rooted at `sourceRoot`, and nothing else. Comparing the
@@ -101,16 +81,24 @@ export function copyBundle(
  * Stub creation is CONTAINED to `root`: the target comes from file content, so a relative link that
  * climbs out (`../../elsewhere.md`) would otherwise have this helper write into the real filesystem
  * outside the throwaway copy. An escaping link is skipped, not healed.
+ *
+ * The file list and the link EXTRACTION both come from scripts/parity-check.ts (issue #159) rather than
+ * being mirrored here, so the healer and the checker cannot drift apart on either. Sharing
+ * `markdownLinks` is what stops it stubbing out the pseudo-links in code spans — with a regex of its
+ * own, healing the widened scope writes `rules/url`, `docs/rules/path`, a literal
+ * `docs/rules/MMMM-...md`, and two nonsense nested directories, all sourced from prose that TEACHES
+ * markdown. That pollution is invisible to every assertion about the checker's output, because the
+ * checker ignores those either way — so it has its own test in parity-links.test.ts.
  */
 export function healDeadLinks(root: string): void {
   const contained = resolve(root);
 
-  for (const rel of LINK_CHECKED) {
+  for (const rel of linkCheckedFiles(root)) {
     const file = join(root, rel);
     if (!existsSync(file)) continue;
 
-    for (const match of readFileSync(file, "utf-8").matchAll(MARKDOWN_LINK)) {
-      const raw = (match[1] ?? "").trim();
+    for (const { destination } of markdownLinks(readFileSync(file, "utf-8"))) {
+      const raw = destination.trim();
       if (raw === "" || /^(?:https?:|mailto:|#)/.test(raw)) continue;
 
       const target = raw.split("#")[0] ?? "";

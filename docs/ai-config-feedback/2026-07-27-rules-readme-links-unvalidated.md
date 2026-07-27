@@ -2,7 +2,27 @@
 
 ## F16 — `docs/rules/README.md` is outside every link validator, and the reason is unstated
 
-**Disposition: `upstream` · Status: recorded**
+**Disposition: `upstream` · Status: resolved in-repo by [#159](https://github.com/wrburgess/bryce/issues/159) / PR #162 — still to be filed upstream**
+
+> **Resolution note (added by #159).** This entry deferred the fix as "neither well-scoped nor low-risk…
+> needs either a fencing pass over the prose or a change to what the validator considers a link." Issue
+> #159 — filed independently, from the same root cause reached via `rules/*.md` — took the second path.
+>
+> `checkLinks` now finds links by PARSING with `commonmark` rather than matching a regex
+> ([ADR 0054](../adr/0054-code-spans-are-not-links.md)), so every illustrative `[text](path)` in this file
+> is prose again — it is not a link node — and the file joined the checked set with **no prose edit at
+> all**, so the cost this entry priced into the fencing option is not paid. The five failures quoted
+> below are exactly the five that stop being links. The scope was derived rather than listed, so the
+> skill bodies and command shims came with it.
+>
+> That makes this entry's third suggestion — resolve the path in the ADR-number scan — unnecessary as a
+> narrower substitute; that scan is parsed too, and gained reference-link and percent-encoded coverage
+> in the process.
+>
+> The one thing #159 did **not** do is this entry's first suggestion, and it is worth keeping: the
+> *reason* the naive `LINK_CHECKED` addition fails is now encoded in a validator instead of stated in
+> prose. A contributor still learns it only by reading ADR 0054. See F17 in
+> [`2026-07-27-link-check-scope-and-code-spans.md`](2026-07-27-link-check-scope-and-code-spans.md).
 
 [`docs/rules/README.md`](../rules/README.md) is the repo's authority on how to write a path reference —
 *Convention: reference a not-yet-existing path as a backticked path, never a markdown link*, and the
