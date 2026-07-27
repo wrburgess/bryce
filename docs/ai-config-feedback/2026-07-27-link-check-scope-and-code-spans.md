@@ -75,7 +75,24 @@ matching rule without asking which way the new failure points"* and *"never buil
 shape the current files happen to have"* — were the load-bearing constraints throughout, and every round
 that ignored them produced a defect. The baseline's own rules did the work they were written to do.
 
-**Scope deliberately left behind:** `docs/adr/*.md` is still unchecked. It carries two genuinely dead
-links whose repair means editing accepted ADRs — a records decision, not a validator one. Any host will
-face the same question the moment it widens the scope, so the *reasoning* is worth upstreaming even
-though the *exclusion* is host data.
+**Scope deliberately left behind — since closed (issue #164, 2026-07-27).** `docs/adr/*.md` was left
+unchecked here because it carried two genuinely dead links whose repair means editing accepted ADRs — a
+records decision, not a validator one. It has since been folded into the same derivation, so the whole
+markdown surface is now covered.
+
+The upstreamable part is the **rule** that unblocked it, not the exclusion (which was always host data).
+A dead link in an accepted ADR splits into two cases that must be handled differently: when the target's
+**identity survived** (a rename, a typo) the link is *repaired*, and when the target **ceased to exist**
+it is *de-linked to backticked prose with a dated annotation* naming what replaced it — never silently
+repointed at a successor, which would make a dated decision assert something untrue on its date. Bryce
+records this as [ADR 0057](../adr/0057-adr-links-repair-identity-annotate-loss.md). Any host that widens
+the scope meets the identical fork, and the rule is what turns it from a deferred issue into a lookup.
+
+**Second-order finding worth upstreaming with it:** the baseline's derivation filtered directory entries
+by **name** (`.endsWith(".md")`) with no `isFile()` guard. A *directory* named `nested.md` therefore
+entered the link scope, where the checker merely skips it — but the shared test fixture's
+`healDeadLinks()` guards with `existsSync` (true for a directory) and then `readFileSync`s it, which is
+`EISDIR` and takes down every bundle-copy test. The same read also blanket-caught every `readdirSync`
+error, so an unreadable directory silently produced an empty scope — the gate printing OK while checking
+nothing, which is the very failure mode `rules/scripting.md` names. Both are one shared helper's worth of
+fix (`ENOENT` swallowed, everything else rethrown) and both are baseline defects, not host ones.

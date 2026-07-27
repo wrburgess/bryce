@@ -392,6 +392,60 @@ function subdirectories(absolute: string): string[] {
 }
 
 /**
+ * A repository read that failed for a reason other than "absent" (issue #164). Typed so `main` can
+ * report it in this script's own failure grammar while letting a genuine internal bug keep its stack
+ * trace — catching both alike would relabel the bug as a read failure and name the wrong cause.
+ */
+export class RepositoryReadError extends Error {
+  constructor(readonly path: string, readonly code: string | undefined, reason: string) {
+    super(`cannot read ${path} - ${reason}`);
+    this.name = "RepositoryReadError";
+  }
+}
+
+/**
+ * Absent is a fact (return `absent`); any other read failure is a malformed bundle (raise it, typed).
+ *
+ * The split is the whole point, and it is not a blanket catch: a bundle legitimately ships a subset of
+ * the tree, but an unreadable path (a permission error, an `ENOTDIR` from a path that is a file, an
+ * `ELOOP` from a symlink cycle) answered with "nothing here" silently empties whatever scope was being
+ * derived — `rules/scripting.md`'s false green, where the gate reports OK while checking nothing.
+ */
+function readOrRaise<T>(path: string, absent: T, read: () => T): T {
+  try {
+    return read();
+  } catch (error) {
+    const failure = error as NodeJS.ErrnoException;
+    if (failure.code === "ENOENT") return absent;
+    throw new RepositoryReadError(path, failure.code, failure.message);
+  }
+}
+
+/**
+ * Immediate `*.md` REGULAR FILES of `absolute`, sorted, with both reads going through `readOrRaise`
+ * above (issue #164).
+ *
+ * `isFile()` is not tidiness: a DIRECTORY named `nested.md` passes a name-only filter, and this list is
+ * consumed by test/tooling/parity-fixture.ts `healDeadLinks()`, which guards with `existsSync` (true for a
+ * directory) and then `readFileSync`s it — `EISDIR`, taking the fixture down. `checkLinks` itself only
+ * skips such an entry, so the name-only bug would have been invisible from the checker's own output.
+ */
+function markdownFilesIn(absolute: string): string[] {
+  const children = readOrRaise(absolute, [] as string[], () => readdirSync(absolute));
+
+  return children
+    .sort()
+    .filter((child) => {
+      if (!child.endsWith(".md")) return false;
+      // The same rule one level down (issue #164 review, Low): a child that vanished between the read
+      // and the stat is absent, but an unreadable one is not — dropping it silently would re-open, per
+      // file, exactly the false green the directory-level rule closes.
+      const path = join(absolute, child);
+      return readOrRaise(path, false, () => statSync(path).isFile());
+    });
+}
+
+/**
  * The files whose markdown links `checkLinks` resolves (issue #159).
  *
  * DERIVED, not hand-kept, for everything below the authored seed: a tenth Skill or a new command shim is
@@ -399,10 +453,15 @@ function subdirectories(absolute: string): string[] {
  * hardcoded paths this replaced — is how `rules/*.md` went unchecked for its entire life while carrying
  * links the whole time.
  *
- * `docs/adr/*.md` is deliberately absent: it carries two dead links whose repair means editing accepted
- * ADRs, which is a records decision rather than a validator one. Tracked as a follow-up, not silently
- * dropped. A path listed here but absent from disk is skipped by the caller, so the derivation is safe
- * against a bundle that ships a subset.
+ * `docs/adr/*.md` joined that derivation in issue #164, closing the last unchecked markdown surface: a
+ * directory of accepted decisions that cite each other constantly, with nothing resolving those
+ * citations. Two were dead. Repairing them was a records question, not a validator one, and its answer is
+ * [ADR 0057](../docs/adr/0057-adr-links-repair-identity-annotate-loss.md) — repair a link whose target
+ * kept its identity, de-link and annotate one whose target ceased to exist. The standing cost is stated
+ * there: renaming a file an ADR cites now reddens this check, which is the point.
+ *
+ * A path listed here but absent from disk is skipped by the caller, so the derivation is safe against a
+ * bundle that ships a subset.
  */
 export function linkCheckedFiles(root: string): string[] {
   const seen = new Set<string>();
@@ -416,16 +475,8 @@ export function linkCheckedFiles(root: string): string[] {
   for (const rel of LINK_CHECKED) add(rel);
   for (const rel of REQUIRED_RULES) add(rel);
   for (const name of subdirectories(join(root, SKILLS_DIR))) add(`${SKILLS_DIR}/${name}/SKILL.md`);
-
-  let shims: string[] = [];
-  try {
-    shims = readdirSync(join(root, CLAUDE_COMMANDS_DIR)).sort();
-  } catch {
-    shims = [];
-  }
-  for (const name of shims) {
-    if (name.endsWith(".md")) add(`${CLAUDE_COMMANDS_DIR}/${name}`);
-  }
+  for (const name of markdownFilesIn(join(root, CLAUDE_COMMANDS_DIR))) add(`${CLAUDE_COMMANDS_DIR}/${name}`);
+  for (const name of markdownFilesIn(join(root, ADR_DIR))) add(`${ADR_DIR}/${name}`);
 
   return out;
 }
@@ -1238,7 +1289,13 @@ export function formatParityResult(result: ParityResult): string {
   );
 }
 
-export function main(args: string[]): number {
+/**
+ * `run` is an injection seam for the self-test only — the CLI never passes it. It exists so the
+ * discrimination below (a read failure is reported; anything else keeps its stack trace) can be proven
+ * by a test rather than asserted in a comment: no tree in this repository throws a NON-read error from
+ * `runParityCheck` on demand, since every other read is guarded by an existence check.
+ */
+export function main(args: string[], run: (root: string) => ParityResult = runParityCheck): number {
   let root = ".";
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -1258,7 +1315,24 @@ export function main(args: string[]): number {
       return 2;
     }
   }
-  const result = runParityCheck(root);
+  // A read failure that is NOT "absent" reaches here as a throw (see `markdownFilesIn`), and a stack
+  // trace is not the greppable, deterministic output a Host App or CI asserts on (rules/scripting.md).
+  // Report it in this script's own failure grammar and keep the exit non-zero: the point of raising was
+  // to be loud, not to be unreadable.
+  //
+  // Only `RepositoryReadError` is handled, deliberately. Catching every throw would relabel a genuine
+  // internal bug — a TypeError, a parser edge case — as a repository-read failure and discard the stack
+  // trace pointing at it, which is a FALSE DIAGNOSIS: worse than a crash, because the log now names the
+  // wrong cause. An unrecognized error keeps its trace and crashes (issue #164 review, Medium).
+  let result: ParityResult;
+  try {
+    result = run(root);
+  } catch (error) {
+    if (!(error instanceof RepositoryReadError)) throw error;
+    process.stderr.write(`parity_check: FAILED - ${error.message}\n`);
+    return 1;
+  }
+
   process.stdout.write(formatParityResult(result));
   return result.status;
 }
