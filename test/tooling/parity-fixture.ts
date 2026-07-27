@@ -133,6 +133,10 @@ export function healDeadLinks(root: string): void {
       // genuinely separate and declining to stub into it merely reports the dead link. Folding
       // `resolveInsideRoot` instead would loosen a guard whose callers ask the permissive question --
       // exactly what `rules/scripting.md` forbids. ADR_DIR is fixed ASCII lowercase, so no locale care.
+      // Like `resolveInsideRoot`, this is string arithmetic: a symlink inside the copy pointing back at
+      // docs/adr/ would resolve outside the literal prefix and slip both guards. Not reachable today --
+      // nothing under docs/ is a symlink and `copyBundle`'s `cpSync` manufactures none -- so the
+      // assumption is recorded rather than paid for with a `realpath` on every href.
       const resolvedKey = resolved.toLowerCase();
       const adrKey = adrDir.toLowerCase();
       if (resolvedKey === adrKey || resolvedKey.startsWith(adrKey + sep)) continue;
