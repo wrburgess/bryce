@@ -175,19 +175,34 @@ const backupListSchema = z
         message: "list name must not contain a control character",
       });
     }
-    // Restore writes `digest_to` STRAIGHT to the row without passing through
-    // `configureList`, so a rule enforced only there is one a supported restore
-    // walks around: a payload carrying `digestTo: "-"` would land a recipient
-    // that renders identically to NULL on every surface (Reviewer P2, delta 2).
-    // The predicate is imported, not restated, so the two doors cannot drift on
-    // what a valid recipient is.
-    if (row.digestTo !== null) {
-      const problem = digestRecipientProblem(row.digestTo);
-      if (problem !== null) {
-        ctx.addIssue({ code: "custom", path: ["digestTo"], message: `digestTo must be ${problem}` });
-      }
-    }
-  });
+  })
+  /**
+   * Restore writes `digest_to` STRAIGHT to the row without passing through
+   * `configureList`, so a rule enforced only there is one a supported restore
+   * walks around: a payload carrying `digestTo: "-"` would land a recipient that
+   * renders identically to NULL on every surface (Reviewer P2, delta 2).
+   *
+   * NORMALIZED, never rejected (Reviewer P1, delta 3). This rule is newer than
+   * the v5 format, so refusing the payload would apply a write-time rule
+   * retroactively and make an already-written backup **unrestorable** — stranding
+   * the one artifact that exists to be the recovery path, on a value the product
+   * itself could have stored. A `digestTo` this predicate refuses was never a
+   * deliverable address and already displayed as unset everywhere, so mapping it
+   * to `null` changes what the row *means* not at all, while keeping the
+   * invariant true in the database.
+   *
+   * The asymmetry with `configureList`, which still THROWS, is deliberate and is
+   * the whole point: an operator typing a bad value now should be told so; a
+   * restore of an artifact written long ago should not be blocked by it.
+   *
+   * The predicate is imported, not restated, so the two doors cannot drift on
+   * what a valid recipient is.
+   */
+  .transform((row) =>
+    row.digestTo !== null && digestRecipientProblem(row.digestTo) !== null
+      ? { ...row, digestTo: null }
+      : row,
+  );
 
 /**
  * A membership in a v4 backup: a list plus exactly one current natural identity

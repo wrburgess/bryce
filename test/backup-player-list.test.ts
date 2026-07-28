@@ -917,21 +917,28 @@ describe("lane configuration in the backup (v5, #190)", () => {
     opened.close();
   });
 
-  // Reviewer P2, delta 2. `restorePlayerListBackup` writes `digest_to` straight
-  // to the row without passing through `configureList`, so a rule enforced only
-  // there is one a supported restore walks around: the payload below would have
-  // landed a recipient that renders exactly like NULL on every surface. Rejected
-  // at PARSE time, before anything is written — the same boundary the blank and
-  // control-character rules already sit on.
+  // Reviewer P2 (delta 2) then P1 (delta 3), and the pair is the lesson.
+  //
+  // `restorePlayerListBackup` writes `digest_to` straight to the row without
+  // passing through `configureList`, so a rule enforced only there is one a
+  // supported restore walks around. But REJECTING the payload to close that gap
+  // applies a rule newer than the v5 format retroactively, and turns an
+  // already-written backup into an unrestorable one — stranding the artifact
+  // that exists to BE the recovery path.
+  //
+  // So it normalizes: an unusable recipient becomes null, the restore succeeds,
+  // and the invariant still holds in the database. `configureList` still throws
+  // for the same value, and that asymmetry is deliberate — an operator typing it
+  // now should be told; a restore of something written long ago should not be
+  // blocked by it.
   //
   // The control-character case is written as a backslash-u escape, never as a
-  // raw byte. A raw control byte in a source file makes git classify the whole
-  // file as binary, which hides its diff from every reviewer (rules/backend.md)
-  // — and this exact case
-  // already fooled one run here: a stray raw BEL made a *valid* recipient throw
-  // for the control-character rule, so the assertion passed while proving
-  // something other than what its name claimed.
-  it("rejects a backup whose digestTo is blank, control-bearing, or the reserved sentinel", async () => {
+  // raw byte: a raw control byte makes git classify the whole file as binary and
+  // hides its diff from every reviewer (rules/backend.md). That exact byte
+  // already fooled one run here — a stray raw BEL turned a *valid* address into
+  // a control-bearing one, so the assertion passed while proving something other
+  // than what its name claimed.
+  it("NORMALIZES an unusable digestTo to null instead of making the backup unrestorable", async () => {
     await createList(opened.db, "Prospects", NOW);
     const backup = await createPlayerListBackup(opened.db, () => NOW);
 
@@ -942,7 +949,29 @@ describe("lane configuration in the backup (v5, #190)", () => {
           l.name === "Prospects" ? { ...l, digestTo: candidate } : l,
         ),
       };
-      expect(() => parsePlayerListBackup(JSON.stringify(poisoned)), candidate).toThrow(/digestTo/);
+      // Parsing SUCCEEDS. This rule is newer than the v5 format, so rejecting
+      // would apply it retroactively and make an already-written backup
+      // unrestorable — stranding the one artifact that exists to BE the
+      // recovery path (Reviewer P1, delta 3).
+      const parsed = parsePlayerListBackup(JSON.stringify(poisoned));
+      expect(parsed.lists?.find((l) => l.name === "Prospects"), candidate)
+        .toMatchObject({ digestTo: null });
+
+      // ...and the invariant still holds in the DATABASE after a real restore:
+      // nothing that renders as unset is ever stored as a recipient.
+      const dest = testDb();
+      try {
+        restorePlayerListBackup(dest.db, parsed.players, NOW, {
+          lists: parsed.lists,
+          members: parsed.members,
+        });
+        const restored = (
+          await dest.db.select().from(playerLists).where(eq(playerLists.name, "Prospects"))
+        )[0];
+        expect(restored?.digestTo, candidate).toBeNull();
+      } finally {
+        dest.close();
+      }
     }
 
     // A recipient merely CONTAINING a hyphen still round-trips untouched.
