@@ -968,6 +968,45 @@ describe("lane configuration in the backup (v5, #190)", () => {
     expect(() => parsePlayerListBackup(JSON.stringify(smuggled))).toThrow(/requires version 5/);
   });
 
+  // Reviewer P2, delta 5 rung 2. `restorePlayerListBackup` takes
+  // `lists: PlayerBackupList[]` as a plain typed parameter, and a TYPE cannot
+  // prove the array came through `parsePlayerListBackup`. It is exported, so a
+  // caller that assembles the array itself — a test, a future REST/MCP restore —
+  // bypasses the parse-time normalization entirely. This drives that caller
+  // directly, which is the only way to reach the write without the parser.
+  it("normalizes an unusable digestTo even when the caller never went through the parser", async () => {
+    for (const candidate of ["-", "  -  ", "   "]) {
+      const dest = testDb();
+      try {
+        restorePlayerListBackup(dest.db, [], NOW, {
+          lists: [makeBackupList({ name: "Prospects", digestTo: candidate })],
+          members: [],
+        });
+        const restored = (
+          await dest.db.select().from(playerLists).where(eq(playerLists.name, "Prospects"))
+        )[0];
+        expect(restored?.digestTo, candidate).toBeNull();
+      } finally {
+        dest.close();
+      }
+    }
+
+    // A real recipient is written through untouched.
+    const ok = testDb();
+    try {
+      restorePlayerListBackup(ok.db, [], NOW, {
+        lists: [makeBackupList({ name: "Prospects", digestTo: "a-b@example.com" })],
+        members: [],
+      });
+      const restored = (
+        await ok.db.select().from(playerLists).where(eq(playerLists.name, "Prospects"))
+      )[0];
+      expect(restored?.digestTo).toBe("a-b@example.com");
+    } finally {
+      ok.close();
+    }
+  });
+
   it("NORMALIZES an unusable digestTo to null instead of making the backup unrestorable", async () => {
     await createList(opened.db, "Prospects", NOW);
     const backup = await createPlayerListBackup(opened.db, () => NOW);
