@@ -91,8 +91,28 @@ export const digestDeliveries = sqliteTable(
     reconciledAt: text("reconciled_at"),
     errorMessage: text("error_message"),
     createdAt: text("created_at").notNull(),
+    /**
+     * The lane this delivery belongs to (issue #190). NOT NULL is LOAD-BEARING,
+     * not stylistic: SQLite treats NULLs as DISTINCT in a unique index, so a
+     * nullable column here would let unlimited `(digest, <date>, NULL)` rows
+     * coexist and silently void the slot uniqueness ADR 0034's durable claim
+     * rests on — surfacing as duplicate sends, not as an error. Every row
+     * carries a real list id (the migration backfills the default lane), which
+     * is exactly what the explicit default list makes possible.
+     *
+     * `kind = 'heartbeat'` rows are not lane-scoped yet still carry the default
+     * lane's id. A recorded wart, not an oversight: the alternative is a
+     * nullable column, and the paragraph above is why that is not on the table.
+     */
+    listId: integer("list_id")
+      .notNull()
+      .references(() => playerLists.id),
   },
-  (t) => [uniqueIndex("digest_deliveries_kind_date_uq").on(t.kind, t.dateCovered)],
+  (t) => [
+    // The slot key gained its lane dimension in #190 so a scheduled per-list
+    // digest stops colliding with the daily one (ADR 0046 decision 4 reversed).
+    uniqueIndex("digest_deliveries_kind_date_list_uq").on(t.kind, t.dateCovered, t.listId),
+  ],
 );
 
 export const statLines = sqliteTable(
@@ -271,6 +291,19 @@ export const playerLists = sqliteTable(
     updatedAt: text("updated_at").notNull(),
     /** Null while live; set on soft-delete. The partial unique index keys on this. */
     deletedAt: text("deleted_at"),
+    /**
+     * The default lane (issue #190). Exactly one LIVE list carries it, so a
+     * command with no `--list` resolves here instead of silently widening to
+     * every active player. This REVERSES ADR 0046 decision 1 (an implicit
+     * default with no seeded row); the migration creates and backfills it.
+     */
+    isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
+    /** Minutes between lane refreshes; null = never auto-refreshed. */
+    refreshIntervalMinutes: integer("refresh_interval_minutes"),
+    /** Host-timezone hour (0-23) this lane digests at; null = never auto-digested. */
+    digestHour: integer("digest_hour"),
+    /** Lane recipients; null falls back to the DIGEST_TO env var. */
+    digestTo: text("digest_to"),
   },
   (t) => [
     // A name is unique among LIVE lists only: a soft-deleted list keeps its row
@@ -280,6 +313,23 @@ export const playerLists = sqliteTable(
       .on(t.name)
       .where(sql`${t.deletedAt} is null`),
     check("player_lists_name_nonblank_ck", sql`length(trim(${t.name})) > 0`),
+    // At most one LIVE default. Partial on BOTH columns deliberately: a
+    // soft-deleted list may keep its stale is_default without blocking the
+    // live one, which is the boundary a non-partial index would break.
+    uniqueIndex("player_lists_default_uq")
+      .on(t.isDefault)
+      .where(sql`${t.isDefault} = 1 and ${t.deletedAt} is null`),
+    // Bounds declared in the DB, not only in service validation — a validation
+    // is not a guarantee under concurrency (rules/backend.md). Both ends are
+    // checked: a negative is as wrong as an out-of-range positive.
+    check(
+      "player_lists_digest_hour_ck",
+      sql`${t.digestHour} is null or (${t.digestHour} >= 0 and ${t.digestHour} <= 23)`,
+    ),
+    check(
+      "player_lists_refresh_interval_ck",
+      sql`${t.refreshIntervalMinutes} is null or ${t.refreshIntervalMinutes} > 0`,
+    ),
   ],
 );
 

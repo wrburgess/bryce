@@ -93,6 +93,14 @@ export type ClaimRefusal =
 export interface ClaimArgs {
   kind: DeliveryKind;
   dateCovered: string;
+  /**
+   * The lane this slot belongs to (issue #190). Required, never defaulted: the
+   * slot key is `(kind, date_covered, list_id)`, so a caller that omitted it
+   * would either fail NOT NULL at the insert or — worse, had the column been
+   * nullable — claim a slot that collides with nothing. Unscoped callers (the
+   * scheduled digest, the heartbeat) resolve the default lane and pass its id.
+   */
+  listId: number;
   now: Date;
   leaseMs?: number;
   /**
@@ -135,6 +143,10 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
           and(
             eq(digestDeliveries.kind, args.kind),
             eq(digestDeliveries.dateCovered, args.dateCovered),
+            // The lookup must key on the SAME triple as the unique index
+            // (issue #190). Matching on two of three columns would find another
+            // lane's row and refuse this lane's legitimate claim.
+            eq(digestDeliveries.listId, args.listId),
           ),
         )
         .all()[0];
@@ -172,6 +184,7 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
           .values({
             kind: args.kind,
             dateCovered: args.dateCovered,
+            listId: args.listId,
             sentAt: null,
             status: "sending",
             claimedAt: nowIso,
