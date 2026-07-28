@@ -1057,7 +1057,7 @@ export async function refreshPlayer(
 
   // The seen set (#197, ADR 0060): every (sportId, statType) pair this Player has
   // produced a line at THIS season, on the MLB path. One query, before any game
-  // log, so a fault here costs zero HTTP.
+  // log, so a fault here costs zero game-log HTTP (identity was already fetched).
   //
   // `source` is what keeps a STORED value from minting a REQUEST: another
   // provider's row must never be read back as a level to fetch MLB game logs for,
