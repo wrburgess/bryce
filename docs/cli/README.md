@@ -33,6 +33,12 @@ Re-ingests the **full current season** game log for every active Player and upse
 time. During **Offseason Sleep** it exits without any API calls
 (`refresh skipped reason=offseason-sleep`).
 
+*Which* game logs each Player needs is derived per Player, not swept blindly across all six levels
+([ADR 0060](../adr/0060-probe-plan-prunes-refresh-fanout.md)): his current level in all three stat
+groups, plus every level and group his stat lines already cover this season. A Player with no lines
+yet — anyone newly added — is fetched across every level. The season fetched per level is always the
+whole season.
+
 ### Live output (#146, [ADR 0056](../adr/0056-refresh-emits-typed-progress-events-cli-is-the-only-presenter.md))
 
 The job emits typed progress events and this CLI is the only thing that renders them. The content is

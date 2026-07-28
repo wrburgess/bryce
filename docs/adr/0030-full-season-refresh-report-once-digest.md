@@ -4,9 +4,12 @@
 > [ADR 0035](0035-window-selected-digest.md).** The Digest now selects by date window rather than by
 > novelty, and `stat_lines.digest_delivery_id` — the stamp that made novelty work — has been dropped.
 >
-> **The ingestion half stands unchanged.** Refresh still re-ingests every active Player's complete
-> current-season game log on every run, with no date windows anywhere in ingestion. That is what makes
-> windowed reporting possible at all, and ADR 0035 depends on it.
+> **The ingestion half stands, and is amended in breadth by
+> [ADR 0060](0060-probe-plan-prunes-refresh-fanout.md).** Refresh still re-ingests the complete
+> current season, with no date windows anywhere in ingestion — that is what makes windowed reporting
+> possible at all, and ADR 0035 depends on it. What ADR 0060 changes is *which* (sportId, stat group)
+> pairs are fetched per Player: a derived probe plan rather than all six sportIds times all three
+> groups, every run. The no-date-windows rule below is unaffected.
 >
 > The reasoning below for *why* novelty was chosen over date windows is left intact deliberately: it
 > is the context for why that choice changed, and ADR 0035 addresses it directly.

@@ -92,7 +92,10 @@ working directory for predictable operation.
 
 Three jobs: Backup (03:00), Refresh (nightly, after West Coast games finish), and Digest (~5 AM Central). Refresh is
 idempotent ([ADR 0030](../adr/0030-full-season-refresh-report-once-digest.md)), so re-running it is
-free. launchd runs missed jobs on wake, which is exactly what a sometimes-asleep laptop needs.
+free. Each Player's game logs are fetched at the levels his history and current team actually call for
+rather than at all six every night ([ADR 0060](../adr/0060-probe-plan-prunes-refresh-fanout.md)); every
+level fetched is still fetched for the whole season, so re-running remains a complete refresh. launchd
+runs missed jobs on wake, which is exactly what a sometimes-asleep laptop needs.
 
 **That wake behaviour is why Digest re-entry is not theoretical.** On wake, the missed Digest job
 fires as its own process at the moment the long-lived server may be handling an MCP `send_digest`

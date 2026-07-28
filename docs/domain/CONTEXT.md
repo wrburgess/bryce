@@ -75,6 +75,13 @@ The recurring job that re-ingests every active Player's *complete current-season
 upserts it idempotently — no date windows; adding a Player is just his first Refresh.
 _Avoid_: "yesterday fetch", "incremental sync" (there is no window to fall out of)
 
+**Probe Plan**:
+The set of (level, stat group) pairs one **Refresh** fetches game logs for, for one Player: his
+current level in all three groups, plus every pair his stat lines already cover this season. A Player
+with none takes the whole fan-out ([ADR 0060](../adr/0060-probe-plan-prunes-refresh-fanout.md)). It
+prunes *breadth*, never *dates* — each probed pair is still fetched for the complete season.
+_Avoid_: "window", "incremental" (nothing about the dates fetched changed)
+
 **Sweep**:
 One Refresh's single pass over the **Watch List**, from claiming the run to settling its outcome.
 _Avoid_: "run" on its own (ambiguous between the pass and its durable record)

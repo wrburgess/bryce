@@ -75,6 +75,11 @@ export type Summary = Record<string, SummaryEntry>;
 // removed well-covered lines and pushed the RATIO below the old 66/54, so the floor was
 // re-earned rather than lowered). `src/cli/refresh.ts` is a NEW entry: it stopped being a
 // one-line presenter, and nothing else would have caught a thinly-tested renderer.
+//
+// #197 adds `src/jobs/refresh.ts`. The job now DECIDES what to fetch per player rather than
+// sweeping a constant matrix (ADR 0060), so an under-tested branch there no longer costs a
+// few wasted calls -- it silently stops fetching a level. Measured 97.83/88.72 with the
+// probe-plan suite in place; floored at 97/88.
 export const FLOORS: Floors = {
   "src/cli/main.ts": { statements: 42, branches: 50 },
   "src/cli/seed.ts": { statements: 54, branches: 61 },
@@ -84,6 +89,7 @@ export const FLOORS: Floors = {
   "src/cli/batch-add.ts": { statements: 85, branches: 73 },
   "src/watchlist/service.ts": { statements: 86, branches: 79 },
   "src/cli/refresh.ts": { statements: 90, branches: 87 },
+  "src/jobs/refresh.ts": { statements: 97, branches: 88 },
 };
 
 // Both path separators, folded to the POSIX one the manifest is written in.
