@@ -59,11 +59,16 @@ const RENDER_SCANNED = [
 
 // The AUTHORED seed of the dead-link scope; `linkCheckedFiles()` derives the rest. Every render-scanned
 // file is also link-checked (the containment runs one way only, which is why this is derived rather
-// than a second hand-kept copy), plus the two prose-heavy documents that have no other home.
+// than a second hand-kept copy), plus the one prose-heavy document that has no other home.
+//
+// `docs/rules/README.md` used to sit here for that same "no other home" reason. Issue #179 gave it one:
+// its whole directory is now derived below, so keeping the entry would be a second authored source for
+// a fact the derivation already owns. Coverage does not rest on anyone noticing that -- two cases in
+// test/tooling/parity-links.test.ts name this file specifically, so deleting the derivation turns them
+// red rather than quietly unchecking it.
 const LINK_CHECKED = [
   ...RENDER_SCANNED,
   "CONTEXT.md",
-  "docs/rules/README.md",
 ];
 
 const GUIDES_DIR = "docs/guides";
@@ -97,7 +102,8 @@ const DEEP_DOC_TOKEN = /docs\/rules\/[a-z0-9-]+-postmortems\.md(?:#[A-Za-z0-9._-
 // prefix is CAPTURED, not just matched: a link's href is `prefix + token`, and the href is what has
 // to resolve from the referring file (issue #154).
 const DEEP_DOC_LINKED = /\](?:\(|:)\s*((?:\.{0,2}\/)*)$/;
-const RULES_DEEP_DOC_README = "docs/rules/README.md";
+const RULES_DEEP_DOC_DIR = "docs/rules";
+const RULES_DEEP_DOC_README = `${RULES_DEEP_DOC_DIR}/README.md`;
 
 // --- Tier-1 accretion guard (issue #152, ADR 0051) -------------------------
 //
@@ -377,6 +383,92 @@ export function markdownLinks(source: string): MarkdownLink[] {
   return links;
 }
 
+/**
+ * The 1-based line numbers `source` spends inside a FENCED code block, the fence lines included. A line
+ * in this set is code, so no line-oriented rule reads it as prose.
+ *
+ * ONE authored copy, from the parser, replacing the `fenced = !fenced` toggle that `checkRulesPointers`
+ * and `ruleBullets` each carried (issue #179). Both toggles tested `` /^\s*```/ ``, so CommonMark's OTHER
+ * fence character was invisible to both: a `~~~` block's contents were read as live prose, and a bullet
+ * parked in one could be measured for length or reported as a duplicate imperative. Latent rather than
+ * live — no Tier-1 file uses `~~~` today — and it fails toward a false RED, the cheaper direction. It is
+ * still a trap that springs on whoever next writes the fence CommonMark equally permits.
+ *
+ * Teaching each toggle a second character was the obvious repair and is the wrong one twice over.
+ * A naive `fenced = !fenced` over both characters is WORSE than the bug: a `~~~` line inside a backtick
+ * block closes it early, so the rest of the block becomes prose. Getting it right means tracking the
+ * opening character, then its run length, then the indent, then the info string — enumerating a grammar,
+ * which `rules/scripting.md` names as the game a structural checker cannot win and ADR 0054 already
+ * settled for links in this same file. The parser answers it by construction, for both spellings and
+ * every case neither of us thought of, and it is already a dependency here.
+ *
+ * This does NOT re-open the note above `checkRulesPointers` ("do not finish the refactor"). That rule is
+ * about what the walks READ: an AST walk cannot see a backticked path, so `markdownLinks` would go blind
+ * where those checks must not. Asking the parser *which lines are code* takes nothing away from them —
+ * they keep reading raw text, on a smaller and more correct set of lines.
+ *
+ * FENCED ONLY, and the word is load-bearing. The first cut of this exempted every `code_block` node,
+ * which silently included INDENTED code blocks the toggles never covered. That read as a harmless
+ * widening and was justified by measuring today's corpus; the PR #188 Reviewer refuted it with a
+ * reproduction, and it was a false green of exactly the kind this whole change exists to close:
+ *
+ *   ## Anti-Patterns
+ *
+ *       - **Never x** - because reasons. *(Host case study: `docs/rules/absent-postmortems.md`.)*
+ *
+ * One stray indent on a section's FIRST bullet — no enclosing list to absorb it — makes CommonMark read
+ * real content as an indented code block. On `main` that dead pointer is reported; under the first cut it
+ * vanished, and so did the bullet's imperative. A deliberate worked example inside a fence is a thing an
+ * author MARKED as code; four accidental spaces are a typo, and the two must not be treated alike.
+ *
+ * The corpus measurement was the tell, not the defense: "no such indent exists today" is a snapshot, and
+ * `rules/testing.md` says a corpus's silence is not a statement about the corpus tomorrow. So the
+ * exemption is now strictly narrower than the node type — fenced blocks only, in either spelling, which
+ * makes this a pure superset of what the toggles caught and a regression against nothing.
+ *
+ * Fenced-ness is decided STRUCTURALLY, from a property of the node rather than from the look of its
+ * first line: a fenced block's source span includes delimiter lines that are not part of its content, and
+ * an indented block's span is exactly its content. So `span > content lines` IS "fenced", and neither
+ * side of that comparison has to be parsed by us.
+ *
+ * The first repair of the finding above did read the opening line, and the delta Reviewer refuted THAT
+ * too: CommonMark reports `sourcepos` at the first content character for both node types, so an indented
+ * block whose content happens to begin `    ``` ` or a tab plus a fence looks fenced to any text test,
+ * and the false-green path reopens one layer down. Reading the text was still modelling the format —
+ * `rules/scripting.md` names exactly this, and thinning the candidate set is not a safe simplification.
+ * The span comparison has no such case because it never looks at a character.
+ *
+ * The private `_isFenced` field would answer directly, and is deliberately not used: no public accessor
+ * exposes it, so a minor `commonmark` bump could rename it and this guard would silently classify every
+ * block as indented. The discriminator here was checked against `_isFenced` over 21 constructions —
+ * both fence characters, 4+ delimiters, an info string, an unclosed fence at EOF, a fence closed by a
+ * longer one, blank lines inside a fence, an empty fence, fences at indent 0-3, a fence nested in a list
+ * item, indented blocks plain / multi-line / with interior blanks / at EOF, and both spellings of the
+ * adversarial indented-block-whose-content-starts-with-a-fence — and agreed on all 21. `fencedCodeLines`
+ * is exported so that table is a test, not a claim in a comment.
+ */
+export function fencedCodeLines(source: string): Set<number> {
+  const lines = new Set<number>();
+  const walker = MARKDOWN_PARSER.parse(source).walker();
+
+  let event = walker.next();
+  while (event !== null) {
+    if (event.entering && event.node.type === "code_block") {
+      const [[first], [last]] = event.node.sourcepos;
+      const literal = event.node.literal ?? "";
+      const contentLines = literal === ""
+        ? 0
+        : literal.split("\n").length - (literal.endsWith("\n") ? 1 : 0);
+
+      if (last - first + 1 > contentLines) {
+        for (let line = first; line <= last; line++) lines.add(line);
+      }
+    }
+    event = walker.next();
+  }
+  return lines;
+}
+
 /** Immediate subdirectory names of `absolute`, sorted; empty when it is not a readable directory. */
 function subdirectories(absolute: string): string[] {
   try {
@@ -456,12 +548,21 @@ function markdownFilesIn(absolute: string): string[] {
  * hardcoded paths this replaced — is how `rules/*.md` went unchecked for its entire life while carrying
  * links the whole time.
  *
- * `docs/adr/*.md` joined that derivation in issue #164, closing the last unchecked markdown surface: a
- * directory of accepted decisions that cite each other constantly, with nothing resolving those
- * citations. Two were dead. Repairing them was a records question, not a validator one, and its answer is
+ * `docs/adr/*.md` joined that derivation in issue #164: a directory of accepted decisions that cite each
+ * other constantly, with nothing resolving those citations. Two were dead. Repairing them was a records
+ * question, not a validator one, and its answer is
  * [ADR 0057](../docs/adr/0057-adr-links-repair-identity-annotate-loss.md) — repair a link whose target
  * kept its identity, de-link and annotate one whose target ceased to exist. The standing cost is stated
  * there: renaming a file an ADR cites now reddens this check, which is the point.
+ *
+ * `docs/rules/*.md` joined in issue #179, and that comment used to call `docs/adr` "the last unchecked
+ * markdown surface" — a running tally is a claim that goes stale the next time the scope widens, which is
+ * exactly what happened, so this now names the CATEGORIES it derives and lets the count speak for itself.
+ * The Tier-2 deep docs are the files a Tier-1 pointer sends an agent to, prose-heavy and link-heavy by
+ * design, and their links resolved nowhere: PR #174's new deep doc had to be hand-verified because CI
+ * would not have caught a dead one. The whole directory is derived rather than a `*-postmortems.md`
+ * pattern — a pattern is a second hand-kept fact, and hand-keeping is how `rules/*.md` went unchecked for
+ * its entire life. A future `docs/rules/<domain>-casebook.md` is checked the day it lands.
  *
  * A path listed here but absent from disk is skipped by the caller, so the derivation is safe against a
  * bundle that ships a subset.
@@ -480,6 +581,7 @@ export function linkCheckedFiles(root: string): string[] {
   for (const name of subdirectories(join(root, SKILLS_DIR))) add(`${SKILLS_DIR}/${name}/SKILL.md`);
   for (const name of markdownFilesIn(join(root, CLAUDE_COMMANDS_DIR))) add(`${CLAUDE_COMMANDS_DIR}/${name}`);
   for (const name of markdownFilesIn(join(root, ADR_DIR))) add(`${ADR_DIR}/${name}`);
+  for (const name of markdownFilesIn(join(root, RULES_DEEP_DOC_DIR))) add(`${RULES_DEEP_DOC_DIR}/${name}`);
 
   return out;
 }
@@ -508,6 +610,7 @@ class ParityCheck {
     this.checkHumanGates();
     this.checkRules();
     this.checkRulesPointers();
+    this.checkRulesDuplicateKeys();
     this.checkRulesNarrative();
     this.checkSkills();
     this.checkGuardrails();
@@ -755,14 +858,13 @@ class ParityCheck {
     for (const rel of REQUIRED_RULES) {
       if (!this.exists(rel)) continue;   // already reported by checkRules()
 
-      let fenced = false;
-      for (const raw of this.read(rel).split("\n")) {
-        const line = rstrip(raw);
-        if (/^\s*```/.test(line)) {
-          fenced = !fenced;
-          continue;
-        }
-        if (fenced) continue;
+      const source = this.read(rel);
+      const code = fencedCodeLines(source);
+      const rawLines = source.split("\n");
+
+      for (let index = 0; index < rawLines.length; index++) {
+        if (code.has(index + 1)) continue;   // a pointer inside a code block is a worked example
+        const line = rstrip(rawLines[index] as string);
 
         const isHeader = strip(line).startsWith(DEEP_DOC_LABEL);
         for (const match of line.matchAll(DEEP_DOC_TOKEN)) {
@@ -821,16 +923,13 @@ class ParityCheck {
    */
   private ruleBullets(rel: string): { key: string; text: string }[] {
     const bullets: { key: string; text: string }[] = [];
-    const lines = this.read(rel).split("\n").map(rstrip);
-    let fenced = false;
+    const source = this.read(rel);
+    const lines = source.split("\n").map(rstrip);
+    const code = fencedCodeLines(source);
 
     for (let i = 0; i < lines.length; i++) {
+      if (code.has(i + 1)) continue;
       const line = lines[i] as string;
-      if (/^\s*```/.test(line)) {
-        fenced = !fenced;
-        continue;
-      }
-      if (fenced) continue;
 
       const match = RULE_BULLET.exec(line);
       if (match === null) continue;
@@ -841,8 +940,13 @@ class ParityCheck {
       // list item's paragraph continue at column zero, which is what a plain hard-wrap (`gq`, a hand
       // edit, a formatter that does not re-indent list bodies) produces -- so requiring indentation
       // would leave the cheapest flavor of the wrap bypass wide open while looking closed.
+      //
+      // The code check is FIRST and is not redundant with RULE_BLOCK_OPENER's ``` arm, which never knew
+      // `~~~` (issue #179). Leaving that arm in place costs nothing and keeps the marker set readable in
+      // one spelling; the parser is what actually decides, here and in the outer loop.
       const parts = [line];
       while (i + 1 < lines.length) {
+        if (code.has(i + 2)) break;
         const next = lines[i + 1] as string;
         if (next === "") break;
         if (RULE_BLOCK_OPENER.test(next)) break;
@@ -928,6 +1032,69 @@ class ParityCheck {
       `\`${deepDoc}\` does not exist yet, so author it first (${RULES_DEEP_DOC_README}) and then leave a ` +
       `backticked pointer to it, or shorten the bullet - a pointer to an absent deep doc fails the rules-pointer check`
     );
+  }
+
+  /**
+   * The bolded imperative identifies a Tier-1 bullet (issue #179, ADR 0058). Fails any imperative that
+   * occurs more than once across the Tier-1 tree.
+   *
+   * NARRATIVE_ALLOWLIST is keyed by that imperative, so uniqueness is the property its whole design
+   * rests on -- and nothing enforced it. checkRulesNarrative DOES report an ambiguous key, but that
+   * report lives inside `for (const key of allowed)`: it fires only for a key already IN the allowlist.
+   * Two non-allowlisted bullets could share an imperative, in one file or across two, with the gate
+   * green (the Reviewer caught the plan for issue #166 proposing that error as a general duplicate
+   * check, which is what it looks like and is not). PR #174 answered it with a one-shot hand scan --
+   * 95 bullets, 0 duplicates -- which is a measurement, not a guard: it does not run again tomorrow.
+   *
+   * Scope is the TREE, not the file. Per-file uniqueness is all the allowlist's lookup strictly needs,
+   * but the property being claimed is that the imperative NAMES a bullet, and a name that identifies two
+   * things is not a name. The wider rule also costs nothing measurable: the corpus is 102 bullets and
+   * 102 distinct imperatives today, re-measured on this branch rather than inherited from #174's 95.
+   *
+   * There is deliberately NO allowlist. An exemption table for a uniqueness guard would key its entries
+   * by the very string whose ambiguity it is exempting -- the defect, wearing the remedy's clothes.
+   *
+   * ADR 0053 is the ordering trap, and the error message answers it in-line. That ADR *permits* one
+   * invariant expressed in both moods, as a Pattern and its mirrored Anti-Pattern. Those are two bullets
+   * carrying two DIFFERENT imperatives, so they never collide here -- but a contributor who read a bare
+   * "duplicate" error could reasonably conclude the mirrored convention was now banned. This is why the
+   * rule is keyed on imperative TEXT and must never be restated as "one bullet per invariant"
+   * (rules/scripting.md: run a guard's own governing convention through it before shipping it).
+   *
+   * Equality is exact: case-sensitive, whitespace-significant, Unicode-UNNORMALIZED. That is not an
+   * inherited default, it is the only rule that matches the property being protected -- allowlist lookup
+   * is `allowed.includes(key)`, exact. Two imperatives differing only by NFD/NFC composition are two
+   * distinct keys, an entry matches exactly one of them, and there is no ambiguity to report.
+   */
+  private checkRulesDuplicateKeys(): void {
+    if (!this.dirExists(RULES_DIR)) return;
+
+    // Insertion-ordered, so the output is a deterministic function of the tree: keys in first-appearance
+    // order, occurrences in REQUIRED_RULES order then source order.
+    const occurrences = new Map<string, string[]>();
+
+    for (const rel of REQUIRED_RULES) {
+      if (!this.exists(rel)) continue;   // already reported by checkRules()
+
+      for (const { key } of this.ruleBullets(rel)) {
+        const where = occurrences.get(key);
+        if (where === undefined) occurrences.set(key, [rel]);
+        else where.push(rel);
+      }
+    }
+
+    for (const [key, where] of occurrences) {
+      if (where.length < 2) continue;
+      // "N bullets in [...]" counts BULLETS, and the list repeats a file that holds two of them -- the
+      // honest reading of a same-file duplicate, which "2 files" would misstate.
+      this.err(
+        `Tier-1 duplicate imperative "${asciiSafeGateValue(key)}": ${where.length} bullets in ` +
+        `${inspectArray(where)} - the bolded imperative identifies a bullet and keys NARRATIVE_ALLOWLIST, ` +
+        `so a shared one makes an allowlist entry ambiguous; reword one imperative so each is distinct. ` +
+        `A Pattern and its mirrored Anti-Pattern are not a duplicate (ADR 0053) - they carry different ` +
+        `imperative text`,
+      );
+    }
   }
 
   /**

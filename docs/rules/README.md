@@ -31,11 +31,17 @@ target pattern. That is deliberate and load-bearing:
 
 - The parity check's dead-link validator (`checkLinks` in `scripts/parity-check.ts`) resolves **only
   markdown links** — and, since [#159](https://github.com/wrburgess/bryce/issues/159), **`rules/*.md` is
-  one of the files it resolves them in** (along with the skill bodies, the command shims, this file, and
-  `CONTEXT.md`; the file set is derived, not a hand-kept list). A markdown link to a file that doesn't
-  exist yet reddens CI with a dead-link failure; a backticked path is inert text the validator ignores.
-  A separate repository-wide Markdown scan checks only local `[ADR NNNN](MMMM-...md)` links for a
-  disagreement between their displayed and target ADR numbers; it does not resolve additional links.
+  one of the files it resolves them in**. A markdown link to a file that doesn't exist yet reddens CI
+  with a dead-link failure; a backticked path is inert text the validator ignores. A separate
+  repository-wide Markdown scan checks only local `[ADR NNNN](MMMM-...md)` links for a disagreement
+  between their displayed and target ADR numbers; it does not resolve additional links.
+- **Which files are in that scope is computed, not listed here.** `linkCheckedFiles()` in
+  `scripts/parity-check.ts` is the authority: a small authored seed plus categories derived from disk —
+  the Tier-1 rules, the skill bodies, the command shims, the ADRs, and every `*.md` in *this* directory.
+  Deriving it is what gets a new file checked the day it lands instead of the day someone remembers a
+  list. This bullet used to enumerate the set instead, and that enumeration went stale twice —
+  [#164](https://github.com/wrburgess/bryce/issues/164) added the ADRs and
+  [#179](https://github.com/wrburgess/bryce/issues/179) the deep docs — so it now names the function.
 - Both scans find links by **parsing** the file rather than pattern-matching it, so a worked example like
   the `[text](path)` on this line is prose about markdown and is never reported as a link — it is not a
   link node ([ADR 0054](../adr/0054-code-spans-are-not-links.md)). That is what made covering these
@@ -46,6 +52,14 @@ target pattern. That is deliberate and load-bearing:
 **The form rule (repo-wide):** a reference to a path that may not exist yet must be a **backticked
 inline-code path** (or plain text), never a markdown link. A contributor who "helpfully" converts a
 backticked path into a link before its target lands will break the parity gate.
+
+**This applies inside the deep docs themselves** ([#179](https://github.com/wrburgess/bryce/issues/179)).
+`docs/rules/*.md` is now in the dead-link scope, so a link written here is resolved like any other. That
+was the gap: these are the files a Tier-1 pointer *sends an agent to*, and they are the most link-heavy
+prose in the repo, yet their links resolved nowhere — PR #174's new deep doc had to be checked by hand.
+Writing about markdown is still safe: a `[text](path)` inside a code span is not a link node
+([ADR 0054](../adr/0054-code-spans-are-not-links.md)), which is what makes covering a file *about*
+markdown possible at all.
 
 **Promotion.** Once the target file exists you may promote the reference to a real `[text](path)` link
 — but write the link the way Markdown resolves it: **relative to the file you are writing in**, not to
