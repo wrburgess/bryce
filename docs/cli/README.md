@@ -256,6 +256,10 @@ or digest behavior; it records the intent those phases will act on.
 - **`none` is a RESERVED word** meaning *clear this column to NULL*. It therefore cannot be used as a
   literal `--digest-to` address.
 - **`--digest-hour 0` is valid** — it means a midnight digest, and the database `CHECK` allows it.
+- **Read the values back with `players lists show`**, which appends `refreshEvery=` · `digestHour=` ·
+  `digestTo=` to each list line, rendering an unset column as `-` — the same null spelling `configure`
+  prints. The four leading keys keep their order and spelling, so an existing script reading that line
+  is unaffected.
   It is the one place the usual positive-integer rule would be wrong.
 - Values must be **canonical**: `07`, `1e2`, `+5`, and `3.0` are usage errors, not silently coerced
   numbers, so a typo can never become a schedule. Out-of-range values (`--digest-hour 24`,

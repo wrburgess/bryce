@@ -267,7 +267,15 @@ async function runShow(flags: Map<string, string>, deps: ListsDeps): Promise<num
   }
   const lists = await listLists(deps.db);
   for (const l of lists) {
-    deps.write(`list id=${l.id} name=${l.name} members=${l.memberCount} default=${l.isDefault}`);
+    // The cadence trio is APPENDED, never inserted: the leading four keys keep
+    // their order and spelling, so an existing grep or script reading this line
+    // is unaffected. `-` for an unset column, the same null spelling
+    // `configure` prints, so the two commands read alike (#191).
+    deps.write(
+      `list id=${l.id} name=${l.name} members=${l.memberCount} default=${l.isDefault} ` +
+        `refreshEvery=${l.refreshIntervalMinutes ?? "-"} digestHour=${l.digestHour ?? "-"} ` +
+        `digestTo=${l.digestTo ?? "-"}`,
+    );
   }
   deps.write(`total=${lists.length}`);
   return 0;

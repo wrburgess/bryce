@@ -179,7 +179,7 @@ export async function runPlayersAdd(rawArgv: string[], deps: PlayersAddDeps): Pr
     }
     writeError(
       `error: player id=${player.id} created but not attached to list=${list.name} - ` +
-        `re-run: sk players lists add --name ${list.name} ${repairSelector(resolved)}`,
+        `re-run: sk players lists add --name ${shellQuote(list.name)} ${repairSelector(resolved)}`,
     );
     return 1;
   }
@@ -200,6 +200,24 @@ function repairSelector(resolved: Resolved): string {
   return resolved.kind === "mlb"
     ? `--person-ids ${resolved.personId}`
     : `--highlightly-player-ids ${resolved.playerId}`;
+}
+
+/**
+ * POSIX-quote a list name for the repair command above (Reviewer P2, #191).
+ *
+ * List names legitimately carry spaces — this repo's own help text uses
+ * `'Top 30'` — and `requireName` rejects only control characters, not quotes,
+ * `$`, or backticks. Unquoted, the advertised recovery `--name Top 30` splits
+ * into a value and an unexpected argument, so the one command the operator was
+ * told to run to finish the job fails. Printing a repair that cannot be pasted
+ * is the failure this message exists to prevent, one layer down.
+ *
+ * Always quoted, never conditionally: a rule with a "safe enough to leave bare"
+ * branch is a rule whose boundary has to be right, and this one has no reason to
+ * have a boundary.
+ */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 /** MLB/MiLB name search, through the shared `--pick` rule. */

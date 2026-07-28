@@ -85,8 +85,13 @@ describe("lists CLI", () => {
     expect(code).toBe(0);
     // Ordered by name, and each line now states whether the list is THE default
     // lane (#190) — the migration-seeded `Watchlist` is, `Alpha` is not.
-    expect(out[0]).toBe(`list id=${list.id} name=Alpha members=1 default=false`);
-    expect(out[1]).toMatch(/^list id=\d+ name=Watchlist members=0 default=true$/);
+    // The cadence trio reads back here (#191), so `configure` is not write-only.
+    // An unconfigured lane renders each as `-`, the same null spelling
+    // `list configured` uses.
+    expect(out[0]).toBe(
+      `list id=${list.id} name=Alpha members=1 default=false refreshEvery=- digestHour=- digestTo=-`,
+    );
+    expect(out[1]).toMatch(/^list id=\d+ name=Watchlist members=0 default=true refreshEvery=\S+ digestHour=\S+ digestTo=\S+$/);
     expect(out.at(-1)).toBe("total=2");
   });
 
@@ -136,7 +141,7 @@ describe("lists CLI", () => {
     const listCode = await runLists(["show"], deps());
     expect(listCode).toBe(0);
     expect(out).toHaveLength(2);
-    expect(out[0]).toMatch(/^list id=\d+ name=Watchlist members=0 default=true$/);
+    expect(out[0]).toMatch(/^list id=\d+ name=Watchlist members=0 default=true refreshEvery=\S+ digestHour=\S+ digestTo=\S+$/);
     expect(out[1]).toBe("total=1");
   });
 
@@ -160,7 +165,7 @@ describe("lists CLI", () => {
       out.length = 0;
       await runLists(["show"], deps());
       expect(out.filter((l) => l.includes("default=true"))).toEqual([
-        `list id=${list.id} name=Prospects members=0 default=true`,
+        `list id=${list.id} name=Prospects members=0 default=true refreshEvery=- digestHour=- digestTo=-`,
       ]);
     });
 
@@ -318,6 +323,6 @@ describe("lists CLI", () => {
     expect(out).toEqual([]);
 
     await runLists(["show"], deps());
-    expect(out[0]).toMatch(/^list id=\d+ name=Watchlist members=0 default=true$/);
+    expect(out[0]).toMatch(/^list id=\d+ name=Watchlist members=0 default=true refreshEvery=\S+ digestHour=\S+ digestTo=\S+$/);
   });
 });

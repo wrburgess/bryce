@@ -107,6 +107,16 @@ export interface ListSummary {
   memberCount: number;
   /** Whether this is THE default lane — what an unscoped command means (#190). */
   isDefault: boolean;
+  /**
+   * The lane's cadence, carried so a caller can READ BACK what `configure`
+   * wrote (#191). Without these, `players lists configure` would be a
+   * write-only surface: settable, and then unreadable except by writing again.
+   * Null means "never auto-refreshes" / "never auto-digests" / "fall back to
+   * the DIGEST_TO env value" — inert until #192/#193 act on them.
+   */
+  refreshIntervalMinutes: number | null;
+  digestHour: number | null;
+  digestTo: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -409,6 +419,9 @@ export async function listLists(db: Db): Promise<ListSummary[]> {
       id: playerLists.id,
       name: playerLists.name,
       isDefault: playerLists.isDefault,
+      refreshIntervalMinutes: playerLists.refreshIntervalMinutes,
+      digestHour: playerLists.digestHour,
+      digestTo: playerLists.digestTo,
       createdAt: playerLists.createdAt,
       updatedAt: playerLists.updatedAt,
       memberCount: sql<number>`count(${players.id})`,
@@ -425,6 +438,9 @@ export async function listLists(db: Db): Promise<ListSummary[]> {
     name: r.name,
     memberCount: Number(r.memberCount),
     isDefault: r.isDefault,
+    refreshIntervalMinutes: r.refreshIntervalMinutes,
+    digestHour: r.digestHour,
+    digestTo: r.digestTo,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   }));

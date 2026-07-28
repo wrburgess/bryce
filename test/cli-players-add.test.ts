@@ -387,12 +387,40 @@ describe("players add CLI", () => {
       // what does not, and the one command that finishes the job.
       expect(err[0]).toBe(
         "error: player id=1 created but not attached to list=Prospects - " +
-          "re-run: sk players lists add --name Prospects --person-ids 691185",
+          "re-run: sk players lists add --name 'Prospects' --person-ids 691185",
       );
       expect(out).toEqual([]);
       // The residual state is exactly what the message claims.
       expect(countPlayers()).toBe(1);
       expect(countMembers()).toBe(0);
+    });
+
+    // Reviewer P2. List names legitimately carry spaces — this repo's own help
+    // text uses `'Top 30'` — and an unquoted repair pastes as
+    // `--name Top 30 --person-ids ...`, where `Top` is the value and `30` is an
+    // unexpected argument. The recovery command the operator was told to run
+    // would fail, which is the exact failure this message exists to prevent.
+    it("quotes a list name with spaces or a quote so the repair can actually be pasted", async () => {
+      for (const [listName, expected] of [
+        ["Top 30", "'Top 30'"],
+        ["Dad's Guys", "'Dad'\\''s Guys'"],
+      ] as const) {
+        opened.close();
+        opened = testDb();
+        out = [];
+        err = [];
+        await createList(opened.db, listName, clock.now());
+        expect(await runPlayersAdd(["--name", "Maximo Acosta", "--list", listName], deps())).toBe(0);
+        await opened.db.delete(listMembers);
+        err = [];
+
+        const code = await runPlayersAdd(
+          ["--name", "Maximo Acosta", "--list", listName],
+          deps({ db: dbFailingAt(opened.db, 1) }),
+        );
+        expect(code).toBe(1);
+        expect(err[0], listName).toContain(`re-run: sk players lists add --name ${expected} --person-ids 691185`);
+      }
     });
 
     it("refuses to attach onto a lane soft-deleted between resolve and attach", async () => {
