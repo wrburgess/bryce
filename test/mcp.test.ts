@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { digestDeliveries, playerTags, players, refreshRuns, statLines } from "../src/db/schema.js";
+import { digestDeliveries, playerLists, playerTags, players, refreshRuns, statLines } from "../src/db/schema.js";
 import { MlbClient } from "../src/mlb/client.js";
 import { claimRefreshRun } from "../src/jobs/refresh-run.js";
 import { assemblePlayerCard } from "../src/reports/player-card.js";
@@ -55,6 +55,7 @@ const ALL_TOOLS = [
   "list_create",
   "list_rename",
   "list_delete",
+  "list_set_default",
   "list_members",
   "list_add_players",
   "list_remove_players",
@@ -1009,8 +1010,16 @@ describe("MCP server over Streamable HTTP", () => {
       expect(added.structuredContent).toMatchObject({ added: 1 });
 
       const listed = await call("lists_list");
-      const lists = listed.structuredContent?.lists as Array<{ name: string; memberCount: number }>;
-      expect(lists).toEqual([{ ...lists[0], name: "Prospects", memberCount: 1 }]);
+      const lists = listed.structuredContent?.lists as Array<{
+        name: string;
+        memberCount: number;
+        isDefault: boolean;
+      }>;
+      // Ordered by name; the migration-seeded default lane is listed too (#190).
+      expect(lists.map((l) => [l.name, l.memberCount, l.isDefault])).toEqual([
+        ["Prospects", 1, false],
+        ["Watchlist", 0, true],
+      ]);
 
       const members = await call("list_members", { name: "Prospects" });
       const m = members.structuredContent?.members as Array<{ fullName: string }>;
@@ -1071,6 +1080,52 @@ describe("MCP server over Streamable HTTP", () => {
 
       const bad = await call("digest_preview", { window: "1d", list: "ghost" });
       expect(bad.isError).toBe(true);
+    });
+
+    /**
+     * The lane error seam (#190). One sad path per tool that can raise each
+     * type, asserting the MESSAGE the client sees rather than only `isError` —
+     * a tool client should not have to guess which conflict it hit.
+     */
+    describe("default lane (#190)", () => {
+      it("list_set_default moves the flag and clears the previous default", async () => {
+        await call("list_create", { name: "Prospects" });
+        const set = await call("list_set_default", { name: "Prospects" });
+        expect(set.isError).toBeUndefined();
+        expect(set.structuredContent).toMatchObject({ list: { name: "Prospects", isDefault: true } });
+
+        const listed = await call("lists_list");
+        const lists = listed.structuredContent?.lists as Array<{ name: string; isDefault: boolean }>;
+        expect(lists.filter((l) => l.isDefault).map((l) => l.name)).toEqual(["Prospects"]);
+      });
+
+      it("list_set_default on an unknown list is an isError, moving nothing", async () => {
+        const res = await call("list_set_default", { name: "ghost" });
+        expect(res.isError).toBe(true);
+        expect(res.content[0]?.text).toContain('no list named "ghost"');
+        const listed = await call("lists_list");
+        const lists = listed.structuredContent?.lists as Array<{ name: string; isDefault: boolean }>;
+        expect(lists.filter((l) => l.isDefault).map((l) => l.name)).toEqual(["Watchlist"]);
+      });
+
+      it("list_delete on the DEFAULT list is an isError naming the recovery", async () => {
+        const res = await call("list_delete", { name: "Watchlist" });
+        expect(res.isError).toBe(true);
+        expect(res.content[0]?.text).toContain("is the default list");
+        expect(res.content[0]?.text).toContain("set-default");
+        // Still live: the refusal wrote nothing.
+        const listed = await call("lists_list");
+        const lists = listed.structuredContent?.lists as Array<{ name: string }>;
+        expect(lists.map((l) => l.name)).toEqual(["Watchlist"]);
+      });
+
+      it("send_digest with no default lane is an isError, and mails nothing", async () => {
+        await opened.db.update(playerLists).set({ isDefault: false });
+        const res = await call("send_digest", {});
+        expect(res.isError).toBe(true);
+        expect(res.content[0]?.text).toContain("no default list is set");
+        expect(mailer.sent).toHaveLength(0);
+      });
     });
   });
 

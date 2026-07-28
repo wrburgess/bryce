@@ -90,9 +90,27 @@ export type ClaimRefusal =
   | "claimed-by-another-run"
   | "heartbeat-sent-within-week";
 
+/**
+ * The LANE a delivery belongs to (#190) — the list's id, plus whether it is the
+ * default. Both are load-bearing: the id is the slot key's third column, and the
+ * flag decides the provider-side key's namespace (see `deliveryKey`).
+ */
+export interface DeliveryLane {
+  id: number;
+  isDefault: boolean;
+}
+
 export interface ClaimArgs {
   kind: DeliveryKind;
   dateCovered: string;
+  /**
+   * The lane claiming this slot (#190). Required, not optional-with-a-fallback:
+   * `digest_deliveries.list_id` is NOT NULL, so a caller that forgot the lane
+   * must fail to compile rather than fail at the INSERT — and a default resolved
+   * *here* would hide the missing lane from every caller that should be
+   * resolving one explicitly.
+   */
+  listId: number;
   now: Date;
   leaseMs?: number;
   /**
@@ -135,6 +153,11 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
           and(
             eq(digestDeliveries.kind, args.kind),
             eq(digestDeliveries.dateCovered, args.dateCovered),
+            // The lane is part of the SLOT, so it is part of the lookup: another
+            // lane's row for the same date is a different slot entirely and must
+            // not be seen here, or one lane's `sent` row would refuse another
+            // lane's claim (#190).
+            eq(digestDeliveries.listId, args.listId),
           ),
         )
         .all()[0];
@@ -172,6 +195,7 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
           .values({
             kind: args.kind,
             dateCovered: args.dateCovered,
+            listId: args.listId,
             sentAt: null,
             status: "sending",
             claimedAt: nowIso,
@@ -182,7 +206,9 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
           .returning({ id: digestDeliveries.id })
           .all()[0];
         if (inserted === undefined) {
-          throw new Error(`Failed to claim ${args.kind} delivery for ${args.dateCovered}`);
+          throw new Error(
+            `Failed to claim ${args.kind} delivery for ${args.dateCovered} (list ${args.listId})`,
+          );
         }
         return {
           claimed: true,
@@ -361,11 +387,6 @@ export function settleFailed(db: Db, args: SettleFailedArgs): void {
 }
 
 /**
- * Stable per-slot key handed to the mail provider. Stable — not per-attempt —
- * so a future reconciliation can ask the provider "did THIS slot land?" and get
- * one answer for every attempt at it.
- */
-/**
  * The oldest digest slot for a date BEFORE `beforeDate` that still owes a send:
  * a `failed` row, or a `sending` row whose lease has expired (a run that
  * crashed and never came back). Returns its `date_covered`, or null.
@@ -382,6 +403,7 @@ export function settleFailed(db: Db, args: SettleFailedArgs): void {
  */
 export function findOrphanedDigestDate(
   db: Db,
+  listId: number,
   beforeDate: string,
   nowMs: number,
   leaseMs = LEASE_MS,
@@ -389,7 +411,16 @@ export function findOrphanedDigestDate(
   const rows = db
     .select()
     .from(digestDeliveries)
-    .where(and(eq(digestDeliveries.kind, "digest"), lt(digestDeliveries.dateCovered, beforeDate)))
+    .where(
+      and(
+        eq(digestDeliveries.kind, "digest"),
+        lt(digestDeliveries.dateCovered, beforeDate),
+        // Scoped to ONE lane (#190). Recovery re-claims the slot it finds, and a
+        // claim is per-lane, so returning another lane's orphaned date would have
+        // this lane re-send that lane's missing digest under its own slot.
+        eq(digestDeliveries.listId, listId),
+      ),
+    )
     .orderBy(digestDeliveries.dateCovered)
     .all();
   for (const row of rows) {
@@ -401,8 +432,34 @@ export function findOrphanedDigestDate(
   return null;
 }
 
-export function deliveryKey(kind: DeliveryKind, dateCovered: string): string {
-  return `bryce:${kind}:${dateCovered}`;
+/**
+ * Stable per-slot key handed to the mail provider. Stable — not per-attempt —
+ * so a reconciliation can ask the provider "did THIS slot land?" and get one
+ * answer for every attempt at it.
+ *
+ * IT MUST CARRY THE LANE, for the same reason `reportKey` must not share this
+ * namespace (see below). The daily digest's stale-claim recovery looks this key
+ * up at the provider to ask whether the crashed attempt already landed — and a
+ * positive answer SUPPRESSES the send. Once two lanes digest the same date, a
+ * lane-less key would make them share `bryce:digest:<date>`: lane B's recovery
+ * would find lane A's delivered message, conclude its own digest had landed, and
+ * silently skip it. A suppressed send looks exactly like a successful one, so
+ * the loss would be invisible.
+ *
+ * THE DEFAULT LANE KEEPS TODAY'S EXACT KEY, byte for byte. Every recovery lookup
+ * in flight across the migration boundary — and every message already sitting in
+ * the provider's searchable history — is keyed `bryce:digest:<date>`; namespacing
+ * the default lane too would orphan all of it and turn the first post-migration
+ * recovery into a duplicate send. Only NON-default lanes get a suffix. The
+ * asymmetry is deliberate, and it is pinned by its own test.
+ */
+export function deliveryKey(
+  kind: DeliveryKind,
+  dateCovered: string,
+  lane: DeliveryLane,
+): string {
+  const base = `bryce:${kind}:${dateCovered}`;
+  return lane.isDefault ? base : `${base}:list-${lane.id}`;
 }
 
 /**

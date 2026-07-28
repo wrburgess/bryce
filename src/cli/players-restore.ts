@@ -100,6 +100,17 @@ export async function runPlayersRestore(
     deps.write(
       `player-list restored inserted=${summary.inserted} updated=${summary.updated} total=${summary.total} lists=${listCount} members=${memberCount}`,
     );
+    // FAIL CLOSED, LOUDLY (#190). A pre-v5 payload carries no lane
+    // configuration, so restoring one leaves no default list and every unscoped
+    // command then raises NoDefaultListError. Guessing a default (the largest
+    // list, say) would silently re-point the HC's schedule at a cohort he never
+    // chose; saying nothing would let him discover it when a digest fails to
+    // arrive. So: restore succeeds, and names the one command that fixes it.
+    if (summary.noDefaultList) {
+      deps.write(
+        "warning: no default list after restore — unscoped commands will fail until you run: sk players lists set-default --name NAME",
+      );
+    }
     return 0;
   } catch (err) {
     if (

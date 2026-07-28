@@ -22,14 +22,21 @@ import { fsyncDir } from "./snapshot.js";
  */
 
 /**
- * The version `createPlayerListBackup` EMITS. Version 4 adds Highlightly
- * identity as an explicit membership selector while retaining v1-v3 imports.
- * (issue #70 / ADR 0046): a v2 payload adds optional `lists` (live list
- * definitions) and `members` (each referencing a player by natural id and a list
- * by name). The parser still accepts a v1 payload (no lists/members) — the bump
- * is backward compatible.
+ * The version `createPlayerListBackup` EMITS.
+ *
+ * Version 5 (#190) carries each list's LANE configuration — `isDefault` plus the
+ * three cadence/recipient columns. The bump is not cosmetic: without it a
+ * restore silently loses which list is the default and every lane's schedule,
+ * and a database with no default fails every unscoped command. Losing the HC's
+ * configuration quietly is exactly what this backup exists to prevent.
+ *
+ * Earlier versions and what they added: v2 optional `lists` + `members` (issue
+ * #70 / ADR 0046), v3 NCAA source state, v4 Highlightly identity as an explicit
+ * membership selector. v1-v4 imports are all retained — each retained version is
+ * a compatibility surface that must keep being tested, which is the cost weighed
+ * when this phase chose ONE bump over two.
  */
-export const PLAYER_BACKUP_VERSION = 4 as const;
+export const PLAYER_BACKUP_VERSION = 5 as const;
 
 /** Refuse absurd inputs before Zod even runs — a cheap denial-of-service guard. */
 export const MAX_BACKUP_BYTES = 16 * 1024 * 1024;
@@ -136,14 +143,25 @@ const playerEntrySchema = z
   });
 
 /**
- * A live list definition in a v2 backup. Name is non-blank after normalization;
- * timestamps are optional (an insert falls back to `now`).
+ * A live list definition in a v2 backup, plus its LANE configuration from v5
+ * (#190). Name is non-blank after normalization; timestamps are optional (an
+ * insert falls back to `now`).
+ *
+ * The four lane fields are optional with explicit defaults so a v1-v4 payload
+ * parses unchanged into a non-default, cadence-less list — the same shape those
+ * versions could ever have described. The bounds mirror the DB CHECKs rather
+ * than trusting them: a payload is untrusted input, and the schema is where it
+ * is rejected with a readable message instead of a constraint failure.
  */
 const backupListSchema = z
   .object({
     name: z.string().min(1),
     createdAt: isoTimestamp.optional(),
     updatedAt: isoTimestamp.optional(),
+    isDefault: z.boolean().default(false),
+    refreshIntervalMinutes: z.number().int().positive().nullable().default(null),
+    digestHour: z.number().int().min(0).max(23).nullable().default(null),
+    digestTo: z.string().min(1).nullable().default(null),
   })
   .strict()
   .superRefine((row, ctx) => {
@@ -191,8 +209,14 @@ const backupMemberSchema = z
 
 export const playerListBackupSchema = z
   .object({
-    // v1 or v2: a v1 payload (no lists/members) still restores (ADR 0046).
-    version: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
+    // v1 through v5: a v1 payload (no lists/members) still restores (ADR 0046).
+    version: z.union([
+      z.literal(1),
+      z.literal(2),
+      z.literal(3),
+      z.literal(4),
+      z.literal(5),
+    ]),
     exportedAt: isoTimestamp.optional(),
     players: z.array(playerEntrySchema),
     lists: z.array(backupListSchema).optional(),
@@ -207,6 +231,38 @@ export const playerListBackupSchema = z
       ctx.addIssue({
         code: "custom",
         message: "version 1 backups must not carry lists or members (use version 2)",
+      });
+    }
+    // Lane configuration requires v5 (#190) — the same fail-closed rule the
+    // version field already carries for lists (v2) and Highlightly membership
+    // (v4). Without it a hand-edited v4 payload could smuggle in a default and
+    // the version would stop describing the payload's contents.
+    if (env.version < 5) {
+      env.lists?.forEach((list, index) => {
+        if (
+          list.isDefault ||
+          list.refreshIntervalMinutes != null ||
+          list.digestHour != null ||
+          list.digestTo != null
+        ) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["lists", index],
+            message: "lane configuration (isDefault/cadence/recipients) requires version 5",
+          });
+        }
+      });
+    }
+    // At most ONE default in the payload, mirroring `player_lists_default_uq`.
+    // Rejected HERE rather than left to the index: restore is all-or-nothing, so
+    // a second default would roll back an otherwise good restore with a
+    // constraint failure instead of naming the actual problem.
+    const defaults = (env.lists ?? []).filter((list) => list.isDefault);
+    if (defaults.length > 1) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["lists"],
+        message: `at most one list may be the default; found ${defaults.length}`,
       });
     }
     if (env.version < 4 && env.members?.some((member) => member.highlightlyPlayerId != null)) {
@@ -304,10 +360,11 @@ export class PlayerBackupParseError extends Error {
 
 /**
  * Serialize every Player row into a versioned, re-importable backup envelope
- * (version 4). LIVE named lists and their memberships are included so the HC's
- * roster choices survive a restore (soft-deleted lists are excluded — a deleted
- * list is not a roster choice to preserve). Each membership references its player
- * by natural id and its list by name.
+ * (version 5). LIVE named lists, their LANE configuration (#190), and their
+ * memberships are included so the HC's roster choices AND schedule survive a
+ * restore (soft-deleted lists are excluded — a deleted list is not a roster
+ * choice to preserve). Each membership references its player by natural id and
+ * its list by name.
  */
 export async function createPlayerListBackup(
   db: Db,
@@ -379,6 +436,13 @@ export async function createPlayerListBackup(
       name: l.name,
       createdAt: l.createdAt,
       updatedAt: l.updatedAt,
+      // ALWAYS emitted, never omitted-when-falsy: a v5 payload states each
+      // list's lane configuration outright, so a restore never has to infer it
+      // from absence (#190).
+      isDefault: l.isDefault,
+      refreshIntervalMinutes: l.refreshIntervalMinutes,
+      digestHour: l.digestHour,
+      digestTo: l.digestTo,
     })),
     // Each current player has exactly one operational natural identity.
     members: memberRows.map((m) =>

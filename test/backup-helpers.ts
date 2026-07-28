@@ -46,6 +46,25 @@ export function copyProdMigrations(): TempMigrations {
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
+/**
+ * A writable copy of the production migrations folder TRUNCATED after `lastIdx`
+ * — the real history up to a point, so a test can build a genuinely pre-migration
+ * database by running the actual migrations rather than hand-seeding a lookalike
+ * (rules/testing.md: a synthetic corpus answers a different question).
+ *
+ * The truncated migration files are deleted as well as unlisted, so a stray read
+ * of the folder cannot resurrect them.
+ */
+export function copyProdMigrationsThrough(lastIdx: number): TempMigrations {
+  const { dir, cleanup } = copyProdMigrations();
+  const journal = readJournal(dir);
+  const dropped = journal.entries.filter((e) => e.idx > lastIdx);
+  journal.entries = journal.entries.filter((e) => e.idx <= lastIdx);
+  writeJournal(dir, journal);
+  for (const entry of dropped) rmSync(join(dir, `${entry.tag}.sql`), { force: true });
+  return { dir, cleanup };
+}
+
 interface Journal {
   version: string;
   dialect: string;
@@ -136,6 +155,38 @@ export function makeBackupEntry(overrides: BackupEntryOverrides = {}): Record<st
     notes: null,
     createdAt: "2026-07-01T00:00:00.000Z",
     updatedAt: "2026-07-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+/**
+ * A complete v5 list entry (#190). Built programmatically rather than spelled
+ * out per test so adding a lane field later touches one place, and so the
+ * default shape is the honest one — a non-default, cadence-less list.
+ */
+export function makeBackupList(
+  overrides: {
+    name?: string;
+    createdAt?: string;
+    updatedAt?: string;
+    isDefault?: boolean;
+    refreshIntervalMinutes?: number | null;
+    digestHour?: number | null;
+    digestTo?: string | null;
+  } = {},
+): {
+  name: string;
+  isDefault: boolean;
+  refreshIntervalMinutes: number | null;
+  digestHour: number | null;
+  digestTo: string | null;
+} {
+  return {
+    name: "Prospects",
+    isDefault: false,
+    refreshIntervalMinutes: null,
+    digestHour: null,
+    digestTo: null,
     ...overrides,
   };
 }

@@ -47,7 +47,9 @@ import {
 } from "../watchlist/service.js";
 import {
   BlankListNameError,
+  CannotDeleteDefaultListError,
   DuplicateListNameError,
+  NoDefaultListError,
   UnknownListError,
   addToList,
   createList,
@@ -57,6 +59,7 @@ import {
   removeFromList,
   renameList,
   resolveListByName,
+  setDefaultList,
 } from "../lists/service.js";
 import {
   AddNcaaPlayerInputSchema,
@@ -97,7 +100,7 @@ function toPlayerRef(ref: { personId?: number; highlightlyPlayerId?: number }): 
 }
 
 /**
- * The MCP server — Bryce's primary interface (ADR 0027). Twenty-two tools over the
+ * The MCP server — Bryce's primary interface (ADR 0027). Twenty-three tools over the
  * same service layer and Zod schemas the REST routes use; every result is
  * JSON, returned both as structuredContent and as a text part for clients
  * that read only text. Mounted at /mcp behind the bearer middleware.
@@ -134,6 +137,8 @@ function errorResult(err: unknown): CallToolResult {
           err instanceof UnknownListError ||
           err instanceof DuplicateListNameError ||
           err instanceof BlankListNameError ||
+          err instanceof CannotDeleteDefaultListError ||
+          err instanceof NoDefaultListError ||
           err instanceof ManualWriteToDerivedNamespaceError ||
           err instanceof UnknownTagError ||
           err instanceof ReadonlyQueryError ||
@@ -565,13 +570,27 @@ export function buildMcpServer(deps: ServiceDeps): McpServer {
     "list_delete",
     {
       description:
-        "Soft-delete a named list: it disappears from lists_list and can no longer scope a digest/query, but its curation intent is recoverable and its NAME frees for reuse. Membership rows are left in place. An unknown list is rejected.",
+        "Soft-delete a named list: it disappears from lists_list and can no longer scope a digest/query, but its curation intent is recoverable and its NAME frees for reuse. Membership rows are left in place. An unknown list is rejected, as is the DEFAULT list — point the default elsewhere with list_set_default first.",
       inputSchema: ListNameInputShape,
     },
     (args) =>
       guarded(async () => {
         const input = ListNameInputSchema.parse(args);
         return jsonResult({ list: await deleteList(deps.db, input.name, deps.now()) });
+      }),
+  );
+
+  server.registerTool(
+    "list_set_default",
+    {
+      description:
+        "Point the DEFAULT list at this one — the list an unscoped command means (#190). Exactly one live list is the default; setting a new one clears the previous in the same transaction. An unknown list is rejected; setting the current default again is an idempotent no-op. The default list cannot be deleted until another is set.",
+      inputSchema: ListNameInputShape,
+    },
+    (args) =>
+      guarded(async () => {
+        const input = ListNameInputSchema.parse(args);
+        return jsonResult({ list: await setDefaultList(deps.db, input.name, deps.now()) });
       }),
   );
 

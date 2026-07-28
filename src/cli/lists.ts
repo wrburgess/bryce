@@ -6,7 +6,9 @@ import type { PlayerRef } from "../watchlist/service.js";
 import { PlayerNotFoundError } from "../watchlist/service.js";
 import {
   BlankListNameError,
+  CannotDeleteDefaultListError,
   DuplicateListNameError,
+  NoDefaultListError,
   UnknownListError,
   addToList,
   createList,
@@ -16,6 +18,7 @@ import {
   removeFromList,
   renameList,
   resolveListByName,
+  setDefaultList,
 } from "../lists/service.js";
 import { exitAfterDrain, isMain } from "./main.js";
 import { preflightDirect } from "./router.js";
@@ -32,6 +35,7 @@ import { preflightDirect } from "./router.js";
  *   create --name NAME                    create a new list
  *   rename --name OLD --to NEW            rename a live list
  *   delete --name NAME                    soft-delete a list (name frees for reuse)
+ *   set-default --name NAME               point the default lane at a list (#190)
  *   add    --name NAME --person-ids a,b --highlightly-player-ids c   add members (idempotent)
  *   remove --name NAME --person-ids a,b --highlightly-player-ids c   remove members
  *   show                                  print every live list + member counts
@@ -57,6 +61,8 @@ export async function runLists(argv: string[], deps: ListsDeps): Promise<number>
         return await runRename(flags, deps);
       case "delete":
         return await runDelete(flags, deps);
+      case "set-default":
+        return await runSetDefault(flags, deps);
       case "add":
         return await runAddRemove("add", flags, deps);
       case "remove":
@@ -64,7 +70,9 @@ export async function runLists(argv: string[], deps: ListsDeps): Promise<number>
       case "show":
         return await runShow(flags, deps);
       default:
-        err("error=usage: lists <create|rename|delete|add|remove|show> [--name NAME] ...");
+        err(
+          "error=usage: lists <create|rename|delete|set-default|add|remove|show> [--name NAME] ...",
+        );
         return 1;
     }
   } catch (e) {
@@ -72,6 +80,8 @@ export async function runLists(argv: string[], deps: ListsDeps): Promise<number>
       e instanceof UnknownListError ||
       e instanceof DuplicateListNameError ||
       e instanceof BlankListNameError ||
+      e instanceof CannotDeleteDefaultListError ||
+      e instanceof NoDefaultListError ||
       e instanceof PlayerNotFoundError
     ) {
       err(`error=${e.message}`);
@@ -129,6 +139,14 @@ async function runDelete(flags: Map<string, string>, deps: ListsDeps): Promise<n
   if (name === null) return 1;
   const list = await deleteList(deps.db, name, deps.now());
   deps.write(`list deleted id=${list.id} name=${list.name}`);
+  return 0;
+}
+
+async function runSetDefault(flags: Map<string, string>, deps: ListsDeps): Promise<number> {
+  const name = requireName(flags, deps);
+  if (name === null) return 1;
+  const list = await setDefaultList(deps.db, name, deps.now());
+  deps.write(`list default id=${list.id} name=${list.name}`);
   return 0;
 }
 
@@ -193,7 +211,7 @@ async function runShow(flags: Map<string, string>, deps: ListsDeps): Promise<num
   }
   const lists = await listLists(deps.db);
   for (const l of lists) {
-    deps.write(`list id=${l.id} name=${l.name} members=${l.memberCount}`);
+    deps.write(`list id=${l.id} name=${l.name} members=${l.memberCount} default=${l.isDefault}`);
   }
   deps.write(`total=${lists.length}`);
   return 0;

@@ -4,7 +4,9 @@ import type { OpenedDb } from "../src/db/client.js";
 import { listMembers, playerLists, players } from "../src/db/schema.js";
 import {
   BlankListNameError,
+  CannotDeleteDefaultListError,
   DuplicateListNameError,
+  NoDefaultListError,
   UnknownListError,
   addToList,
   createList,
@@ -14,10 +16,21 @@ import {
   listMembersOf,
   removeFromList,
   renameList,
+  resolveDefaultList,
   resolveListByName,
+  resolveListOrDefault,
+  setDefaultList,
 } from "../src/lists/service.js";
 import { PlayerNotFoundError } from "../src/watchlist/service.js";
 import { fakeClock, insertPlayer, testDb } from "./factories.js";
+
+/**
+ * How many lists a freshly migrated database already holds: exactly one, the
+ * default lane `Watchlist` seeded by drizzle/0012 (#190). Named rather than
+ * folded into each literal so a count here still reads as "the lists this test
+ * created", plus the one it inherited.
+ */
+const SEEDED_LISTS = 1;
 
 /**
  * Named-list service (issue #70 / ADR 0046). Every assertion is over DB/content
@@ -40,7 +53,7 @@ describe("lists service", () => {
       expect(list.name).toBe("Prospects");
       expect(list.deletedAt).toBeNull();
       const rows = await opened.db.select().from(playerLists);
-      expect(rows).toHaveLength(1);
+      expect(rows).toHaveLength(SEEDED_LISTS + 1);
     });
 
     it("rejects a duplicate live name", async () => {
@@ -48,7 +61,7 @@ describe("lists service", () => {
       await expect(createList(opened.db, "Dupes", clock.now())).rejects.toBeInstanceOf(
         DuplicateListNameError,
       );
-      expect(await opened.db.select().from(playerLists)).toHaveLength(1);
+      expect(await opened.db.select().from(playerLists)).toHaveLength(SEEDED_LISTS + 1);
     });
 
     it("rejects a blank/whitespace name", async () => {
@@ -60,7 +73,7 @@ describe("lists service", () => {
     it("is case-sensitive (two names differing only in case coexist)", async () => {
       await createList(opened.db, "prospects", clock.now());
       await createList(opened.db, "Prospects", clock.now());
-      expect(await opened.db.select().from(playerLists)).toHaveLength(2);
+      expect(await opened.db.select().from(playerLists)).toHaveLength(SEEDED_LISTS + 2);
     });
   });
 
@@ -95,13 +108,13 @@ describe("lists service", () => {
       expect(deleted.deletedAt).not.toBeNull();
 
       // Gone from listLists and unresolvable...
-      expect(await listLists(opened.db)).toHaveLength(0);
+      expect(await listLists(opened.db)).toHaveLength(SEEDED_LISTS);
       await expect(resolveListByName(opened.db, "Temp")).rejects.toBeInstanceOf(UnknownListError);
 
       // ...but the name is reusable, and that is a NEW row (soft-delete kept the old).
       const reused = await createList(opened.db, "Temp", clock.now());
       expect(reused.id).not.toBe(created.id);
-      expect(await opened.db.select().from(playerLists)).toHaveLength(2);
+      expect(await opened.db.select().from(playerLists)).toHaveLength(SEEDED_LISTS + 2);
     });
   });
 
@@ -121,9 +134,11 @@ describe("lists service", () => {
       });
 
       const summaries = await listLists(opened.db);
-      expect(summaries.map((s) => s.name)).toEqual(["Alpha", "Bravo"]);
+      // The seeded default lane sorts last by name (#190).
+      expect(summaries.map((s) => s.name)).toEqual(["Alpha", "Bravo", "Watchlist"]);
       expect(summaries[0]?.memberCount).toBe(2);
       expect(summaries[1]?.memberCount).toBe(0);
+      expect(summaries.map((s) => s.isDefault)).toEqual([false, false, true]);
     });
   });
 
@@ -228,5 +243,281 @@ describe("lists service", () => {
     await addToList(opened.db, "B", [p.externalId!], clock.now());
     expect(await listMemberIds(opened.db, a.id)).toEqual([p.id]);
     expect(await listMemberIds(opened.db, b.id)).toEqual([p.id]);
+  });
+});
+
+/**
+ * The default LANE (#190): the list an unscoped command means. Everything here
+ * asserts DB state, and the constraint tests drive the DATABASE's own refusal —
+ * a service-level guard that agrees with an index proves nothing about what
+ * happens under concurrency, which is the case the index exists for.
+ */
+describe("default list / lane (#190)", () => {
+  let opened: OpenedDb;
+  const clock = fakeClock("2026-07-19T17:00:00.000Z");
+
+  beforeEach(() => {
+    opened = testDb();
+  });
+  afterEach(() => {
+    opened.close();
+  });
+
+  /** The lane drizzle/0012 seeds into every freshly migrated database. */
+  async function seededLane() {
+    return resolveDefaultList(opened.db);
+  }
+
+  describe("schema constraints", () => {
+    it("refuses a second LIVE default", async () => {
+      await expect(
+        opened.db.insert(playerLists).values({
+          name: "Rival",
+          isDefault: true,
+          createdAt: "2026-07-19T17:00:00.000Z",
+          updatedAt: "2026-07-19T17:00:00.000Z",
+        }),
+      ).rejects.toThrow(/UNIQUE constraint failed/i);
+      expect(await listLists(opened.db)).toHaveLength(SEEDED_LISTS);
+    });
+
+    it("lets a SOFT-DELETED default coexist with a live one", async () => {
+      // The case a non-partial index would silently break: once the default is
+      // deleted, no replacement could ever be set, and every unscoped command
+      // would fail forever.
+      const lane = await seededLane();
+      await opened.db
+        .update(playerLists)
+        .set({ deletedAt: "2026-07-19T17:00:00.000Z" })
+        .where(eq(playerLists.id, lane.id));
+
+      const replacement = await opened.db
+        .insert(playerLists)
+        .values({
+          name: "Replacement",
+          isDefault: true,
+          createdAt: "2026-07-19T17:00:00.000Z",
+          updatedAt: "2026-07-19T17:00:00.000Z",
+        })
+        .returning();
+      expect(replacement[0]?.isDefault).toBe(true);
+      expect((await resolveDefaultList(opened.db)).name).toBe("Replacement");
+    });
+
+    it("refuses a NULL list_id on a delivery", async () => {
+      // THE NULL TRAP. SQLite treats NULLs as DISTINCT in a unique index, so a
+      // nullable list_id would permit unlimited (digest, <date>, NULL) rows and
+      // silently void the slot uniqueness ADR 0034's durable claim rests on.
+      // Verified by the rules/testing.md discipline: dropping `NOT NULL` from
+      // the rebuilt table in drizzle/0012 makes THIS named test fail and no
+      // other, so the guard is known to bite.
+      // Driven on the RAW handle so the assertion sees SQLite's own message
+      // rather than drizzle's wrapper — the point is which constraint fired.
+      expect(() =>
+        opened.sqlite
+          .prepare(
+            "INSERT INTO digest_deliveries (kind, date_covered, status, created_at, list_id) VALUES ('digest', '2026-07-19', 'sent', '2026-07-19T17:00:00.000Z', NULL)",
+          )
+          .run(),
+      ).toThrow(/NOT NULL constraint failed: digest_deliveries\.list_id/i);
+    });
+
+    it("bounds digest_hour at BOTH ends", async () => {
+      for (const digestHour of [24, -1]) {
+        await expect(
+          opened.db.insert(playerLists).values({
+            name: `Hour ${digestHour}`,
+            digestHour,
+            createdAt: "2026-07-19T17:00:00.000Z",
+            updatedAt: "2026-07-19T17:00:00.000Z",
+          }),
+        ).rejects.toThrow(/player_lists_digest_hour_range_ck/);
+      }
+      // 0 and 23 are legal hours, so the bound rejects only what it should.
+      for (const digestHour of [0, 23]) {
+        await opened.db.insert(playerLists).values({
+          name: `Hour ${digestHour}`,
+          digestHour,
+          createdAt: "2026-07-19T17:00:00.000Z",
+          updatedAt: "2026-07-19T17:00:00.000Z",
+        });
+      }
+      expect(await listLists(opened.db)).toHaveLength(SEEDED_LISTS + 2);
+    });
+
+    it("bounds refresh_interval_minutes at BOTH ends", async () => {
+      for (const refreshIntervalMinutes of [0, -1]) {
+        await expect(
+          opened.db.insert(playerLists).values({
+            name: `Interval ${refreshIntervalMinutes}`,
+            refreshIntervalMinutes,
+            createdAt: "2026-07-19T17:00:00.000Z",
+            updatedAt: "2026-07-19T17:00:00.000Z",
+          }),
+        ).rejects.toThrow(/player_lists_refresh_interval_positive_ck/);
+      }
+      await opened.db.insert(playerLists).values({
+        name: "Interval 1",
+        refreshIntervalMinutes: 1,
+        createdAt: "2026-07-19T17:00:00.000Z",
+        updatedAt: "2026-07-19T17:00:00.000Z",
+      });
+      expect(await listLists(opened.db)).toHaveLength(SEEDED_LISTS + 1);
+    });
+  });
+
+  describe("setDefaultList", () => {
+    it("moves the flag atomically: the prior default is cleared and the new one set", async () => {
+      const previous = await seededLane();
+      await createList(opened.db, "Next", clock.now());
+
+      const now = await setDefaultList(opened.db, "Next", clock.now());
+      expect(now.name).toBe("Next");
+
+      // BOTH rows asserted — a test that checked only the new default would pass
+      // against an implementation that left two defaults behind in a database
+      // without the index.
+      const rows = await opened.db.select().from(playerLists).orderBy(playerLists.id);
+      expect(rows.map((r) => [r.name, r.isDefault])).toEqual([
+        [previous.name, false],
+        ["Next", true],
+      ]);
+      expect((await resolveDefaultList(opened.db)).id).toBe(now.id);
+    });
+
+    it("sets a default when none exists", async () => {
+      const lane = await seededLane();
+      await opened.db.update(playerLists).set({ isDefault: false }).where(eq(playerLists.id, lane.id));
+      await expect(resolveDefaultList(opened.db)).rejects.toBeInstanceOf(NoDefaultListError);
+
+      await setDefaultList(opened.db, lane.name, clock.now());
+      expect((await resolveDefaultList(opened.db)).id).toBe(lane.id);
+    });
+
+    it("is an idempotent no-op on the CURRENT default and writes nothing", async () => {
+      const lane = await seededLane();
+      const again = await setDefaultList(opened.db, lane.name, new Date("2027-01-01T00:00:00.000Z"));
+      expect(again).toEqual(lane);
+      // Not merely equal by id: `updated_at` is untouched, so a re-run does not
+      // read as a change in an audit.
+      const stored = (await opened.db.select().from(playerLists).where(eq(playerLists.id, lane.id)))[0];
+      expect(stored?.updatedAt).toBe(lane.updatedAt);
+    });
+
+    it("rejects an unknown list and moves nothing", async () => {
+      const before = await opened.db.select().from(playerLists).orderBy(playerLists.id);
+      await expect(setDefaultList(opened.db, "ghost", clock.now())).rejects.toBeInstanceOf(
+        UnknownListError,
+      );
+      expect(await opened.db.select().from(playerLists).orderBy(playerLists.id)).toEqual(before);
+    });
+
+    it("rejects a SOFT-DELETED list and moves nothing", async () => {
+      await createList(opened.db, "Temp", clock.now());
+      await deleteList(opened.db, "Temp", clock.now());
+      await expect(setDefaultList(opened.db, "Temp", clock.now())).rejects.toBeInstanceOf(
+        UnknownListError,
+      );
+      expect((await resolveDefaultList(opened.db)).name).toBe("Watchlist");
+    });
+  });
+
+  describe("deleteList refuses the default", () => {
+    it("refuses, leaving the list live and still the default", async () => {
+      const lane = await seededLane();
+      await expect(deleteList(opened.db, lane.name, clock.now())).rejects.toBeInstanceOf(
+        CannotDeleteDefaultListError,
+      );
+
+      // Nothing half-applied: still live, still default, `updated_at` untouched.
+      const stored = (await opened.db.select().from(playerLists).where(eq(playerLists.id, lane.id)))[0];
+      expect(stored).toEqual(lane);
+    });
+
+    it("names the recovery command in the error", async () => {
+      const lane = await seededLane();
+      await expect(deleteList(opened.db, lane.name, clock.now())).rejects.toThrow(
+        /set another default first: sk players lists set-default --name NAME/,
+      );
+    });
+
+    it("refuses a list that BECAME the default, deciding on live state rather than a prior read", async () => {
+      // The interleaving finding-5 guards against: an implementation that reads
+      // "is this the default?" and then deletes on the answer would delete a
+      // list that became the default in the gap, leaving NO default at all.
+      // Deletion here is one conditional UPDATE inside BEGIN IMMEDIATE, so the
+      // predicate is evaluated against the row the write itself sees.
+      await createList(opened.db, "Promoted", clock.now());
+      const seeded = await seededLane();
+      expect(await deleteList(opened.db, "Promoted", clock.now())).toMatchObject({ name: "Promoted" });
+
+      // Same list name, re-created and THEN promoted: now the same call is refused.
+      await createList(opened.db, "Promoted", clock.now());
+      await setDefaultList(opened.db, "Promoted", clock.now());
+      await expect(deleteList(opened.db, "Promoted", clock.now())).rejects.toBeInstanceOf(
+        CannotDeleteDefaultListError,
+      );
+      expect((await resolveDefaultList(opened.db)).name).toBe("Promoted");
+      // And the previously-seeded lane really did lose the flag, so the refusal
+      // is not an artifact of two lists both claiming it.
+      const previous = (await opened.db.select().from(playerLists).where(eq(playerLists.id, seeded.id)))[0];
+      expect(previous?.isDefault).toBe(false);
+    });
+
+    it("still deletes a NON-default list", async () => {
+      await createList(opened.db, "Ordinary", clock.now());
+      const deleted = await deleteList(opened.db, "Ordinary", clock.now());
+      expect(deleted.deletedAt).not.toBeNull();
+    });
+
+    it("reports an unknown list as unknown, not as the default", async () => {
+      await expect(deleteList(opened.db, "ghost", clock.now())).rejects.toBeInstanceOf(
+        UnknownListError,
+      );
+    });
+  });
+
+  describe("resolveDefaultList / resolveListOrDefault", () => {
+    it("throws NoDefaultListError when no LIVE default exists", async () => {
+      const lane = await seededLane();
+      await opened.db.update(playerLists).set({ isDefault: false }).where(eq(playerLists.id, lane.id));
+      await expect(resolveDefaultList(opened.db)).rejects.toBeInstanceOf(NoDefaultListError);
+      await expect(resolveDefaultList(opened.db)).rejects.toThrow(
+        /run: sk players lists set-default --name NAME/,
+      );
+    });
+
+    it("ignores a soft-deleted default", async () => {
+      const lane = await seededLane();
+      await opened.db
+        .update(playerLists)
+        .set({ deletedAt: "2026-07-19T17:00:00.000Z" })
+        .where(eq(playerLists.id, lane.id));
+      await expect(resolveDefaultList(opened.db)).rejects.toBeInstanceOf(NoDefaultListError);
+    });
+
+    it("prefers an EXPLICIT name over the default", async () => {
+      const explicit = await createList(opened.db, "Explicit", clock.now());
+      expect((await resolveListOrDefault(opened.db, "Explicit")).id).toBe(explicit.id);
+    });
+
+    it("resolves the default when no name is given", async () => {
+      const lane = await seededLane();
+      expect((await resolveListOrDefault(opened.db)).id).toBe(lane.id);
+    });
+
+    it("FAILS CLOSED on a soft-deleted name instead of falling back to the default", async () => {
+      // The property that keeps a typo from silently widening a scope: a name
+      // that no longer resolves is an error, never "well, use the default then".
+      await createList(opened.db, "Gone", clock.now());
+      await deleteList(opened.db, "Gone", clock.now());
+      await expect(resolveListOrDefault(opened.db, "Gone")).rejects.toBeInstanceOf(UnknownListError);
+    });
+
+    it("FAILS CLOSED on an unknown name instead of falling back to the default", async () => {
+      await expect(resolveListOrDefault(opened.db, "ghost")).rejects.toBeInstanceOf(
+        UnknownListError,
+      );
+    });
   });
 });

@@ -52,6 +52,76 @@ export const players = sqliteTable("players", {
   ),
 ]);
 
+/**
+ * A named player list for scoped digests/queries (issue #70 / ADR 0046), and —
+ * since #190 — a LANE: a list that additionally carries its own refresh cadence,
+ * digest hour, and recipients. A list is CURATED membership over the Watch List
+ * — distinct from a tag (a queryable attribute, #30) and a fantasy roster (a
+ * future specialization, #69).
+ *
+ * Soft-deleted (`deleted_at`) so the HC's curation intent is recoverable like a
+ * deactivated player; the PARTIAL unique index frees the name for reuse once a
+ * list is deleted. Named-list scope selects active players who are members —
+ * `players.active` stays the master gate (ADR 0046 decision 2).
+ *
+ * Declared ABOVE `digest_deliveries` because that table now references it.
+ */
+export const playerLists = sqliteTable(
+  "player_lists",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    name: text("name").notNull(),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    /** Null while live; set on soft-delete. The partial unique index keys on this. */
+    deletedAt: text("deleted_at"),
+    /**
+     * THE default lane: what an unscoped command means (#190). Reverses ADR
+     * 0046 decision 1's implicit default — a seeded row the migration backfills,
+     * so "no `--list`" resolves to a real, nameable, re-pointable list instead
+     * of to the whole Watch List by accident.
+     */
+    isDefault: integer("is_default", { mode: "boolean" }).notNull().default(false),
+    /**
+     * Minutes between this lane's automatic refreshes; null = never
+     * auto-refreshes. An interval rather than a cron expression (decided in
+     * #190): it avoids a parser dependency and its test surface at the cost of
+     * not expressing "weekdays only". Inert until #192 reads it.
+     */
+    refreshIntervalMinutes: integer("refresh_interval_minutes"),
+    /** Host-timezone hour (0-23) this lane digests at; null = never auto-digests. Inert until #193. */
+    digestHour: integer("digest_hour"),
+    /** This lane's recipients; null = fall back to the DIGEST_TO env value. Inert until #193. */
+    digestTo: text("digest_to"),
+  },
+  (t) => [
+    // A name is unique among LIVE lists only: a soft-deleted list keeps its row
+    // but frees its name, so a fresh list may reuse it (ADR 0046 decision 3).
+    // The invariant lives in the DB, DECLARED in the schema (rules/backend.md).
+    uniqueIndex("player_lists_name_live_uq")
+      .on(t.name)
+      .where(sql`${t.deletedAt} is null`),
+    // At most ONE LIVE default (#190). Partial on BOTH predicates: a soft-deleted
+    // list holding is_default must not block the live one, or deleting the
+    // default would make a replacement unsettable.
+    uniqueIndex("player_lists_default_uq")
+      .on(t.isDefault)
+      .where(sql`${t.isDefault} = 1 and ${t.deletedAt} is null`),
+    check("player_lists_name_nonblank_ck", sql`length(trim(${t.name})) > 0`),
+    // Cadence bounds live in the DATABASE, DECLARED here (rules/backend.md), so
+    // a drizzle table rebuild re-emits them. Both ends are named explicitly:
+    // a negative hour or interval is rejected as squarely as an over-large one.
+    check(
+      "player_lists_digest_hour_range_ck",
+      sql`${t.digestHour} is null or (${t.digestHour} >= 0 and ${t.digestHour} <= 23)`,
+    ),
+    check(
+      "player_lists_refresh_interval_positive_ck",
+      sql`${t.refreshIntervalMinutes} is null or ${t.refreshIntervalMinutes} > 0`,
+    ),
+  ],
+);
+
 export const digestDeliveries = sqliteTable(
   "digest_deliveries",
   {
@@ -91,8 +161,29 @@ export const digestDeliveries = sqliteTable(
     reconciledAt: text("reconciled_at"),
     errorMessage: text("error_message"),
     createdAt: text("created_at").notNull(),
+    /**
+     * The LANE this delivery belongs to (#190). NOT NULL is load-bearing, not
+     * housekeeping: SQLite treats NULLs as DISTINCT in a unique index, so a
+     * nullable list_id would let unlimited `(digest, <date>, NULL)` rows coexist
+     * and would silently void the slot uniqueness ADR 0034's durable claim rests
+     * on — surfacing as duplicate digests, the one failure this table exists to
+     * prevent. The migration carries the constraint from the rebuilt table's
+     * creation rather than tightening it afterwards (drizzle/0012).
+     *
+     * `kind: "heartbeat"` rows are not lane-scoped yet still carry the default
+     * lane's id — a known wart, recorded rather than discovered (#190).
+     */
+    listId: integer("list_id")
+      .notNull()
+      .references(() => playerLists.id),
   },
-  (t) => [uniqueIndex("digest_deliveries_kind_date_uq").on(t.kind, t.dateCovered)],
+  (t) => [
+    // The slot key gains the lane dimension: two lanes may digest the same date,
+    // one lane may not digest it twice. Until #193 routes lane-scoped sends onto
+    // the claimed path every row carries the default lane, so this behaves
+    // exactly like the two-column key it replaces.
+    uniqueIndex("digest_deliveries_kind_date_list_uq").on(t.kind, t.dateCovered, t.listId),
+  ],
 );
 
 export const statLines = sqliteTable(
@@ -249,37 +340,6 @@ export const refreshRuns = sqliteTable(
     check("refresh_runs_players_total_nonneg_ck", sql`${t.playersTotal} >= 0`),
     check("refresh_runs_stat_lines_inserted_nonneg_ck", sql`${t.statLinesInserted} >= 0`),
     check("refresh_runs_stat_lines_updated_nonneg_ck", sql`${t.statLinesUpdated} >= 0`),
-  ],
-);
-
-/**
- * A named player list for scoped digests/queries (issue #70 / ADR 0046). A list
- * is CURATED membership over the Watch List — distinct from a tag (a queryable
- * attribute, #30) and a fantasy roster (a future specialization, #69).
- *
- * Soft-deleted (`deleted_at`) so the HC's curation intent is recoverable like a
- * deactivated player; the PARTIAL unique index frees the name for reuse once a
- * list is deleted. Named-list scope selects active players who are members —
- * `players.active` stays the master gate (ADR 0046 decision 2).
- */
-export const playerLists = sqliteTable(
-  "player_lists",
-  {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    name: text("name").notNull(),
-    createdAt: text("created_at").notNull(),
-    updatedAt: text("updated_at").notNull(),
-    /** Null while live; set on soft-delete. The partial unique index keys on this. */
-    deletedAt: text("deleted_at"),
-  },
-  (t) => [
-    // A name is unique among LIVE lists only: a soft-deleted list keeps its row
-    // but frees its name, so a fresh list may reuse it (ADR 0046 decision 3).
-    // The invariant lives in the DB, DECLARED in the schema (rules/backend.md).
-    uniqueIndex("player_lists_name_live_uq")
-      .on(t.name)
-      .where(sql`${t.deletedAt} is null`),
-    check("player_lists_name_nonblank_ck", sql`length(trim(${t.name})) > 0`),
   ],
 );
 

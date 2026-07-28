@@ -658,6 +658,14 @@ export interface RestorePlayerListSummary {
   inserted: number;
   updated: number;
   total: number;
+  /**
+   * True when the restore left the database with NO live default list (#190) —
+   * a v1-v4 payload carrying lists, or a v5 payload whose lists are all
+   * non-default. Surfaced rather than silently tolerated because a lane-less
+   * database fails every unscoped command, and a restore that quietly created
+   * that state would be discovered by the next digest not arriving.
+   */
+  noDefaultList: boolean;
 }
 
 /**
@@ -868,6 +876,29 @@ export function restorePlayerListBackup(
     // resolved live list id; `null` is the memoized "no live list of this name"
     // sentinel — so a repeated member list name is looked up at most once.
     const listIdByName = new Map<string, number | null>();
+
+    // THE PAYLOAD'S DEFAULT WINS (#190). Restore is merge-by-live-name, so a
+    // restored default can collide with one the database already has — and
+    // `player_lists_default_uq` would reject the second, rolling back an
+    // otherwise good restore. Clearing every live default FIRST, under this same
+    // all-or-nothing transaction, resolves it in the only direction that makes
+    // the result reproducible: a restore is a deliberate act of replacement, so
+    // the restored state must not depend on which list happened to be default
+    // beforehand.
+    //
+    // The clear is conditioned on the payload carrying a `lists` ARRAY at all. A
+    // v1 backup predates named lists and says nothing about them; treating its
+    // silence as "no lists, therefore no default" would destroy a default the
+    // payload never described. Same undefined-vs-present distinction the manual
+    // tag reconciliation above turns on.
+    if (extras.lists !== undefined) {
+      tx
+        .update(playerLists)
+        .set({ isDefault: false, updatedAt: nowIso })
+        .where(and(eq(playerLists.isDefault, true), isNull(playerLists.deletedAt)))
+        .run();
+    }
+
     for (const list of extras.lists ?? []) {
       const name = list.name.trim();
       const live = tx
@@ -876,7 +907,22 @@ export function restorePlayerListBackup(
         .where(and(eq(playerLists.name, name), isNull(playerLists.deletedAt)))
         .all()[0];
       if (live !== undefined) {
-        // Reuse an existing live list of the same name (do not insert, do not error).
+        // Reuse an existing live list of the same name (do not insert, do not
+        // error) — but its LANE configuration is authoritative in the payload,
+        // so overwrite it rather than merging. A restored lane that kept the
+        // database's cadence would be neither the backup's state nor the
+        // database's.
+        tx
+          .update(playerLists)
+          .set({
+            isDefault: list.isDefault,
+            refreshIntervalMinutes: list.refreshIntervalMinutes,
+            digestHour: list.digestHour,
+            digestTo: list.digestTo,
+            updatedAt: list.updatedAt ?? nowIso,
+          })
+          .where(eq(playerLists.id, live.id))
+          .run();
         listIdByName.set(name, live.id);
         continue;
       }
@@ -889,6 +935,10 @@ export function restorePlayerListBackup(
           name,
           createdAt: list.createdAt ?? nowIso,
           updatedAt: list.updatedAt ?? nowIso,
+          isDefault: list.isDefault,
+          refreshIntervalMinutes: list.refreshIntervalMinutes,
+          digestHour: list.digestHour,
+          digestTo: list.digestTo,
         })
         .returning()
         .all()[0];
@@ -953,7 +1003,16 @@ export function restorePlayerListBackup(
       }
     }
 
-    return { inserted, updated, total: rows.length };
+    // Read the FINAL state rather than inferring it from the payload (#190): the
+    // question a caller needs answered is "does this database have a default
+    // now?", and after a merge-by-name restore only the database knows.
+    const liveDefault = tx
+      .select()
+      .from(playerLists)
+      .where(and(eq(playerLists.isDefault, true), isNull(playerLists.deletedAt)))
+      .all()[0];
+
+    return { inserted, updated, total: rows.length, noDefaultList: liveDefault === undefined };
   });
 }
 

@@ -189,6 +189,38 @@ describe("CLI logic in-process", () => {
       expect(code).toBe(0);
       expect(out[0]).toBe("player-list restored inserted=1 updated=0 total=1 lists=0 members=0");
       expect((await live.opened.db.select().from(players))[0]?.externalId).toBe(700009);
+      // A payload with no `lists` array says nothing about lists, so the seeded
+      // default lane survives and there is nothing to warn about (#190).
+      expect(out.join("\n")).not.toContain("warning:");
+    });
+
+    it("WARNS, naming set-default, when a pre-v5 payload leaves no default lane (#190)", async () => {
+      // Silence is the failure mode this whole line exists to prevent: without
+      // it the HC discovers the missing lane when a digest does not arrive. The
+      // TEXT is pinned, not merely the presence of some warning.
+      const file = join(backups.path, "v4.json");
+      writeFileSync(
+        file,
+        JSON.stringify({
+          ...makeBackupEnvelope([makeBackupEntry({ externalId: 700010 })], { version: 4 }),
+          lists: [{ name: "Legacy" }],
+          members: [{ list: "Legacy", externalId: 700010, ncaaPlayerSeq: null }],
+        }),
+      );
+
+      const code = await runPlayersRestore(["--in", file], {
+        db: live.opened.db,
+        now: CLOCK,
+        write,
+      });
+
+      // The restore SUCCEEDS — failing closed here would refuse a legitimate
+      // recovery from an older backup, which is worse than an operable warning.
+      expect(code).toBe(0);
+      expect(out[0]).toContain("lists=1 members=1");
+      expect(out[1]).toBe(
+        "warning: no default list after restore — unscoped commands will fail until you run: sk players lists set-default --name NAME",
+      );
     });
 
     it("rejects an invalid payload with a non-zero exit", async () => {

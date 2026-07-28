@@ -9,6 +9,7 @@ import type { OpenedDb } from "../src/db/client.js";
 import { BUSY_TIMEOUT_MS } from "../src/db/client.js";
 import { digestDeliveries, listMembers, playerLists, players, statLines } from "../src/db/schema.js";
 import { upsertStatLines } from "../src/jobs/refresh.js";
+import { resolveDefaultList } from "../src/lists/service.js";
 import {
   insertList,
   insertListMember,
@@ -279,6 +280,7 @@ describe("digest_deliveries claim columns and lock behaviour (ADR 0034)", () => 
       await opened.db.insert(digestDeliveries).values({
         kind: "digest",
         dateCovered: "2026-07-19",
+        listId: (await resolveDefaultList(opened.db)).id,
         status: "sent",
         sentAt: "2026-07-19T17:00:00.000Z",
         createdAt: "2026-07-19T17:00:00.000Z",

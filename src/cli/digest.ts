@@ -11,7 +11,7 @@ import {
 } from "../domain/window.js";
 import type { Mailer } from "../mailer/types.js";
 import { runDigest } from "../jobs/digest.js";
-import { UnknownListError, resolveListByName } from "../lists/service.js";
+import { NoDefaultListError, UnknownListError, resolveListByName } from "../lists/service.js";
 import { createMailer } from "../mailer/index.js";
 import type { TagScope } from "../tags/service.js";
 import { resolveTagScope } from "../tags/service.js";
@@ -168,19 +168,33 @@ export async function runDigestCli(argv: string[], deps: DigestCliDeps): Promise
       throw err;
     }
   }
-  const result = await runDigest({
-    db: deps.db,
-    mailer: deps.mailer,
-    now: deps.now,
-    tz: deps.tz,
-    to: deps.to,
-    from: deps.from,
-    spec,
-    force: parseForce(argv),
-    listId,
-    listName: resolvedListName,
-    tagScope,
-  });
+  let result;
+  try {
+    result = await runDigest({
+      db: deps.db,
+      mailer: deps.mailer,
+      now: deps.now,
+      tz: deps.tz,
+      to: deps.to,
+      from: deps.from,
+      spec,
+      force: parseForce(argv),
+      listId,
+      listName: resolvedListName,
+      tagScope,
+    });
+  } catch (err) {
+    // The scheduled path resolves the DEFAULT lane (#190), and a database with
+    // none refuses rather than mailing an unknown cohort. Caught here so the
+    // operator gets the same greppable `error:` line and exit 1 as every other
+    // refusal, instead of an unhandled rejection — and the message names the
+    // command that fixes it.
+    if (err instanceof NoDefaultListError) {
+      writeError(`error: ${err.message}`);
+      return 1;
+    }
+    throw err;
+  }
   deps.write(
     `digest kind=${result.kind} action=${result.action} statLines=${result.statLineCount} players=${result.playerCount}${
       result.window !== null ? ` window=${result.window}` : ""

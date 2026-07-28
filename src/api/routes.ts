@@ -19,7 +19,9 @@ import { runDigest } from "../jobs/digest.js";
 import { runRefresh, runRefreshForPlayer } from "../jobs/refresh.js";
 import {
   BlankListNameError,
+  CannotDeleteDefaultListError,
   DuplicateListNameError,
+  NoDefaultListError,
   UnknownListError,
   addToList,
   createList,
@@ -29,6 +31,7 @@ import {
   removeFromList,
   renameList,
   resolveListByName,
+  setDefaultList,
 } from "../lists/service.js";
 import { MlbApiError } from "../mlb/client.js";
 import {
@@ -155,6 +158,12 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
       || err instanceof PlayerCardNotFoundError
     ) {
       return c.json({ error: err.message }, 404);
+    }
+    // Both lane errors are 409s (#190): each describes a live state that
+    // conflicts with the request — the target IS the default, or no default
+    // exists — and each is fixed by a different request, not by a different body.
+    if (err instanceof CannotDeleteDefaultListError || err instanceof NoDefaultListError) {
+      return c.json({ error: err.message }, 409);
     }
     if (err instanceof DuplicateListNameError || err instanceof PlayerPromotionConflictError || err instanceof AmbiguousPlayerCardNameError) {
       if (err instanceof AmbiguousPlayerCardNameError) return c.json({ error: err.message, candidates: err.candidates }, 409);
@@ -524,6 +533,15 @@ export function createApiRoutes(deps: ServiceDeps): Hono {
 
   api.delete("/lists/:name", async (c) => {
     const list = await deleteList(deps.db, c.req.param("name"), deps.now());
+    return c.json({ list });
+  });
+
+  // Point the default lane at this list (#190). A PUT on a sub-resource rather
+  // than a field on PATCH /lists/:name: setting the default MOVES a flag off
+  // another row, so it is not an edit of this list alone, and PUT says the
+  // request is idempotent — re-defaulting the current default writes nothing.
+  api.put("/lists/:name/default", async (c) => {
+    const list = await setDefaultList(deps.db, c.req.param("name"), deps.now());
     return c.json({ list });
   });
 
