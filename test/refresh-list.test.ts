@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { OpenedDb } from "../src/db/client.js";
-import { refreshRuns } from "../src/db/schema.js";
+import type { Db, OpenedDb } from "../src/db/client.js";
+import { players, refreshRuns } from "../src/db/schema.js";
 import type { RefreshDeps, RefreshScope } from "../src/jobs/refresh.js";
 import { runRefresh, runRefreshForPlayer } from "../src/jobs/refresh.js";
 import { claimRefreshRun, digestFreshnessFor } from "../src/jobs/refresh-run.js";
@@ -48,6 +48,76 @@ import {
 /** The on-lane MLB (sportId 1) identity, and the Triple-A (sportId 11) one. */
 const MLB_PERSON_ID = 691185;
 const AAA_PERSON_ID = 660271;
+
+/**
+ * A db that runs `enroll()` the moment the FIRST read against `players`
+ * COMPLETES — after its rows are in hand and before the caller resumes to issue
+ * anything else. That instant IS the race window ADR 0061 decision 8 has to be
+ * atomic across: everything `runRefresh` learns about who is active and who is
+ * covered must come from the snapshot taken before it.
+ *
+ * The hook is on completion, not on issue, and that distinction is the whole
+ * fixture: firing BEFORE the read would simply let selection see the new member
+ * and sweep him, which is not a defect at all.
+ *
+ * `then` is what `await` calls, so intercepting it is how a completion is
+ * observed without re-implementing drizzle's execution. The chainable methods
+ * are re-wrapped because `.where()` returns `this` — handing back the unwrapped
+ * builder would drop the hook before anything was ever awaited.
+ */
+function enrollWhenPlayersFirstRead(db: Db, enroll: () => void): Db {
+  let fired = false;
+  const fire = (): void => {
+    if (fired) return;
+    fired = true;
+    enroll();
+  };
+  const hooked = (builder: object): object =>
+    new Proxy(builder, {
+      get(b, p) {
+        const bv: unknown = Reflect.get(b, p);
+        if (p === "then") {
+          return (onOk?: (v: unknown) => unknown, onErr?: (e: unknown) => unknown): unknown =>
+            (async () => {
+              // `b` is the RAW builder, so this awaits drizzle's own `then`
+              // rather than recursing back through this proxy.
+              const rows: unknown = await (b as PromiseLike<unknown>);
+              fire();
+              return rows;
+            })().then(onOk, onErr);
+        }
+        if (typeof bv !== "function") return bv;
+        return (...args: unknown[]): unknown => {
+          const result: unknown = (bv as (...a: unknown[]) => unknown).apply(b, args);
+          return result === b ? hooked(b) : result;
+        };
+      },
+    });
+
+  return new Proxy(db, {
+    get(target, prop) {
+      const value: unknown = Reflect.get(target, prop);
+      if (prop !== "select") return typeof value === "function" ? value.bind(target) : value;
+      return (...selectArgs: unknown[]): unknown => {
+        const builder = (value as (...a: unknown[]) => unknown).apply(target, selectArgs);
+        return new Proxy(builder as object, {
+          get(b, p) {
+            const bv: unknown = Reflect.get(b, p);
+            if (p === "from") {
+              return (table: unknown): unknown => {
+                const next: unknown = (bv as (t: unknown) => unknown).call(b, table);
+                // Only reads OF `players` matter. The correlated `EXISTS`
+                // subquery reads `list_members` and is never awaited on its own.
+                return table === players ? hooked(next as object) : next;
+              };
+            }
+            return typeof bv === "function" ? bv.bind(b) : bv;
+          },
+        });
+      };
+    },
+  }) as Db;
+}
 
 describe("lane-scoped refresh (#192)", () => {
   let opened: OpenedDb;
@@ -429,9 +499,11 @@ describe("lane-scoped refresh (#192)", () => {
   // --- The COVERAGE-keyed freshness watermark (ADR 0061 decision 8) -----------
   //
   // These live here, not in test/refresh-run.test.ts beside the rest of the
-  // freshness cases, because the decision under test is `runRefresh`'s — it
-  // counts the uncovered active Players at claim time and writes `NULL` when
-  // there are none. A `claimRefreshRun` fixture would hand-write the very value
+  // freshness cases, because the decision under test is `runRefresh`'s — its
+  // claim-time selection read tags each active Player with his own coverage and
+  // writes `NULL` when none came back uncovered (PR #201 Reviewer P1: ONE read,
+  // so selection and coverage cannot disagree). A `claimRefreshRun` fixture
+  // would hand-write the very value
   // the code is supposed to derive, which is the one thing these cases must not
   // do. The pure encode/eligibility cases stay in refresh-run.test.ts.
   //
@@ -549,6 +621,43 @@ describe("lane-scoped refresh (#192)", () => {
 
       expect(await recordedScope()).toBeNull();
       expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("fresh");
+    });
+
+    it("selection and coverage come from ONE snapshot: an enrollment racing the claim cannot forge FRESH", async () => {
+      // PR #201 Reviewer P1. Coverage used to be a SECOND read taken after
+      // selection had already returned, and two reads take two snapshots that
+      // disagree in the FAIL-OPEN direction. This models the disagreement with
+      // the write that causes it: an ALREADY-ACTIVE, off-lane player is enrolled
+      // into the in-scope lane inside the window between them.
+      const covered = await insertPlayer(opened.db, { externalId: MLB_PERSON_ID });
+      const racer = await insertPlayer(opened.db, { externalId: AAA_PERSON_ID }); // active, off-lane
+      const lane = await enrollInDefaultLane(opened.db, [covered]);
+
+      let enrolled = false;
+      const racingDb = enrollWhenPlayersFirstRead(opened.db, () => {
+        // Raw SQL on the same connection, SYNCHRONOUS, so the whole write lands
+        // inside the window rather than interleaving with the caller's next read.
+        opened.sqlite
+          .prepare("INSERT INTO list_members (list_id, player_id, created_at) VALUES (?, ?, ?)")
+          .run(lane.id, racer.id, clock.now().toISOString());
+        enrolled = true;
+      });
+
+      const summary = await runRefresh(deps({ db: racingDb, scope: scopeOf(lane) }));
+
+      // The injection has to have happened, or every assertion below passes for
+      // the wrong reason (rules/testing.md: a guard nobody broke pins nothing).
+      expect(enrolled).toBe(true);
+      // He was NOT swept — selection had already returned without him — and the
+      // assertion is on the CLIENT, because the ADR 0029 upsert is idempotent.
+      expect(summary).toMatchObject({ skipped: false, status: "ok", playersRefreshed: 1 });
+      expect(peopleFetched()).toEqual([MLB_PERSON_ID]);
+      // ...so this run must NOT claim it covered everyone. Under the two-read
+      // shape the coverage query saw the enrollment the sweep itself missed,
+      // recorded the whole-list `NULL`, and the banner forged `fresh` over a
+      // player nobody fetched.
+      expect(await recordedScope()).toBe(`,${lane.id},`);
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("stale");
     });
 
     it("a ZERO-LANE scope on a host with active players records its (empty) scope and reads STALE", async () => {

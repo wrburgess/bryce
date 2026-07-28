@@ -119,14 +119,26 @@ green.
    dependency's question with a proxy signal instead of the dependency's own criterion"* — so no new
    rule is owed; the existing bullet was simply not applied to a predicate written in SQL.
 
-   **How it is asked.** At claim time `runRefresh` counts the active Players its lanes do *not* reach
-   (one `count()` over a correlated `NOT EXISTS`, never a row load). Zero uncovered ⇒ the run swept the
+   **How it is asked.** At claim time `runRefresh` issues **one** read over the active Players, tagging
+   each row with a correlated `EXISTS` over the in-scope lanes: the covered rows *are* the sweep set, and
+   coverage holds exactly when no row came back uncovered. Zero uncovered ⇒ the run swept the
    whole Watch List ⇒ `scope_list_ids` records **`NULL`** — including for a *lane* run, which is not a
    fudge but the column's documented meaning, and such a run genuinely did sweep everyone. Otherwise
    the lane ids are recorded as **provenance for a genuinely partial run**. `digestFreshnessFor`'s
    eligibility test collapses to `scope_list_ids IS NULL`; it loses its lane parameter, and the
    `instr` containment, the `RefreshScope.includesDefaultLane` flag, and the whole notion of a
    default-lane plumbing path go with it.
+
+   **Coverage is computed from the SAME snapshot as selection, and that is load-bearing** (PR #201
+   Reviewer P1). The first implementation asked in two reads — `loadActivePlayers`, then a `count()`
+   over a correlated `NOT EXISTS` — and two reads race in the **fail-open** direction: enroll an
+   already-active, off-lane Player into an in-scope lane between them and selection misses him while
+   coverage counts him as covered, so the run records `NULL` over a Player it never fetched and the
+   banner forges `fresh`. One tagged read has no such window. A transaction or lock would also close it
+   and is deliberately not used: it would have to span the async drizzle read and the synchronous
+   better-sqlite3 claim, and buys nothing the single read does not. The price is that a scoped read
+   loads the uncovered rows rather than counting them — free at one person's watch list, and the same
+   load-then-partition shape `src/digest/assemble.ts` already uses.
 
    Coverage is a **claim-time snapshot**. A Player added mid-sweep is still picked up by the
    settle-time re-read that feeds `calendarBlocksFresh` (decision 2), but he does not retroactively

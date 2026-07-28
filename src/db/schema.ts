@@ -325,7 +325,8 @@ export const refreshRuns = sqliteTable(
      * run could ever have done, so drizzle/0013's NULL backfill is semantically
      * correct by construction rather than a placeholder. A LANE run whose lanes
      * happened to hold every active Player also records `NULL`, because it too
-     * swept everyone; `runRefresh` decides that with one claim-time count.
+     * swept everyone; `runRefresh` decides that from the SAME claim-time read
+     * that selected the sweep, so the two can never disagree.
      *
      * Otherwise the value is PROVENANCE for a genuinely partial run: the
      * canonical encoding of its lane ids — ascending, deduped, comma-delimited,
