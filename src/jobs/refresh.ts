@@ -246,8 +246,9 @@ function groupForStatType(statType: "batting" | "pitching" | "fielding"): StatGr
  * pitching appearance is ingested the sweep it happens, never a sweep late — plus
  * every seen pair at any OTHER level, because that is exactly where a historical
  * level's quiet corrections keep landing. A stored sportId outside `SPORT_IDS` is
- * dropped HERE as well as in the caller's `WHERE`, so a malformed or legacy row can
- * never mint a game-log request through this function in isolation.
+ * dropped HERE, BEFORE the emptiness check, so a malformed or legacy row can never
+ * mint a game-log request through this function in isolation — and a seen set made
+ * ENTIRELY of such rows still reads as a first refresh and takes the FULL fan-out.
  */
 export function probePlanFor(args: {
   /** DISTINCT (sportId, statType) rows this Player has THIS season from the MLB path. */
@@ -255,7 +256,13 @@ export function probePlanFor(args: {
   /** sportId of the team the identity fetch just resolved; null when he has none. */
   currentSportId: number | null;
 }): ProbePlan {
-  const { seen, currentSportId } = args;
+  const { currentSportId } = args;
+  // Unswept rows are dropped BEFORE the emptiness check: a seen set consisting
+  // ONLY of unswept sportIds must read as "nothing usable seen" and take the FULL
+  // fan-out, exactly as if the caller's WHERE had filtered them. This ordering is
+  // what makes the function safe in isolation — swap it and the caller's inArray
+  // becomes load-bearing for that input.
+  const seen = args.seen.filter((row) => SWEPT_SPORT_IDS.includes(row.sportId));
   if (seen.length === 0) return { kind: "full" };
   if (currentSportId === null || !SWEPT_SPORT_IDS.includes(currentSportId)) return { kind: "full" };
 
@@ -266,7 +273,6 @@ export function probePlanFor(args: {
   for (const group of STAT_GROUPS) add(currentSportId, group);
   for (const row of seen) {
     if (row.sportId === currentSportId) continue; // already probed in full
-    if (!SWEPT_SPORT_IDS.includes(row.sportId)) continue;
     add(row.sportId, groupForStatType(row.statType));
   }
 
@@ -1060,8 +1066,9 @@ export async function refreshPlayer(
   // a probe alive forever.
   //
   // The sportId `inArray` narrows what SQLite reads; it is NOT the behavioral
-  // guard. probePlanFor re-applies the same constraint to its own input, and that
-  // is the copy under test — deleting this one changes no outcome.
+  // guard. probePlanFor re-applies the same constraint to its own input BEFORE its
+  // emptiness check — that ordering is what makes this copy deletable with no
+  // outcome change, and the all-unswept-rows unit case pins it.
   const seen = await db
     .selectDistinct({ sportId: statLines.sportId, statType: statLines.statType })
     .from(statLines)

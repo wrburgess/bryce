@@ -13,6 +13,7 @@ import {
 } from "../src/jobs/refresh.js";
 import { SUPERSEDED_MESSAGE, claimRefreshRun } from "../src/jobs/refresh-run.js";
 import { MlbClient } from "../src/mlb/client.js";
+import { SPORT_IDS } from "../src/mlb/levels.js";
 import {
   FakeNcaaApi,
   FakeStatsApi,
@@ -233,9 +234,14 @@ function sortProbes(keys: readonly string[]): string[] {
   });
 }
 
-/** The pre-#197 sweep: every swept sportId x every stat group, 18 pairs. */
+/**
+ * The pre-#197 sweep: every swept sportId x every stat group, 18 pairs. Built from
+ * the imported ladder so a level added to SPORT_IDS widens this pin instead of
+ * leaving it silently under-asserting. The three groups are the MLB API's own
+ * fixed enumeration, not repo config, so they stay literal.
+ */
 const FULL_FAN_OUT = sortProbes(
-  [1, 11, 12, 13, 14, 16].flatMap((sportId) =>
+  SPORT_IDS.flatMap((sportId) =>
     ["hitting", "pitching", "fielding"].map((group) => `${sportId}:${group}`),
   ),
 );
@@ -1038,7 +1044,9 @@ describe("probePlanFor (#197, ADR 0060)", () => {
     expect(probeKeys(plan)).toEqual(["1:hitting", "11:fielding", "11:hitting", "11:pitching"]);
   });
 
-  it("maps statType to stat group in BOTH directions: batting->hitting, fielding->fielding", () => {
+  it("maps stored statType to the API's stat group: batting->hitting, pitching and fielding unchanged", () => {
+    // The group->statType direction (hitting stored back as `batting`) is pinned
+    // by the ingest suites above, which assert stored statType on ingested rows.
     const plan = probePlanFor({
       seen: [
         { sportId: 12, statType: "batting" },
@@ -1062,6 +1070,38 @@ describe("probePlanFor (#197, ADR 0060)", () => {
       currentSportId: 1,
     });
     expect(probeKeys(plan)).toEqual(["1:fielding", "1:hitting", "1:pitching"]);
+  });
+
+  it("falls back to FULL when EVERY seen row is at an unswept sportId — unswept rows are dropped before the emptiness check", () => {
+    // The case that makes the drop-then-check ordering load-bearing: were the
+    // emptiness check first, this non-empty-but-unusable set would prune to a
+    // three-call plan and the caller's WHERE clause would become the real guard.
+    const plan = probePlanFor({
+      seen: [
+        { sportId: 99, statType: "batting" },
+        { sportId: 22, statType: "pitching" },
+      ],
+      currentSportId: 1,
+    });
+    expect(plan).toEqual({ kind: "full" });
+  });
+
+  it("emits pairs in ladder order (SPORT_IDS declaration order, then STAT_GROUPS) — the pre-#197 call order", () => {
+    // Asserted WITHOUT sorting helpers, deliberately: every other assertion in
+    // this file normalizes order away, so this is the one test that dies if the
+    // sort inside probePlanFor is removed. Order is a contract because the pairs
+    // become ADR 0056 progress events in call order.
+    const plan = probePlanFor({
+      seen: [{ sportId: 1, statType: "batting" }],
+      currentSportId: 11,
+    });
+    if (plan.kind === "full") throw new Error("expected a pruned probe plan");
+    expect(plan.pairs).toEqual([
+      { sportId: 1, group: "hitting" },
+      { sportId: 11, group: "hitting" },
+      { sportId: 11, group: "pitching" },
+      { sportId: 11, group: "fielding" },
+    ]);
   });
 
   it("dedupes repeated seen pairs and never double-probes one at the current sport", () => {

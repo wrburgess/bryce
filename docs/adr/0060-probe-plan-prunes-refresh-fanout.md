@@ -76,10 +76,14 @@ so completeness at each probed pair is bit-for-bit what it was.
    and the only one in which this filter is the sole thing in the way.
 
    The `SPORT_IDS` constraint appears **twice**, and only one copy is load-bearing. `probePlanFor`
-   re-applies it to its own input, so the pure exported function is safe in isolation rather than
-   resting on its one caller's `WHERE` clause; that copy is the one under test. The `inArray` in the
-   query narrows what SQLite reads and changes no outcome — deleting it turns nothing red, and the
-   comment at the call site says so, so a later reader does not mistake it for a guard.
+   re-applies it to its own input **before its emptiness check**, so the pure exported function is safe
+   in isolation rather than resting on its one caller's `WHERE` clause; that copy is the one under
+   test. The ordering is the load-bearing part: filtered *after* the emptiness check, a seen set made
+   entirely of unswept rows would read as non-empty and prune instead of taking the FULL fan-out —
+   the verify pass caught exactly that in the first cut, and the all-unswept-rows unit case now pins
+   it. The `inArray` in the query narrows what SQLite reads and changes no outcome — deleting it turns
+   nothing red, and the comment at the call site says so, so a later reader does not mistake it for a
+   guard.
 
 2. **The full fan-out is keyed on the *current* sport being a swept one — one predicate, not three.**
    `SPORT_IDS` membership is the load-bearing test: we only ever probe a sport the MLB path sweeps. It
@@ -92,7 +96,9 @@ so completeness at each probed pair is bit-for-bit what it was.
 
 3. **No new index.** The query's `WHERE` leads with `player_id`, which the existing
    `stat_lines_player_source_game_type_uq` unique index (`player_id, source, game_id, stat_type`)
-   covers as a two-column equality prefix; SQLite filters `sport_id` and `game_date` from the small
+   covers as a two-column equality prefix. (The plan revision named `stat_lines_player_scan_ix` as the
+   serving index; no index of that name exists — this is the real one, and the substitution is a
+   recorded deviation, not a silent one.) SQLite filters `sport_id` and `game_date` from the small
    per-player row set that prefix yields. At this project's scale — one host, tens of players, a few
    hundred rows each — that is already far cheaper than the fifteen HTTP calls it removes, and a
    dedicated index would cost writes on every ingest to save microseconds on one read per player per
