@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import type { DigestCliDeps } from "../src/cli/digest.js";
 import { parseForce, parseList, parseTags, parseWindow, runDigestCli } from "../src/cli/digest.js";
+import { playerLists } from "../src/db/schema.js";
 import { addToList, createList } from "../src/lists/service.js";
 import { preflightDirect } from "../src/cli/router.js";
 import {
@@ -348,6 +349,26 @@ describe("digest CLI", () => {
       // The seeded player has stats but no tags: exit 0, a mail, and zero players.
       expect(await runDigestCli(["--tags", "status:scouted"], deps())).toBe(0);
       expect(output[0]).toContain("players=0");
+      expect(mailer.sent).toHaveLength(1);
+    });
+
+    it("refuses the scheduled send with no default lane: error line, exit 1, nothing sent (#190)", async () => {
+      await opened.db.update(playerLists).set({ isDefault: false });
+
+      expect(await runDigestCli([], deps())).toBe(1);
+      expect(errors[0]).toContain("no default list is set");
+      // The refusal names the command that fixes it, so the operator is not
+      // left to work out what a lane is from an exit code.
+      expect(errors[0]).toContain("sk players lists set-default --name NAME");
+      expect(mailer.sent).toHaveLength(0);
+      expect(output).toEqual([]);
+    });
+
+    it("still runs an EXPLICITLY windowed report with no default lane (#190)", async () => {
+      // An on-demand report takes no daily slot, so it needs no lane — the
+      // boundary #193 moves.
+      await opened.db.update(playerLists).set({ isDefault: false });
+      expect(await runDigestCli(["--window", "7d"], deps())).toBe(0);
       expect(mailer.sent).toHaveLength(1);
     });
   });

@@ -1,8 +1,11 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { digestDeliveries, playerTags, players, refreshRuns, statLines } from "../src/db/schema.js";
+import { digestDeliveries, playerLists, playerTags, players, refreshRuns, statLines } from "../src/db/schema.js";
 import { MlbClient } from "../src/mlb/client.js";
 import { claimRefreshRun } from "../src/jobs/refresh-run.js";
 import { assemblePlayerCard } from "../src/reports/player-card.js";
@@ -55,6 +58,7 @@ const ALL_TOOLS = [
   "list_create",
   "list_rename",
   "list_delete",
+  "list_set_default",
   "list_members",
   "list_add_players",
   "list_remove_players",
@@ -137,6 +141,48 @@ describe("MCP server over Streamable HTTP", () => {
       content: Array<{ type: string; text: string }>;
     };
   }
+
+  it("is documented tool-for-tool in the MCP reference, count word included", () => {
+    // #190 shipped `list_set_default` and left docs/mcp/README.md advertising
+    // "twenty-two tools" and "Seven tools over the named-list service" — the
+    // repo's dominant defect shape (one idea, several places) landing on the
+    // published interface, where the reader has no way to notice. Code-side the
+    // list is already pinned three ways (this suite, ALL_TOOLS in
+    // src/cli/connector-smoke.ts, and the server itself); the reference was the
+    // only copy nothing checked. Now adding a tool without documenting it is red.
+    const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const doc = readFileSync(join(repo, "docs", "mcp", "README.md"), "utf8");
+    const undocumented = ALL_TOOLS.filter((name) => !doc.includes(`\`${name}\``));
+    expect(undocumented).toEqual([]);
+
+    // The count is prose, so it drifts silently. Spelled out because that is how
+    // the document writes it; the map only needs to span plausible tool counts.
+    const COUNT_WORDS: Record<number, string> = {
+      20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
+      24: "twenty-four", 25: "twenty-five", 26: "twenty-six", 27: "twenty-seven",
+      28: "twenty-eight", 29: "twenty-nine", 30: "thirty",
+    };
+    const expected = COUNT_WORDS[ALL_TOOLS.length];
+    expect(expected, `no count word for ${ALL_TOOLS.length} tools — extend COUNT_WORDS`).toBeDefined();
+
+    // BOTH published copies, not just the reference: the count was stale in the
+    // runbook too, and checking one file would have left the other free to drift
+    // — the same one-idea-several-places shape, one file over.
+    for (const path of [
+      join(repo, "docs", "mcp", "README.md"),
+      join(repo, "docs", "guides", "running-bryce.md"),
+    ]) {
+      const text = readFileSync(path, "utf8");
+      expect(text, path).toContain(`${expected} tools`);
+      // And no STALE count survives beside the right one.
+      for (const [count, word] of Object.entries(COUNT_WORDS)) {
+        if (Number(count) === ALL_TOOLS.length) continue;
+        expect(text.toLowerCase(), `${path}: stale count "${word} tools"`).not.toContain(
+          `${word} tools`,
+        );
+      }
+    }
+  });
 
   it("exposes exactly the advertised tools", async () => {
     const { tools } = await client.listTools();
@@ -1009,8 +1055,16 @@ describe("MCP server over Streamable HTTP", () => {
       expect(added.structuredContent).toMatchObject({ added: 1 });
 
       const listed = await call("lists_list");
-      const lists = listed.structuredContent?.lists as Array<{ name: string; memberCount: number }>;
-      expect(lists).toEqual([{ ...lists[0], name: "Prospects", memberCount: 1 }]);
+      const lists = listed.structuredContent?.lists as Array<{
+        name: string;
+        memberCount: number;
+        isDefault: boolean;
+      }>;
+      // Ordered by name; the migration-seeded default lane is listed too (#190).
+      expect(lists.map((l) => [l.name, l.memberCount, l.isDefault])).toEqual([
+        ["Prospects", 1, false],
+        ["Watchlist", 0, true],
+      ]);
 
       const members = await call("list_members", { name: "Prospects" });
       const m = members.structuredContent?.members as Array<{ fullName: string }>;
@@ -1071,6 +1125,52 @@ describe("MCP server over Streamable HTTP", () => {
 
       const bad = await call("digest_preview", { window: "1d", list: "ghost" });
       expect(bad.isError).toBe(true);
+    });
+
+    /**
+     * The lane error seam (#190). One sad path per tool that can raise each
+     * type, asserting the MESSAGE the client sees rather than only `isError` —
+     * a tool client should not have to guess which conflict it hit.
+     */
+    describe("default lane (#190)", () => {
+      it("list_set_default moves the flag and clears the previous default", async () => {
+        await call("list_create", { name: "Prospects" });
+        const set = await call("list_set_default", { name: "Prospects" });
+        expect(set.isError).toBeUndefined();
+        expect(set.structuredContent).toMatchObject({ list: { name: "Prospects", isDefault: true } });
+
+        const listed = await call("lists_list");
+        const lists = listed.structuredContent?.lists as Array<{ name: string; isDefault: boolean }>;
+        expect(lists.filter((l) => l.isDefault).map((l) => l.name)).toEqual(["Prospects"]);
+      });
+
+      it("list_set_default on an unknown list is an isError, moving nothing", async () => {
+        const res = await call("list_set_default", { name: "ghost" });
+        expect(res.isError).toBe(true);
+        expect(res.content[0]?.text).toContain('no list named "ghost"');
+        const listed = await call("lists_list");
+        const lists = listed.structuredContent?.lists as Array<{ name: string; isDefault: boolean }>;
+        expect(lists.filter((l) => l.isDefault).map((l) => l.name)).toEqual(["Watchlist"]);
+      });
+
+      it("list_delete on the DEFAULT list is an isError naming the recovery", async () => {
+        const res = await call("list_delete", { name: "Watchlist" });
+        expect(res.isError).toBe(true);
+        expect(res.content[0]?.text).toContain("is the default list");
+        expect(res.content[0]?.text).toContain("set-default");
+        // Still live: the refusal wrote nothing.
+        const listed = await call("lists_list");
+        const lists = listed.structuredContent?.lists as Array<{ name: string }>;
+        expect(lists.map((l) => l.name)).toEqual(["Watchlist"]);
+      });
+
+      it("send_digest with no default lane is an isError, and mails nothing", async () => {
+        await opened.db.update(playerLists).set({ isDefault: false });
+        const res = await call("send_digest", {});
+        expect(res.isError).toBe(true);
+        expect(res.content[0]?.text).toContain("no default list is set");
+        expect(mailer.sent).toHaveLength(0);
+      });
     });
   });
 

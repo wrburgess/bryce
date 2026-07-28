@@ -200,8 +200,9 @@ sk players lists create --name Prospects
 sk players lists rename --name Prospects --to "Top 30"
 sk players lists add    --name "Top 30" --person-ids 691185,700001 --highlightly-player-ids 501
 sk players lists remove --name "Top 30" --person-ids 700001
-sk players lists show                       # every live list + member counts
+sk players lists show                       # every live list + member counts + which is default
 sk players lists show   --name "Top 30"     # a list's active members
+sk players lists set-default --name "Top 30"  # point the default lane here
 sk players lists delete --name "Top 30"     # soft-delete; the name frees for reuse
 ```
 
@@ -212,6 +213,15 @@ scope selects a list's **active** members (`players.active` stays the master gat
 by `--person-ids` (MLB/MiLB, comma-separated) and/or `--highlightly-player-ids` (NCAA); `add` is idempotent and
 `remove` no-ops on a non-member. An unknown list, or a reference to a Player not on the Watch List,
 fails closed. (Distinct from `seed list`, which prints players.)
+
+Exactly one live list is the **default lane** — what a command that names no list means
+([ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md)). The `0012` migration
+seeds it as `Watchlist`, enrolling every active Player, and `show` marks it with `default=true`.
+`set-default` moves the flag (clearing the previous holder in the same transaction; re-pointing at the
+current default writes nothing). **`delete` refuses the default list** — point the default elsewhere
+first, or every unscoped command would start failing. If the default is ever lost (restoring a pre-v5
+Player List Backup is the usual way), `sk digest` refuses with an `error:` line naming `set-default`
+rather than mailing every Player.
 
 ## `seed` — manage the Watch List
 
@@ -340,6 +350,13 @@ Re-imports a Player List Backup **network-free and all-or-nothing**, upserting o
 identity (MLB `external_id`, legacy NCAA `stats_player_seq`, or Highlightly player ID) so existing rows keep their `id` and their
 **Stat Line** history stays intact. Reports `player-list restored inserted=N updated=M total=T`. An
 invalid payload or an identity conflict fails the whole import with a non-zero exit.
+
+**The backup's default Lane wins**, so a restore can move which Lane is the default
+([ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md)). It never does so
+quietly: the restore prints `warning: default list changed from "X" to "Y"` with the
+`players lists set-default` command that changes it back, or — for a pre-v5 payload, which carries no
+Lane configuration and can only leave the database default-less — `warning: no default list after
+restore`, since every unscoped command fails until one is set.
 
 | Flag | Required | Notes |
 |---|---|---|

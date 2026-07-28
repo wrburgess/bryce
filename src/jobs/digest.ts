@@ -10,6 +10,7 @@ import { isGameCountSpec, resolveWindow } from "../domain/window.js";
 import type { DeliveryKind } from "../db/schema.js";
 import type { LookupResult, MailReceipt, Mailer } from "../mailer/types.js";
 import type { Db } from "../db/client.js";
+import { resolveDefaultList } from "../lists/service.js";
 import type { ClaimRefusal, ClaimResult, Tx } from "./delivery-claim.js";
 import {
   claimDelivery,
@@ -178,6 +179,19 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
     return runOnDemandReport(deps, warn);
   }
 
+  // Everything past this point is the SCHEDULED artifact, and the scheduled
+  // artifact now belongs to a lane (#190): `digest_deliveries.list_id` is NOT
+  // NULL, so the slot cannot be claimed without one. Resolving it HERE — once,
+  // before recovery, the sleep decision, and the claim — is what keeps the daily
+  // digest working the moment the column goes NOT NULL. A missing default is
+  // NoDefaultListError: a refusal the operator can fix, never a silent send to
+  // some other cohort.
+  //
+  // The on-demand path above returned already, so an explicitly scoped send
+  // never needs a default and never takes a claim; #193 moves those onto the
+  // claimed path.
+  const laneId = (await resolveDefaultList(db)).id;
+
   const today = hostDate(now(), tz);
 
   // Catch up ONE orphaned prior day BEFORE deciding today's run — and before the
@@ -191,18 +205,18 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   // assembles ITS date's window (asOf), never today's, and never forces. One per
   // run bounds catch-up to a single extra email; a multi-day backlog drains a
   // day at a time rather than arriving as a burst.
-  const orphan = findOrphanedDigestDate(db, today, now().getTime());
+  const orphan = findOrphanedDigestDate(db, laneId, today, now().getTime());
   if (orphan !== null) {
-    await deliverDailyDigest(deps, orphan, orphan, false, warn);
+    await deliverDailyDigest(deps, laneId, orphan, orphan, false, warn);
   }
 
   // Only TODAY's run is replaced by the offseason heartbeat; the recovery above
   // is for an in-season day that still owes its digest.
   if (sleep.sleeping) {
-    return runHeartbeat(deps, activePlayers.length, sleep.nextOpeningDay);
+    return runHeartbeat(deps, laneId, activePlayers.length, sleep.nextOpeningDay);
   }
 
-  return deliverDailyDigest(deps, today, today, deps.force === true, warn);
+  return deliverDailyDigest(deps, laneId, today, today, deps.force === true, warn);
 }
 
 /**
@@ -213,13 +227,20 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
  */
 async function deliverDailyDigest(
   deps: DigestDeps,
+  laneId: number,
   dateCovered: string,
   asOf: string,
   force: boolean,
   warn: (message: string) => void,
 ): Promise<DigestResult> {
   const { db, now, tz } = deps;
-  const claim = claimDelivery(db, { kind: "digest", dateCovered, now: now(), force });
+  const claim = claimDelivery(db, {
+    kind: "digest",
+    dateCovered,
+    listId: laneId,
+    now: now(),
+    force,
+  });
   if (!claim.claimed) {
     return {
       kind: "digest",
@@ -248,7 +269,7 @@ async function deliverDailyDigest(
   // accidental protection that would evaporate the day someone adds one. The
   // explicit guard is the one to keep; the test pins the behaviour, not either
   // mechanism.
-  if (!claim.replay && (await reconciled(deps, "digest", dateCovered, claim))) {
+  if (!claim.replay && (await reconciled(deps, "digest", dateCovered, laneId, claim))) {
     return {
       kind: "digest",
       action: "skipped",
@@ -291,7 +312,7 @@ async function deliverDailyDigest(
   try {
     receipt = await deps.mailer.send(
       { to: deps.to, from: deps.from, ...mail },
-      { deliveryKey: deliveryKey("digest", dateCovered) },
+      { deliveryKey: deliveryKey("digest", dateCovered, laneId) },
     );
   } catch (err) {
     // Send failed: settle the claim as failed. A later run re-claims the slot
@@ -439,6 +460,7 @@ async function runOnDemandReport(
  */
 async function runHeartbeat(
   deps: DigestDeps,
+  laneId: number,
   watchedCount: number,
   nextOpeningDay: string | null,
 ): Promise<DigestResult> {
@@ -449,6 +471,10 @@ async function runHeartbeat(
   const claim = claimDelivery(db, {
     kind: "heartbeat",
     dateCovered: today,
+    // A heartbeat is not lane-scoped — it is one liveness signal for the host —
+    // but the slot it claims is, so it rides the default lane. A known wart,
+    // recorded here rather than discovered later (#190).
+    listId: laneId,
     now: now(),
     force: deps.force,
     precondition: (tx) => heartbeatWithinWeek(tx, nowMs),
@@ -467,7 +493,7 @@ async function runHeartbeat(
 
   // A replay never reconciles — see the digest path for why suppressing a
   // forced send here would both defeat force and rewrite a delivered row.
-  if (!claim.replay && (await reconciled(deps, "heartbeat", today, claim))) {
+  if (!claim.replay && (await reconciled(deps, "heartbeat", today, laneId, claim))) {
     return {
       kind: "heartbeat",
       action: "skipped",
@@ -484,7 +510,7 @@ async function runHeartbeat(
   try {
     receipt = await deps.mailer.send(
       { to: deps.to, from: deps.from, ...mail },
-      { deliveryKey: deliveryKey("heartbeat", today) },
+      { deliveryKey: deliveryKey("heartbeat", today, laneId) },
     );
   } catch (err) {
     // A replay holds no claim: nothing to settle, nothing to degrade.
@@ -563,6 +589,7 @@ async function reconciled(
   deps: DigestDeps,
   kind: DeliveryKind,
   dateCovered: string,
+  laneId: number,
   claim: RecoveredClaim,
 ): Promise<boolean> {
   if (!claim.recovered) return false;
@@ -571,7 +598,11 @@ async function reconciled(
 
   let result: LookupResult;
   try {
-    result = await lookup.call(deps.mailer, deliveryKey(kind, dateCovered), claim.previousClaimedAt);
+    result = await lookup.call(
+      deps.mailer,
+      deliveryKey(kind, dateCovered, laneId),
+      claim.previousClaimedAt,
+    );
   } catch {
     // The contract says findAccepted must not throw; a provider that does is
     // still just "we do not know", and not knowing re-sends.

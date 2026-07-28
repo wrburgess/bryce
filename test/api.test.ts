@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { digestDeliveries, players, statLines } from "../src/db/schema.js";
+import { digestDeliveries, playerLists, players, statLines } from "../src/db/schema.js";
 import { MlbClient } from "../src/mlb/client.js";
 import { claimRefreshRun } from "../src/jobs/refresh-run.js";
 import { assemblePlayerCard } from "../src/reports/player-card.js";
@@ -1271,8 +1271,15 @@ describe("REST API", () => {
 
       const listed = await app().request("/api/lists", { headers: AUTH });
       expect(listed.status).toBe(200);
-      const body = (await listed.json()) as { lists: Array<{ name: string; memberCount: number }> };
-      expect(body.lists).toEqual([{ ...body.lists[0], name: "Prospects", memberCount: 0 }]);
+      const body = (await listed.json()) as {
+        lists: Array<{ name: string; memberCount: number; isDefault: boolean }>;
+      };
+      // Ordered by name, and the migration-seeded default lane is one of them
+      // (#190): a fresh database is never list-less any more.
+      expect(body.lists.map((l) => [l.name, l.memberCount, l.isDefault])).toEqual([
+        ["Prospects", 0, false],
+        ["Watchlist", 0, true],
+      ]);
     });
 
     it("adds and shows members; membership is scoped to active players", async () => {
@@ -1347,10 +1354,11 @@ describe("REST API", () => {
       });
       expect(bad.status).toBe(400);
 
-      // The ZodError seam fails closed BEFORE any write — no list exists.
+      // The ZodError seam fails closed BEFORE any write — nothing was created,
+      // so only the migration-seeded default lane remains (#190).
       const listed = await app().request("/api/lists", { headers: AUTH });
-      const body = (await listed.json()) as { lists: unknown[] };
-      expect(body.lists).toEqual([]);
+      const body = (await listed.json()) as { lists: Array<{ name: string }> };
+      expect(body.lists.map((l) => l.name)).toEqual(["Watchlist"]);
     });
 
     it("GET /digest/preview?list= scopes the preview, and an unknown list 404s", async () => {
@@ -1432,6 +1440,61 @@ describe("REST API", () => {
       // all players, both outsiders' lines would leak in — so [] proves scoping,
       // not merely an absence of data.
       expect(body.statLines).toEqual([]);
+    });
+
+    /**
+     * The lane error seam (#190). Asserted PER ROUTE, not once per error type:
+     * a rejection raised past the first `await` in a static route may not reach
+     * Hono's central onError the way a param'd route's does (#140 / PR #150), so
+     * each route that can raise one of these is driven on its own. Bodies are
+     * asserted, never just the status.
+     */
+    describe("default lane errors", () => {
+      it("PUT /api/lists/:name/default points the default at the list", async () => {
+        await createList("Prospects");
+        const res = await app().request("/api/lists/Prospects/default", {
+          method: "PUT",
+          headers: AUTH,
+        });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toMatchObject({ list: { name: "Prospects", isDefault: true } });
+
+        // The prior default really lost the flag — exactly one live default.
+        const listed = (await (await app().request("/api/lists", { headers: AUTH })).json()) as {
+          lists: Array<{ name: string; isDefault: boolean }>;
+        };
+        expect(listed.lists.filter((l) => l.isDefault).map((l) => l.name)).toEqual(["Prospects"]);
+      });
+
+      it("PUT /api/lists/:name/default 404s on an unknown list", async () => {
+        const res = await app().request("/api/lists/ghost/default", { method: "PUT", headers: AUTH });
+        expect(res.status).toBe(404);
+        expect(await res.json()).toEqual({ error: 'no list named "ghost"' });
+      });
+
+      it("DELETE /api/lists/:name 409s on the DEFAULT list, leaving it live", async () => {
+        const res = await app().request("/api/lists/Watchlist", { method: "DELETE", headers: AUTH });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toEqual({
+          error: expect.stringContaining("is the default list"),
+        });
+
+        // Still live and still the default: the refusal wrote nothing.
+        const listed = (await (await app().request("/api/lists", { headers: AUTH })).json()) as {
+          lists: Array<{ name: string; isDefault: boolean }>;
+        };
+        expect(listed.lists).toEqual([expect.objectContaining({ name: "Watchlist", isDefault: true })]);
+      });
+
+      it("POST /api/digest/send 409s when no default lane is set", async () => {
+        await opened.db.update(playerLists).set({ isDefault: false });
+        const res = await app().request("/api/digest/send", { method: "POST", headers: JSON_AUTH });
+        expect(res.status).toBe(409);
+        expect(await res.json()).toEqual({
+          error: expect.stringContaining("no default list is set"),
+        });
+        expect(mailer.sent).toHaveLength(0);
+      });
     });
   });
 

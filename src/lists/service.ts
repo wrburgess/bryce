@@ -39,6 +39,39 @@ export class DuplicateListNameError extends Error {
   }
 }
 
+/**
+ * No LIVE list carries `is_default` (#190). Unscoped commands resolve THE
+ * default lane, so this is a refusal, never a silent widening to the whole Watch
+ * List: an unscoped digest that quietly mailed everyone would be indistinguishable
+ * from a correctly configured one. The migration seeds a default, so reaching
+ * this means the HC deleted or unset it — recoverable with `lists set-default`,
+ * which the message names.
+ */
+export class NoDefaultListError extends Error {
+  constructor() {
+    super("no default list is set — run: sk players lists set-default --name NAME");
+    this.name = "NoDefaultListError";
+  }
+}
+
+/**
+ * The target of a delete is the live default (#190). Refused rather than
+ * cascaded: deleting it would leave every unscoped command raising
+ * NoDefaultListError, so the HC must point the default elsewhere FIRST and then
+ * delete — an ordering the error message states.
+ */
+export class CannotDeleteDefaultListError extends Error {
+  readonly listName: string;
+
+  constructor(listName: string) {
+    super(
+      `"${listName}" is the default list — set another default first: sk players lists set-default --name NAME`,
+    );
+    this.name = "CannotDeleteDefaultListError";
+    this.listName = listName;
+  }
+}
+
 /** A blank/whitespace-only or control-char-bearing list name reached the service (boundary schemas also reject it). */
 export class BlankListNameError extends Error {
   constructor() {
@@ -52,6 +85,8 @@ export interface ListSummary {
   id: number;
   name: string;
   memberCount: number;
+  /** Whether this is THE default lane — what an unscoped command means (#190). */
+  isDefault: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -86,6 +121,78 @@ export async function resolveListByName(db: Db, name: string): Promise<PlayerLis
   const list = await findLiveList(db, requireName(name));
   if (list === undefined) throw new UnknownListError(name.trim());
   return list;
+}
+
+/**
+ * THE default lane, or NoDefaultListError (#190). The single place "no `--list`"
+ * is answered, so an unscoped command can never resolve to something other than
+ * a real, nameable list — the reversal of ADR 0046 decision 1's implicit default.
+ */
+export async function resolveDefaultList(db: Db): Promise<PlayerListRow> {
+  const row = (
+    await db
+      .select()
+      .from(playerLists)
+      .where(and(eq(playerLists.isDefault, true), isNull(playerLists.deletedAt)))
+  )[0];
+  if (row === undefined) throw new NoDefaultListError();
+  return row;
+}
+
+/**
+ * The one funnel every surface and later phase routes list scoping through: an
+ * explicit name wins, an absent one resolves the default. Both failure modes are
+ * CLOSED — an unknown or soft-deleted name throws UnknownListError rather than
+ * quietly falling back to the default, so a typo can never widen a scope into
+ * someone else's lane, and a missing default is NoDefaultListError rather than
+ * "everyone".
+ */
+export async function resolveListOrDefault(db: Db, name?: string): Promise<PlayerListRow> {
+  if (name === undefined) return resolveDefaultList(db);
+  return resolveListByName(db, name);
+}
+
+/**
+ * Point the default lane at `name` (#190). Unknown live name → UnknownListError;
+ * already the default → an idempotent no-op that writes nothing.
+ *
+ * ONE transaction, and the clear STRICTLY precedes the set: `player_lists_default_uq`
+ * is a live-partial unique index, so setting the new default while the old one
+ * still holds the flag violates it mid-statement. Doing both under one write lock
+ * is also what keeps a crash from leaving the database with no default at all —
+ * the state in which every unscoped command fails.
+ */
+export async function setDefaultList(db: Db, name: string, now: Date): Promise<PlayerListRow> {
+  const trimmed = requireName(name);
+  const nowIso = now.toISOString();
+  return db.transaction(
+    (tx): PlayerListRow => {
+      const target = tx
+        .select()
+        .from(playerLists)
+        .where(and(eq(playerLists.name, trimmed), isNull(playerLists.deletedAt)))
+        .all()[0];
+      if (target === undefined) throw new UnknownListError(trimmed);
+      // Already the default: write NOTHING. A no-op that still bumped
+      // `updated_at` would make a re-run look like a change in every audit.
+      if (target.isDefault) return target;
+
+      tx
+        .update(playerLists)
+        .set({ isDefault: false, updatedAt: nowIso })
+        .where(and(eq(playerLists.isDefault, true), isNull(playerLists.deletedAt)))
+        .run();
+      const row = tx
+        .update(playerLists)
+        .set({ isDefault: true, updatedAt: nowIso })
+        .where(eq(playerLists.id, target.id))
+        .returning()
+        .all()[0];
+      if (row === undefined) throw new Error("setDefaultList update failed");
+      return row;
+    },
+    { behavior: "immediate" },
+  );
 }
 
 /** Create a new live list; a duplicate LIVE name is a DuplicateListNameError. */
@@ -145,16 +252,43 @@ export async function renameList(
  * rows are left in place — a deleted list is simply unresolvable for scoping.
  */
 export async function deleteList(db: Db, name: string, now: Date): Promise<PlayerListRow> {
-  const list = await resolveListByName(db, name);
+  const trimmed = requireName(name);
   const nowIso = now.toISOString();
-  const rows = await db
-    .update(playerLists)
-    .set({ deletedAt: nowIso, updatedAt: nowIso })
-    .where(eq(playerLists.id, list.id))
-    .returning();
-  const row = rows[0];
-  if (row === undefined) throw new Error("deleteList update failed");
-  return row;
+  return db.transaction(
+    (tx): PlayerListRow => {
+      // ONE conditional UPDATE decides and acts (#190). Reading "is this the
+      // default?" and then deleting on the answer is a check-then-act split: a
+      // set-default landing in the gap would delete the list that had just BECOME
+      // the default, leaving the database with none. The predicate carries all
+      // three conditions — right name, still live, not the default — so the
+      // database, not a prior read, is what refuses.
+      const row = tx
+        .update(playerLists)
+        .set({ deletedAt: nowIso, updatedAt: nowIso })
+        .where(
+          and(
+            eq(playerLists.name, trimmed),
+            isNull(playerLists.deletedAt),
+            eq(playerLists.isDefault, false),
+          ),
+        )
+        .returning()
+        .all()[0];
+      if (row !== undefined) return row;
+
+      // Zero rows affected is ambiguous — no such live list, or it is the
+      // default. Re-read INSIDE the same transaction to tell them apart, so the
+      // classification describes the state the UPDATE actually saw.
+      const live = tx
+        .select()
+        .from(playerLists)
+        .where(and(eq(playerLists.name, trimmed), isNull(playerLists.deletedAt)))
+        .all()[0];
+      if (live === undefined) throw new UnknownListError(trimmed);
+      throw new CannotDeleteDefaultListError(live.name);
+    },
+    { behavior: "immediate" },
+  );
 }
 
 /** Every live list with its active-member count, ordered by name. */
@@ -170,6 +304,7 @@ export async function listLists(db: Db): Promise<ListSummary[]> {
     .select({
       id: playerLists.id,
       name: playerLists.name,
+      isDefault: playerLists.isDefault,
       createdAt: playerLists.createdAt,
       updatedAt: playerLists.updatedAt,
       memberCount: sql<number>`count(${players.id})`,
@@ -185,6 +320,7 @@ export async function listLists(db: Db): Promise<ListSummary[]> {
     id: r.id,
     name: r.name,
     memberCount: Number(r.memberCount),
+    isDefault: r.isDefault,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   }));

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { listMembers, playerTags, players, statLines } from "../src/db/schema.js";
+import { listMembers, playerLists, playerTags, players, statLines } from "../src/db/schema.js";
 import {
   MAX_BACKUP_BYTES,
   PlayerBackupParseError,
@@ -23,8 +23,9 @@ import {
   deleteList,
   listLists,
   listMembersOf,
+  setDefaultList,
 } from "../src/lists/service.js";
-import { makeBackupEntry, makeBackupEnvelope, makeTempDir, type BackupEntryOverrides } from "./backup-helpers.js";
+import { makeBackupEntry, makeBackupEnvelope, makeBackupList, makeTempDir, type BackupEntryOverrides } from "./backup-helpers.js";
 import {
   InjectedFault,
   fakeClock,
@@ -68,7 +69,7 @@ describe("createPlayerListBackup", () => {
     });
 
     const backup = await createPlayerListBackup(opened.db, fakeClock("2026-07-22T12:00:00Z").now);
-    expect(backup.version).toBe(4);
+    expect(backup.version).toBe(5);
     expect(backup.exportedAt).toBe("2026-07-22T12:00:00.000Z");
     expect(backup.players).toHaveLength(2);
     expect(backup.players[1]).toMatchObject({
@@ -100,7 +101,15 @@ describe("restorePlayerListBackup: import semantics", () => {
       makeBackupEntry({ id: 5, externalId: 691185, notes: "watch closely", active: false }),
     ]);
     const summary = restorePlayerListBackup(opened.db, rows, NOW);
-    expect(summary).toEqual({ inserted: 1, updated: 0, total: 1 });
+    // The payload carries no `lists` array at all, so it makes no statement
+    // about lists and the migration-seeded default lane is left alone (#190).
+    expect(summary).toEqual({
+      inserted: 1,
+      updated: 0,
+      total: 1,
+      noDefaultList: false,
+      defaultListChange: null,
+    });
 
     const stored = (await opened.db.select().from(players))[0];
     expect(stored?.id).toBe(1); // fresh autoincrement, NOT the source-local 5
@@ -118,7 +127,13 @@ describe("restorePlayerListBackup: import semantics", () => {
     backup.players[0]!.fullName = "New Name";
     backup.players[0]!.teamName = "Traded Team";
     const summary = restorePlayerListBackup(opened.db, backup.players, NOW);
-    expect(summary).toEqual({ inserted: 0, updated: 1, total: 1 });
+    expect(summary).toEqual({
+      inserted: 0,
+      updated: 1,
+      total: 1,
+      noDefaultList: false,
+      defaultListChange: null,
+    });
 
     const rows = await opened.db.select().from(players);
     expect(rows).toHaveLength(1);
@@ -222,7 +237,13 @@ describe("restorePlayerListBackup: import semantics", () => {
       }),
     ]);
     const summary = restorePlayerListBackup(opened.db, rows, NOW);
-    expect(summary).toEqual({ inserted: 0, updated: 1, total: 1 });
+    expect(summary).toEqual({
+      inserted: 0,
+      updated: 1,
+      total: 1,
+      noDefaultList: false,
+      defaultListChange: null,
+    });
 
     const stored = await opened.db.select().from(players);
     expect(stored).toHaveLength(1);
@@ -262,6 +283,8 @@ describe("restorePlayerListBackup: import semantics", () => {
         inserted: 0,
         updated: 1,
         total: 1,
+        noDefaultList: false,
+        defaultListChange: null,
       });
 
       const restored = opened.db.select().from(players).where(eq(players.externalId, externalId)).all()[0];
@@ -381,15 +404,15 @@ describe("writePlayerListBackupFile", () => {
 });
 
 describe("parsePlayerListBackup: strict validation", () => {
-  it("rejects an absent or wrong version (v1-v4 are accepted)", () => {
+  it("rejects an absent or wrong version (v1-v5 are accepted)", () => {
     expect(() =>
       parsePlayerListBackup(JSON.stringify({ players: [makeBackupEntry()] })),
     ).toThrow(PlayerBackupParseError);
-    // v5 is not a known version.
+    // v6 is not a known version.
     expect(() =>
-      parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 5 }))),
+      parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 6 }))),
     ).toThrow(PlayerBackupParseError);
-    // v1-v3 remain compatible and v4 is the current envelope.
+    // v1-v4 remain compatible and v5 is the current envelope (#190).
     expect(() =>
       parsePlayerListBackup(JSON.stringify(makeBackupEnvelope([makeBackupEntry()], { version: 1 }))),
     ).not.toThrow();
@@ -597,8 +620,14 @@ describe("named lists in the backup (v2, #70 / ADR 0046)", () => {
     await opened.db.insert(listMembers).values({ listId: list.id, playerId: ncaa.id, createdAt: NOW.toISOString() });
 
     const backup = await createPlayerListBackup(opened.db, () => NOW);
-    expect(backup.version).toBe(4);
-    expect(backup.lists).toEqual([{ name: "Prospects", createdAt: expect.any(String), updatedAt: expect.any(String) }]);
+    expect(backup.version).toBe(5);
+    // v5 states each list's lane configuration outright (#190). "Prospects" is
+    // a plain list; the migration-seeded "Watchlist" is the default lane and
+    // carries the cadence the migration recorded.
+    expect(backup.lists).toEqual([
+      { name: "Prospects", createdAt: expect.any(String), updatedAt: expect.any(String), isDefault: false, refreshIntervalMinutes: null, digestHour: null, digestTo: null },
+      { name: "Watchlist", createdAt: expect.any(String), updatedAt: expect.any(String), isDefault: true, refreshIntervalMinutes: 1440, digestHour: 5, digestTo: null },
+    ]);
     expect(backup.members).toHaveLength(2);
     // The envelope round-trips through the strict parser.
     expect(() => parsePlayerListBackup(JSON.stringify(backup))).not.toThrow();
@@ -612,7 +641,10 @@ describe("named lists in the backup (v2, #70 / ADR 0046)", () => {
         members: parsed.members,
       });
       const lists = await listLists(dest.db);
-      expect(lists.map((l) => l.name)).toEqual(["Prospects"]);
+      // The destination's own seeded "Watchlist" is MERGED BY NAME with the
+      // payload's, so it is not duplicated — and the payload's default wins.
+      expect(lists.map((l) => l.name)).toEqual(["Prospects", "Watchlist"]);
+      expect(lists.filter((l) => l.isDefault).map((l) => l.name)).toEqual(["Watchlist"]);
       const members = await listMembersOf(dest.db, "Prospects");
       expect(members.map((m) => m.fullName).sort()).toEqual(["Mlb Guy", "Ncaa Guy"]);
       expect(ncaa.ncaaPlayerSeq).toBe(555);
@@ -629,7 +661,7 @@ describe("named lists in the backup (v2, #70 / ADR 0046)", () => {
     await deleteList(opened.db, "Gone", NOW);
 
     const backup = await createPlayerListBackup(opened.db, () => NOW);
-    expect(backup.lists?.map((l) => l.name)).toEqual(["Live"]);
+    expect(backup.lists?.map((l) => l.name)).toEqual(["Live", "Watchlist"]);
     // The deleted list's membership is not carried either.
     expect(backup.members).toEqual([]);
   });
@@ -643,22 +675,26 @@ describe("named lists in the backup (v2, #70 / ADR 0046)", () => {
       members: parsed.members,
     });
     expect(summary.inserted).toBe(1);
-    expect(await listLists(opened.db)).toEqual([]);
+    // A v1 payload makes NO statement about lists, so the seeded default lane
+    // survives untouched — absence is not an instruction to delete (#190).
+    expect((await listLists(opened.db)).map((l) => l.name)).toEqual(["Watchlist"]);
+    expect(summary.noDefaultList).toBe(false);
   });
 
   it("aborts the whole import when a membership's player natural id does not resolve", async () => {
     const rows = parse([makeBackupEntry({ externalId: 691185 })]);
     expect(() =>
       restorePlayerListBackup(opened.db, rows, NOW, {
-        lists: [{ name: "Prospects" }],
+        lists: [makeBackupList({ name: "Prospects" })],
         // References a player NOT in the payload.
         members: [{ list: "Prospects", externalId: 999999, ncaaPlayerSeq: null }],
       }),
     ).toThrow(UnresolvedBackupMemberError);
 
-    // The transaction rolled back entirely: no players, no lists persisted.
+    // The transaction rolled back entirely: no players, and no list beyond the
+    // seeded default lane the rollback restored (#190).
     expect(await opened.db.select().from(players)).toHaveLength(0);
-    expect(await listLists(opened.db)).toEqual([]);
+    expect((await listLists(opened.db)).map((l) => l.name)).toEqual(["Watchlist"]);
   });
 
   it("restore reuses a pre-existing live list of the same name and merges memberships (idempotent, no rollback)", async () => {
@@ -670,16 +706,28 @@ describe("named lists in the backup (v2, #70 / ADR 0046)", () => {
     // The v2 backup carries a list ALSO named "L" and a backed-up member (player 200).
     const rows = parse([makeBackupEntry({ externalId: 200, fullName: "Backup Member" })]);
     const summary = restorePlayerListBackup(opened.db, rows, NOW, {
-      lists: [{ name: "L" }],
+      lists: [makeBackupList({ name: "L" })],
       members: [{ list: "L", externalId: 200, ncaaPlayerSeq: null }],
     });
 
     // If list recreation still INSERTed, the name would collide on the partial
     // unique index and roll the WHOLE restore back — the player would be lost.
     // Instead the player restore commits and the list is reused.
-    expect(summary).toEqual({ inserted: 1, updated: 0, total: 1 });
+    // `noDefaultList` is true because the payload CARRIES a lists array whose
+    // only entry is non-default, so the finding-4 policy cleared the lane the
+    // migration seeded and the payload replaced it with nothing (#190).
+    // The seeded lane WAS the default and no longer is, so the change is
+    // reported too — the CLI leaves it to the louder no-default warning to
+    // speak, but the fact itself is never inferred from silence (#190).
+    expect(summary).toEqual({
+      inserted: 1,
+      updated: 0,
+      total: 1,
+      noDefaultList: true,
+      defaultListChange: { from: "Watchlist", to: null },
+    });
     const lists = await listLists(opened.db);
-    expect(lists.map((l) => l.name)).toEqual(["L"]); // reused, not duplicated
+    expect(lists.map((l) => l.name)).toEqual(["L", "Watchlist"]); // reused, not duplicated
     // Both the original and the backed-up member are present (memberships merged).
     const members = await listMembersOf(opened.db, "L");
     expect(members.map((m) => m.externalId).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([100, 200]);
@@ -849,5 +897,267 @@ describe("manual-tag backup round-trip (Phase A of #29)", () => {
     expect(() => restorePlayerListBackup(faulting, parse([row]), NOW)).toThrow(InjectedFault);
     expect(opened.db.select().from(players).all()).toHaveLength(0);
     expect(opened.db.select().from(playerTags).all()).toHaveLength(0);
+  });
+});
+
+/**
+ * Lane configuration in the backup — the v4 -> v5 bump (#190). Without it a
+ * restore silently loses which list is the default and every lane's cadence, and
+ * a database with no default fails every unscoped command. Silence is the whole
+ * failure mode here, so the warning text is pinned as tightly as the data.
+ */
+describe("lane configuration in the backup (v5, #190)", () => {
+  let opened: OpenedDb;
+
+  beforeEach(() => {
+    opened = testDb();
+  });
+
+  afterEach(() => {
+    opened.close();
+  });
+
+  it("round-trips the default flag and every cadence field into a fresh database", async () => {
+    await createList(opened.db, "Prospects", NOW);
+    await setDefaultList(opened.db, "Prospects", NOW);
+    await opened.db
+      .update(playerLists)
+      .set({ refreshIntervalMinutes: 360, digestHour: 7, digestTo: "lane@example.com" })
+      .where(eq(playerLists.name, "Prospects"));
+
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+    const emitted = backup.lists?.find((l) => l.name === "Prospects");
+    expect(emitted).toMatchObject({
+      isDefault: true,
+      refreshIntervalMinutes: 360,
+      digestHour: 7,
+      digestTo: "lane@example.com",
+    });
+
+    const dest = testDb();
+    try {
+      const parsed = parsePlayerListBackup(JSON.stringify(backup));
+      restorePlayerListBackup(dest.db, parsed.players, NOW, {
+        lists: parsed.lists,
+        members: parsed.members,
+      });
+      const restored = (
+        await dest.db.select().from(playerLists).where(eq(playerLists.name, "Prospects"))
+      )[0];
+      expect(restored).toMatchObject({
+        isDefault: true,
+        refreshIntervalMinutes: 360,
+        digestHour: 7,
+        digestTo: "lane@example.com",
+      });
+      // Exactly one live default survives: the destination's own seeded lane
+      // lost the flag rather than colliding on the partial unique index.
+      expect((await listLists(dest.db)).filter((l) => l.isDefault).map((l) => l.name)).toEqual([
+        "Prospects",
+      ]);
+    } finally {
+      dest.close();
+    }
+  });
+
+  it("THE PAYLOAD'S DEFAULT WINS over a different default already in the database", async () => {
+    // Restore is merge-by-live-name, so a restored default can collide with the
+    // database's. Resolving it toward the payload is what makes the restored
+    // state reproducible instead of dependent on what happened to be there.
+    await createList(opened.db, "Backed Up", NOW);
+    await setDefaultList(opened.db, "Backed Up", NOW);
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+
+    const dest = testDb();
+    try {
+      await createList(dest.db, "Incumbent", NOW);
+      await setDefaultList(dest.db, "Incumbent", NOW);
+
+      const parsed = parsePlayerListBackup(JSON.stringify(backup));
+      const summary = restorePlayerListBackup(dest.db, parsed.players, NOW, {
+        lists: parsed.lists,
+        members: parsed.members,
+      });
+
+      expect(summary.noDefaultList).toBe(false);
+      const lists = await listLists(dest.db);
+      expect(lists.filter((l) => l.isDefault).map((l) => l.name)).toEqual(["Backed Up"]);
+      // The incumbent is still there, simply no longer the default.
+      expect(lists.map((l) => l.name)).toContain("Incumbent");
+    } finally {
+      dest.close();
+    }
+  });
+
+  it("REPORTS which lane the default moved from and to, so the win is never silent", async () => {
+    // The payload wins (above) — but a restore run months later to recover one
+    // deleted player also re-points the schedule at whatever lane was default
+    // when the backup was written. Unannounced, that is discovered by reading a
+    // digest full of players the HC never asked for. The summary carries the
+    // change; the CLI says it out loud (#190).
+    await createList(opened.db, "Backed Up", NOW);
+    await setDefaultList(opened.db, "Backed Up", NOW);
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+
+    const dest = testDb();
+    try {
+      await createList(dest.db, "Incumbent", NOW);
+      await setDefaultList(dest.db, "Incumbent", NOW);
+
+      const parsed = parsePlayerListBackup(JSON.stringify(backup));
+      const summary = restorePlayerListBackup(dest.db, parsed.players, NOW, {
+        lists: parsed.lists,
+        members: parsed.members,
+      });
+
+      expect(summary.defaultListChange).toEqual({ from: "Incumbent", to: "Backed Up" });
+    } finally {
+      dest.close();
+    }
+  });
+
+  it("reports NO change when the payload's default is the list that ALREADY held the flag", async () => {
+    // Compared by list id, not by the flag being rewritten: the clear-then-apply
+    // sequence touches the incumbent row twice even when nothing moved, so a
+    // change detected from the writes rather than the endpoints would warn on
+    // every single restore and train the HC to ignore the line.
+    await createList(opened.db, "Shared", NOW);
+    await setDefaultList(opened.db, "Shared", NOW);
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+
+    const dest = testDb();
+    try {
+      await createList(dest.db, "Shared", NOW);
+      await setDefaultList(dest.db, "Shared", NOW);
+
+      const parsed = parsePlayerListBackup(JSON.stringify(backup));
+      const summary = restorePlayerListBackup(dest.db, parsed.players, NOW, {
+        lists: parsed.lists,
+        members: parsed.members,
+      });
+
+      expect(summary.defaultListChange).toBeNull();
+      expect((await listLists(dest.db)).filter((l) => l.isDefault).map((l) => l.name)).toEqual([
+        "Shared",
+      ]);
+    } finally {
+      dest.close();
+    }
+  });
+
+  it("the payload wins for a SAME-NAME list whose default flag differs", async () => {
+    // The merge-by-name path, not the insert path: the destination already has a
+    // live list of this name, and its lane configuration is overwritten wholesale
+    // rather than merged — a half-restored lane is neither state.
+    await createList(opened.db, "Shared", NOW);
+    await setDefaultList(opened.db, "Shared", NOW);
+    await opened.db
+      .update(playerLists)
+      .set({ digestHour: 9, refreshIntervalMinutes: 120 })
+      .where(eq(playerLists.name, "Shared"));
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+
+    const dest = testDb();
+    try {
+      const incumbent = await createList(dest.db, "Shared", NOW);
+      await dest.db
+        .update(playerLists)
+        .set({ digestHour: 22, refreshIntervalMinutes: 15 })
+        .where(eq(playerLists.id, incumbent.id));
+
+      const parsed = parsePlayerListBackup(JSON.stringify(backup));
+      restorePlayerListBackup(dest.db, parsed.players, NOW, {
+        lists: parsed.lists,
+        members: parsed.members,
+      });
+
+      const merged = (await dest.db.select().from(playerLists).where(eq(playerLists.id, incumbent.id)))[0];
+      expect(merged).toMatchObject({
+        id: incumbent.id, // reused, not duplicated
+        isDefault: true,
+        digestHour: 9,
+        refreshIntervalMinutes: 120,
+      });
+    } finally {
+      dest.close();
+    }
+  });
+
+  it("restores a v4 payload's lists and reports that NO default remains", async () => {
+    // A pre-v5 payload carries no lane configuration, so it can only ever leave
+    // the database default-less. That is reported, never guessed at.
+    const payload = {
+      ...makeBackupEnvelope([makeBackupEntry({ externalId: 691185 })], { version: 4 }),
+      lists: [{ name: "Legacy" }],
+      members: [{ list: "Legacy", externalId: 691185, ncaaPlayerSeq: null }],
+    };
+    const parsed = parsePlayerListBackup(JSON.stringify(payload));
+    const summary = restorePlayerListBackup(opened.db, parsed.players, NOW, {
+      lists: parsed.lists,
+      members: parsed.members,
+    });
+
+    expect(summary.noDefaultList).toBe(true);
+    expect(summary.defaultListChange).toEqual({ from: "Watchlist", to: null });
+    const lists = await listLists(opened.db);
+    expect(lists.map((l) => l.name).sort()).toEqual(["Legacy", "Watchlist"]);
+    expect(lists.filter((l) => l.isDefault)).toEqual([]);
+  });
+
+  it("reports NO change when the database had no default to lose", async () => {
+    // Nothing is overwritten when there was no incumbent, so there is nothing to
+    // announce — and the alternative would print `from "undefined"` on the one
+    // path where a restore is unambiguously an improvement (#190).
+    await opened.db.update(playerLists).set({ isDefault: false });
+    const payload = {
+      ...makeBackupEnvelope([makeBackupEntry({ externalId: 691185 })], { version: 5 }),
+      lists: [makeBackupList({ name: "Fresh", isDefault: true })],
+    };
+    const parsed = parsePlayerListBackup(JSON.stringify(payload));
+    const summary = restorePlayerListBackup(opened.db, parsed.players, NOW, {
+      lists: parsed.lists,
+      members: parsed.members,
+    });
+
+    expect(summary.defaultListChange).toBeNull();
+    expect(summary.noDefaultList).toBe(false);
+    expect((await listLists(opened.db)).filter((l) => l.isDefault).map((l) => l.name)).toEqual([
+      "Fresh",
+    ]);
+  });
+
+  it("REJECTS lane configuration on a pre-v5 payload", async () => {
+    const payload = {
+      ...makeBackupEnvelope([makeBackupEntry({ externalId: 691185 })], { version: 4 }),
+      lists: [makeBackupList({ name: "Smuggled", isDefault: true })],
+    };
+    expect(() => parsePlayerListBackup(JSON.stringify(payload))).toThrow(
+      /lane configuration \(isDefault\/cadence\/recipients\) requires version 5/,
+    );
+  });
+
+  it("REJECTS a payload naming two defaults, by validation rather than by constraint failure", async () => {
+    const payload = {
+      ...makeBackupEnvelope([makeBackupEntry({ externalId: 691185 })], { version: 5 }),
+      lists: [
+        makeBackupList({ name: "One", isDefault: true }),
+        makeBackupList({ name: "Two", isDefault: true }),
+      ],
+    };
+    expect(() => parsePlayerListBackup(JSON.stringify(payload))).toThrow(
+      /at most one list may be the default; found 2/,
+    );
+  });
+
+  it("REJECTS out-of-range cadence in a payload with a readable message", async () => {
+    for (const [field, value] of [["digestHour", 24], ["refreshIntervalMinutes", 0]] as const) {
+      const payload = {
+        ...makeBackupEnvelope([makeBackupEntry({ externalId: 691185 })], { version: 5 }),
+        lists: [makeBackupList({ name: "Bad", [field]: value })],
+      };
+      expect(() => parsePlayerListBackup(JSON.stringify(payload)), field).toThrow(
+        PlayerBackupParseError,
+      );
+    }
   });
 });

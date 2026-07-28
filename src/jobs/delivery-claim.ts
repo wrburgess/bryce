@@ -93,6 +93,14 @@ export type ClaimRefusal =
 export interface ClaimArgs {
   kind: DeliveryKind;
   dateCovered: string;
+  /**
+   * The lane claiming this slot (#190). Required, not optional-with-a-fallback:
+   * `digest_deliveries.list_id` is NOT NULL, so a caller that forgot the lane
+   * must fail to compile rather than fail at the INSERT — and a default resolved
+   * *here* would hide the missing lane from every caller that should be
+   * resolving one explicitly.
+   */
+  listId: number;
   now: Date;
   leaseMs?: number;
   /**
@@ -135,6 +143,11 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
           and(
             eq(digestDeliveries.kind, args.kind),
             eq(digestDeliveries.dateCovered, args.dateCovered),
+            // The lane is part of the SLOT, so it is part of the lookup: another
+            // lane's row for the same date is a different slot entirely and must
+            // not be seen here, or one lane's `sent` row would refuse another
+            // lane's claim (#190).
+            eq(digestDeliveries.listId, args.listId),
           ),
         )
         .all()[0];
@@ -172,6 +185,7 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
           .values({
             kind: args.kind,
             dateCovered: args.dateCovered,
+            listId: args.listId,
             sentAt: null,
             status: "sending",
             claimedAt: nowIso,
@@ -182,7 +196,9 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
           .returning({ id: digestDeliveries.id })
           .all()[0];
         if (inserted === undefined) {
-          throw new Error(`Failed to claim ${args.kind} delivery for ${args.dateCovered}`);
+          throw new Error(
+            `Failed to claim ${args.kind} delivery for ${args.dateCovered} (list ${args.listId})`,
+          );
         }
         return {
           claimed: true,
@@ -361,11 +377,6 @@ export function settleFailed(db: Db, args: SettleFailedArgs): void {
 }
 
 /**
- * Stable per-slot key handed to the mail provider. Stable — not per-attempt —
- * so a future reconciliation can ask the provider "did THIS slot land?" and get
- * one answer for every attempt at it.
- */
-/**
  * The oldest digest slot for a date BEFORE `beforeDate` that still owes a send:
  * a `failed` row, or a `sending` row whose lease has expired (a run that
  * crashed and never came back). Returns its `date_covered`, or null.
@@ -382,6 +393,7 @@ export function settleFailed(db: Db, args: SettleFailedArgs): void {
  */
 export function findOrphanedDigestDate(
   db: Db,
+  listId: number,
   beforeDate: string,
   nowMs: number,
   leaseMs = LEASE_MS,
@@ -389,7 +401,16 @@ export function findOrphanedDigestDate(
   const rows = db
     .select()
     .from(digestDeliveries)
-    .where(and(eq(digestDeliveries.kind, "digest"), lt(digestDeliveries.dateCovered, beforeDate)))
+    .where(
+      and(
+        eq(digestDeliveries.kind, "digest"),
+        lt(digestDeliveries.dateCovered, beforeDate),
+        // Scoped to ONE lane (#190). Recovery re-claims the slot it finds, and a
+        // claim is per-lane, so returning another lane's orphaned date would have
+        // this lane re-send that lane's missing digest under its own slot.
+        eq(digestDeliveries.listId, listId),
+      ),
+    )
     .orderBy(digestDeliveries.dateCovered)
     .all();
   for (const row of rows) {
@@ -401,8 +422,40 @@ export function findOrphanedDigestDate(
   return null;
 }
 
-export function deliveryKey(kind: DeliveryKind, dateCovered: string): string {
-  return `bryce:${kind}:${dateCovered}`;
+/**
+ * Stable per-slot key handed to the mail provider. Stable — not per-attempt —
+ * so a reconciliation can ask the provider "did THIS slot land?" and get one
+ * answer for every attempt at it.
+ *
+ * IT MUST CARRY THE LANE, for the same reason `reportKey` must not share this
+ * namespace (see below). The daily digest's stale-claim recovery looks this key
+ * up at the provider to ask whether the crashed attempt already landed — and a
+ * positive answer SUPPRESSES the send. Once two lanes digest the same date, a
+ * lane-less key would make them share `bryce:digest:<date>`: lane B's recovery
+ * would find lane A's delivered message, conclude its own digest had landed, and
+ * silently skip it. A suppressed send looks exactly like a successful one, so
+ * the loss would be invisible.
+ *
+ * EVERY LANE IS SUFFIXED, INCLUDING THE DEFAULT — the lane is identified by its
+ * IMMUTABLE id, never by the mutable `is_default` flag (Reviewer P1 on #190). An
+ * earlier draft let the default lane keep the pre-lane key `bryce:digest:<date>`
+ * unsuffixed, to stay compatible with messages already in the provider's history.
+ * That tied the key to a flag `set-default` MOVES: lane A sends a date's digest
+ * while it is the default, the HC re-points the default at lane B, and B now emits
+ * the same unsuffixed key. B crashes after claiming and before sending, its
+ * recovery finds A's accepted message under the shared key, and B is settled as
+ * delivered without ever sending. Silent, and permanent — reachable any time the
+ * default moves, which is a supported operation this very phase ships.
+ *
+ * The compatibility that buys is worth strictly less than that. It matters only
+ * for a slot that is `failed` or lease-expired at the instant the 0012 migration
+ * runs: such a slot re-sends instead of reconciling, costing at most ONE duplicate
+ * email, once, loudly. A duplicate is the failure this project accepts (the
+ * delivery contract is at-least-once, ADR 0034); a silently skipped digest is the
+ * one it does not.
+ */
+export function deliveryKey(kind: DeliveryKind, dateCovered: string, listId: number): string {
+  return `bryce:${kind}:${dateCovered}:list-${listId}`;
 }
 
 /**

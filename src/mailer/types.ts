@@ -8,9 +8,10 @@ export interface MailMessage {
 
 /**
  * Per-delivery context handed to the provider alongside the message. The key is
- * stable per (kind, date) slot (`bryce:digest:2026-07-19`) rather than per
- * attempt, so a future reconciliation can ask the provider whether THIS slot
- * ever landed — see ADR 0034. Providers that cannot carry it simply ignore it.
+ * stable per (kind, date, lane) slot (`bryce:digest:2026-07-19:list-1`) rather
+ * than per attempt, so a reconciliation can ask the provider whether THIS slot
+ * ever landed — see ADR 0034, and ADR 0059 for why the lane is part of it and is
+ * named by its immutable id. Providers that cannot carry it simply ignore it.
  */
 export interface MailContext {
   deliveryKey: string;

@@ -43,6 +43,7 @@ export const ALL_TOOLS = [
   "list_create",
   "list_rename",
   "list_delete",
+  "list_set_default",
   "list_members",
   "list_add_players",
   "list_remove_players",

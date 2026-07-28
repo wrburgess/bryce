@@ -59,6 +59,7 @@ const validArgs: Record<string, string[]> = {
   "players lists create": ["--name", "Prospects"],
   "players lists rename": ["--name", "Prospects", "--to", "Top 30"],
   "players lists delete": ["--name", "Prospects"],
+  "players lists set-default": ["--name", "Prospects"],
   "players lists add": ["--name", "Prospects", "--person-ids", "1"],
   "players lists remove": ["--name", "Prospects", "--person-ids", "1"],
   "players backup": ["--out", "players.json"],

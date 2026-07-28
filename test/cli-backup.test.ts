@@ -12,7 +12,8 @@ import { runRestore } from "../src/cli/restore.js";
 import { runPlayersBackup } from "../src/cli/players-backup.js";
 import { runPlayersRestore } from "../src/cli/players-restore.js";
 import type { TempDir } from "./backup-helpers.js";
-import { makeBackupEntry, makeBackupEnvelope, makeTempDir } from "./backup-helpers.js";
+import { createList, setDefaultList } from "../src/lists/service.js";
+import { makeBackupEntry, makeBackupEnvelope, makeBackupList, makeTempDir } from "./backup-helpers.js";
 import type { TempFileDb } from "./factories.js";
 import { fakeClock, insertPlayer, testFileDb } from "./factories.js";
 
@@ -189,6 +190,76 @@ describe("CLI logic in-process", () => {
       expect(code).toBe(0);
       expect(out[0]).toBe("player-list restored inserted=1 updated=0 total=1 lists=0 members=0");
       expect((await live.opened.db.select().from(players))[0]?.externalId).toBe(700009);
+      // A payload with no `lists` array says nothing about lists, so the seeded
+      // default lane survives and there is nothing to warn about (#190).
+      expect(out.join("\n")).not.toContain("warning:");
+    });
+
+    it("WARNS, naming set-default, when a pre-v5 payload leaves no default lane (#190)", async () => {
+      // Silence is the failure mode this whole line exists to prevent: without
+      // it the HC discovers the missing lane when a digest does not arrive. The
+      // TEXT is pinned, not merely the presence of some warning.
+      const file = join(backups.path, "v4.json");
+      writeFileSync(
+        file,
+        JSON.stringify({
+          ...makeBackupEnvelope([makeBackupEntry({ externalId: 700010 })], { version: 4 }),
+          lists: [{ name: "Legacy" }],
+          members: [{ list: "Legacy", externalId: 700010, ncaaPlayerSeq: null }],
+        }),
+      );
+
+      const code = await runPlayersRestore(["--in", file], {
+        db: live.opened.db,
+        now: CLOCK,
+        write,
+      });
+
+      // The restore SUCCEEDS — failing closed here would refuse a legitimate
+      // recovery from an older backup, which is worse than an operable warning.
+      expect(code).toBe(0);
+      expect(out[0]).toContain("lists=1 members=1");
+      expect(out[1]).toBe(
+        "warning: no default list after restore — unscoped commands will fail until you run: sk players lists set-default --name NAME",
+      );
+      // ONE warning, not two: the default did move (Watchlist -> none), but the
+      // line above already says so in the form that names the fix. A second
+      // re-point line here would be noise on the same event (#190).
+      expect(out).toHaveLength(2);
+    });
+
+    it("WARNS, naming both lanes, when the restore RE-POINTS the default (#190)", async () => {
+      // The backup's default wins — deliberately, so a restored state does not
+      // depend on what happened to be in the database. The cost is that a
+      // restore run to recover one deleted player also moves the schedule back
+      // to whichever lane was default when the backup was written. This line is
+      // what keeps that from being discovered by reading the wrong digest, so
+      // its TEXT is pinned, including the command that undoes it.
+      await createList(live.opened.db, "Prospects", CLOCK());
+      await setDefaultList(live.opened.db, "Prospects", CLOCK());
+
+      const file = join(backups.path, "v5.json");
+      writeFileSync(
+        file,
+        JSON.stringify({
+          ...makeBackupEnvelope([makeBackupEntry({ externalId: 700011 })], { version: 5 }),
+          lists: [makeBackupList({ name: "Watchlist", isDefault: true })],
+        }),
+      );
+
+      const code = await runPlayersRestore(["--in", file], {
+        db: live.opened.db,
+        now: CLOCK,
+        write,
+      });
+
+      expect(code).toBe(0);
+      expect(out[1]).toBe(
+        'warning: default list changed from "Prospects" to "Watchlist" — the backup\'s default won; run: sk players lists set-default --name "Prospects" to change it back',
+      );
+      // The re-point is the ONLY warning: a default exists, so the no-default
+      // line must not also fire.
+      expect(out).toHaveLength(2);
     });
 
     it("rejects an invalid payload with a non-zero exit", async () => {

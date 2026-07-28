@@ -1,9 +1,20 @@
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { OpenedDb } from "../src/db/client.js";
+import type { Db, OpenedDb } from "../src/db/client.js";
 import { openDb } from "../src/db/client.js";
-import { digestDeliveries, statLines } from "../src/db/schema.js";
-import { LEASE_MS, claimDelivery } from "../src/jobs/delivery-claim.js";
+import { digestDeliveries, playerLists, statLines } from "../src/db/schema.js";
+import {
+  LEASE_MS,
+  claimDelivery,
+  deliveryKey,
+  findOrphanedDigestDate,
+} from "../src/jobs/delivery-claim.js";
+import {
+  NoDefaultListError,
+  createList,
+  resolveDefaultList,
+  setDefaultList,
+} from "../src/lists/service.js";
 import type { DigestDeps, DigestResult } from "../src/jobs/digest.js";
 import { runDigest } from "../src/jobs/digest.js";
 import {
@@ -24,6 +35,15 @@ import {
   testDb,
   testFileDb,
 } from "./factories.js";
+
+/**
+ * The lane a scheduled-path claim runs under (#190). Resolved through the
+ * PRODUCTION funnel rather than hardcoded to the id the migration happens to
+ * seed, so these assertions follow the app instead of a coincidence.
+ */
+async function laneId(db: Db): Promise<number> {
+  return (await resolveDefaultList(db)).id;
+}
 
 /**
  * The cell values of the table row starting with `startsWith`, whitespace
@@ -219,7 +239,9 @@ describe("runDigest", () => {
     // slot did not also re-send its own Jul 18 content.
     expect(lookup.sent).toHaveLength(1);
     expect(lookup.sent[0]?.subject).toBe("ScoreKeeps Baseball (Default) - Sun, July 19, 2026");
-    expect(lookup.lookups.map((l) => l.deliveryKey)).toContain("bryce:digest:2026-07-19");
+    expect(lookup.lookups.map((l) => l.deliveryKey)).toContain(
+      `bryce:digest:2026-07-19:list-${await laneId(opened.db)}`,
+    );
   });
 
   it("a 7d request is not refused because the day's 1d digest already went out", async () => {
@@ -272,7 +294,7 @@ describe("runDigest", () => {
 
     const keys = mailer.contexts.map((c) => c?.deliveryKey);
     expect(keys).toContain("bryce:report:7d:2026-07-18");
-    expect(keys).toContain("bryce:digest:2026-07-19");
+    expect(keys).toContain(`bryce:digest:2026-07-19:list-${await laneId(opened.db)}`);
     expect(new Set(keys).size).toBe(2); // distinct namespaces, no collision
   });
 
@@ -1256,7 +1278,9 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
     const rows = await deliveries();
     expect(rows[0]?.providerMessageId).toBe("postmark-abc-123");
     // The slot key handed to the provider is stable per (kind, date).
-    expect(mailer.contexts[0]).toEqual({ deliveryKey: "bryce:digest:2026-07-19" });
+    expect(mailer.contexts[0]).toEqual({
+      deliveryKey: `bryce:digest:2026-07-19:list-${await laneId(opened.db)}`,
+    });
   });
 
   it("releases the slot on provider rejection so the retry re-claims it", async () => {
@@ -1355,7 +1379,10 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     // Asked about the right slot, bounded by the CRASHED attempt's claim time
     // (17:00) — not the recovery's own claim, which overwrote it.
     expect(mailer.lookups).toEqual([
-      { deliveryKey: "bryce:digest:2026-07-19", since: "2026-07-19T17:00:00.000Z" },
+      {
+        deliveryKey: `bryce:digest:2026-07-19:list-${await laneId(opened.db)}`,
+        since: "2026-07-19T17:00:00.000Z",
+      },
     ]);
 
     const rows = await deliveries();
@@ -1524,7 +1551,10 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     });
     expect(mailer.sent).toHaveLength(1); // no second heartbeat
     expect(mailer.lookups).toEqual([
-      { deliveryKey: "bryce:heartbeat:2026-12-05", since: "2026-12-05T18:00:00.000Z" },
+      {
+        deliveryKey: `bryce:heartbeat:2026-12-05:list-${await laneId(opened.db)}`,
+        since: "2026-12-05T18:00:00.000Z",
+      },
     ]);
     expect((await deliveries())[0]).toMatchObject({
       kind: "heartbeat",
@@ -1574,6 +1604,7 @@ describe("claimDelivery lease boundary (ADR 0034)", () => {
     return claimDelivery(opened.db, {
       kind: "digest",
       dateCovered: "2026-07-19",
+      listId: await laneId(opened.db),
       now: new Date(Date.parse(CLAIMED_AT) + ms),
       ...(leaseMs !== undefined ? { leaseMs } : {}),
     });
@@ -1613,6 +1644,7 @@ describe("claimDelivery lease boundary (ADR 0034)", () => {
       claimDelivery(opened.db, {
         kind: "digest",
         dateCovered: "2026-07-19",
+        listId: await laneId(opened.db),
         now: new Date(CLAIMED_AT),
       }),
     ).toMatchObject({ claimed: true, attempt: 5, recovered: true });
@@ -1679,6 +1711,7 @@ describe("forced delivery", () => {
     const claim = claimDelivery(opened.db, {
       kind: "digest",
       dateCovered: "2026-07-19",
+      listId: await laneId(opened.db),
       now: new Date(MID_SEASON),
       force: true,
     });
@@ -1713,6 +1746,7 @@ describe("forced delivery", () => {
       claimDelivery(opened.db, {
         kind: "digest",
         dateCovered: "2026-07-19",
+        listId: await laneId(opened.db),
         now: new Date(MID_SEASON),
         force: true,
       }),
@@ -1739,6 +1773,7 @@ describe("forced delivery", () => {
       claimDelivery(opened.db, {
         kind: "digest",
         dateCovered: "2026-07-19",
+        listId: await laneId(opened.db),
         now: new Date(MID_SEASON),
         force: true,
       }),
@@ -1751,6 +1786,7 @@ describe("forced delivery", () => {
       claimDelivery(opened.db, {
         kind: "digest",
         dateCovered: "2026-07-19",
+        listId: await laneId(opened.db),
         now: new Date(MID_SEASON),
         force: true,
       }),
@@ -1775,6 +1811,7 @@ describe("forced delivery", () => {
       claimDelivery(opened.db, {
         kind: "digest",
         dateCovered: "2026-07-19",
+        listId: await laneId(opened.db),
         now: new Date(MID_SEASON),
         force: true,
       }),
@@ -2043,6 +2080,7 @@ describe("forced delivery", () => {
       claimDelivery(opened.db, {
         kind: "heartbeat",
         dateCovered: "2026-12-05",
+        listId: await laneId(opened.db),
         now: new Date(OFFSEASON),
         force: true,
         precondition: () => "heartbeat-sent-within-week",
@@ -2144,5 +2182,193 @@ describe("digest respects host-timezone dates", () => {
     const deliveries = await opened.db.select().from(digestDeliveries);
     expect(deliveries[0]?.dateCovered).toBe("2026-07-19");
     opened.close();
+  });
+});
+
+/**
+ * The delivery slot gains a LANE (#190). This is the phase's real risk: the
+ * scheduled digest and the heartbeat are the two writers, and `list_id` is NOT
+ * NULL, so a missed one breaks the daily digest on the first run after the
+ * migration. Both are driven END TO END here — through runDigest, asserting the
+ * PERSISTED row — rather than by calling claimDelivery directly, because what
+ * has to hold is that the real path supplies a lane, not that the function
+ * accepts one.
+ */
+describe("lane-scoped delivery slot (#190)", () => {
+  let opened: OpenedDb;
+  let mailer: CapturingMailer;
+  let clock: ReturnType<typeof fakeClock>;
+
+  const deps = (overrides: Partial<DigestDeps> = {}): DigestDeps => ({
+    db: opened.db,
+    mailer,
+    now: clock.now,
+    tz: TEST_TZ,
+    to: "hc@example.com",
+    from: "bryce@example.com",
+    spec: "1d",
+    ...overrides,
+  });
+
+  const deliveries = () => opened.db.select().from(digestDeliveries);
+
+  beforeEach(async () => {
+    opened = testDb();
+    mailer = new CapturingMailer();
+    clock = fakeClock(MID_SEASON);
+    await insertCalendars2026(opened.db);
+  });
+
+  afterEach(() => {
+    opened.close();
+  });
+
+  it("persists the DEFAULT lane's id on a scheduled digest", async () => {
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+
+    const result = await runDigest(deps());
+    expect(result).toMatchObject({ kind: "digest", action: "sent" });
+
+    const rows = await deliveries();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.listId).toBe(await laneId(opened.db));
+  });
+
+  it("persists the DEFAULT lane's id on an offseason heartbeat", async () => {
+    clock.set(OFFSEASON); // 2026-12-05 Chicago: after the World Series
+    // Offseason Sleep is judged against the WATCHED players' calendars, so the
+    // heartbeat path needs one.
+    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+    const result = await runDigest(deps());
+    expect(result).toMatchObject({ kind: "heartbeat", action: "sent" });
+
+    const rows = await deliveries();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: "heartbeat", listId: await laneId(opened.db) });
+  });
+
+  it("REFUSES to run the scheduled path with no default lane, rather than mailing an unknown cohort", async () => {
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+    await opened.db.update(playerLists).set({ isDefault: false });
+
+    await expect(runDigest(deps())).rejects.toBeInstanceOf(NoDefaultListError);
+    // Nothing was mailed and no slot was taken: the refusal precedes both.
+    expect(mailer.sent).toHaveLength(0);
+    expect(await deliveries()).toHaveLength(0);
+  });
+
+  it("still runs an ON-DEMAND report with no default lane (it takes no slot)", async () => {
+    const player = await insertPlayer(opened.db);
+    await insertStatLine(opened.db, { playerId: player.id });
+    await opened.db.update(playerLists).set({ isDefault: false });
+
+    // An explicitly windowed request never touches the daily slot, so it has no
+    // lane to resolve — the boundary #193 will move.
+    const result = await runDigest(deps({ spec: "7d" }));
+    expect(result).toMatchObject({ action: "sent" });
+    expect(await deliveries()).toHaveLength(0);
+  });
+
+  describe("slot independence", () => {
+    it("lets two lanes claim the same (kind, date) and refuses the same triple twice", async () => {
+      const other = await createList(opened.db, "Other Lane", clock.now());
+      const args = { kind: "digest" as const, dateCovered: "2026-07-19", now: clock.now() };
+
+      const first = claimDelivery(opened.db, { ...args, listId: await laneId(opened.db) });
+      const second = claimDelivery(opened.db, { ...args, listId: other.id });
+      expect(first).toMatchObject({ claimed: true, replay: false });
+      expect(second).toMatchObject({ claimed: true, replay: false });
+      expect(await deliveries()).toHaveLength(2);
+
+      // ...but the SAME triple is still exactly-once: the live lease refuses it,
+      // which is ADR 0034's mutual exclusion, undiminished by the extra column.
+      expect(claimDelivery(opened.db, { ...args, listId: other.id })).toEqual({
+        claimed: false,
+        reason: "claimed-by-another-run",
+      });
+      expect(await deliveries()).toHaveLength(2);
+    });
+
+    it("does not let one lane's SENT row refuse another lane's claim", async () => {
+      const other = await createList(opened.db, "Other Lane", clock.now());
+      await insertDelivery(opened.db, {
+        kind: "digest",
+        dateCovered: "2026-07-19",
+        listId: await laneId(opened.db),
+        status: "sent",
+      });
+
+      expect(
+        claimDelivery(opened.db, {
+          kind: "digest",
+          dateCovered: "2026-07-19",
+          listId: other.id,
+          now: clock.now(),
+        }),
+      ).toMatchObject({ claimed: true, replay: false, attempt: 1 });
+    });
+
+    it("scopes orphan recovery to its own lane", async () => {
+      // Another lane's failed slot must not be recovered by this lane: recovery
+      // re-claims the date it finds, so a cross-lane answer would have the
+      // default lane re-send a cohort's digest under its own slot.
+      const other = await createList(opened.db, "Other Lane", clock.now());
+      await insertDelivery(opened.db, {
+        kind: "digest",
+        dateCovered: "2026-07-18",
+        listId: other.id,
+        status: "failed",
+      });
+
+      expect(findOrphanedDigestDate(opened.db, await laneId(opened.db), "2026-07-19", clock.now().getTime())).toBeNull();
+      expect(findOrphanedDigestDate(opened.db, other.id, "2026-07-19", clock.now().getTime())).toBe(
+        "2026-07-18",
+      );
+    });
+  });
+
+  describe("deliveryKey lane namespace", () => {
+    it("namespaces EVERY lane, so two lanes never share an idempotency key", () => {
+      // Without this, lane B's stale-claim recovery would find lane A's
+      // delivered message, conclude its own digest had already landed, and
+      // silently skip it — and a suppressed send looks exactly like a
+      // successful one.
+      expect(deliveryKey("digest", "2026-07-19", 7)).toBe("bryce:digest:2026-07-19:list-7");
+      expect(deliveryKey("digest", "2026-07-19", 7)).not.toBe(
+        deliveryKey("digest", "2026-07-19", 8),
+      );
+      expect(deliveryKey("heartbeat", "2026-12-05", 7)).toBe("bryce:heartbeat:2026-12-05:list-7");
+    });
+
+    it("keys on the IMMUTABLE list id, never on which lane is currently default", async () => {
+      // The Reviewer's P1 on #190, as a test. An earlier draft let whichever
+      // lane held `is_default` keep the unsuffixed pre-lane key, for
+      // compatibility with messages already in the provider's history. But
+      // `set-default` MOVES that flag: lane A sends a date under the unsuffixed
+      // key, the HC re-points the default at lane B, and B inherits A's key —
+      // B's recovery then finds A's accepted message and settles B as delivered
+      // without ever sending it. Keying on the id makes that unconstructable.
+      const a = await laneId(opened.db);
+      const b = (await createList(opened.db, "Prospects", clock.now())).id;
+      const beforeMove = deliveryKey("digest", "2026-07-19", a);
+
+      await setDefaultList(opened.db, "Prospects", clock.now());
+
+      // A's key is unchanged by losing the flag, and B's is still its own.
+      expect(await laneId(opened.db)).toBe(b); // the flag really did move
+      expect(deliveryKey("digest", "2026-07-19", a)).toBe(beforeMove);
+      expect(deliveryKey("digest", "2026-07-19", b)).not.toBe(beforeMove);
+    });
+
+    it("hands the provider the lane-suffixed key on a real scheduled send", async () => {
+      const player = await insertPlayer(opened.db);
+      await insertStatLine(opened.db, { playerId: player.id });
+      await runDigest(deps());
+      expect(mailer.contexts[0]).toEqual({
+        deliveryKey: `bryce:digest:2026-07-19:list-${await laneId(opened.db)}`,
+      });
+    });
   });
 });

@@ -81,8 +81,11 @@ describe("lists CLI", () => {
     await addToList(opened.db, "Alpha", [p.externalId!], clock.now());
     const code = await runLists(["show"], deps());
     expect(code).toBe(0);
-    expect(out[0]).toBe(`list id=${list.id} name=Alpha members=1`);
-    expect(out.at(-1)).toBe("total=1");
+    // Ordered by name, and each line now states whether the list is THE default
+    // lane (#190) — the migration-seeded `Watchlist` is, `Alpha` is not.
+    expect(out[0]).toBe(`list id=${list.id} name=Alpha members=1 default=false`);
+    expect(out[1]).toMatch(/^list id=\d+ name=Watchlist members=0 default=true$/);
+    expect(out.at(-1)).toBe("total=2");
   });
 
   it("rename: renames a live list", async () => {
@@ -126,15 +129,66 @@ describe("lists CLI", () => {
     const code = await runLists(["create", "--name", "a\nb"], deps());
     expect(code).toBe(1);
     expect(err[0]).toMatch(/^error=/);
-    // Validation fails closed at the service, before any insert — no list exists.
+    // Validation fails closed at the service, before any insert — nothing was
+    // created, so only the migration-seeded default lane is listed (#190).
     const listCode = await runLists(["show"], deps());
     expect(listCode).toBe(0);
-    expect(out).toEqual(["total=0"]);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toMatch(/^list id=\d+ name=Watchlist members=0 default=true$/);
+    expect(out[1]).toBe("total=1");
   });
 
   it("sad path: an unknown subcommand exits 1 with usage", async () => {
     const code = await runLists(["frobnicate"], deps());
     expect(code).toBe(1);
     expect(err[0]).toContain("error=usage:");
+    // The new verb is discoverable from the usage line, not only from the docs.
+    expect(err[0]).toContain("set-default");
+  });
+
+  describe("set-default (#190)", () => {
+    it("points the default at a list and clears the previous one", async () => {
+      const list = await createList(opened.db, "Prospects", clock.now());
+      const code = await runLists(["set-default", "--name", "Prospects"], deps());
+      expect(code).toBe(0);
+      expect(out[0]).toBe(`list default id=${list.id} name=Prospects`);
+
+      // Asserted through `show`, so the observable CLI state is what changed —
+      // exactly one list marked default.
+      out.length = 0;
+      await runLists(["show"], deps());
+      expect(out.filter((l) => l.includes("default=true"))).toEqual([
+        `list id=${list.id} name=Prospects members=0 default=true`,
+      ]);
+    });
+
+    it("sad path: an unknown list writes error= and exits 1, moving nothing", async () => {
+      const code = await runLists(["set-default", "--name", "ghost"], deps());
+      expect(code).toBe(1);
+      expect(err[0]).toBe('error=no list named "ghost"');
+      expect(out).toEqual([]);
+
+      await runLists(["show"], deps());
+      expect(out.filter((l) => l.includes("default=true"))).toHaveLength(1);
+      expect(out[0]).toContain("name=Watchlist");
+    });
+
+    it("sad path: a missing --name writes error= and exits 1", async () => {
+      const code = await runLists(["set-default"], deps());
+      expect(code).toBe(1);
+      expect(err[0]).toContain("--name is required");
+    });
+  });
+
+  it("sad path: deleting the DEFAULT list writes error= and exits 1, leaving it live", async () => {
+    const code = await runLists(["delete", "--name", "Watchlist"], deps());
+    expect(code).toBe(1);
+    expect(err[0]).toContain("is the default list");
+    // The error names the recovery command, so the operator is not left guessing.
+    expect(err[0]).toContain("sk players lists set-default --name NAME");
+    expect(out).toEqual([]);
+
+    await runLists(["show"], deps());
+    expect(out[0]).toMatch(/^list id=\d+ name=Watchlist members=0 default=true$/);
   });
 });

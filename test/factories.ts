@@ -23,6 +23,7 @@ import {
   seasonCalendar,
   statLines,
 } from "../src/db/schema.js";
+import { resolveDefaultList } from "../src/lists/service.js";
 import type { FetchLike } from "../src/mlb/client.js";
 import { MlbClient } from "../src/mlb/client.js";
 import type {
@@ -215,11 +216,16 @@ export async function insertDelivery(
   overrides: Partial<typeof digestDeliveries.$inferInsert> = {},
 ): Promise<DigestDeliveryRow> {
   const status = overrides.status ?? "sent";
+  // A delivery belongs to a LANE (#190), and `list_id` is NOT NULL. Default to
+  // the lane the migration seeded, resolved through the PRODUCTION funnel rather
+  // than a hardcoded id, so the harness cannot drift from what the app resolves.
+  const listId = overrides.listId ?? (await resolveDefaultList(db)).id;
   const rows = await db
     .insert(digestDeliveries)
     .values({
       kind: "digest",
       dateCovered: "2026-07-18",
+      listId,
       sentAt: status === "sent" ? "2026-07-18T17:00:00.000Z" : null,
       playerCount: 1,
       statLineCount: 1,

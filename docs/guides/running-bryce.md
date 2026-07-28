@@ -214,6 +214,12 @@ Restore uses exactly one current natural identity: MLB `external_id`, legacy NCA
 **Stat Line** history. Promotion is an explicit live operation: it retains the local row ID while
 retiring NCAA-native identity/state before assigning `external_id`. It never re-pulls from sources.
 
+A backup also carries each list's **lane** configuration (v5, #190), and **the backup's default lane
+wins** on restore — so a restore run to recover a Player can also move which lane is the default. It
+says so when it does, naming both lanes and the `players lists set-default` command that changes it
+back; a pre-v5 payload carries no lane configuration and leaves **no** default, which is reported the
+same way. See [ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md).
+
 ### Restore runbook
 
 Restore is the **destructive** recovery op. It refuses (`error: database is in use by pid …`) while
@@ -399,7 +405,7 @@ API_TOKEN=... MCP_URL=https://your-host.example.com/mcp sk connector smoke
 ```
 
 It drives the real MCP SDK client over Streamable HTTP: `initialize` → `tools/list` (asserts the
-exact twenty-two tools) → `status` → `digest_preview` (read-only — sends nothing, writes nothing), then
+exact twenty-five tools) → `status` → `digest_preview` (read-only — sends nothing, writes nothing), then
 confirms a **no-bearer** request still returns `401 {"error":"unauthorized"}`. It reads config from
 the environment only, refuses a non-`https` URL for any non-loopback host, never follows a redirect
 on an authenticated request, and **never prints a secret** (the token and any `CF_ACCESS_*` values
@@ -568,7 +574,7 @@ tunnel is the second, independent layer per
 The full, canonical per-audience references live under `docs/` — this runbook does not restate them,
 so they never drift:
 
-- **[MCP Reference](../mcp/README.md)** — all twenty-two tools, their inputs and result shapes, and how
+- **[MCP Reference](../mcp/README.md)** — all twenty-five tools, their inputs and result shapes, and how
   to connect a Claude client. **Claude Code** connects today with a static bearer header; the hosted
   **claude.ai / Claude mobile** custom-connector flow is **pending verification**
   ([#37](https://github.com/wrburgess/bryce/issues/37)) — a static `Authorization: Bearer` header is

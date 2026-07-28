@@ -64,6 +64,47 @@ is one an author marked deliberately, rather than one a formatting accident prod
 
 ---
 
+### F002 — A durable external key was derived from a role flag the product lets you move
+
+- **Normalized failure class:** mutable-identity-in-a-durable-key — naming an entity in a key that
+  outlives the process by a **role** it currently holds (`is_default`, "primary", "current") rather than
+  by an identifier that cannot be reassigned.
+- **Severity and blast radius:** **Critical** as it occurred. `deliveryKey`, the provider-side
+  idempotency key stale-claim recovery looks up to decide whether to suppress a send, exempted the
+  default lane from its lane suffix. `set-default` moves that flag, so lane B could inherit lane A's
+  key, find A's accepted message, and settle itself as delivered **without ever sending**. Blast radius
+  is a scheduled digest silently not sent while the delivery row records success — loss that reports
+  itself as success. It was reachable through an operation the same phase shipped.
+- **Enforcement status:** **the specific defect is enforced structurally** — `DeliveryLane` is deleted
+  and `deliveryKey`/`reconciled` take a `listId: number`, so the flag-dependent form no longer
+  type-checks; `test/digest.test.ts` pins that a `set-default` leaves each lane's key untouched
+  (mutation-verified). **The general lesson is not mechanically checkable** — "is this identifier
+  reassignable?" is a question about product semantics, not a property of the code.
+- **Recurrence count:** 0 (first occurrence).
+- **Surfaced by:** [PR #195](https://github.com/wrburgess/bryce/pull/195) (issue
+  [#190](https://github.com/wrburgess/bryce/issues/190)), Stage-4 Reviewer, P1.
+- **Date recorded:** 2026-07-28
+- **Review date:** 2026-10-26
+
+**Why outcome 3 rather than 2.** The **minting freeze** is in force until the bounded corpus review
+dispositions the 45 loop-added bullets measured in
+[#185](https://github.com/wrburgess/bryce/issues/185), so outcome 2 is unavailable regardless of merit.
+It is also genuinely adjacent to existing guidance rather than absent from it: `rules/security.md`
+already says to pin a CI action to an immutable SHA rather than a mutable tag, and `rules/backend.md`
+already says to validate the closed bytes rather than a mutable source. Both are the same shape one
+domain over, which is an argument for recurrence deciding this rather than conviction in the moment.
+
+**What made it hard to see:** the exemption was **deliberate and well-argued** — it preserved
+compatibility with keys already in the provider's history, and its reasoning was written down. What the
+reasoning never asked was whether the property it keyed on could change. That is the question worth
+carrying forward, not "avoid exemptions."
+
+**If it recurs:** promote toward *enforce* first. The mechanically checkable form, if one exists, is a
+check that any value handed to an external system as a durable identifier is derived only from primary
+keys and immutable columns — not from any column the codebase also writes an `UPDATE` against.
+
+---
+
 ## Archived
 
 _None yet._

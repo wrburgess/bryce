@@ -24,6 +24,24 @@ The set of *active* Players — the digest's audience of one's chosen few. Deact
 removes him from the digest but keeps his history.
 _Avoid_: "roster" (a real baseball concept; using it here invites confusion)
 
+**Named List**:
+A curated set of Players over the Watch List, addressed by name. Distinct from a **Tag** (a queryable
+attribute) — a list is membership someone chose, not a property a Player has.
+_Avoid_: "group"/"collection" (say *list*); "roster" (see **Watch List**)
+
+**Lane**:
+A **Named List** that also carries its own schedule and recipients — a refresh interval, a digest
+hour, and a `digest_to`. Exactly one live list is the **Default Lane**: what a command means when it
+names no list. A Lane is a Named List with a cadence, never a second kind of object
+([ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md)).
+_Avoid_: "channel"/"feed"; calling every list a Lane (a list with no cadence is just a list)
+
+**Default Lane**:
+The one live list marked `is_default` — the audience of an unscoped Digest or Refresh. It cannot be
+deleted while it is the default, and a database with none *refuses* unscoped commands rather than
+falling back to every Player.
+_Avoid_: "the main list"; treating "no default" as "everyone"
+
 **Tag**:
 A user-queryable label on a Player as `namespace:value`. **Derived** tags (`level:`, `pos:`,
 `prospect`) are recomputed automatically from the Player's own data; **manual** tags
@@ -162,6 +180,12 @@ _Avoid_: overloading the delivery-ledger sense ("guarantee restored across the d
 - A **Player**'s Level, MiLB Level, and team are refreshed automatically from the source APIs
   during the nightly fetch — the digest regroups on its own when a Player moves.
 - A **Watch List** is just the active subset of Players; there is no separate list object.
+- A **Named List** holds many Players and a Player may sit in many lists; membership sits UNDER
+  `players.active`, so a deactivated Player never appears in a scope even while still listed.
+- Exactly one live **Named List** is the **Default Lane**, and every Digest delivery belongs to one
+  lane: the delivery slot is keyed `(kind, date_covered, list_id)`, so two lanes may report the same
+  date and one lane may not report it twice
+  ([ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md)).
 - A **Player** produces at most two **Stat Lines** per game — one batting, one pitching (a two-way
   player produces both).
 - One date can hold several **Stat Lines** for the same Player (doubleheaders): uniqueness is
