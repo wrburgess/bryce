@@ -589,6 +589,37 @@ so they never drift:
   behavior, and the full `onError` status map.
 - **[CLI Reference](../cli/README.md)** — the same operations from the command line.
 
+## Lanes: adding players and setting a lane's cadence
+
+A **Lane** is a named player list that also carries its own cadence and recipients
+([ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md)). Exactly one live list
+is the **default lane** — what a command that names no list means.
+
+```sh
+sk players add --name "Maximo Acosta"                       # onto the default lane
+sk players add --name "Maximo Acosta" --list Prospects      # onto a named lane
+sk players add --name "Roch Cholowsky" --ncaa -l Prospects  # NCAA, short --list alias
+sk players lists configure --name Prospects --digest-hour 5 --refresh-every 1440
+sk players lists configure --name Prospects --digest-hour none   # clear it
+```
+
+`sk players add` is the one-command form of `sk seed add` followed by `sk players lists add`. It
+resolves the lane **first** — before any upstream call and before any write — so a typo'd `--list`
+costs no API call and never leaves a player created but unattached. Omitting `--list` targets the
+default lane; with no default set it refuses with the same `no default list is set` line `sk digest`
+gives, naming `set-default` as the fix.
+
+`sk players lists configure` writes the three lane columns and **only the flags you pass** — setting a
+digest hour never clears the refresh interval. The reserved word `none` clears a column back to
+unset, and `--digest-hour 0` is a legitimate midnight digest, not a rejected zero. **These columns are
+still inert**: nothing reads them until [#192](https://github.com/wrburgess/bryce/issues/192) and
+[#193](https://github.com/wrburgess/bryce/issues/193), so configuring a lane today records intent and
+changes no scheduled behavior.
+
+Every command that scopes to a lane takes `--list NAME`, `--list=NAME`, **or the short `-l NAME`** —
+all three are the same flag, including on `sk digest`. Full syntax and every sad path are in the
+[CLI Reference](../cli/README.md).
+
 ## NCAA players
 
 NCAA players can be found through Highlightly by name:

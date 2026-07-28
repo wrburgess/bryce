@@ -623,6 +623,13 @@ async function reconciled(
  * rows count: a `sending` (in-flight or crashed) or `failed` heartbeat must
  * never suppress the next one, or a stuck row would silence the heartbeat
  * indefinitely — exactly the silent loss this design refuses.
+ *
+ * DELIBERATELY LANE-BLIND, and this query is not missing a `list_id` filter.
+ * A heartbeat proves the HOST is alive, not that any one lane is configured, so
+ * lane-scoping it would multiply offseason mail by the lane count for no added
+ * signal. The `digest_deliveries` row a heartbeat writes carries the default
+ * lane's id only because `list_id` is `NOT NULL` — a storage detail, not a claim
+ * the heartbeat belongs to a lane. See ADR 0059 → *Amendment (#191)*.
  */
 function heartbeatWithinWeek(tx: Tx, nowMs: number): ClaimRefusal | null {
   const last = tx

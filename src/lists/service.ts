@@ -72,6 +72,26 @@ export class CannotDeleteDefaultListError extends Error {
   }
 }
 
+/**
+ * A lane-configuration value is out of range (#191). Thrown by the SERVICE, not
+ * only rejected by the router: `configureList` is reachable from a test, a
+ * future REST/MCP surface, and any caller that never sees a CLI option table, so
+ * "the router validated it" is an assumption, not a guarantee. Carries the
+ * offending field and the reason so every surface can render it the same way
+ * (rules/backend.md — thread a new error type through every surface's seam).
+ */
+export class InvalidListConfigError extends Error {
+  readonly field: string;
+  readonly reason: string;
+
+  constructor(field: string, reason: string) {
+    super(`invalid ${field}: expected ${reason}`);
+    this.name = "InvalidListConfigError";
+    this.field = field;
+    this.reason = reason;
+  }
+}
+
 /** A blank/whitespace-only or control-char-bearing list name reached the service (boundary schemas also reject it). */
 export class BlankListNameError extends Error {
   constructor() {
@@ -87,6 +107,16 @@ export interface ListSummary {
   memberCount: number;
   /** Whether this is THE default lane — what an unscoped command means (#190). */
   isDefault: boolean;
+  /**
+   * The lane's cadence, carried so a caller can READ BACK what `configure`
+   * wrote (#191). Without these, `players lists configure` would be a
+   * write-only surface: settable, and then unreadable except by writing again.
+   * Null means "never auto-refreshes" / "never auto-digests" / "fall back to
+   * the DIGEST_TO env value" — inert until #192/#193 act on them.
+   */
+  refreshIntervalMinutes: number | null;
+  digestHour: number | null;
+  digestTo: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -189,6 +219,118 @@ export async function setDefaultList(db: Db, name: string, now: Date): Promise<P
         .returning()
         .all()[0];
       if (row === undefined) throw new Error("setDefaultList update failed");
+      return row;
+    },
+    { behavior: "immediate" },
+  );
+}
+
+/**
+ * A partial update of a lane's cadence and recipients (#191). The three-state
+ * contract is the whole point:
+ *
+ *   - key ABSENT (`undefined`) → leave that column exactly as it is;
+ *   - key present as `null`    → clear it to SQL NULL;
+ *   - key present as a value   → set it.
+ *
+ * Without the absent/null split, configuring ONE column would silently clear
+ * the other two — a lane that had a digest hour would lose it the first time
+ * someone set its refresh interval, and nothing about the command would say so.
+ */
+export interface ListConfigPatch {
+  refreshIntervalMinutes?: number | null;
+  digestHour?: number | null;
+  digestTo?: string | null;
+}
+
+/**
+ * What is wrong with a lane's `digest_to`, or null when nothing is (#191).
+ *
+ * THE definition of a valid recipient, exported so every write path shares it
+ * rather than restating it. `configureList` is not the only door: a v5 Player
+ * List Backup carries `digestTo` and `restorePlayerListBackup` writes it
+ * straight to the row, never passing through here — so a rule enforced only in
+ * `configureList` is a rule a supported restore walks around (Reviewer P2,
+ * delta 2). That is the "author it once, export it, let a new call site inherit
+ * it" rule in `rules/scripting.md`, and the reason this is a function and not
+ * two `if`s in two files.
+ *
+ * `-` is rejected because it is how a NULL column RENDERS on every surface that
+ * prints a lane: stored as a recipient it would make a configured lane read
+ * exactly like a cleared one, to an operator and to a script parsing the line.
+ * Clear the column with `null`, never with the sentinel.
+ */
+export function digestRecipientProblem(value: string): string | null {
+  if (value.trim().length === 0 || /\p{Cc}/u.test(value)) {
+    return "a non-blank value without control characters";
+  }
+  if (value.trim() === "-") {
+    return "a recipient other than '-', which is reserved as the display sentinel";
+  }
+  return null;
+}
+
+/** Reject a cadence value the DB CHECKs would reject, with the field named. */
+function validatePatch(patch: ListConfigPatch): void {
+  const { refreshIntervalMinutes: interval, digestHour: hour, digestTo: to } = patch;
+  if (interval !== undefined && interval !== null && (!Number.isSafeInteger(interval) || interval <= 0)) {
+    throw new InvalidListConfigError("refreshIntervalMinutes", "a positive whole number of minutes");
+  }
+  // 0 is VALID here — a midnight digest — which is why this is not the
+  // positive-integer rule reused. `player_lists_digest_hour_range_ck` allows
+  // 0..23, and a validator that rejected 0 would refuse a lane the database
+  // accepts.
+  if (hour !== undefined && hour !== null && (!Number.isSafeInteger(hour) || hour < 0 || hour > 23)) {
+    throw new InvalidListConfigError("digestHour", "an hour from 0 to 23");
+  }
+  if (to !== undefined && to !== null) {
+    const problem = digestRecipientProblem(to);
+    if (problem !== null) throw new InvalidListConfigError("digestTo", problem);
+  }
+}
+
+/**
+ * Set a live lane's cadence and recipients, writing ONLY the supplied keys.
+ * Unknown or soft-deleted live name → UnknownListError; an out-of-range value →
+ * InvalidListConfigError. An empty patch is refused rather than silently
+ * bumping `updated_at`, so a no-op invocation is loud at BOTH layers (the CLI's
+ * `oneOf` and here).
+ *
+ * One `BEGIN IMMEDIATE` transaction that re-reads the lane under the write lock,
+ * for the same reason `deleteList` does: resolving the name and then updating on
+ * that answer is a check-then-act split a concurrent delete lands in.
+ */
+export async function configureList(
+  db: Db,
+  name: string,
+  patch: ListConfigPatch,
+  now: Date,
+): Promise<PlayerListRow> {
+  const trimmed = requireName(name);
+  validatePatch(patch);
+  const changes: Partial<typeof playerLists.$inferInsert> = {};
+  if (patch.refreshIntervalMinutes !== undefined) changes.refreshIntervalMinutes = patch.refreshIntervalMinutes;
+  if (patch.digestHour !== undefined) changes.digestHour = patch.digestHour;
+  if (patch.digestTo !== undefined) changes.digestTo = patch.digestTo === null ? null : patch.digestTo.trim();
+  if (Object.keys(changes).length === 0) {
+    throw new InvalidListConfigError("patch", "at least one of refreshIntervalMinutes, digestHour, digestTo");
+  }
+  const nowIso = now.toISOString();
+  return db.transaction(
+    (tx): PlayerListRow => {
+      const target = tx
+        .select()
+        .from(playerLists)
+        .where(and(eq(playerLists.name, trimmed), isNull(playerLists.deletedAt)))
+        .all()[0];
+      if (target === undefined) throw new UnknownListError(trimmed);
+      const row = tx
+        .update(playerLists)
+        .set({ ...changes, updatedAt: nowIso })
+        .where(eq(playerLists.id, target.id))
+        .returning()
+        .all()[0];
+      if (row === undefined) throw new Error("configureList update failed");
       return row;
     },
     { behavior: "immediate" },
@@ -305,6 +447,9 @@ export async function listLists(db: Db): Promise<ListSummary[]> {
       id: playerLists.id,
       name: playerLists.name,
       isDefault: playerLists.isDefault,
+      refreshIntervalMinutes: playerLists.refreshIntervalMinutes,
+      digestHour: playerLists.digestHour,
+      digestTo: playerLists.digestTo,
       createdAt: playerLists.createdAt,
       updatedAt: playerLists.updatedAt,
       memberCount: sql<number>`count(${players.id})`,
@@ -321,6 +466,9 @@ export async function listLists(db: Db): Promise<ListSummary[]> {
     name: r.name,
     memberCount: Number(r.memberCount),
     isDefault: r.isDefault,
+    refreshIntervalMinutes: r.refreshIntervalMinutes,
+    digestHour: r.digestHour,
+    digestTo: r.digestTo,
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   }));
@@ -411,17 +559,32 @@ export async function addToList(
   // Resolve EVERY ref before writing anything, so a bad ref aborts the whole add.
   const rows = await resolvePlayers(db, refs);
   if (rows.length === 0) return { list, players: rows, changed: 0 };
+  const changed = insertMemberships(db, list.id, rows.map((player) => player.id), now.toISOString());
+  return { list, players: rows, changed };
+}
 
-  // One bulk insert, never a write per member (rules/backend.md: no N+1). A
-  // re-add of an existing member conflicts on the unique key and is skipped, so
-  // `changed` counts only rows actually newly inserted (idempotent re-add = 0).
-  const nowIso = now.toISOString();
-  const inserted = await db
+/** The top-level `Db`, or the transaction handle drizzle hands a callback. Both share the sync query API. */
+type MembershipWriter = Db | Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/**
+ * THE idempotent membership insert, authored once and shared by all three
+ * writers (`addToList`, `addPlayerIdsToList`, `addPlayerIdsToLiveList`). One
+ * bulk insert, never a write per member (rules/backend.md: no N+1); an existing
+ * member conflicts on the unique key and is skipped, so the return counts only
+ * rows actually newly written — an idempotent re-add is 0.
+ *
+ * Copying these four lines per call site is how the `onConflictDoNothing`
+ * target quietly stops matching the unique index at one of them and a re-add
+ * starts throwing (rules/scripting.md).
+ */
+function insertMemberships(writer: MembershipWriter, listId: number, playerIds: number[], nowIso: string): number {
+  return writer
     .insert(listMembers)
-    .values(rows.map((player) => ({ listId: list.id, playerId: player.id, createdAt: nowIso })))
+    .values(playerIds.map((playerId) => ({ listId, playerId, createdAt: nowIso })))
     .onConflictDoNothing({ target: [listMembers.listId, listMembers.playerId] })
-    .returning();
-  return { list, players: rows, changed: inserted.length };
+    .returning()
+    .all()
+    .length;
 }
 
 /**
@@ -469,16 +632,44 @@ export async function addPlayerIdsToList(
   now: Date,
 ): Promise<number> {
   if (playerIds.length === 0) return 0;
+  return insertMemberships(db, listId, playerIds, now.toISOString());
+}
+
+/**
+ * `addPlayerIdsToList` plus a liveness RE-CHECK under the write lock (#191).
+ *
+ * `sk players add` resolves the lane, then makes a network call and creates the
+ * player, and only then attaches — so an arbitrary amount of time passes between
+ * "this lane exists" and "write membership onto it". A `lists delete` landing in
+ * that gap would otherwise leave a membership row pointing at a soft-deleted
+ * lane: invisible to every scope query, and impossible to notice from the
+ * command's own success line. Re-reading the row inside the same
+ * `BEGIN IMMEDIATE` transaction as the insert makes the DATABASE refuse, the way
+ * `deleteList` makes it refuse the default (ADR 0059 decision 4).
+ *
+ * Takes the resolved row rather than an id so the refusal can NAME the lane the
+ * operator asked for instead of quoting a bare integer at him.
+ */
+export async function addPlayerIdsToLiveList(
+  db: Db,
+  list: PlayerListRow,
+  playerIds: number[],
+  now: Date,
+): Promise<number> {
+  if (playerIds.length === 0) return 0;
   const nowIso = now.toISOString();
-  // One bulk insert, never a write per id (rules/backend.md: no N+1). Existing
-  // members conflict on the unique key and are skipped, so `changed` counts only
-  // rows actually newly inserted (a re-add is idempotent).
-  const inserted = await db
-    .insert(listMembers)
-    .values(playerIds.map((playerId) => ({ listId, playerId, createdAt: nowIso })))
-    .onConflictDoNothing({ target: [listMembers.listId, listMembers.playerId] })
-    .returning();
-  return inserted.length;
+  return db.transaction(
+    (tx): number => {
+      const live = tx
+        .select()
+        .from(playerLists)
+        .where(and(eq(playerLists.id, list.id), isNull(playerLists.deletedAt)))
+        .all()[0];
+      if (live === undefined) throw new UnknownListError(list.name);
+      return insertMemberships(tx, list.id, playerIds, nowIso);
+    },
+    { behavior: "immediate" },
+  );
 }
 
 /** A better-sqlite3 UNIQUE-constraint failure, however drizzle surfaces it. */

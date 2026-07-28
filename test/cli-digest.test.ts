@@ -4,7 +4,7 @@ import type { DigestCliDeps } from "../src/cli/digest.js";
 import { parseForce, parseList, parseTags, parseWindow, runDigestCli } from "../src/cli/digest.js";
 import { playerLists } from "../src/db/schema.js";
 import { addToList, createList } from "../src/lists/service.js";
-import { preflightDirect } from "../src/cli/router.js";
+import { normalizeDirect, preflightDirect } from "../src/cli/router.js";
 import {
   CapturingMailer,
   MID_SEASON,
@@ -26,9 +26,24 @@ import {
  * content, and no mail at all for a window that fails closed.
  */
 describe("digest CLI", () => {
+  /**
+   * Every parser below is fed the argv the ROUTER would hand the presenter, not
+   * a hand-written one (#191). `-w`, `-l`, and the `=` forms are rewritten by
+   * `normalizeOptions` before any parser runs, which is why the hand-rolled
+   * alias branches could be deleted rather than left as a second, drifting
+   * implementation of the same grammar. Driving the tests through the real
+   * normalization is what makes that deletion safe: if normalization stopped
+   * rewriting `-w`, these cases go red instead of the parsers quietly
+   * defaulting.
+   */
+  const routed = (argv: string[]): string[] => normalizeDirect(["digest"], argv);
+
   describe("parseForce", () => {
-    it("is true only when the flag is present", () => {
+    it("is true only when the flag is present, in either spelling", () => {
       expect(parseForce(["--force"])).toBe(true);
+      expect(parseForce(routed(["-f"]))).toBe(true);
+      // A boolean has no value to mis-attach, so this parser keeps recognizing
+      // the raw alias too — deliberately, unlike the VALUE parsers below.
       expect(parseForce(["-f"])).toBe(true);
       expect(parseForce([])).toBe(false);
     });
@@ -46,78 +61,91 @@ describe("digest CLI", () => {
   describe("parseWindow", () => {
     it("defaults to 1d when the flag is absent", () => {
       expect(parseWindow([])).toBe("1d");
-      expect(parseWindow(["--force"])).toBe("1d");
+      expect(parseWindow(routed(["--force"]))).toBe("1d");
     });
 
-    it("accepts --window <spec> and --window=<spec>", () => {
-      expect(parseWindow(["--window", "7d"])).toBe("7d");
-      expect(parseWindow(["--window=ytd"])).toBe("ytd");
-      expect(parseWindow(["--force", "--window", "21d"])).toBe("21d");
+    it("accepts every routed spelling of --window: long, alias, and inline", () => {
+      // All three forms are ONE flag. Asserted through the router's own
+      // normalization, so this pins the whole path an operator actually uses
+      // rather than a parser branch that has since been deleted.
+      for (const argv of [["--window", "7d"], ["-w", "7d"], ["--window=7d"]]) {
+        expect(parseWindow(routed(argv)), argv.join(" ")).toBe("7d");
+      }
+      expect(parseWindow(routed(["--window=ytd"]))).toBe("ytd");
+      expect(parseWindow(routed(["--force", "--window", "21d"]))).toBe("21d");
+      expect(parseWindow(routed(["-f", "-w", "21d"]))).toBe("21d");
     });
 
     it("accepts the new long windows", () => {
-      expect(parseWindow(["--window", "28d"])).toBe("28d");
-      expect(parseWindow(["--window=35d"])).toBe("35d");
-      expect(parseWindow(["--window", "60d"])).toBe("60d");
+      expect(parseWindow(routed(["--window", "28d"]))).toBe("28d");
+      expect(parseWindow(routed(["--window=35d"]))).toBe("35d");
+      expect(parseWindow(routed(["--window", "60d"]))).toBe("60d");
     });
 
     it("accepts the per-player game-count windows (issue #153)", () => {
-      expect(parseWindow(["--window", "last10games"])).toBe("last10games");
-      expect(parseWindow(["--window=last30games"])).toBe("last30games");
-      expect(parseWindow(["-w", "LAST10GAMES"])).toBe("last10games");
+      expect(parseWindow(routed(["--window", "last10games"]))).toBe("last10games");
+      expect(parseWindow(routed(["--window=last30games"]))).toBe("last30games");
+      expect(parseWindow(routed(["-w", "LAST10GAMES"]))).toBe("last10games");
     });
 
     it("returns null for an unsupported window so the CLI fails closed", () => {
       // Null is distinct from the 1d default: "you asked for something I do not
       // support" must not silently become "here is the daily report".
-      expect(parseWindow(["--window", "30d"])).toBeNull();
-      expect(parseWindow(["--window"])).toBeNull();
-      expect(parseWindow(["--window="])).toBeNull();
-      expect(parseWindow(["--window", "--force"])).toBeNull();
+      expect(parseWindow(routed(["--window", "30d"]))).toBeNull();
+      expect(parseWindow(routed(["--window"]))).toBeNull();
+      expect(parseWindow(routed(["-w"]))).toBeNull();
+      expect(parseWindow(routed(["--window", "--force"]))).toBeNull();
     });
 
     it("normalizes case and surrounding whitespace", () => {
-      expect(parseWindow(["--window", "7D"])).toBe("7d");
-      expect(parseWindow(["--window", " ytd "])).toBe("ytd");
+      expect(parseWindow(routed(["--window", "7D"]))).toBe("7d");
+      expect(parseWindow(routed(["--window", " ytd "]))).toBe("ytd");
     });
   });
 
   describe("parseTags (#140)", () => {
     it("is undefined when the flag is absent", () => {
       expect(parseTags([])).toBeUndefined();
-      expect(parseTags(["--force"])).toBeUndefined();
-      expect(parseTags(["--list", "L"])).toBeUndefined();
+      expect(parseTags(routed(["--force"]))).toBeUndefined();
+      expect(parseTags(routed(["--list", "L"]))).toBeUndefined();
+      expect(parseTags(routed(["-l", "L"]))).toBeUndefined();
     });
 
     it("accepts --tags <selector> and --tags=<selector>, trimming", () => {
-      expect(parseTags(["--tags", "level:aaa"])).toBe("level:aaa");
-      expect(parseTags(["--tags=level:aaa,status:rostered"])).toBe("level:aaa,status:rostered");
-      expect(parseTags(["--tags", "  prospect  "])).toBe("prospect");
+      expect(parseTags(routed(["--tags", "level:aaa"]))).toBe("level:aaa");
+      expect(parseTags(routed(["--tags=level:aaa,status:rostered"]))).toBe("level:aaa,status:rostered");
+      expect(parseTags(routed(["--tags", "  prospect  "]))).toBe("prospect");
     });
 
     it("is null (fail closed) when the flag is present but its value is missing", () => {
-      expect(parseTags(["--tags"])).toBeNull();
-      expect(parseTags(["--tags="])).toBeNull();
-      expect(parseTags(["--tags", "--force"])).toBeNull();
+      expect(parseTags(routed(["--tags"]))).toBeNull();
+      expect(parseTags(routed(["--tags="]))).toBeNull();
+      expect(parseTags(routed(["--tags", "--force"]))).toBeNull();
     });
   });
 
   describe("parseList (#70)", () => {
     it("is undefined when absent (unscoped)", () => {
       expect(parseList([])).toBeUndefined();
-      expect(parseList(["--force"])).toBeUndefined();
+      expect(parseList(routed(["--force"]))).toBeUndefined();
+      expect(parseList(routed(["-f"]))).toBeUndefined();
     });
 
-    it("accepts --list <name> and --list=<name>, trimmed", () => {
-      expect(parseList(["--list", "Prospects"])).toBe("Prospects");
-      expect(parseList(["--list=Top 30"])).toBe("Top 30");
-      expect(parseList(["--list", "  Spaced  "])).toBe("Spaced");
+    it("reads --list NAME, --list=NAME, and -l NAME as the SAME flag (#191)", () => {
+      // The bug this alias could have shipped: `-l` reaching `parseList`
+      // unrewritten returns undefined, which means UNSCOPED — the whole Watch
+      // List mailed under a line that reads like a scoped send.
+      for (const argv of [["--list", "Prospects"], ["--list=Prospects"], ["-l", "Prospects"]]) {
+        expect(parseList(routed(argv)), argv.join(" ")).toBe("Prospects");
+      }
+      expect(parseList(routed(["--list=Top 30"]))).toBe("Top 30");
+      expect(parseList(routed(["-l", "  Spaced  "]))).toBe("Spaced");
     });
 
     it("is null when the flag is present but blank, so the CLI fails closed", () => {
-      expect(parseList(["--list"])).toBeNull();
-      expect(parseList(["--list="])).toBeNull();
-      expect(parseList(["--list", "--force"])).toBeNull();
+      expect(parseList(routed(["--list"]))).toBeNull();
+      expect(parseList(routed(["-l"]))).toBeNull();
+      expect(parseList(routed(["--list", "--force"]))).toBeNull();
     });
   });
 
@@ -261,6 +289,33 @@ describe("digest CLI", () => {
       expect(body).not.toContain("Acosta");
       expect(mailer.sent[0]?.subject).toBe("ScoreKeeps Baseball (L) - Sat, July 18, 2026");
       expect(mailer.sent[0]?.text).toContain("ScoreKeeps Baseball - L List - Sat, July 18, 2026");
+    });
+
+    it("-l, --list=, and --list NAME scope the SEND identically (#191)", async () => {
+      // The end-to-end anchor for the alias. Asserted on what was MAILED, not on
+      // a parse: an alias silently dropped on the way to `runDigest` produces a
+      // green parse test and a wrong-recipient email. Each spelling must cover
+      // exactly the listed player and exclude the unlisted one.
+      const listed = await insertPlayer(opened.db, { fullName: "Listed Guy" });
+      await insertStatLine(opened.db, { playerId: listed.id, gameDate: "2026-07-18" });
+      const clock = fakeClock(MID_SEASON);
+      await createList(opened.db, "L", clock.now());
+      await addToList(opened.db, "L", [listed.externalId!], clock.now());
+
+      const subjects: string[] = [];
+      for (const argv of [["--list", "L"], ["--list=L"], ["-l", "L"]]) {
+        mailer = new CapturingMailer();
+        output = [];
+        expect(await runDigestCli(argv, deps()), argv.join(" ")).toBe(0);
+        expect(output[0], argv.join(" ")).toContain("players=1");
+        const body = `${mailer.sent[0]?.html}\n${mailer.sent[0]?.text}`;
+        expect(body, argv.join(" ")).toContain("Guy");
+        expect(body, argv.join(" ")).not.toContain("Acosta"); // the UNLISTED player
+        subjects.push(mailer.sent[0]?.subject ?? "");
+      }
+      // One scope, three spellings: byte-identical subjects prove it.
+      expect(new Set(subjects).size).toBe(1);
+      expect(subjects[0]).toBe("ScoreKeeps Baseball (L) - Sat, July 18, 2026");
     });
 
     it("--list fails closed on an unknown list: exits 1 and sends nothing (#70)", async () => {

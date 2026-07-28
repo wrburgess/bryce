@@ -9,7 +9,7 @@ import { startupDb } from "../db/startup.js";
 import type { MlbClient } from "../mlb/client.js";
 import { MlbClient as MlbClientImpl } from "../mlb/client.js";
 import type { HighlightlyClient } from "../highlightly/client.js";
-import { HighlightlyClient as HighlightlyClientImpl, HighlightlyError } from "../highlightly/client.js";
+import { HighlightlyClient as HighlightlyClientImpl } from "../highlightly/client.js";
 import {
   ManualWriteToDerivedNamespaceError,
   UnknownTagError,
@@ -28,8 +28,13 @@ import {
   listPlayers,
   promoteHighlightlyNcaaPlayer,
 } from "../watchlist/service.js";
+import { parseFlags } from "./flags.js";
 import { exitAfterDrain, isMain } from "./main.js";
-import { preflightDirect } from "./router.js";
+// The MLB/NCAA name-resolution rules and the Highlightly exit-code mapping live
+// in one module (#191) so `sk players add` inherits them rather than
+// re-authoring them (rules/scripting.md).
+import { pickFromSearch, pickNcaaFromSearch, writeHighlightlyError } from "./pick.js";
+import { normalizeDirect, preflightDirect } from "./router.js";
 
 /**
  * Watch-list seeding CLI: a thin presenter over the watch-list service
@@ -108,19 +113,6 @@ async function runPromote(flags: Map<string, string>, deps: SeedDeps): Promise<n
   }
 }
 
-function parseFlags(args: string[]): Map<string, string> {
-  const flags = new Map<string, string>();
-  for (let i = 0; i < args.length; i += 1) {
-    const arg = args[i];
-    if (arg !== undefined && arg.startsWith("--")) {
-      const value = args[i + 1];
-      flags.set(arg.slice(2), value !== undefined && !value.startsWith("--") ? value : "");
-      if (value !== undefined && !value.startsWith("--")) i += 1;
-    }
-  }
-  return flags;
-}
-
 async function runAdd(flags: Map<string, string>, deps: SeedDeps): Promise<number> {
   const ncaaName = flags.get("name");
   if (flags.has("ncaa") || ncaaName !== undefined) {
@@ -137,19 +129,11 @@ async function runAdd(flags: Map<string, string>, deps: SeedDeps): Promise<numbe
       return 78;
     }
     try {
-      const results = await deps.highlightlyClient.searchNcaaPlayers(ncaaName.trim());
-      if (results.value.length === 0) {
-        deps.write(`error: no NCAA matches for name=${ncaaName.trim()}`);
-        return 1;
-      }
-      if (results.value.length > 1) {
-        deps.write(`multiple NCAA matches for name=${ncaaName.trim()}; re-run with an explicit Highlightly identity`);
-        results.value.forEach((player, index) => {
-          deps.write(`[${index + 1}] highlightlyPlayerId=${player.playerId} name=${player.canonicalName} teamId=${player.teamId}`);
-        });
-        return 1;
-      }
-      const player = results.value[0]!;
+      const player = await pickNcaaFromSearch(ncaaName.trim(), {
+        highlightlyClient: deps.highlightlyClient,
+        write: deps.write,
+      });
+      if (player === null) return 1;
       return addHighlightlyPlayer(player.playerId, player.canonicalName, player.teamId, deps);
     } catch (err) {
       return writeHighlightlyError(err, deps);
@@ -236,46 +220,6 @@ async function addHighlightlyPlayer(playerId: number, canonicalName: string, tea
   } catch (err) {
     return writeHighlightlyError(err, deps);
   }
-}
-
-function writeHighlightlyError(err: unknown, deps: SeedDeps): number {
-  if (err instanceof HighlightlyError) {
-    deps.write(`error: ${err.code}: ${err.message}`);
-    return err.code === "highlightly_not_configured" ? 78 : err.code === "highlightly_quota_exhausted" || err.code === "highlightly_coverage_incomplete" ? 75 : err.code === "highlightly_player_not_found" || err.code === "highlightly_identity_mismatch" ? 65 : 69;
-  }
-  throw err;
-}
-
-async function pickFromSearch(
-  name: string,
-  pickFlag: string | undefined,
-  deps: SeedDeps,
-): Promise<number | null> {
-  const results = await deps.client.searchPeople(name);
-  if (results.length === 0) {
-    deps.write(`error: no matches for search=${name}`);
-    return null;
-  }
-  if (results.length === 1 && pickFlag === undefined) {
-    const only = results[0];
-    return only !== undefined ? only.id : null;
-  }
-  if (pickFlag === undefined) {
-    deps.write(`multiple matches for search=${name}; re-run with --pick I`);
-    results.forEach((p, i) => {
-      deps.write(
-        `[${i + 1}] personId=${p.id} name=${p.fullName} position=${p.primaryPosition?.abbreviation ?? "?"}`,
-      );
-    });
-    return null;
-  }
-  const pick = Number.parseInt(pickFlag, 10);
-  const chosen = Number.isInteger(pick) ? results[pick - 1] : undefined;
-  if (chosen === undefined) {
-    deps.write(`error: --pick ${pickFlag} out of range 1..${results.length}`);
-    return null;
-  }
-  return chosen.id;
 }
 
 async function runDeactivate(flags: Map<string, string>, deps: SeedDeps): Promise<number> {
@@ -474,6 +418,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     process.stderr.write(`error: ${failure}\n`);
     return 1;
   }
+  // Validate FIRST (so the error quotes what the operator typed), then rewrite
+  // aliases/`=` forms to their canonical long spelling, so this presenter's own
+  // flag parser never has to know an option has a short form (#191).
+  const normalized = normalizeDirect(path, argv, prefix);
   loadDotEnv();
   const config = loadConfig();
   const { db, close } = await startupDb(config.databasePath, {
@@ -483,7 +431,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   try {
     const client = new MlbClientImpl({ delayMs: config.mlbApiDelayMs });
     const highlightlyClient = new HighlightlyClientImpl({ apiKey: config.highlightlyApiKey });
-    return await runSeed(argv, {
+    return await runSeed(normalized, {
       db,
       client,
       highlightlyClient,

@@ -15,6 +15,27 @@ import { validateTagSelector } from "../tags/selector.js";
  */
 export type CliAdapter = (argv: string[]) => Promise<number>;
 const CLI_NAME = "sk";
+/**
+ * The RESERVED word that clears a lane-configuration column to SQL NULL (#191).
+ * A single constant so the router's validators, the presenter's parser, and the
+ * docs cannot drift on what "clear it" is spelled as.
+ */
+export const CLEAR_LITERAL = "none";
+/**
+ * How a NULL lane-configuration column RENDERS (#191). Exported so the reader
+ * and the writer share it: `players lists show` and `list configured` print it,
+ * and `--digest-to` REFUSES it as input.
+ *
+ * That refusal is the point. `--digest-to` is otherwise free-form (`DIGEST_TO`
+ * in the environment is an unvalidated string), so without it a literal `-`
+ * recipient would render identically to an unset column and an operator — or a
+ * script parsing the line — would read a configured lane as cleared. Reserving
+ * the sentinel at the INPUT keeps the output unambiguous by construction, which
+ * is cheaper than encoding it on the way out at each of the two print sites.
+ * (Reviewer P2, delta 1. `--refresh-every` and `--digest-hour` already reject it
+ * by taking only a canonical integer or `none`.)
+ */
+export const DISPLAY_NULL = "-";
 const cli = (text: string): string => text.replaceAll("bryce", CLI_NAME);
 
 export type Option = { name: string; value?: boolean; aliases?: string[]; values?: readonly string[]; description: string; validate?: (value: string) => string | null; inline?: boolean; repeatable?: boolean };
@@ -44,7 +65,7 @@ export type Group = {
 
 export const GROUPS: readonly Group[] = [
   { path: ["players"], purpose: "Manage players, lists, and backups.", usage: "bryce players <command>", options: [], example: "bryce players lists show" },
-  { path: ["players", "lists"], purpose: "Manage named player lists.", usage: "bryce players lists <command>", options: ["--name", "--person-ids", "--highlightly-player-ids"], example: "bryce players lists show" },
+  { path: ["players", "lists"], purpose: "Manage named player lists.", usage: "bryce players lists <command>", options: ["--name", "--person-ids", "--highlightly-player-ids", "--refresh-every", "--digest-hour", "--digest-to"], example: "bryce players lists show" },
   { path: ["db"], purpose: "Manage the Bryce database.", usage: "bryce db <command>", options: [], example: "bryce db migrate" },
   { path: ["connector"], purpose: "Check external connectors.", usage: "bryce connector <command>", options: ["--mutate"], example: "bryce connector smoke" },
   { path: ["seed"], purpose: "Manage the watch list and player tags.", usage: "bryce seed <command>", options: ["--person-id", "--highlightly-player-id", "--tags"], example: "bryce seed list" },
@@ -65,7 +86,40 @@ const value = (name: string, description: string, values?: readonly string[], al
 const inlineValue = (name: string, description: string, values?: readonly string[], aliases?: string[], validate?: Option["validate"]): Option =>
   ({ name, description, values, aliases, validate: withNonBlank(validate), inline: true });
 const flag = (name: string, description: string, aliases?: string[]): Option => ({ name, description, value: false, aliases });
+/**
+ * The `--list NAME` / `-l NAME` option, declared ONCE (#191). Every command that
+ * scopes to a lane takes it from here, so a command cannot ship the long form
+ * without the alias — and `test/cli-router.test.ts` asserts that property over
+ * the whole table rather than enumerating today's commands.
+ */
+const listOption = (): Option => inlineValue("list", "Named player list.", undefined, ["l"]);
 const positiveInteger = (value: string): string | null => /^\d+$/.test(value) && String(Number(value)) === value && Number.isSafeInteger(Number(value)) && Number(value) > 0 ? null : "a canonical positive integer";
+/**
+ * A lane-configuration value: the RESERVED literal `none` (clear the column to
+ * SQL NULL), or a canonical integer inside `inRange`. Canonical in the same
+ * sense `positiveInteger` means it — `07`, `1e2`, `+5`, and `3.0` are usage
+ * errors, so a typo can never be silently coerced into a schedule.
+ *
+ * Built as a factory rather than copied per option because `--digest-hour` and
+ * `--refresh-every` differ ONLY in their bound: hour 0 is a valid midnight
+ * digest (the DB CHECK allows it), so reusing `positiveInteger` there would
+ * reject a legitimate lane configuration.
+ */
+const clearableInteger = (expected: string, inRange: (candidate: number) => boolean) => (value: string): string | null => {
+  if (value === CLEAR_LITERAL) return null;
+  const parsed = Number(value);
+  return /^\d+$/.test(value) && String(parsed) === value && Number.isSafeInteger(parsed) && inRange(parsed) ? null : expected;
+};
+/**
+ * A lane's recipients: free-form, but never the bare display sentinel — see
+ * `DISPLAY_NULL`. Deliberately no email-shape rule: `DIGEST_TO` in the
+ * environment is an unvalidated string, and a CLI stricter than the value it
+ * falls back to would reject addresses the host already accepts.
+ */
+const digestToValue = (value: string): string | null =>
+  value.trim() === DISPLAY_NULL ? `a recipient other than '${DISPLAY_NULL}', which is reserved (use '${CLEAR_LITERAL}' to clear)` : null;
+const refreshEveryValue = clearableInteger("a canonical positive integer of minutes or 'none'", (candidate) => candidate > 0);
+const digestHourValue = clearableInteger("a canonical hour 0-23 or 'none'", (candidate) => candidate >= 0 && candidate <= 23);
 const positiveIntegerList = (value: string): string | null => value.split(",").every((part) => positiveInteger(part.trim()) === null) ? null : "a comma-separated list of positive integers";
 const uniqueBoundedIntegerList = (value: string): string | null => {
   const parts = value.split(",").map((part) => part.trim()).filter(Boolean);
@@ -119,6 +173,16 @@ const seedAddShape = (values: ReadonlyMap<string, readonly string[]>): string | 
   const selectors = ["person-id", "highlightly-player-id", "search"].filter((option) => values.has(option)).length + (ncaa ? 1 : 0);
   return selectors === 1 ? null : "requires exactly one player selector";
 };
+/**
+ * `sk players add` refuses `--ncaa` together with `--pick` (#191). The NCAA
+ * branch has NO pick escape — several Highlightly hits tell the operator to
+ * re-run with an explicit identity — and `seed add` pins the same rule with
+ * `requires: [["pick","search"]]`. Honoring `--ncaa --pick` would mint a SECOND
+ * ambiguity rule for the same question, which is exactly what this issue exists
+ * to prevent.
+ */
+const playersAddShape = (values: ReadonlyMap<string, readonly string[]>): string | null =>
+  values.has("ncaa") && values.has("pick") ? "option '--pick' cannot be combined with '--ncaa'" : null;
 const manualTag = (candidate: string): string | null => {
   const match = /^([^:]+):([^:]+)$/.exec(candidate);
   if (match === null || match[1] !== "status" || !["rostered", "scouted"].includes(match[2]!)) {
@@ -142,7 +206,7 @@ const tagSelector = (candidate: string): string | null => {
 /** Canonical built-in syntax/help metadata. Operational detail belongs in docs/cli. */
 export const COMMANDS: readonly Command[] = [
   leaf(["report", "player"], "Build a read-only single-player card.", "sk report player (--id ID|--name NAME) [--windows SPECS] [--format FORMAT] [--out PATH] [--open]", "sk report player --id 1 --windows last10,last30,ytd", () => import("./report.js"), [value("id", "Internal Bryce player id.", undefined, undefined, positiveInteger), value("name", "Canonical exact player name."), inlineValue("windows", "Comma-separated card windows."), inlineValue("format", "Card rendering (default console).", PLAYER_CARD_FORMATS), value("out", "Write the rendered card to this file instead of stdout."), flag("open", "Render HTML and open it in a browser.")], { exactlyOneOf: [["id", "name"]] }),
-  leaf(["digest"], "Build and send a digest.", "sk digest [--window SPEC|-w SPEC] [--list NAME] [--tags SELECTOR] [--force|-f]", "sk digest -w 28d --tags level:aaa,status:rostered", () => import("./digest.js"), [inlineValue("window", "Digest window (date or per-player game-count).", [...WINDOW_SPECS, ...GAME_COUNT_WINDOW_SPECS], ["w"]), inlineValue("list", "Named player list."), inlineValue("tags", "Tag selector scoping the report to a cohort.", undefined, undefined, validateTagSelector), flag("force", "Replay the daily slot when allowed.", ["f"])]),
+  leaf(["digest"], "Build and send a digest.", "sk digest [--window SPEC|-w SPEC] [--list NAME|-l NAME] [--tags SELECTOR] [--force|-f]", "sk digest -w 28d --tags level:aaa,status:rostered", () => import("./digest.js"), [inlineValue("window", "Digest window (date or per-player game-count).", [...WINDOW_SPECS, ...GAME_COUNT_WINDOW_SPECS], ["w"]), listOption(), inlineValue("tags", "Tag selector scoping the report to a cohort.", undefined, undefined, validateTagSelector), flag("force", "Replay the daily slot when allowed.", ["f"])]),
   leaf(["refresh"], "Refresh the active watch list.", "sk refresh [--quiet|-q]", "sk refresh --quiet", () => import("./refresh.js"), [flag("quiet", "Suppress live progress; print only the terminal summary.", ["q"])]),
   leaf(["players", "lists", "create"], "Create a named player list.", "sk players lists create --name NAME", "sk players lists create --name Prospects", () => import("./lists.js"), [value("name", "List name.")], { required: ["name"] }),
   leaf(["players", "lists", "rename"], "Rename a named player list.", "sk players lists rename --name OLD --to NEW", "sk players lists rename --name Prospects --to 'Top 30'", () => import("./lists.js"), [value("name", "Current list name."), value("to", "New list name.")], { required: ["name", "to"] }),
@@ -150,6 +214,8 @@ export const COMMANDS: readonly Command[] = [
   leaf(["players", "lists", "set-default"], "Point the default list at a named list.", "sk players lists set-default --name NAME", "sk players lists set-default --name Watchlist", () => import("./lists.js"), [value("name", "List name.")], { required: ["name"] }),
   leaf(["players", "lists", "add"], "Add players to a named list.", "sk players lists add --name NAME [--person-ids IDS] [--highlightly-player-ids IDS]", "sk players lists add --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids.", undefined, undefined, positiveIntegerList), value("highlightly-player-ids", "Comma-separated Highlightly NCAA ids.", undefined, undefined, positiveIntegerList)], { required: ["name"], oneOf: [["person-ids", "highlightly-player-ids"]] }),
   leaf(["players", "lists", "remove"], "Remove players from a named list.", "sk players lists remove --name NAME [--person-ids IDS] [--highlightly-player-ids IDS]", "sk players lists remove --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids.", undefined, undefined, positiveIntegerList), value("highlightly-player-ids", "Comma-separated Highlightly NCAA ids.", undefined, undefined, positiveIntegerList)], { required: ["name"], oneOf: [["person-ids", "highlightly-player-ids"]] }),
+  leaf(["players", "add"], "Add one player to a named list in a single command.", "sk players add --name NAME [--list NAME|-l NAME] [--pick I] [--ncaa]", "sk players add --name 'Maximo Acosta' --list Prospects", () => import("./players-add.js"), [value("name", "Player name to search."), listOption(), value("pick", "One-based MLB search result.", undefined, undefined, positiveInteger), flag("ncaa", "Search NCAA players by Highlightly name.")], { required: ["name"], requires: [["pick", "name"]], semantic: playersAddShape }),
+  leaf(["players", "lists", "configure"], "Configure a lane's cadence and recipients.", "sk players lists configure --name NAME [--refresh-every MINUTES|none] [--digest-hour HOUR|none] [--digest-to ADDRESS|none]", "sk players lists configure --name Prospects --digest-hour 5", () => import("./lists.js"), [value("name", "List name."), value("refresh-every", "Minutes between this lane's automatic refreshes; the reserved word 'none' clears it.", undefined, undefined, refreshEveryValue), value("digest-hour", "Host-timezone hour 0-23 this lane digests at; the reserved word 'none' clears it.", undefined, undefined, digestHourValue), value("digest-to", `This lane's recipients; the reserved word 'none' clears it ('${DISPLAY_NULL}' is reserved as the display sentinel).`, undefined, undefined, digestToValue)], { required: ["name"], oneOf: [["refresh-every", "digest-hour", "digest-to"]] }),
   leaf(["players", "lists", "show"], "Show named lists or their members.", "sk players lists show [--name NAME]", "sk players lists show", () => import("./lists.js"), [value("name", "List name.")]),
   leaf(["players", "backup"], "Write a player-list backup.", "sk players backup --out FILE", "sk players backup --out backups/players.json", () => import("./players-backup.js"), [value("out", "Output file.")], { required: ["out"] }),
   leaf(["players", "restore"], "Restore a player-list backup.", "sk players restore --in FILE", "sk players restore --in backups/players.json", () => import("./players-restore.js"), [value("in", "Input file.")], { required: ["in"] }),
@@ -303,6 +369,73 @@ export function preflightDirect(path: readonly string[], argv: readonly string[]
   return preflight(command, argv, validateValues);
 }
 
+/**
+ * Rewrite an already-validated argv into ONE canonical spelling per option:
+ * every alias `-a VALUE` becomes `--name VALUE`, and every `inline` option's
+ * `--name=VALUE` becomes `--name VALUE`. A boolean flag takes no value, so `-f`
+ * becomes a bare `--force`.
+ *
+ * Why this exists (#191). `runRouter` hands the ORIGINAL argv to the presenter,
+ * and each presenter re-implements flag parsing over it. `src/cli/digest.ts`
+ * hand-handled `-w` but NOT `-l`, so adding an `l` alias would have made
+ * `sk digest -l "Prospects"` pass preflight, return `undefined` from
+ * `parseList`, and send an UNSCOPED digest — the whole Watch List mailed under
+ * a line that reads like a scoped send. Normalizing centrally means a presenter
+ * parser only ever sees `--name value`, so a new alias cannot silently widen a
+ * scope; it also lets the hand-rolled alias branches be DELETED rather than
+ * left as a second, drifting implementation (rules/scripting.md).
+ *
+ * Derived entirely from the command's own declared `Option[]` — nothing here
+ * knows a specific flag name. PURE, and it runs strictly AFTER preflight so a
+ * usage error still quotes exactly what the operator typed.
+ */
+export function normalizeOptions(command: Command, argv: readonly string[]): string[] {
+  const byName = new Map<string, Option>();
+  const byAlias = new Map<string, Option>();
+  for (const option of command.options ?? []) {
+    byName.set(`--${option.name}`, option);
+    for (const alias of option.aliases ?? []) byAlias.set(`-${alias}`, option);
+  }
+  const normalized: string[] = [];
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]!;
+    const aliased = byAlias.get(arg);
+    if (aliased !== undefined) {
+      normalized.push(`--${aliased.name}`);
+      // A boolean flag consumes nothing; a value option carries the NEXT token
+      // through untouched, so a value is never re-inspected as a flag.
+      if (aliased.value !== false && index + 1 < argv.length) normalized.push(argv[++index]!);
+      continue;
+    }
+    const equals = arg.indexOf("=");
+    if (equals !== -1) {
+      const inlined = byName.get(arg.slice(0, equals));
+      if (inlined !== undefined && inlined.inline === true && inlined.value !== false) {
+        normalized.push(`--${inlined.name}`, arg.slice(equals + 1));
+        continue;
+      }
+    }
+    const named = byName.get(arg);
+    normalized.push(arg);
+    // Carry a long option's value token through verbatim for the same reason:
+    // a VALUE that happens to look like `-l` must never be rewritten.
+    if (named !== undefined && named.value !== false && index + 1 < argv.length) normalized.push(argv[++index]!);
+  }
+  return normalized;
+}
+
+/**
+ * `normalizeOptions` for a direct `npm run …` entry point, which addresses its
+ * command by path (and may carry a grouped verb `prefix` it owns). The prefix is
+ * passed through untouched. An unknown path returns the argv unchanged —
+ * `preflightDirect`, which every caller runs first, is what rejects that.
+ */
+export function normalizeDirect(path: readonly string[], argv: readonly string[], prefix: readonly string[] = []): string[] {
+  const command = COMMANDS.find((candidate) => candidate.path.join("\0") === path.join("\0"));
+  if (command === undefined) return [...argv];
+  return [...argv.slice(0, prefix.length), ...normalizeOptions(command, argv.slice(prefix.length))];
+}
+
 export async function runRouter(argv = process.argv.slice(2), output: (line: string, error?: boolean) => void = write, commands: readonly Command[] = COMMANDS): Promise<number> {
   const resolution = resolve(argv, commands);
   if (resolution.help !== undefined) {
@@ -334,7 +467,10 @@ export async function runRouter(argv = process.argv.slice(2), output: (line: str
     : resolution.command.path[0] === "players" && resolution.command.path[1] === "lists"
       ? resolution.command.path.slice(2)
       : [];
-  return module.main([...prefix, ...resolution.argv]);
+  // Normalize AFTER preflight (#191): the presenter downstream re-parses argv
+  // with its own hand-rolled scanner, and handing it one canonical spelling per
+  // option is what keeps a short alias from being silently dropped there.
+  return module.main([...prefix, ...normalizeOptions(resolution.command, resolution.argv)]);
 }
 
 import { exitAfterDrain, isMain } from "./main.js";

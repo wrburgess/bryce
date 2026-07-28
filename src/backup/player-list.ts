@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { Db } from "../db/client.js";
 import { listMembers, playerLists, playerTags, players } from "../db/schema.js";
 import { canonicalizeName } from "../domain/names.js";
+import { digestRecipientProblem } from "../lists/service.js";
 import { listPlayers } from "../watchlist/service.js";
 import { fsyncDir } from "./snapshot.js";
 
@@ -344,7 +345,43 @@ export const playerListBackupSchema = z
         seenHighlightly.add(p.highlightlyPlayerId);
       }
     });
-  });
+  })
+  /**
+   * Normalize an unusable `digestTo` to `null` — AFTER every check above.
+   *
+   * Why it exists: restore writes `digest_to` straight to the row without
+   * passing through `configureList`, so a rule enforced only there is one a
+   * supported restore walks around (Reviewer P2, delta 2). Why it NORMALIZES
+   * rather than rejects: that rule is newer than the v5 format, so refusing the
+   * payload would make an already-written backup unrestorable and strand the one
+   * artifact that exists to BE the recovery path (Reviewer P1, delta 3). Such a
+   * value was never a deliverable address and already displayed as unset
+   * everywhere, so mapping it to `null` changes what the row means not at all.
+   *
+   * Why it lives HERE and not on `backupListSchema`: a nested transform runs
+   * BEFORE this envelope's `superRefine`, so normalizing there would rewrite the
+   * value out from under the `version < 5` gate — a hand-edited v2-v4 payload
+   * smuggling `digestTo` would have its evidence erased and then pass, silently
+   * defeating the fail-closed rule that the version must describe the payload's
+   * contents (Reviewer P2, delta 4). Validate first, normalize second.
+   *
+   * `configureList` still THROWS for the same value; that asymmetry is the
+   * point. An operator typing a bad value now should be told so; a restore of an
+   * artifact written before the rule existed should not be blocked by it. The
+   * predicate is imported, not restated, so the doors cannot drift.
+   */
+  .transform((env) =>
+    env.lists === undefined
+      ? env
+      : {
+          ...env,
+          lists: env.lists.map((list) =>
+            list.digestTo !== null && digestRecipientProblem(list.digestTo) !== null
+              ? { ...list, digestTo: null }
+              : list,
+          ),
+        },
+  );
 
 export type PlayerBackupEntry = z.infer<typeof playerEntrySchema>;
 export type PlayerBackupList = z.infer<typeof backupListSchema>;

@@ -17,7 +17,7 @@ import {
   highlightlyTeamId,
 } from "../highlightly/client.js";
 import type { HighlightlyClient } from "../highlightly/client.js";
-import { addPlayerIdsToList, resolveListByName } from "../lists/service.js";
+import { addPlayerIdsToList, digestRecipientProblem, resolveListByName } from "../lists/service.js";
 import type { CalendarFailure } from "../jobs/refresh.js";
 import { runRefreshForPlayer } from "../jobs/refresh.js";
 import type { MlbClient } from "../mlb/client.js";
@@ -722,6 +722,24 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
  * intact); `createdAt` is the existing row's on update / the backup value (or
  * `now` if absent) on insert; `updatedAt` is always `now`.
  */
+/**
+ * A lane's recipients as they may be WRITTEN: an unusable value becomes null.
+ *
+ * The parse boundary already normalizes, but this function takes
+ * `lists: PlayerBackupList[]` as a plain typed parameter — and a TYPE cannot
+ * prove the array came through `parsePlayerListBackup`. It is exported, so a
+ * test, a future REST/MCP restore, or any caller assembling the array itself
+ * would otherwise write `digestTo: "-"` straight to the row, where it renders
+ * identically to a cleared lane. Guarding at the WRITE closes that for every
+ * caller regardless of how the value arrived (Reviewer P2, delta 5 rung 2).
+ *
+ * The predicate is imported from the list service, not restated, so the
+ * definition of a valid recipient stays in one place.
+ */
+function writableDigestTo(value: string | null): string | null {
+  return value !== null && digestRecipientProblem(value) !== null ? null : value;
+}
+
 export function restorePlayerListBackup(
   db: Db,
   rows: PlayerBackupEntry[],
@@ -946,7 +964,7 @@ export function restorePlayerListBackup(
             isDefault: list.isDefault,
             refreshIntervalMinutes: list.refreshIntervalMinutes,
             digestHour: list.digestHour,
-            digestTo: list.digestTo,
+            digestTo: writableDigestTo(list.digestTo),
             updatedAt: list.updatedAt ?? nowIso,
           })
           .where(eq(playerLists.id, live.id))
@@ -966,7 +984,7 @@ export function restorePlayerListBackup(
           isDefault: list.isDefault,
           refreshIntervalMinutes: list.refreshIntervalMinutes,
           digestHour: list.digestHour,
-          digestTo: list.digestTo,
+          digestTo: writableDigestTo(list.digestTo),
         })
         .returning()
         .all()[0];

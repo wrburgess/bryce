@@ -6,9 +6,12 @@ import {
   BlankListNameError,
   CannotDeleteDefaultListError,
   DuplicateListNameError,
+  InvalidListConfigError,
   NoDefaultListError,
   UnknownListError,
+  addPlayerIdsToLiveList,
   addToList,
+  configureList,
   createList,
   deleteList,
   listLists,
@@ -518,6 +521,121 @@ describe("default list / lane (#190)", () => {
       await expect(resolveListOrDefault(opened.db, "ghost")).rejects.toBeInstanceOf(
         UnknownListError,
       );
+    });
+  });
+  describe("configureList (#191)", () => {
+    /** The three cadence columns as stored. */
+    const cadence = async (id: number) => {
+      const row = (await opened.db.select().from(playerLists).where(eq(playerLists.id, id)))[0]!;
+      return { every: row.refreshIntervalMinutes, hour: row.digestHour, to: row.digestTo };
+    };
+
+    it("writes ONLY the supplied keys — absent means untouched, null means cleared", async () => {
+      const lane = await createList(opened.db, "Lane", clock.now());
+      await configureList(opened.db, "Lane", { refreshIntervalMinutes: 60, digestHour: 5, digestTo: "hc@example.com" }, clock.now());
+
+      // An absent key leaves its column alone...
+      await configureList(opened.db, "Lane", { digestHour: 9 }, clock.now());
+      expect(await cadence(lane.id)).toEqual({ every: 60, hour: 9, to: "hc@example.com" });
+      // ...and an explicit null clears exactly that one.
+      await configureList(opened.db, "Lane", { digestTo: null }, clock.now());
+      expect(await cadence(lane.id)).toEqual({ every: 60, hour: 9, to: null });
+    });
+
+    it("enforces the bounds at the SERVICE, independently of the router", async () => {
+      // The router validates too, but this function is reachable from a test, a
+      // future REST/MCP surface, and any caller that never sees an option table.
+      // "The router checked it" is an assumption, not a guarantee.
+      await createList(opened.db, "Lane", clock.now());
+      for (const patch of [
+        { digestHour: 24 },
+        { digestHour: -1 },
+        { digestHour: 1.5 },
+        { refreshIntervalMinutes: 0 },
+        { refreshIntervalMinutes: -5 },
+        { digestTo: "   " },
+        { digestTo: "a\nBcc: x@y" },
+      ]) {
+        await expect(configureList(opened.db, "Lane", patch, clock.now()), JSON.stringify(patch))
+          .rejects.toBeInstanceOf(InvalidListConfigError);
+      }
+      // Nothing was written by any of them.
+      const row = (await opened.db.select().from(playerLists).where(eq(playerLists.name, "Lane")))[0]!;
+      expect([row.refreshIntervalMinutes, row.digestHour, row.digestTo]).toEqual([null, null, null]);
+    });
+
+    it("accepts hour 0 and hour 23, the inclusive bounds the DB CHECK allows", async () => {
+      const lane = await createList(opened.db, "Lane", clock.now());
+      await configureList(opened.db, "Lane", { digestHour: 0 }, clock.now());
+      expect((await cadence(lane.id)).hour).toBe(0);
+      await configureList(opened.db, "Lane", { digestHour: 23 }, clock.now());
+      expect((await cadence(lane.id)).hour).toBe(23);
+    });
+
+    // Reviewer P2, delta 1. The CLI's generic "a value must not start with -"
+    // rule blocks the bare spelling, but this function is reachable from a test,
+    // a future REST/MCP surface, and any caller with no option table at all —
+    // so the guarantee lives here, not only at the router.
+    it("refuses a digestTo of '-', the sentinel a NULL column renders as", async () => {
+      const lane = await createList(opened.db, "Lane", clock.now());
+      for (const candidate of ["-", "  -  "]) {
+        await expect(
+          configureList(opened.db, "Lane", { digestTo: candidate }, clock.now()),
+          candidate,
+        ).rejects.toBeInstanceOf(InvalidListConfigError);
+      }
+      // Nothing was written, and a hyphen INSIDE a recipient is still fine.
+      expect((await cadence(lane.id)).to).toBeNull();
+      await configureList(opened.db, "Lane", { digestTo: "a-b@example.com" }, clock.now());
+      expect((await cadence(lane.id)).to).toBe("a-b@example.com");
+    });
+
+    it("refuses an EMPTY patch rather than silently bumping updated_at", async () => {
+      await createList(opened.db, "Lane", clock.now());
+      await expect(configureList(opened.db, "Lane", {}, clock.now()))
+        .rejects.toBeInstanceOf(InvalidListConfigError);
+    });
+
+    it("throws UnknownListError for an unknown or SOFT-DELETED list", async () => {
+      await expect(configureList(opened.db, "ghost", { digestHour: 5 }, clock.now()))
+        .rejects.toBeInstanceOf(UnknownListError);
+      await createList(opened.db, "Gone", clock.now());
+      await deleteList(opened.db, "Gone", clock.now());
+      await expect(configureList(opened.db, "Gone", { digestHour: 5 }, clock.now()))
+        .rejects.toBeInstanceOf(UnknownListError);
+    });
+  });
+
+  describe("addPlayerIdsToLiveList (#191)", () => {
+    it("attaches idempotently and reports only rows actually written", async () => {
+      const lane = await createList(opened.db, "Lane", clock.now());
+      const player = await insertPlayer(opened.db);
+      expect(await addPlayerIdsToLiveList(opened.db, lane, [player.id], clock.now())).toBe(1);
+      // A re-attach conflicts on the unique key and is a no-op.
+      expect(await addPlayerIdsToLiveList(opened.db, lane, [player.id], clock.now())).toBe(0);
+      expect(await opened.db.select().from(listMembers).where(eq(listMembers.listId, lane.id))).toHaveLength(1);
+    });
+
+    it("REFUSES a lane soft-deleted after it was resolved, writing no membership row", async () => {
+      // The check-then-act gap `sk players add` opens: the lane is resolved,
+      // then a network call and a player insert happen, and only then is
+      // membership written. A `lists delete` landing in between would otherwise
+      // attach a player to a dead lane — invisible to every scope query.
+      const lane = await createList(opened.db, "Lane", clock.now());
+      const player = await insertPlayer(opened.db);
+      await deleteList(opened.db, "Lane", clock.now());
+
+      await expect(addPlayerIdsToLiveList(opened.db, lane, [player.id], clock.now()))
+        .rejects.toBeInstanceOf(UnknownListError);
+      // The refusal NAMES the lane rather than quoting a bare id at the operator.
+      await expect(addPlayerIdsToLiveList(opened.db, lane, [player.id], clock.now()))
+        .rejects.toThrow(/no list named "Lane"/);
+      expect(await opened.db.select().from(listMembers).where(eq(listMembers.listId, lane.id))).toHaveLength(0);
+    });
+
+    it("is a no-op for an empty id list", async () => {
+      const lane = await createList(opened.db, "Lane", clock.now());
+      expect(await addPlayerIdsToLiveList(opened.db, lane, [], clock.now())).toBe(0);
     });
   });
 });

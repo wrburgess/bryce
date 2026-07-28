@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import type { OpenedDb } from "../src/db/client.js";
 import type { ListsDeps } from "../src/cli/lists.js";
 import { runLists } from "../src/cli/lists.js";
-import { addToList, createList } from "../src/lists/service.js";
+import { playerLists } from "../src/db/schema.js";
+import { InvalidListConfigError, addToList, configureList, createList } from "../src/lists/service.js";
 import { fakeClock, insertPlayer, testDb } from "./factories.js";
 
 /**
@@ -83,8 +85,13 @@ describe("lists CLI", () => {
     expect(code).toBe(0);
     // Ordered by name, and each line now states whether the list is THE default
     // lane (#190) — the migration-seeded `Watchlist` is, `Alpha` is not.
-    expect(out[0]).toBe(`list id=${list.id} name=Alpha members=1 default=false`);
-    expect(out[1]).toMatch(/^list id=\d+ name=Watchlist members=0 default=true$/);
+    // The cadence trio reads back here (#191), so `configure` is not write-only.
+    // An unconfigured lane renders each as `-`, the same null spelling
+    // `list configured` uses.
+    expect(out[0]).toBe(
+      `list id=${list.id} name=Alpha members=1 default=false refreshEvery=- digestHour=- digestTo=-`,
+    );
+    expect(out[1]).toMatch(/^list id=\d+ name=Watchlist members=0 default=true refreshEvery=\S+ digestHour=\S+ digestTo=\S+$/);
     expect(out.at(-1)).toBe("total=2");
   });
 
@@ -134,7 +141,7 @@ describe("lists CLI", () => {
     const listCode = await runLists(["show"], deps());
     expect(listCode).toBe(0);
     expect(out).toHaveLength(2);
-    expect(out[0]).toMatch(/^list id=\d+ name=Watchlist members=0 default=true$/);
+    expect(out[0]).toMatch(/^list id=\d+ name=Watchlist members=0 default=true refreshEvery=\S+ digestHour=\S+ digestTo=\S+$/);
     expect(out[1]).toBe("total=1");
   });
 
@@ -158,7 +165,7 @@ describe("lists CLI", () => {
       out.length = 0;
       await runLists(["show"], deps());
       expect(out.filter((l) => l.includes("default=true"))).toEqual([
-        `list id=${list.id} name=Prospects members=0 default=true`,
+        `list id=${list.id} name=Prospects members=0 default=true refreshEvery=- digestHour=- digestTo=-`,
       ]);
     });
 
@@ -180,6 +187,133 @@ describe("lists CLI", () => {
     });
   });
 
+  describe("configure (#191)", () => {
+    /** The three cadence columns as stored, read straight from the row. */
+    const cadence = async (name: string): Promise<{ every: number | null; hour: number | null; to: string | null }> => {
+      const row = (await opened.db.select().from(playerLists).where(eq(playerLists.name, name)))[0]!;
+      return { every: row.refreshIntervalMinutes, hour: row.digestHour, to: row.digestTo };
+    };
+
+    beforeEach(async () => {
+      await createList(opened.db, "Lane", clock.now());
+    });
+
+    it("sets each column INDIVIDUALLY, leaving the other two untouched", async () => {
+      // The defect this pins: a patch that wrote all three columns every time
+      // would clear two of them here, and the success line would not say so.
+      await configureList(opened.db, "Lane", { refreshIntervalMinutes: 60, digestHour: 5, digestTo: "hc@example.com" }, clock.now());
+
+      expect(await runLists(["configure", "--name", "Lane", "--digest-hour", "9"], deps())).toBe(0);
+      expect(await cadence("Lane")).toEqual({ every: 60, hour: 9, to: "hc@example.com" });
+
+      expect(await runLists(["configure", "--name", "Lane", "--refresh-every", "30"], deps())).toBe(0);
+      expect(await cadence("Lane")).toEqual({ every: 30, hour: 9, to: "hc@example.com" });
+
+      expect(await runLists(["configure", "--name", "Lane", "--digest-to", "other@example.com"], deps())).toBe(0);
+      expect(await cadence("Lane")).toEqual({ every: 30, hour: 9, to: "other@example.com" });
+    });
+
+    it("sets all three at once and reports them on one greppable line", async () => {
+      expect(await runLists(
+        ["configure", "--name", "Lane", "--refresh-every", "1440", "--digest-hour", "5", "--digest-to", "hc@example.com"],
+        deps(),
+      )).toBe(0);
+      expect(out[0]).toMatch(
+        /^list configured id=\d+ name=Lane refreshEvery=1440 digestHour=5 digestTo=hc@example\.com$/,
+      );
+      expect(await cadence("Lane")).toEqual({ every: 1440, hour: 5, to: "hc@example.com" });
+    });
+
+    it("`none` clears EACH column to null and renders it as -", async () => {
+      await configureList(opened.db, "Lane", { refreshIntervalMinutes: 60, digestHour: 5, digestTo: "hc@example.com" }, clock.now());
+
+      expect(await runLists(["configure", "--name", "Lane", "--digest-hour", "none"], deps())).toBe(0);
+      expect(await cadence("Lane")).toEqual({ every: 60, hour: null, to: "hc@example.com" });
+      expect(out[0]).toContain("digestHour=-");
+
+      expect(await runLists(["configure", "--name", "Lane", "--refresh-every", "none"], deps())).toBe(0);
+      expect(await cadence("Lane")).toEqual({ every: null, hour: null, to: "hc@example.com" });
+
+      expect(await runLists(["configure", "--name", "Lane", "--digest-to", "none"], deps())).toBe(0);
+      expect(await cadence("Lane")).toEqual({ every: null, hour: null, to: null });
+      expect(out.at(-1)).toMatch(/refreshEvery=- digestHour=- digestTo=-$/);
+    });
+
+    it("--digest-hour 0 SUCCEEDS and stores 0 — midnight is a real digest hour", async () => {
+      // The trap this guards: `positiveInteger` rejects 0, but the DB CHECK
+      // explicitly allows it. Reusing that validator would refuse a lane the
+      // database accepts, and the failure would look like a typo to the HC.
+      expect(await runLists(["configure", "--name", "Lane", "--digest-hour", "0"], deps())).toBe(0);
+      expect((await cadence("Lane")).hour).toBe(0);
+      // Rendered as 0, never collapsed to the null spelling by a falsy check.
+      expect(out[0]).toContain("digestHour=0");
+      expect(out[0]).not.toContain("digestHour=-");
+      // And 23 is still in range while 24 is not.
+      expect(await runLists(["configure", "--name", "Lane", "--digest-hour", "23"], deps())).toBe(0);
+      expect((await cadence("Lane")).hour).toBe(23);
+    });
+
+    it("refuses every out-of-range and non-canonical value, writing nothing", async () => {
+      await configureList(opened.db, "Lane", { digestHour: 5, refreshIntervalMinutes: 60 }, clock.now());
+      const cases: Array<[string, string]> = [
+        ["--digest-hour", "24"],
+        ["--digest-hour", "-1"],
+        ["--refresh-every", "0"],
+        ["--digest-hour", "07"],
+        ["--refresh-every", "1e2"],
+        ["--refresh-every", "+5"],
+        ["--digest-hour", "3.0"],
+      ];
+      for (const [flag, value] of cases) {
+        err.length = 0;
+        out.length = 0;
+        expect(await runLists(["configure", "--name", "Lane", flag, value], deps()), `${flag} ${value}`).toBe(1);
+        expect(err[0], `${flag} ${value}`).toMatch(/^error=/);
+        expect(out, `${flag} ${value}`).toEqual([]);
+      }
+      // Nothing moved across the whole matrix.
+      expect(await cadence("Lane")).toEqual({ every: 60, hour: 5, to: null });
+    });
+
+    it("sad path: an unknown list exits 1 with error= and updates no row", async () => {
+      expect(await runLists(["configure", "--name", "ghost", "--digest-hour", "5"], deps())).toBe(1);
+      expect(err[0]).toBe('error=no list named "ghost"');
+      expect(out).toEqual([]);
+      expect(await cadence("Lane")).toEqual({ every: null, hour: null, to: null });
+    });
+
+    it("sad path: --name with no other flag fails LOUDLY rather than no-opping", async () => {
+      expect(await runLists(["configure", "--name", "Lane"], deps())).toBe(1);
+      expect(err[0]).toContain("requires at least one of --refresh-every, --digest-hour, --digest-to");
+      expect(out).toEqual([]);
+    });
+
+    it("sad path: a missing --name writes error= and exits 1", async () => {
+      expect(await runLists(["configure", "--digest-hour", "5"], deps())).toBe(1);
+      expect(err[0]).toContain("--name is required");
+    });
+
+    it("renders an InvalidListConfigError from the SERVICE as error= + exit 1", async () => {
+      // The service is the last line of defense, and it is reachable without the
+      // router: a caller that hands it an out-of-range value must still get the
+      // typed error rendered through this surface's seam (rules/backend.md),
+      // never an unhandled throw. Driven through the presenter's own catch by
+      // bypassing the CLI's canonical-integer parse with the service directly.
+      await expect(configureList(opened.db, "Lane", { digestHour: 24 }, clock.now()))
+        .rejects.toBeInstanceOf(InvalidListConfigError);
+
+      // And through the CLI: the presenter's catch list knows the type.
+      expect(await runLists(["configure", "--name", "Lane", "--digest-hour", "99"], deps())).toBe(1);
+      expect(err[0]).toMatch(/^error=/);
+      expect(await cadence("Lane")).toEqual({ every: null, hour: null, to: null });
+    });
+
+    it("is discoverable from the usage line, not only from the docs", async () => {
+      expect(await runLists(["frobnicate"], deps())).toBe(1);
+      expect(err[0]).toContain("configure");
+    });
+  });
+
   it("sad path: deleting the DEFAULT list writes error= and exits 1, leaving it live", async () => {
     const code = await runLists(["delete", "--name", "Watchlist"], deps());
     expect(code).toBe(1);
@@ -189,6 +323,6 @@ describe("lists CLI", () => {
     expect(out).toEqual([]);
 
     await runLists(["show"], deps());
-    expect(out[0]).toMatch(/^list id=\d+ name=Watchlist members=0 default=true$/);
+    expect(out[0]).toMatch(/^list id=\d+ name=Watchlist members=0 default=true refreshEvery=\S+ digestHour=\S+ digestTo=\S+$/);
   });
 });

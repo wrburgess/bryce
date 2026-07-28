@@ -14,7 +14,7 @@ import { REFRESH_CALL_KEYS, legacyNoticeText } from "../jobs/refresh-progress.js
 import { MlbClient } from "../mlb/client.js";
 import { HighlightlyClient } from "../highlightly/client.js";
 import { exitAfterDrain, isMain } from "./main.js";
-import { preflightDirect } from "./router.js";
+import { normalizeDirect, preflightDirect } from "./router.js";
 
 /**
  * The refresh CLI: `npm run refresh [-- --quiet]`. The ONLY presenter of the
@@ -343,7 +343,9 @@ export async function runRefreshCli(argv: string[], deps: RefreshCliDeps): Promi
     writeError(`error: ${syntaxFailure}`);
     return 1;
   }
-  const presenter = createRefreshPresenter(deps, parseQuiet(argv));
+  // Validate first, then collapse aliases/`=` forms to one canonical spelling,
+  // so the parser below never has to know an option has a short form (#191).
+  const presenter = createRefreshPresenter(deps, parseQuiet(normalizeDirect(["refresh"], argv)));
   let summary;
   try {
     summary = await runRefresh({
@@ -397,6 +399,9 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     process.stderr.write(`error: ${failure}\n`);
     return 1;
   }
+  // Validate first, then collapse aliases/`=` forms to one canonical spelling,
+  // so the parser below never has to know an option has a short form (#191).
+  const normalized = normalizeDirect(["refresh"], argv);
   loadDotEnv();
   const config = loadConfig();
   const { db, close } = await startupDb(config.databasePath, {
@@ -404,7 +409,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     keepLast: config.backupKeepLast,
   });
   try {
-    return await runRefreshCli(argv, {
+    return await runRefreshCli(normalized, {
       db,
       client: new MlbClient({ delayMs: config.mlbApiDelayMs }),
       highlightlyClient: new HighlightlyClient({ apiKey: config.highlightlyApiKey }),

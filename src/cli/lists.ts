@@ -4,13 +4,16 @@ import type { Db } from "../db/client.js";
 import { startupDb } from "../db/startup.js";
 import type { PlayerRef } from "../watchlist/service.js";
 import { PlayerNotFoundError } from "../watchlist/service.js";
+import type { ListConfigPatch } from "../lists/service.js";
 import {
   BlankListNameError,
   CannotDeleteDefaultListError,
   DuplicateListNameError,
+  InvalidListConfigError,
   NoDefaultListError,
   UnknownListError,
   addToList,
+  configureList,
   createList,
   deleteList,
   listLists,
@@ -20,8 +23,9 @@ import {
   resolveListByName,
   setDefaultList,
 } from "../lists/service.js";
+import { parseFlags } from "./flags.js";
 import { exitAfterDrain, isMain } from "./main.js";
-import { preflightDirect } from "./router.js";
+import { CLEAR_LITERAL, DISPLAY_NULL, normalizeDirect, preflightDirect } from "./router.js";
 
 /**
  * Named-list CLI (issue #70 / ADR 0046): a thin presenter over the list service
@@ -36,6 +40,8 @@ import { preflightDirect } from "./router.js";
  *   rename --name OLD --to NEW            rename a live list
  *   delete --name NAME                    soft-delete a list (name frees for reuse)
  *   set-default --name NAME               point the default lane at a list (#190)
+ *   configure --name NAME [--refresh-every M|none] [--digest-hour H|none] [--digest-to A|none]
+ *                                         set a lane's cadence/recipients (#191)
  *   add    --name NAME --person-ids a,b --highlightly-player-ids c   add members (idempotent)
  *   remove --name NAME --person-ids a,b --highlightly-player-ids c   remove members
  *   show                                  print every live list + member counts
@@ -63,6 +69,8 @@ export async function runLists(argv: string[], deps: ListsDeps): Promise<number>
         return await runDelete(flags, deps);
       case "set-default":
         return await runSetDefault(flags, deps);
+      case "configure":
+        return await runConfigure(flags, deps);
       case "add":
         return await runAddRemove("add", flags, deps);
       case "remove":
@@ -71,7 +79,7 @@ export async function runLists(argv: string[], deps: ListsDeps): Promise<number>
         return await runShow(flags, deps);
       default:
         err(
-          "error=usage: lists <create|rename|delete|set-default|add|remove|show> [--name NAME] ...",
+          "error=usage: lists <create|rename|delete|set-default|configure|add|remove|show> [--name NAME] ...",
         );
         return 1;
     }
@@ -82,6 +90,7 @@ export async function runLists(argv: string[], deps: ListsDeps): Promise<number>
       e instanceof BlankListNameError ||
       e instanceof CannotDeleteDefaultListError ||
       e instanceof NoDefaultListError ||
+      e instanceof InvalidListConfigError ||
       e instanceof PlayerNotFoundError
     ) {
       err(`error=${e.message}`);
@@ -89,19 +98,6 @@ export async function runLists(argv: string[], deps: ListsDeps): Promise<number>
     }
     throw e;
   }
-}
-
-function parseFlags(args: string[]): Map<string, string> {
-  const flags = new Map<string, string>();
-  for (let i = 0; i < args.length; i += 1) {
-    const arg = args[i];
-    if (arg !== undefined && arg.startsWith("--")) {
-      const value = args[i + 1];
-      flags.set(arg.slice(2), value !== undefined && !value.startsWith("--") ? value : "");
-      if (value !== undefined && !value.startsWith("--")) i += 1;
-    }
-  }
-  return flags;
 }
 
 function requireName(flags: Map<string, string>, deps: ListsDeps): string | null {
@@ -147,6 +143,66 @@ async function runSetDefault(flags: Map<string, string>, deps: ListsDeps): Promi
   if (name === null) return 1;
   const list = await setDefaultList(deps.db, name, deps.now());
   deps.write(`list default id=${list.id} name=${list.name}`);
+  return 0;
+}
+
+/**
+ * A lane-configuration integer flag: absent → undefined (leave the column
+ * alone), the RESERVED literal `none` → null (clear it), otherwise a CANONICAL
+ * integer. Canonical in the `positiveInteger` sense the router uses, so `07`,
+ * `1e2`, `+5`, and `3.0` are usage errors rather than values silently coerced
+ * into a schedule. RANGE is deliberately NOT checked here — the service owns
+ * the bounds (and 0 is a valid `--digest-hour`), so the CLI cannot drift from
+ * the DB CHECKs by re-stating them.
+ */
+function parseConfigInteger(
+  raw: string | undefined,
+  label: string,
+  deps: ListsDeps,
+): number | null | undefined | "invalid" {
+  if (raw === undefined) return undefined;
+  const value = raw.trim();
+  if (value === CLEAR_LITERAL) return null;
+  const parsed = Number(value);
+  if (!/^\d+$/.test(value) || String(parsed) !== value || !Number.isSafeInteger(parsed)) {
+    (deps.writeError ?? deps.write)(`error=invalid ${label} value ${raw}; expected a canonical integer or '${CLEAR_LITERAL}'`);
+    return "invalid";
+  }
+  return parsed;
+}
+
+/**
+ * `configure` — set a lane's cadence and recipients (#191). Only the flags
+ * actually supplied are written; the other columns keep their values, which is
+ * why the patch distinguishes "absent" from "cleared". The literal `none` is
+ * RESERVED as the clear token and therefore cannot be used as a `--digest-to`
+ * address.
+ */
+async function runConfigure(flags: Map<string, string>, deps: ListsDeps): Promise<number> {
+  const name = requireName(flags, deps);
+  if (name === null) return 1;
+  const patch: ListConfigPatch = {};
+  const interval = parseConfigInteger(flags.get("refresh-every"), "--refresh-every", deps);
+  if (interval === "invalid") return 1;
+  if (interval !== undefined) patch.refreshIntervalMinutes = interval;
+  const hour = parseConfigInteger(flags.get("digest-hour"), "--digest-hour", deps);
+  if (hour === "invalid") return 1;
+  if (hour !== undefined) patch.digestHour = hour;
+  const to = flags.get("digest-to");
+  if (to !== undefined) patch.digestTo = to.trim() === CLEAR_LITERAL ? null : to;
+  if (Object.keys(patch).length === 0) {
+    (deps.writeError ?? deps.write)(
+      "error=configure requires at least one of --refresh-every, --digest-hour, --digest-to",
+    );
+    return 1;
+  }
+  const list = await configureList(deps.db, name, patch, deps.now());
+  // `-` for an unset column, the same null spelling `seed list` uses, so one
+  // greppable line always carries all three fields.
+  deps.write(
+    `list configured id=${list.id} name=${list.name} refreshEvery=${list.refreshIntervalMinutes ?? DISPLAY_NULL} ` +
+      `digestHour=${list.digestHour ?? DISPLAY_NULL} digestTo=${list.digestTo ?? DISPLAY_NULL}`,
+  );
   return 0;
 }
 
@@ -211,7 +267,15 @@ async function runShow(flags: Map<string, string>, deps: ListsDeps): Promise<num
   }
   const lists = await listLists(deps.db);
   for (const l of lists) {
-    deps.write(`list id=${l.id} name=${l.name} members=${l.memberCount} default=${l.isDefault}`);
+    // The cadence trio is APPENDED, never inserted: the leading four keys keep
+    // their order and spelling, so an existing grep or script reading this line
+    // is unaffected. `-` for an unset column, the same null spelling
+    // `configure` prints, so the two commands read alike (#191).
+    deps.write(
+      `list id=${l.id} name=${l.name} members=${l.memberCount} default=${l.isDefault} ` +
+        `refreshEvery=${l.refreshIntervalMinutes ?? DISPLAY_NULL} digestHour=${l.digestHour ?? DISPLAY_NULL} ` +
+        `digestTo=${l.digestTo ?? DISPLAY_NULL}`,
+    );
   }
   deps.write(`total=${lists.length}`);
   return 0;
@@ -226,6 +290,11 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     process.stderr.write(`error: ${failure}\n`);
     return 1;
   }
+  // Validate first, then collapse aliases/`=` forms to one canonical spelling,
+  // so `parseFlags` below never has to know an option has a short form (#191).
+  const normalized = command === undefined
+    ? argv
+    : normalizeDirect(["players", "lists", command], argv, [command]);
   loadDotEnv();
   const config = loadConfig();
   const { db, close } = await startupDb(config.databasePath, {
@@ -233,7 +302,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     keepLast: config.backupKeepLast,
   });
   try {
-    return await runLists(argv, {
+    return await runLists(normalized, {
       db,
       now: () => new Date(),
       write: (line) => process.stdout.write(`${line}\n`),

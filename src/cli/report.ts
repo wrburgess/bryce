@@ -13,7 +13,7 @@ import type { PlayerCardWindowSpec } from "../reports/player-card.js";
 import { AmbiguousPlayerCardNameError, PlayerCardNotFoundError, assemblePlayerCard } from "../reports/player-card.js";
 import { renderPlayerCardHtml, renderPlayerCardText } from "../reports/player-card-render.js";
 import { exitAfterDrain, isMain } from "./main.js";
-import { preflightDirect } from "./router.js";
+import { normalizeDirect, preflightDirect } from "./router.js";
 
 function option(argv: readonly string[], name: string): string | undefined | null {
   const inline = argv.find((token) => token.startsWith(`--${name}=`));
@@ -148,9 +148,12 @@ function defaultLaunch(path: string): Promise<void> {
   });
 }
 
-export async function runReportCli(argv: string[], deps: ReportCliDeps): Promise<number> {
-  const syntax = preflightDirect(["report", "player"], argv);
+export async function runReportCli(rawArgv: string[], deps: ReportCliDeps): Promise<number> {
+  const syntax = preflightDirect(["report", "player"], rawArgv);
   if (syntax !== null) { deps.write(`error: ${syntax}`, true); return 1; }
+  // Validate first, then collapse aliases/`=` forms to one canonical spelling,
+  // so the parser below never has to know an option has a short form (#191).
+  const argv = normalizeDirect(["report", "player"], rawArgv);
   const parsed = parseReportPlayerArgs(argv);
   if (typeof parsed === "string") { deps.write(`error: ${parsed}`, true); return 1; }
 
@@ -236,7 +239,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const config = loadConfig();
   const { db, close } = await startupDb(config.databasePath, { backupDir: config.backupDir, keepLast: config.backupKeepLast });
   try {
-    return await runReportCli(argv, {
+    return await runReportCli(normalizeDirect(["report", "player"], argv), {
       db,
       now: () => new Date(),
       tz: config.tz,

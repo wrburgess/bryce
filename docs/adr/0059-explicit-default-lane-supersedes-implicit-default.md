@@ -141,8 +141,39 @@ player in scope, which is the one outcome an unscoped digest must never have.
   liveness signal for the host, riding the lane's slot. A known wart, recorded here rather than
   discovered later.
 
+- **The two host-wide health reads stay lane-blind, on purpose** — see the amendment below, which
+  records why and what #193 still owes.
+
 - **`refresh_interval_minutes` is an interval, not a cron expression.** Decided in this phase because
   changing it later is another migration. The interval avoids a parser dependency and its test surface;
   it cannot express "weekdays only". The seeded lane's `1440` and `digest_hour` of `5` reproduce the
   host's existing `ops/templates` schedule exactly, so the lane describes the behavior the host already
   has rather than proposing a new one.
+
+## Amendment (#191)
+
+Phase 2 ([issue #191](https://github.com/wrburgess/bryce/issues/191)) is a command surface only — it
+adds `sk players add` and `sk players lists configure` over the phase-1 columns and changes no refresh
+or digest behavior. Building it surfaced two health reads that are lane-blind and *look* like
+oversights. Both are deliberate, and recording that here is cheaper than re-litigating them in #192
+and #193.
+
+**1. The offseason heartbeat stays lane-blind, by design.** `heartbeatWithinWeek`
+(`src/jobs/digest.ts`) asks one question — *has this HOST sent a liveness signal in the last seven
+days?* — and it is not a lane's question. Lane-scoping it would multiply offseason mail by the lane
+count while telling the HC nothing he did not already know from the first message: that the box is
+alive and the pipeline runs. The `digest_deliveries` row a heartbeat writes does carry the default
+lane's id, but only because `list_id` is `NOT NULL` (decision 2). That is a STORAGE detail, not a claim
+that the heartbeat belongs to that lane, and the wart is already recorded above.
+
+**2. `healthSnapshot.lastDelivery` stays host-wide, by design — and #193 owes an ADDITIONAL per-lane
+view.** The public `GET /health` and the MCP `status` tool answer "is this host delivering at all?",
+which is a host-wide question and stays one; narrowing the existing field would silently change a
+published contract for every consumer.
+
+The gap is real, though, and it opens the moment lanes actually send. A host-wide "last delivery"
+cannot detect ONE DEAD LANE AMONG SEVERAL: lane A digesting daily keeps `lastDelivery` fresh forever
+while lane B has been silent for a month, and the snapshot reports a healthy host throughout. That is
+the same shape as the failure ADR 0046's implicit default had — a system behaving like a correctly
+configured one while configured wrong — so it is worth naming before it can ship. #193 therefore owes a
+per-lane delivery view ALONGSIDE the host-wide one, not in place of it.

@@ -917,6 +917,143 @@ describe("lane configuration in the backup (v5, #190)", () => {
     opened.close();
   });
 
+  // Reviewer P2 (delta 2) then P1 (delta 3), and the pair is the lesson.
+  //
+  // `restorePlayerListBackup` writes `digest_to` straight to the row without
+  // passing through `configureList`, so a rule enforced only there is one a
+  // supported restore walks around. But REJECTING the payload to close that gap
+  // applies a rule newer than the v5 format retroactively, and turns an
+  // already-written backup into an unrestorable one — stranding the artifact
+  // that exists to BE the recovery path.
+  //
+  // So it normalizes: an unusable recipient becomes null, the restore succeeds,
+  // and the invariant still holds in the database. `configureList` still throws
+  // for the same value, and that asymmetry is deliberate — an operator typing it
+  // now should be told; a restore of something written long ago should not be
+  // blocked by it.
+  //
+  // The control-character case is written as a backslash-u escape, never as a
+  // raw byte: a raw control byte makes git classify the whole file as binary and
+  // hides its diff from every reviewer (rules/backend.md). That exact byte
+  // already fooled one run here — a stray raw BEL turned a *valid* address into
+  // a control-bearing one, so the assertion passed while proving something other
+  // than what its name claimed.
+  // Reviewer P2, delta 4. The normalization must run AFTER the version gate,
+  // never before it. A nested transform would rewrite `digestTo` out from under
+  // the `version < 5` check — erasing the very evidence that check looks for —
+  // so a hand-edited v2-v4 payload smuggling lane configuration would be
+  // silently ACCEPTED instead of rejected. Validate first, normalize second.
+  it("still rejects a pre-v5 payload smuggling digestTo, rather than normalizing its evidence away", async () => {
+    await createList(opened.db, "Prospects", NOW);
+    const v5 = await createPlayerListBackup(opened.db, () => NOW);
+    // EVERY other lane field is cleared on EVERY list, so `digestTo` is the only
+    // v5-only value left in the payload. Without this the migration-seeded
+    // `Watchlist` (refreshIntervalMinutes 1440, digestHour 5) trips the version
+    // gate on its own and the assertion passes whether or not the ordering is
+    // right — proving nothing, which is exactly what it did on the first draft.
+    const stripped = (v5.lists ?? []).map((l) => ({
+      ...l,
+      isDefault: false,
+      refreshIntervalMinutes: null,
+      digestHour: null,
+      digestTo: null,
+    }));
+    const control = { ...v5, version: 4, lists: stripped };
+    expect(() => parsePlayerListBackup(JSON.stringify(control))).not.toThrow();
+
+    const smuggled = {
+      ...control,
+      lists: stripped.map((l) => (l.name === "Prospects" ? { ...l, digestTo: "-" } : l)),
+    };
+    expect(() => parsePlayerListBackup(JSON.stringify(smuggled))).toThrow(/requires version 5/);
+  });
+
+  // Reviewer P2, delta 5 rung 2. `restorePlayerListBackup` takes
+  // `lists: PlayerBackupList[]` as a plain typed parameter, and a TYPE cannot
+  // prove the array came through `parsePlayerListBackup`. It is exported, so a
+  // caller that assembles the array itself — a test, a future REST/MCP restore —
+  // bypasses the parse-time normalization entirely. This drives that caller
+  // directly, which is the only way to reach the write without the parser.
+  it("normalizes an unusable digestTo even when the caller never went through the parser", async () => {
+    for (const candidate of ["-", "  -  ", "   "]) {
+      const dest = testDb();
+      try {
+        restorePlayerListBackup(dest.db, [], NOW, {
+          lists: [makeBackupList({ name: "Prospects", digestTo: candidate })],
+          members: [],
+        });
+        const restored = (
+          await dest.db.select().from(playerLists).where(eq(playerLists.name, "Prospects"))
+        )[0];
+        expect(restored?.digestTo, candidate).toBeNull();
+      } finally {
+        dest.close();
+      }
+    }
+
+    // A real recipient is written through untouched.
+    const ok = testDb();
+    try {
+      restorePlayerListBackup(ok.db, [], NOW, {
+        lists: [makeBackupList({ name: "Prospects", digestTo: "a-b@example.com" })],
+        members: [],
+      });
+      const restored = (
+        await ok.db.select().from(playerLists).where(eq(playerLists.name, "Prospects"))
+      )[0];
+      expect(restored?.digestTo).toBe("a-b@example.com");
+    } finally {
+      ok.close();
+    }
+  });
+
+  it("NORMALIZES an unusable digestTo to null instead of making the backup unrestorable", async () => {
+    await createList(opened.db, "Prospects", NOW);
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+
+    for (const candidate of ["-", "  -  ", "   ", "bad\u0007addr"]) {
+      const poisoned = {
+        ...backup,
+        lists: (backup.lists ?? []).map((l) =>
+          l.name === "Prospects" ? { ...l, digestTo: candidate } : l,
+        ),
+      };
+      // Parsing SUCCEEDS. This rule is newer than the v5 format, so rejecting
+      // would apply it retroactively and make an already-written backup
+      // unrestorable — stranding the one artifact that exists to BE the
+      // recovery path (Reviewer P1, delta 3).
+      const parsed = parsePlayerListBackup(JSON.stringify(poisoned));
+      expect(parsed.lists?.find((l) => l.name === "Prospects"), candidate)
+        .toMatchObject({ digestTo: null });
+
+      // ...and the invariant still holds in the DATABASE after a real restore:
+      // nothing that renders as unset is ever stored as a recipient.
+      const dest = testDb();
+      try {
+        restorePlayerListBackup(dest.db, parsed.players, NOW, {
+          lists: parsed.lists,
+          members: parsed.members,
+        });
+        const restored = (
+          await dest.db.select().from(playerLists).where(eq(playerLists.name, "Prospects"))
+        )[0];
+        expect(restored?.digestTo, candidate).toBeNull();
+      } finally {
+        dest.close();
+      }
+    }
+
+    // A recipient merely CONTAINING a hyphen still round-trips untouched.
+    const fine = {
+      ...backup,
+      lists: (backup.lists ?? []).map((l) =>
+        l.name === "Prospects" ? { ...l, digestTo: "a-b@example.com" } : l,
+      ),
+    };
+    expect(parsePlayerListBackup(JSON.stringify(fine)).lists?.find((l) => l.name === "Prospects"))
+      .toMatchObject({ digestTo: "a-b@example.com" });
+  });
+
   it("round-trips the default flag and every cadence field into a fresh database", async () => {
     await createList(opened.db, "Prospects", NOW);
     await setDefaultList(opened.db, "Prospects", NOW);
