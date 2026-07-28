@@ -917,6 +917,45 @@ describe("lane configuration in the backup (v5, #190)", () => {
     opened.close();
   });
 
+  // Reviewer P2, delta 2. `restorePlayerListBackup` writes `digest_to` straight
+  // to the row without passing through `configureList`, so a rule enforced only
+  // there is one a supported restore walks around: the payload below would have
+  // landed a recipient that renders exactly like NULL on every surface. Rejected
+  // at PARSE time, before anything is written — the same boundary the blank and
+  // control-character rules already sit on.
+  //
+  // The control-character case is written as a backslash-u escape, never as a
+  // raw byte. A raw control byte in a source file makes git classify the whole
+  // file as binary, which hides its diff from every reviewer (rules/backend.md)
+  // — and this exact case
+  // already fooled one run here: a stray raw BEL made a *valid* recipient throw
+  // for the control-character rule, so the assertion passed while proving
+  // something other than what its name claimed.
+  it("rejects a backup whose digestTo is blank, control-bearing, or the reserved sentinel", async () => {
+    await createList(opened.db, "Prospects", NOW);
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+
+    for (const candidate of ["-", "  -  ", "   ", "bad\u0007addr"]) {
+      const poisoned = {
+        ...backup,
+        lists: (backup.lists ?? []).map((l) =>
+          l.name === "Prospects" ? { ...l, digestTo: candidate } : l,
+        ),
+      };
+      expect(() => parsePlayerListBackup(JSON.stringify(poisoned)), candidate).toThrow(/digestTo/);
+    }
+
+    // A recipient merely CONTAINING a hyphen still round-trips untouched.
+    const fine = {
+      ...backup,
+      lists: (backup.lists ?? []).map((l) =>
+        l.name === "Prospects" ? { ...l, digestTo: "a-b@example.com" } : l,
+      ),
+    };
+    expect(parsePlayerListBackup(JSON.stringify(fine)).lists?.find((l) => l.name === "Prospects"))
+      .toMatchObject({ digestTo: "a-b@example.com" });
+  });
+
   it("round-trips the default flag and every cadence field into a fresh database", async () => {
     await createList(opened.db, "Prospects", NOW);
     await setDefaultList(opened.db, "Prospects", NOW);

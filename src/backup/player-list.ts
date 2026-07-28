@@ -5,6 +5,7 @@ import { z } from "zod";
 import type { Db } from "../db/client.js";
 import { listMembers, playerLists, playerTags, players } from "../db/schema.js";
 import { canonicalizeName } from "../domain/names.js";
+import { digestRecipientProblem } from "../lists/service.js";
 import { listPlayers } from "../watchlist/service.js";
 import { fsyncDir } from "./snapshot.js";
 
@@ -173,6 +174,18 @@ const backupListSchema = z
         path: ["name"],
         message: "list name must not contain a control character",
       });
+    }
+    // Restore writes `digest_to` STRAIGHT to the row without passing through
+    // `configureList`, so a rule enforced only there is one a supported restore
+    // walks around: a payload carrying `digestTo: "-"` would land a recipient
+    // that renders identically to NULL on every surface (Reviewer P2, delta 2).
+    // The predicate is imported, not restated, so the two doors cannot drift on
+    // what a valid recipient is.
+    if (row.digestTo !== null) {
+      const problem = digestRecipientProblem(row.digestTo);
+      if (problem !== null) {
+        ctx.addIssue({ code: "custom", path: ["digestTo"], message: `digestTo must be ${problem}` });
+      }
     }
   });
 

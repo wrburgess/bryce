@@ -243,6 +243,33 @@ export interface ListConfigPatch {
   digestTo?: string | null;
 }
 
+/**
+ * What is wrong with a lane's `digest_to`, or null when nothing is (#191).
+ *
+ * THE definition of a valid recipient, exported so every write path shares it
+ * rather than restating it. `configureList` is not the only door: a v5 Player
+ * List Backup carries `digestTo` and `restorePlayerListBackup` writes it
+ * straight to the row, never passing through here — so a rule enforced only in
+ * `configureList` is a rule a supported restore walks around (Reviewer P2,
+ * delta 2). That is the "author it once, export it, let a new call site inherit
+ * it" rule in `rules/scripting.md`, and the reason this is a function and not
+ * two `if`s in two files.
+ *
+ * `-` is rejected because it is how a NULL column RENDERS on every surface that
+ * prints a lane: stored as a recipient it would make a configured lane read
+ * exactly like a cleared one, to an operator and to a script parsing the line.
+ * Clear the column with `null`, never with the sentinel.
+ */
+export function digestRecipientProblem(value: string): string | null {
+  if (value.trim().length === 0 || /\p{Cc}/u.test(value)) {
+    return "a non-blank value without control characters";
+  }
+  if (value.trim() === "-") {
+    return "a recipient other than '-', which is reserved as the display sentinel";
+  }
+  return null;
+}
+
 /** Reject a cadence value the DB CHECKs would reject, with the field named. */
 function validatePatch(patch: ListConfigPatch): void {
   const { refreshIntervalMinutes: interval, digestHour: hour, digestTo: to } = patch;
@@ -256,17 +283,9 @@ function validatePatch(patch: ListConfigPatch): void {
   if (hour !== undefined && hour !== null && (!Number.isSafeInteger(hour) || hour < 0 || hour > 23)) {
     throw new InvalidListConfigError("digestHour", "an hour from 0 to 23");
   }
-  if (to !== undefined && to !== null && (to.trim().length === 0 || /\p{Cc}/u.test(to))) {
-    throw new InvalidListConfigError("digestTo", "a non-blank value without control characters");
-  }
-  // `-` is how a NULL column RENDERS on every surface that prints a lane, so
-  // storing it as a recipient would make a configured lane indistinguishable
-  // from a cleared one to a reader — including a script parsing that line.
-  // Guarded HERE and not only at the router because this function is reachable
-  // from a test, a future REST/MCP surface, and any caller that never sees a CLI
-  // option table (Reviewer P2, delta 1). Use `null` to clear.
-  if (to !== undefined && to !== null && to.trim() === "-") {
-    throw new InvalidListConfigError("digestTo", "a recipient other than '-', which is reserved as the display sentinel");
+  if (to !== undefined && to !== null) {
+    const problem = digestRecipientProblem(to);
+    if (problem !== null) throw new InvalidListConfigError("digestTo", problem);
   }
 }
 
