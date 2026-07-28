@@ -237,7 +237,7 @@ Implemented on `feature/dependency-automation` via a PR referencing **`Part of #
 keyword). #59 remains open through operational acceptance (§7) and is closed by the HC after live
 verification.
 
-**Pin guard (in this PR):** [`scripts/check_action_pins.rb`](../../../scripts/check_action_pins.rb)
+**Pin guard (in this PR):** [`scripts/check-action-pins.ts`](../../../scripts/check-action-pins.ts)
 (stdlib-only, with a `.test.sh` self-test) fails CI if any workflow reintroduces an unpinned external
 `uses:`, wired into `parity.yml` so the hardening cannot erode as new steps are added. The convention
 is documented in [`rules/security.md`](../../../rules/security.md) (Patterns + Anti-Patterns).
