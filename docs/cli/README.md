@@ -89,6 +89,8 @@ terminal can never show more players settled than the database knows about.
 sk digest                         # default 1d window
 sk digest -w 7d                   # short alias
 sk digest --window=14d            # equals form
+sk digest --list Prospects        # scope to a named list
+sk digest -l Prospects            # short alias for --list (#191)
 sk digest --force                 # daily-slot test replay
 ```
 
@@ -97,8 +99,8 @@ state, so re-running a Window always sends the same content.
 
 | Flag | Default | Accepted values |
 |---|---|---|
-| `--window <spec>` / `--window=<spec>` | `1d` | date windows `1d`, `7d`, `14d`, `21d`, `28d`, `35d`, `60d`, `ytd`; per-player game-count windows `last10games`, `last30games` (#153) |
-| `--list <name>` / `--list=<name>` | off (all active) | any existing list name (#70) |
+| `--window <spec>` / `--window=<spec>` / `-w <spec>` | `1d` | date windows `1d`, `7d`, `14d`, `21d`, `28d`, `35d`, `60d`, `ytd`; per-player game-count windows `last10games`, `last30games` (#153) |
+| `--list <name>` / `--list=<name>` / `-l <name>` | off (all active) | any existing list name (#70) |
 | `--tags <selector>` / `--tags=<selector>` | off (no cohort scope) | any valid tag selector (#140) |
 | `--force` | off (boolean) | present or absent |
 
@@ -126,10 +128,13 @@ state, so re-running a Window always sends the same content.
   sk digest -w last10games                             # all tracked, each over his last 10 games
   sk digest --tags level:aaa -w last30games            # AAA cohort, each over his last 30 games
   ```
-- `--list NAME` scopes the send to a named list's active members
+- `--list NAME` (or the short `-l NAME`) scopes the send to a named list's active members
   ([#70](https://github.com/wrburgess/bryce/issues/70) / [ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)).
   A named-list send is **on-demand only** (it takes no daily slot); an unknown list **fails closed**
-  (exit `1`, `error: no list named "…"`, nothing sent).
+  (exit `1`, `error: no list named "…"`, nothing sent). All three spellings —
+  `--list NAME`, `--list=NAME`, `-l NAME` — scope identically: the router rewrites an alias and an
+  `=` form to one canonical spelling before the command reads it, so a short flag can never be
+  silently dropped and send an unscoped digest ([#191](https://github.com/wrburgess/bryce/issues/191)).
 - `--tags SELECTOR` scopes the send to a **cohort** — the Players matching every token
   ([#140](https://github.com/wrburgess/bryce/issues/140) / [ADR 0050](../adr/0050-tag-scoped-cohort-reports.md)).
   The grammar is the one in [Player Tags](../domain/tags.md#selector-grammar): comma-separated tokens
@@ -203,6 +208,7 @@ sk players lists remove --name "Top 30" --person-ids 700001
 sk players lists show                       # every live list + member counts + which is default
 sk players lists show   --name "Top 30"     # a list's active members
 sk players lists set-default --name "Top 30"  # point the default lane here
+sk players lists configure --name "Top 30" --digest-hour 5   # this lane's cadence (#191)
 sk players lists delete --name "Top 30"     # soft-delete; the name frees for reuse
 ```
 
@@ -222,6 +228,119 @@ current default writes nothing). **`delete` refuses the default list** — point
 first, or every unscoped command would start failing. If the default is ever lost (restoring a pre-v5
 Player List Backup is the usual way), `sk digest` refuses with an `error:` line naming `set-default`
 rather than mailing every Player.
+
+### `players lists configure` — a lane's cadence and recipients (`#191`)
+
+```sh
+sk players lists configure --name "Top 30" --digest-hour 5          # digest at 05:00 host time
+sk players lists configure --name "Top 30" --digest-hour 0          # midnight IS a valid hour
+sk players lists configure --name "Top 30" --refresh-every 1440     # refresh once a day
+sk players lists configure --name "Top 30" --digest-to hc@example.com
+sk players lists configure --name "Top 30" --digest-hour none       # clear it back to the default
+```
+
+Sets the three **Lane** columns [ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md)
+declared in phase 1. They remain **inert** — nothing reads them until
+[#192](https://github.com/wrburgess/bryce/issues/192) and
+[#193](https://github.com/wrburgess/bryce/issues/193) — so configuring a lane today changes no refresh
+or digest behavior; it records the intent those phases will act on.
+
+| Flag | Sets | Accepted values |
+|---|---|---|
+| `--refresh-every MINUTES` | `refresh_interval_minutes` | a **canonical** positive integer, or the reserved `none` |
+| `--digest-hour HOUR` | `digest_hour` | a **canonical** integer `0`–`23` inclusive, or the reserved `none` |
+| `--digest-to ADDRESS` | `digest_to` | any non-blank recipient value, or the reserved `none` |
+
+- **Only the flags you pass are written.** Setting `--digest-hour` leaves `refresh_every` and
+  `digest_to` exactly as they were; configuring one column never silently clears another.
+- **`none` is a RESERVED word** meaning *clear this column to NULL*. It therefore cannot be used as a
+  literal `--digest-to` address.
+- **`--digest-hour 0` is valid** — it means a midnight digest, and the database `CHECK` allows it.
+  It is the one place the usual positive-integer rule would be wrong.
+- Values must be **canonical**: `07`, `1e2`, `+5`, and `3.0` are usage errors, not silently coerced
+  numbers, so a typo can never become a schedule. Out-of-range values (`--digest-hour 24`,
+  `--refresh-every 0`) are refused at the router **and** again in the service, which is what a REST or
+  MCP caller will inherit.
+- At least one of the three flags is required; `configure --name X` alone fails loudly rather than
+  succeeding as a no-op. An unknown list writes `error=no list named "…"` and exits `1`.
+
+Output is one greppable line, with `-` for an unset column:
+
+```
+list configured id=3 name=Top 30 refreshEvery=1440 digestHour=5 digestTo=hc@example.com
+```
+
+## `players add` — add one player straight onto a lane (`#191`)
+
+```sh
+sk players add --name "Maximo Acosta"                        # onto the DEFAULT lane
+sk players add --name "Maximo Acosta" --list Prospects       # onto a named lane
+sk players add --name "Maximo Acosta" -l Prospects           # short alias for --list
+sk players add --name "smith" --pick 2                       # choose from a numbered list (1-based)
+sk players add --name "Roch Cholowsky" --ncaa --list Prospects
+```
+
+Collapses the two-step `sk seed add` + `sk players lists add` dance into one command: resolve a
+player by name, add him to the Watch List, and attach him to a **Lane**. The identity rules are
+exactly `seed add`'s — one shared implementation, so the two commands cannot disambiguate a name
+differently.
+
+| Flag | Required | Notes |
+|---|---|---|
+| `--name NAME` | **yes** | The name to search. MLB/MiLB people-search by default. |
+| `--list NAME` / `-l NAME` | no | Target lane. **Omitted → the default lane**; unknown → fails closed. |
+| `--pick I` | no | **One-based** choice among several MLB matches. Requires `--name`. |
+| `--ncaa` | no | Search NCAA players through Highlightly instead. **Cannot be combined with `--pick`.** |
+
+- **The lane is resolved FIRST** — before any upstream call and before any write. A typo'd `--list`
+  costs no API call and can never leave a player created but homeless. With `--list` omitted and no
+  default set, it refuses with the same `no default list is set` line `digest` gives.
+- **List names are case-sensitive** ([ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)):
+  `--list prospects` does not find a list named `Prospects`, it fails closed.
+- **`--ncaa` has no `--pick` escape.** Several Highlightly hits print each candidate's explicit
+  identity and exit `1`, telling you to re-run with it — the same rule `seed add --ncaa` follows.
+  Passing `--ncaa --pick` is a usage error, refused at preflight, rather than a second ambiguity rule.
+- **Re-adding is idempotent**: an existing player and an existing membership both report
+  `member=existing`, exit `0`, and run **no** refresh.
+- Adding a **new** player runs his **first Refresh** immediately (or reports it skipped in Offseason
+  Sleep), exactly like `seed add`.
+
+Output is one greppable line, plus the first-refresh line for a brand-new player only:
+
+```
+added player id=7 personId=691185 name=Maximo Acosta list=Prospects member=added
+refresh done inserted=44 updated=0
+```
+
+NCAA rows carry `highlightlyPlayerId=…` in place of `personId=…`.
+
+**The two-write caveat, stated rather than hidden.** Creating the player and attaching him to the
+lane are two writes and **cannot** be one transaction — the create does network I/O and runs the
+first Refresh, and a SQLite write lock is never held across the network. So if the attach fails, the
+command does not pretend nothing happened. It reports the residual state and the exact repair, and
+exits non-zero:
+
+```
+error: player id=7 created but not attached to list=Prospects - re-run: sk players lists add --name Prospects --person-ids 691185
+```
+
+A lane soft-deleted between the two writes is refused the same way: the attach re-reads the lane
+under its write lock, so membership is never written onto a dead lane.
+
+## `connector smoke` — prove a connector can reach `/mcp`
+
+```sh
+API_TOKEN=... MCP_URL=https://your-host.example.com/mcp sk connector smoke
+sk connector smoke --mutate       # STAGING ONLY — exercises the write path
+```
+
+Drives the **real** MCP SDK client over Streamable HTTP against a running Bryce `/mcp`
+([#37](https://github.com/wrburgess/bryce/issues/37)): it initializes, discovers the full tool set,
+reads health and a digest preview, and confirms an unauthenticated request still fails closed.
+Configuration is environment-only and **no secret is ever echoed**. The opt-in `--mutate` additionally
+exercises the write path — against a designated, already-inactive staging sentinel only, never a live
+Player. The full procedure, including what to check when it fails, is in
+[Running Bryce → Verify the connector path locally first](../guides/running-bryce.md#verify-the-connector-path-locally-first).
 
 ## `seed` — manage the Watch List
 

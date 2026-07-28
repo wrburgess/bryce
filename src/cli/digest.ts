@@ -16,7 +16,7 @@ import { createMailer } from "../mailer/index.js";
 import type { TagScope } from "../tags/service.js";
 import { resolveTagScope } from "../tags/service.js";
 import { exitAfterDrain, isMain } from "./main.js";
-import { preflightDirect } from "./router.js";
+import { normalizeDirect, preflightDirect } from "./router.js";
 
 /**
  * The digest CLI: `npm run digest [-- --window 7d] [-- --force]`. A thin
@@ -39,29 +39,43 @@ export interface DigestCliDeps {
 }
 
 /**
+ * Every parser below reads a NORMALIZED argv (#191): `runRouter` and this
+ * module's own entry points call `normalizeOptions` right after preflight, so
+ * an alias (`-w`, `-l`, `-f`) and an inline `--window=7d` have already been
+ * rewritten to the canonical `--window 7d` spelling by the time a parser runs.
+ *
+ * That is why the hand-rolled `-w` / `--window=` / `--list=` branches that used
+ * to live here are GONE rather than kept alongside. They were a second
+ * implementation of the router's own option grammar, and it had already drifted:
+ * `parseWindow` handled `-w` while `parseList` handled no alias at all, so
+ * adding an `l` alias would have let `sk digest -l Prospects` pass preflight,
+ * parse to `undefined`, and mail the WHOLE Watch List under a line that reads
+ * like a scoped send. One grammar, declared in the router's table, is the fix.
+ */
+
+/**
  * `--force`: re-send today's digest even though it already went out (testing).
  * One valueless boolean, so a bare `includes` rather than seed.ts's flag-map
  * parser. Exported and pure so the lookalike cases are covered directly.
  * What force does and does not override lives in src/jobs/delivery-claim.ts.
+ *
+ * The `-f` check is deliberately RETAINED where the value parsers' alias
+ * branches were deleted: `includes` is order-free and a boolean has no value to
+ * mis-attach, so recognizing both spellings cannot mis-scope anything — it only
+ * keeps a direct, un-normalized caller honest. The deleted branches were the
+ * opposite: they decided WHICH VALUE was read.
  */
 export function parseForce(argv: string[]): boolean {
   return argv.includes("--force") || argv.includes("-f");
 }
 
 /**
- * `--window <spec>` / `--window=<spec>`, default `1d`. Returns null for an
- * unsupported value so the caller can fail closed — a typo'd window must not
- * silently send a different report than the operator asked for, and under
- * window selection the window IS the content.
+ * `--window <spec>`, default `1d`. Returns null for an unsupported value so the
+ * caller can fail closed — a typo'd window must not silently send a different
+ * report than the operator asked for, and under window selection the window IS
+ * the content.
  */
 export function parseWindow(argv: string[]): ReportWindowSpec | null {
-  const shortAt = argv.indexOf("-w");
-  if (shortAt !== -1) {
-    const value = argv[shortAt + 1];
-    return value === undefined ? null : parseReportWindowSpec(value);
-  }
-  const inline = argv.find((a) => a.startsWith("--window="));
-  if (inline !== undefined) return parseReportWindowSpec(inline.slice("--window=".length));
   const at = argv.indexOf("--window");
   if (at === -1) return "1d";
   const value = argv[at + 1];
@@ -69,17 +83,12 @@ export function parseWindow(argv: string[]): ReportWindowSpec | null {
 }
 
 /**
- * `--list <name>` / `--list=<name>`, scoping an on-demand send to a named list's
- * active members (issue #70). Returns undefined when absent (unscoped, all
- * active players) and null when the flag is present but its value is missing —
- * so the caller can fail closed on a malformed flag, just like `--window`.
+ * `--list <name>`, scoping an on-demand send to a named list's active members
+ * (issue #70). Returns undefined when absent (unscoped, all active players) and
+ * null when the flag is present but its value is missing — so the caller can
+ * fail closed on a malformed flag, just like `--window`.
  */
 export function parseList(argv: string[]): string | null | undefined {
-  const inline = argv.find((a) => a.startsWith("--list="));
-  if (inline !== undefined) {
-    const value = inline.slice("--list=".length).trim();
-    return value.length === 0 ? null : value;
-  }
   const at = argv.indexOf("--list");
   if (at === -1) return undefined;
   const value = argv[at + 1];
@@ -90,19 +99,16 @@ export function parseList(argv: string[]): string | null | undefined {
 }
 
 /**
- * `--tags <selector>` / `--tags=<selector>`, scoping the report to the players
- * matching every token (#140). Same three-state contract as `parseList`:
- * undefined when absent (no tag scope), null when the flag is present but its
- * value is missing — so a malformed flag fails closed rather than silently
- * widening the report to every active player. The selector's GRAMMAR is not
- * checked here; `resolveTagScope` owns it, so the CLI cannot drift from REST/MCP.
+ * `--tags <selector>`, scoping the report to the players matching every token
+ * (#140). Same three-state contract as `parseList`: undefined when absent (no
+ * tag scope), null when the flag is present but its value is missing — so a
+ * malformed flag fails closed rather than silently widening the report to every
+ * active player. Its `--tags=` branch was deleted alongside `--list=`'s (#191),
+ * for the same reason: the router's grammar already rewrote it. The selector's
+ * GRAMMAR is not checked here; `resolveTagScope` owns it, so the CLI cannot
+ * drift from REST/MCP.
  */
 export function parseTags(argv: string[]): string | null | undefined {
-  const inline = argv.find((a) => a.startsWith("--tags="));
-  if (inline !== undefined) {
-    const value = inline.slice("--tags=".length).trim();
-    return value.length === 0 ? null : value;
-  }
   const at = argv.indexOf("--tags");
   if (at === -1) return undefined;
   const value = argv[at + 1];
@@ -111,13 +117,18 @@ export function parseTags(argv: string[]): string | null | undefined {
     : value.trim();
 }
 
-export async function runDigestCli(argv: string[], deps: DigestCliDeps): Promise<number> {
+export async function runDigestCli(rawArgv: string[], deps: DigestCliDeps): Promise<number> {
   const writeError = deps.writeError ?? deps.write;
-  const syntaxFailure = preflightDirect(["digest"], argv);
+  const syntaxFailure = preflightDirect(["digest"], rawArgv);
   if (syntaxFailure !== null) {
+    // Reported against what the operator TYPED, which is why validation runs
+    // before normalization rather than after.
     writeError(`error: ${syntaxFailure}`);
     return 1;
   }
+  // Validated; now collapse aliases and `=` forms to one spelling, so every
+  // parser below reads `--name value` and an alias can never be dropped (#191).
+  const argv = normalizeDirect(["digest"], rawArgv);
   const spec = parseWindow(argv);
   if (spec === null) {
     // Fail closed, BEFORE the mailer is touched: nothing is sent.
@@ -209,6 +220,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     process.stderr.write(`error: ${failure}\n`);
     return 1;
   }
+  // Normalized here too, not only in `runDigestCli`: the direct `npm run digest
+  // -- -l X` path bypasses `runRouter` entirely, and normalizing in only one
+  // place is how one entry point keeps a broken alias (#191).
+  const normalized = normalizeDirect(["digest"], argv);
   loadDotEnv();
   const config = loadConfig();
   const { db, close } = await startupDb(config.databasePath, {
@@ -216,7 +231,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     keepLast: config.backupKeepLast,
   });
   try {
-    return await runDigestCli(argv, {
+    return await runDigestCli(normalized, {
       db,
       mailer: createMailer(config),
       now: () => new Date(),

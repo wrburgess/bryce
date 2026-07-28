@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { availableParallelism, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { COMMANDS, type Command, preflight, preflightDirect, renderHelp, resolve, runRouter } from "../src/cli/router.js";
+import { COMMANDS, type Command, normalizeDirect, normalizeOptions, preflight, preflightDirect, renderHelp, resolve, runRouter } from "../src/cli/router.js";
 
 // How long any ONE compatibility entry point may take to bail on a bare environment, and how many may
 // be in flight at once. The case below derives its own test budget from both, so the budget and the
@@ -72,6 +73,8 @@ const validArgs: Record<string, string[]> = {
   "seed tag add": ["--person-id", "1", "--tag", "status:rostered"],
   "seed tag remove": ["--person-id", "1", "--tag", "status:rostered"],
   "seed tag list": ["--person-id", "1"],
+  "players add": ["--name", "Acosta"],
+  "players lists configure": ["--name", "Prospects", "--digest-hour", "5"],
 };
 
 describe("CLI router metadata", () => {
@@ -390,11 +393,129 @@ describe("CLI router metadata", () => {
     }
     expect(seen).toHaveLength(COMMANDS.length);
 
+    // The presenter is handed the NORMALIZED argv, not the raw one (#191): the
+    // router owns the option grammar, so a leaf never has to re-implement it and
+    // can never disagree with preflight about what `-w` meant.
     const digestSeen: string[][] = [];
     const digest = commands.find((command) => command.path[0] === "digest")!;
     const digestOnly = [{ ...digest, load: async () => ({ main: async (argv: string[]) => { digestSeen.push(argv); return 29; } }) }];
     expect(await runRouter(["digest", "-w", "7d"], vi.fn(), digestOnly)).toBe(29);
-    expect(digestSeen).toEqual([["-w", "7d"]]);
+    expect(digestSeen).toEqual([["--window", "7d"]]);
+
+    digestSeen.length = 0;
+    expect(await runRouter(["digest", "-l", "Prospects", "-f"], vi.fn(), digestOnly)).toBe(29);
+    expect(digestSeen).toEqual([["--list", "Prospects", "--force"]]);
+  });
+
+  // #191. The defect this whole mechanism exists to prevent: `runRouter` hands
+  // the ORIGINAL argv to each presenter, and each presenter re-implements flag
+  // parsing. digest's `parseWindow` handled `-w`; `parseList` handled no alias at
+  // all — so naively adding an `l` alias would have let `sk digest -l Prospects`
+  // pass preflight, parse to `undefined`, and mail the WHOLE Watch List under a
+  // line that reads like a scoped send.
+  describe("normalizeOptions (#191)", () => {
+    it("rewrites EVERY declared alias and inline form to one canonical spelling", () => {
+      // A PROPERTY over the whole table, not an enumeration of today's commands:
+      // a command added tomorrow with an alias is covered without editing this.
+      for (const command of COMMANDS) {
+        for (const option of command.options ?? []) {
+          const long = `--${option.name}`;
+          for (const alias of option.aliases ?? []) {
+            const expected = option.value === false ? [long] : [long, "VALUE"];
+            const short = option.value === false ? [`-${alias}`] : [`-${alias}`, "VALUE"];
+            expect(normalizeOptions(command, short), `${command.path.join(" ")} -${alias}`).toEqual(expected);
+            // Idempotent: the long form is already canonical and must not move.
+            expect(normalizeOptions(command, expected), `${command.path.join(" ")} ${long}`).toEqual(expected);
+          }
+          if (option.inline === true && option.value !== false) {
+            expect(normalizeOptions(command, [`${long}=VALUE`]), `${command.path.join(" ")} ${long}=`).toEqual([long, "VALUE"]);
+          }
+        }
+      }
+    });
+
+    it("never rewrites a VALUE that looks like a flag, and leaves unknown tokens alone", () => {
+      const digest = COMMANDS.find((command) => command.path.join(" ") === "digest")!;
+      // `-l` here is the VALUE of --list, not a second option. Consuming the
+      // following token is what keeps it from being re-read as one.
+      expect(normalizeOptions(digest, ["--list", "-l"])).toEqual(["--list", "-l"]);
+      expect(normalizeOptions(digest, ["-l", "-w"])).toEqual(["--list", "-w"]);
+      // Pure: an option this command does not declare passes through untouched
+      // (preflight already rejected it — normalization is not a second gate).
+      expect(normalizeOptions(digest, ["--bogus", "x"])).toEqual(["--bogus", "x"]);
+      expect(normalizeOptions(digest, [])).toEqual([]);
+    });
+
+    it("normalizes the DIRECT npm entry point too, prefix and all", () => {
+      // The direct `npm run …` path bypasses runRouter entirely, so normalizing
+      // in only one place would leave `npm run digest -- -l X` broken.
+      expect(normalizeDirect(["digest"], ["-l", "Prospects"])).toEqual(["--list", "Prospects"]);
+      expect(normalizeDirect(["digest"], ["--window=7d"])).toEqual(["--window", "7d"]);
+      // The grouped verb the lists/seed scripts own is carried through verbatim.
+      expect(normalizeDirect(["players", "lists", "create"], ["create", "--name", "P"], ["create"]))
+        .toEqual(["create", "--name", "P"]);
+      // An unresolvable path is preflight's business, not normalization's.
+      expect(normalizeDirect(["nope"], ["-l", "X"])).toEqual(["-l", "X"]);
+    });
+  });
+
+  it("gives EVERY --list option the short `l` alias (#191)", () => {
+    // A property, not a list: the alias is declared once by `listOption()`, so a
+    // command that grew its own `--list` without the alias fails here by name.
+    const withList = COMMANDS.filter((command) => (command.options ?? []).some((option) => option.name === "list"));
+    expect(withList.length, "no command declares --list — this guard would be vacuous").toBeGreaterThan(0);
+    for (const command of withList) {
+      const option = (command.options ?? []).find((candidate) => candidate.name === "list")!;
+      expect(option.aliases, command.path.join(" ")).toContain("l");
+    }
+  });
+
+  it("refuses `players add --ncaa --pick` at preflight (#191)", () => {
+    const add = COMMANDS.find((command) => command.path.join(" ") === "players add")!;
+    expect(preflight(add, ["--name", "Roch Cholowsky", "--ncaa"])).toBeNull();
+    expect(preflight(add, ["--name", "smith", "--pick", "2"])).toBeNull();
+    expect(preflight(add, ["--name", "Roch", "--ncaa", "--pick", "2"])).toContain("cannot be combined with '--ncaa'");
+    // `--pick` is search-only and `--name` is required, exactly as on `seed add`.
+    expect(preflight(add, ["--pick", "2"])).toContain("missing required option '--name'");
+    expect(preflight(add, ["--name", "smith", "--pick", "01"])).toContain("canonical positive integer");
+    expect(preflight(add, ["--name", "smith", "-l", "Prospects"])).toBeNull();
+    expect(preflight(add, ["--name", "smith", "--list="])).toContain("invalid value");
+  });
+
+  it("validates `players lists configure` bounds at the router, midnight included (#191)", () => {
+    const configure = COMMANDS.find((command) => command.path.join(" ") === "players lists configure")!;
+    // Hour 0 is a valid MIDNIGHT digest — the DB CHECK allows it, so reusing the
+    // positive-integer rule here would refuse a lane the database accepts.
+    expect(preflight(configure, ["--name", "P", "--digest-hour", "0"])).toBeNull();
+    expect(preflight(configure, ["--name", "P", "--digest-hour", "23"])).toBeNull();
+    expect(preflight(configure, ["--name", "P", "--digest-hour", "24"])).toContain("hour 0-23");
+    expect(preflight(configure, ["--name", "P", "--refresh-every", "0"])).toContain("positive integer");
+    expect(preflight(configure, ["--name", "P", "--refresh-every", "1440"])).toBeNull();
+    // `none` is the RESERVED clear token on all three.
+    for (const flag of ["--digest-hour", "--refresh-every", "--digest-to"]) {
+      expect(preflight(configure, ["--name", "P", flag, "none"]), flag).toBeNull();
+    }
+    // Non-canonical spellings are usage errors, never coerced numbers.
+    for (const bad of ["07", "1e2", "+5", "3.0", "-1"]) {
+      expect(preflight(configure, ["--name", "P", "--digest-hour", bad]), bad).not.toBeNull();
+      expect(preflight(configure, ["--name", "P", "--refresh-every", bad]), bad).not.toBeNull();
+    }
+    // A no-op invocation fails loudly rather than succeeding as a nothing.
+    expect(preflight(configure, ["--name", "P"])).toContain("one of --refresh-every, --digest-hour, --digest-to");
+  });
+
+  // The CLI twin of the MCP tool-documentation guard #190 shipped
+  // (test/mcp.test.ts). A command that exists but is undocumented is invisible
+  // to the only reader who needs it, and nothing else in the repo checks it —
+  // `connector smoke` had been shipping undocumented in this file since #37.
+  it("documents every routed command path in docs/cli/README.md", () => {
+    const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const doc = readFileSync(join(repo, "docs", "cli", "README.md"), "utf8");
+    // Matched as the invocation an operator would actually type (`sk <path>`),
+    // not as a bare word: "digest" appears in prose constantly, so a substring
+    // check on the path alone would pass for a command nobody documented.
+    const undocumented = COMMANDS.map((command) => `sk ${command.path.join(" ")}`).filter((invocation) => !doc.includes(invocation));
+    expect(undocumented).toEqual([]);
   });
 
   it("runs a generated real-adapter matrix for every routed leaf", async () => {

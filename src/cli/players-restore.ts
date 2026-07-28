@@ -12,7 +12,7 @@ import {
   restorePlayerListBackup,
 } from "../watchlist/service.js";
 import { exitAfterDrain, isMain } from "./main.js";
-import { preflightDirect } from "./router.js";
+import { normalizeDirect, preflightDirect } from "./router.js";
 
 /**
  * `players:restore --in FILE` — re-import a Player List Backup, network-free and
@@ -156,7 +156,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     migrationsFolder: MIGRATIONS_FOLDER,
   });
   try {
-    return await runPlayersRestore(argv, {
+    return await runPlayersRestore(normalizeDirect(["players", "restore"], argv), {
       db: started.db,
       now: () => new Date(),
       write: (line) => process.stdout.write(`${line}\n`),

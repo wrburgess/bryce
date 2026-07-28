@@ -12,7 +12,7 @@ import { HighlightlyClient as HighlightlyClientImpl } from "../highlightly/clien
 import type { BatchAddEntryResult } from "../watchlist/service.js";
 import { batchAddPlayers } from "../watchlist/service.js";
 import { exitAfterDrain, isMain } from "./main.js";
-import { preflightDirect } from "./router.js";
+import { normalizeDirect, preflightDirect } from "./router.js";
 
 /**
  * `players:batch-add` — stage up to 25 players onto the Watch List in one call
@@ -260,7 +260,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   try {
     const client = new MlbClientImpl({ delayMs: config.mlbApiDelayMs });
     const highlightlyClient = new HighlightlyClientImpl({ apiKey: config.highlightlyApiKey });
-    return await runBatchAdd(argv, {
+    return await runBatchAdd(normalizeDirect(["players", "batch-add"], argv), {
       db,
       client,
       highlightlyClient,

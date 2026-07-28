@@ -45,6 +45,13 @@ export async function healthSnapshot(db: Db, now: Date, tz: string): Promise<Hea
   const statLineCount = (await db.select({ n: count() }).from(statLines))[0];
   // A retried delivery is updated in place (sentAt moves, createdAt does not),
   // so "last" means latest activity: sentAt when sent, createdAt for failed rows.
+  //
+  // DELIBERATELY HOST-WIDE, not lane-scoped (ADR 0059 → *Amendment (#191)*).
+  // This field answers "is the host delivering at all?", and narrowing it would
+  // silently change a published contract for every /health and MCP `status`
+  // consumer. It does NOT answer "is every lane delivering?": once lanes send,
+  // a healthy lane A digesting daily keeps this fresh while lane B has been
+  // silent for a month. #193 owes a per-lane view ALONGSIDE this one.
   const last = (
     await db
       .select()

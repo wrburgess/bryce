@@ -4,7 +4,7 @@ import { MIGRATIONS_FOLDER } from "../db/client.js";
 import { DatabaseBusyError } from "../db/lock.js";
 import { isKnownRestoreError, restoreSnapshot } from "../backup/restore.js";
 import { exitAfterDrain, isMain } from "./main.js";
-import { preflightDirect } from "./router.js";
+import { normalizeDirect, preflightDirect } from "./router.js";
 
 /**
  * `db:restore --from FILE` — swap a validated Snapshot into place.
@@ -95,7 +95,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const config = loadConfig();
   // Deliberately never opens config.databasePath here — the restore service owns
   // the file-level swap; opening/migrating it would defeat the whole design.
-  return runRestore(argv, {
+  return runRestore(normalizeDirect(["db", "restore"], argv), {
     liveDbPath: config.databasePath,
     backupDir: config.backupDir,
     keepLast: config.backupKeepLast,

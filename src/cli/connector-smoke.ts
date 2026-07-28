@@ -2,7 +2,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { loadDotEnv } from "../env.js";
 import { exitAfterDrain, isMain } from "./main.js";
-import { preflightDirect } from "./router.js";
+import { normalizeDirect, preflightDirect } from "./router.js";
 
 /**
  * Connector smoke diagnostic (issue #37): drives the REAL MCP SDK client over
@@ -560,7 +560,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   const safeFetch = makeSafeFetch((url, init) => fetch(url, init));
   return runSmoke({
     env: process.env,
-    argv,
+    argv: normalizeDirect(["connector", "smoke"], argv),
     io,
     fetchImpl: safeFetch,
     connectMcp: createRealConnector(safeFetch),
