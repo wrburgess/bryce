@@ -105,6 +105,54 @@ keys and immutable columns — not from any column the codebase also writes an `
 
 ---
 
+### F003 — One decision was answered by two reads, and they could disagree fail-open
+
+- **Normalized failure class:** two-snapshot decision — computing a **derived predicate about a set**
+  (coverage, completeness, "did we get everyone?") in a *second* query, after the query that selected
+  the set has already returned, so a concurrent write landing in the gap makes the two answers describe
+  different worlds.
+- **Severity and blast radius:** **High** as it occurred. `runRefresh` selected the sweep's players and
+  then separately counted whether its lanes covered every active player. Enrolling an already-active,
+  off-lane player into an in-scope lane between the two made selection miss them while coverage counted
+  them covered — so the run recorded `scope_list_ids = NULL` ("swept the whole Watch List") over a
+  player it never fetched, became watermark-eligible, and made the whole-list digest banner read
+  `fresh`. Blast radius is a digest that asserts completeness it does not have — **the same
+  "loss that reports itself as success" shape as [F002](#f002--a-durable-external-key-was-derived-from-a-role-flag-the-product-lets-you-move)**, and reached
+  through an ordinary lane enrollment.
+- **Enforcement status:** **the specific defect is enforced structurally** — `coversEveryActivePlayer`
+  is deleted and `selectSweepPlayers` returns the swept set and the coverage answer as two projections
+  of **one** statement, so there is no second snapshot to disagree with; `test/refresh-list.test.ts`
+  injects the racing enrollment at the moment the first `players` read completes and asserts the player
+  is unfetched **and** the run is not watermark-eligible (mutation-verified red against `14fd568`).
+  **The general lesson is not mechanically checkable** — "are these two reads answering one decision?"
+  is a question about intent, not a property the code exposes.
+- **Recurrence count:** 0 (first occurrence).
+- **Surfaced by:** [PR #201](https://github.com/wrburgess/bryce/pull/201) (issue
+  [#192](https://github.com/wrburgess/bryce/issues/192)), Stage-4 Reviewer, P1.
+- **Date recorded:** 2026-07-28
+- **Review date:** 2026-10-26
+
+**Why outcome 3 rather than 2.** The **minting freeze** is in force until the bounded corpus review
+dispositions the 45 loop-added bullets measured in
+[#185](https://github.com/wrburgess/bryce/issues/185), so outcome 2 is unavailable regardless of merit.
+It is also adjacent rather than absent: `rules/backend.md` already says never to swap a live data file
+into place with two renames, *"because a crash in the gap between the two renames leaves the canonical
+path absent"* — the identical two-step-with-a-gap shape, one domain over (filesystem, not database).
+Whether the database phrasing earns its own bullet is exactly what recurrence should decide.
+
+**What made it hard to see:** the two-read shape was introduced *as the fix* for an earlier defect in
+this same PR — the freshness gate had been keyed on a proxy (`rules/backend.md`: *never re-decide a
+dependency's question with a proxy signal*), and replacing the proxy with a real coverage question was
+correct. The regression was in *where the answer came from*, not in what was asked. A fix that gets the
+question right can still get the snapshot wrong, and the second mistake hides behind the first one's
+correctness.
+
+**If it recurs:** promote toward *enforce* first. The mechanically checkable form, if one exists, is a
+check that no code path issues two reads of the same table between a selection and the durable write
+that records what the selection covered — narrower and more tractable than a general TOCTOU rule.
+
+---
+
 ## Archived
 
 _None yet._
