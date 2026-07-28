@@ -20,18 +20,37 @@ activated `sk` executable may run from any directory; `.env` and relative config
 resolved from the current working directory, so run it from the directory whose data/configuration
 you intend to use.
 
-## `refresh` — re-ingest the current season
+## `refresh` — re-ingest a lane's current season
 
 ```sh
-sk refresh                        # live per-player progress (the interactive default)
+sk refresh                        # the DEFAULT lane, live per-player progress
 sk refresh --quiet                # only the terminal summary (what scheduled runs use)
 sk refresh -q                     # short alias
+sk refresh --list Prospects       # scope the sweep to a named lane
+sk refresh -l Prospects           # short alias for --list (#192)
 ```
 
-Re-ingests the **full current season** game log for every active Player and upserts it idempotently
-(no date windows — a Refresh makes storage complete). Running it twice changes nothing the second
-time. During **Offseason Sleep** it exits without any API calls
-(`refresh skipped reason=offseason-sleep`).
+Re-ingests the **full current season** game log for every active Player **in the lane** and upserts it
+idempotently (no date windows — a Refresh makes storage complete). Running it twice changes nothing the
+second time. During **Offseason Sleep** it exits without any API calls
+(`refresh skipped list=<lane> reason=offseason-sleep`).
+
+**Bare `sk refresh` means the DEFAULT lane**, not every active Player
+([#192](https://github.com/wrburgess/bryce/issues/192),
+[ADR 0061](../adr/0061-lane-scoped-refresh-supersedes-whole-sweep.md)) — the same rule
+`sk players add` follows. `players lists show` marks the default lane and `players lists set-default`
+moves it. `players.active` remains the master gate above membership: a deactivated Player who is still
+enrolled in the lane is not fetched.
+
+**Both lane failures are closed, before anything is claimed or swept.** An unknown (or soft-deleted)
+`--list` and a database with **no** default lane each print a greppable `error: …` line to stderr and
+exit **1** with no run recorded — a typo must never widen a sweep. The MCP `refresh` tool and
+`POST /refresh` are unchanged this phase and still sweep the whole Watch List.
+
+> **One-phase asymmetry.** `sk refresh` is lane-scoped from #192, while bare `sk digest` still assembles
+> the whole Watch List until [#193](https://github.com/wrburgess/bryce/issues/193). A lane run that is
+> *not* the default lane therefore does **not** make the daily digest read `fresh` — deliberately, so a
+> narrow sweep cannot forge a completeness claim over players it never touched.
 
 *Which* game logs each Player needs is derived per Player, not swept blindly across all six levels
 ([ADR 0060](../adr/0060-probe-plan-prunes-refresh-fanout.md)): his current level in all three stat
@@ -54,7 +73,7 @@ refresh player=3/12 id=41 call=getBoxScore matchId=99123 outcome=ok elapsed=847m
 refresh player=3/12 id=41 waiting call=getBoxScore matchId=99123 elapsed=30000ms
 refresh player=3/12 id=41 done outcome=refreshed inserted=4 updated=1 elapsed=48200ms refreshed=3 passedOver=0 failed=0
 refresh notice code=ncaa-season-missing season=2026
-refresh done status=ok players=11 skipped=1 failed=0 inserted=44 updated=3
+refresh done list=Watchlist status=ok players=11 skipped=1 failed=0 inserted=44 updated=3
 ```
 
 - **Key order is fixed** — `refresh` · `player=i/total` · `id=` · `name=` · `call=` · the call's own
@@ -77,8 +96,13 @@ refresh done status=ok players=11 skipped=1 failed=0 inserted=44 updated=3
   the pre-#146 stderr text byte-identically, or redirect stdout. Callers with no presenter attached
   (the MCP tool, the REST route, and the seed path) are unaffected: they still get the original
   stderr line and nothing else.
-- **`--quiet`** reproduces exactly the pre-#146 output: the single `refresh done …` (or
-  `refresh skipped reason=…`) line, plus the stderr failure summary and the three legacy notice
+- **The terminal lines lead with `list=`** (#192): `refresh done list=<lane> status=… … updated=…` and
+  `refresh skipped list=<lane> reason=…`. The lane comes **first** because the run's own counters come
+  last, and it is ASCII-folded like every other runtime-derived field — a lane name is
+  operator-supplied text, so folding is what stops one called `x status=ok` from forging a token ahead
+  of the real ones.
+- **`--quiet`** prints **exactly one terminal line and nothing else**, and that line is byte-identical
+  to the verbose run's terminal line — plus the stderr failure summary and the three legacy notice
   lines, which are unconditional. Scheduled runs use it — see `ops/templates/com.sk.refresh.plist`,
   where the `--` in `npm run refresh -- --quiet` is load-bearing.
 
@@ -86,8 +110,10 @@ Console counts and the persisted `/health` / MCP `status` counts agree **by cons
 player's `done` line is emitted only after that player's progress write has committed, so the
 terminal can never show more players settled than the database knows about.
 
-**Exit codes are unchanged** by the live output: `failed` (a blocked run that refreshed nobody) exits
-1; `ok`, `partial`, and any Skipped Sweep exit 0.
+**Exit codes are unchanged** by the live output or by the lane: `failed` (a blocked run that refreshed
+nobody) exits 1; `ok`, `partial`, and any Skipped Sweep exit 0. A manual lane refresh started while
+another sweep holds a live lease prints `refresh skipped list=<lane> reason=already-running` and exits
+0 — the same refusal any whole sweep gets, because it is the same claim.
 
 ## `digest` — build and send a windowed Digest
 

@@ -317,6 +317,21 @@ export const refreshRuns = sqliteTable(
     statLinesInserted: integer("stat_lines_inserted").notNull().default(0),
     statLinesUpdated: integer("stat_lines_updated").notNull().default(0),
     errorMessage: text("error_message"),
+    /**
+     * WHICH LANES this run swept (#192, ADR 0061). `NULL` means the WHOLE Watch
+     * List — the only thing a pre-#192 run could ever have swept, so the
+     * migration's NULL backfill is semantically correct by construction rather
+     * than a placeholder. Otherwise it is the CANONICAL encoding of the scoped
+     * lane ids: ascending, comma-delimited, with LEADING AND TRAILING sentinel
+     * commas (`,1,3,10,`). The sentinels are load-bearing — a containment test
+     * for lane `1` against a bare `10` would otherwise match on the prefix.
+     * {@link encodeScopeListIds} is the one writer and
+     * {@link watermarkEligible} the one reader.
+     *
+     * Declared HERE, not only in drizzle/0013, so a future drizzle-kit table
+     * rebuild re-emits the column (`rules/backend.md`).
+     */
+    scopeListIds: text("scope_list_ids"),
     createdAt: text("created_at").notNull(),
   },
   (t) => [

@@ -13,6 +13,7 @@ import type { Mailer } from "../mailer/types.js";
 import { runDigest } from "../jobs/digest.js";
 import { NoDefaultListError, UnknownListError, resolveListByName } from "../lists/service.js";
 import { createMailer } from "../mailer/index.js";
+import { parseList } from "./flags.js";
 import type { TagScope } from "../tags/service.js";
 import { resolveTagScope } from "../tags/service.js";
 import { exitAfterDrain, isMain } from "./main.js";
@@ -83,27 +84,14 @@ export function parseWindow(argv: string[]): ReportWindowSpec | null {
 }
 
 /**
- * `--list <name>`, scoping an on-demand send to a named list's active members
- * (issue #70). Returns undefined when absent (unscoped, all active players) and
- * null when the flag is present but its value is missing — so the caller can
- * fail closed on a malformed flag, just like `--window`.
- */
-export function parseList(argv: string[]): string | null | undefined {
-  const at = argv.indexOf("--list");
-  if (at === -1) return undefined;
-  const value = argv[at + 1];
-  // A following flag (or nothing) means the value is missing — fail closed.
-  return value === undefined || value.startsWith("--") || value.trim().length === 0
-    ? null
-    : value.trim();
-}
-
-/**
  * `--tags <selector>`, scoping the report to the players matching every token
- * (#140). Same three-state contract as `parseList`: undefined when absent (no
- * tag scope), null when the flag is present but its value is missing — so a
- * malformed flag fails closed rather than silently widening the report to every
- * active player. Its `--tags=` branch was deleted alongside `--list=`'s (#191),
+ * (#140). Same three-state contract as `parseList` (now shared, in ./flags.ts):
+ * undefined when absent (no tag scope), null when the flag is present but its
+ * value is missing — so a malformed flag fails closed rather than silently
+ * widening the report to every active player. It stays HERE rather than moving
+ * beside `parseList`, because `--tags` has exactly one command; extracting a
+ * single-caller parser would be motion, not deduplication.
+ * Its `--tags=` branch was deleted alongside `--list=`'s (#191),
  * for the same reason: the router's grammar already rewrote it. The selector's
  * GRAMMAR is not checked here; `resolveTagScope` owns it, so the CLI cannot
  * drift from REST/MCP.

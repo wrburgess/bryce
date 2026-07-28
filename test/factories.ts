@@ -311,6 +311,37 @@ export async function insertListMember(
   return row;
 }
 
+/**
+ * Enroll players in the lane `drizzle/0012` seeded as the DEFAULT (#192).
+ *
+ * EXPLICIT on purpose, and `insertPlayer` deliberately does NOT do it. The
+ * migration enrolled only the players that existed and were active WHEN IT RAN,
+ * and a fresh `testDb()` has none — so a test that exercises the default-lane
+ * path (bare `sk refresh` since #192) must say so, and a test that does not is
+ * unaffected. Making enrollment a side effect of building a player would ripple
+ * silently through every suite and bury the one behavior change under mechanical
+ * edits.
+ */
+export async function enrollInDefaultLane(
+  db: Db,
+  members: readonly PlayerRow[],
+): Promise<PlayerListRow> {
+  const lane = await resolveDefaultList(db);
+  for (const member of members) await insertListMember(db, { listId: lane.id, playerId: member.id });
+  return lane;
+}
+
+/** A live NAMED lane holding exactly `members` — the non-default half of the pair above. */
+export async function insertLane(
+  db: Db,
+  name: string,
+  members: readonly PlayerRow[] = [],
+): Promise<PlayerListRow> {
+  const lane = await insertList(db, { name });
+  for (const member of members) await insertListMember(db, { listId: lane.id, playerId: member.id });
+  return lane;
+}
+
 export async function insertCalendar(
   db: Db,
   overrides: Partial<typeof seasonCalendar.$inferInsert> = {},

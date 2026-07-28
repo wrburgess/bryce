@@ -290,7 +290,10 @@ async function deliverDailyDigest(
   // delivery slot) and on the run's START (not its finish) are the two
   // correctness fixes ADR 0043 turns on.
   const contentDate = resolveWindow("1d", now(), tz, null, asOf).to;
-  const freshness = digestFreshnessFor(db, contentDate, tz);
+  // `laneId` is the default lane this scheduled digest was resolved for, so the
+  // watermark is judged against runs that actually covered it (#192, ADR 0061):
+  // another lane's sweep, however recent, never certifies this one's data.
+  const freshness = digestFreshnessFor(db, contentDate, tz, laneId);
 
   // Pure assembly (src/digest/assemble.ts): what this Digest reports. A replay
   // assembles exactly what an ordinary run would — the window is the content,

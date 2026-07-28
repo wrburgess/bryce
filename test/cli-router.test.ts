@@ -367,10 +367,13 @@ describe("CLI router metadata", () => {
     expect(preflightDirect(["refresh"], ["--quiet"])).toBeNull();
     expect(preflightDirect(["refresh"], ["-q"])).toBeNull();
     expect(preflightDirect(["refresh"], ["--quiet=1"])).toContain("does not support '=' syntax");
-    // Usage and example advertise the flag, so `sk refresh --help` is not a lie.
-    expect(refresh.usage).toBe("sk refresh [--quiet|-q]");
+    // Usage and example advertise the flags, so `sk refresh --help` is not a lie.
+    // `--list` joined the leaf in #192; the alias-parity property test below
+    // covers `-l` for the whole table, so it is not re-enumerated here.
+    expect(refresh.usage).toBe("sk refresh [--quiet|-q] [--list NAME|-l NAME]");
     expect(refresh.example).toBe("sk refresh --quiet");
     expect(renderHelp(["refresh"])).toContain("--quiet, -q");
+    expect(renderHelp(["refresh"])).toContain("--list, -l");
     expect(renderHelp(["refresh"])).toContain("Suppress live progress; print only the terminal summary.");
   });
 

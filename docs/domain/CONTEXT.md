@@ -71,9 +71,19 @@ in `raw`) so nothing outside the adapter knows the difference
 _Avoid_: "game date" (a date is not an identifier — doubleheaders)
 
 **Refresh**:
-The recurring job that re-ingests every active Player's *complete current-season game log* and
-upserts it idempotently — no date windows; adding a Player is just his first Refresh.
+The recurring job that re-ingests an active Player's *complete current-season game log* and upserts
+it idempotently — no date windows; adding a Player is just his first Refresh. Its audience is a
+**Scope**: a set of **Lanes**, or the whole **Watch List**
+([ADR 0061](../adr/0061-lane-scoped-refresh-supersedes-whole-sweep.md)).
 _Avoid_: "yesterday fetch", "incremental sync" (there is no window to fall out of)
+
+**Scope** (of a Refresh):
+Which **Lanes** one **Sweep** covers, resolved *once* before the run is claimed and used by every
+selection the sweep makes. Absent means the whole **Watch List**; `sk refresh` with no `--list`
+resolves the **Default Lane**. A run records its Scope, and only a run whose Scope covered the
+Default Lane can advance the Digest's freshness watermark.
+_Avoid_: "filter" (a Scope is decided before the sweep, not applied to its results); treating an
+empty Scope as "everyone"
 
 **Probe Plan**:
 The set of (level, stat group) pairs one **Refresh** fetches game logs for, for one Player: his
@@ -83,8 +93,9 @@ prunes *breadth*, never *dates* — each probed pair is still fetched for the co
 _Avoid_: "window", "incremental" (nothing about the dates fetched changed)
 
 **Sweep**:
-One Refresh's single pass over the **Watch List**, from claiming the run to settling its outcome.
-_Avoid_: "run" on its own (ambiguous between the pass and its durable record)
+One Refresh's single pass over its **Scope**, from claiming the run to settling its outcome.
+_Avoid_: "run" on its own (ambiguous between the pass and its durable record); assuming a Sweep
+always covers the whole **Watch List**
 
 **Skipped Sweep**:
 A Refresh that swept nobody at all — during **Offseason Sleep**, behind a concurrent Refresh already
