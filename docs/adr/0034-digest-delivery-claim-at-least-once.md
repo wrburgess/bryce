@@ -146,7 +146,9 @@ two identical emails.
 Narrowing the window needs provider-side reconciliation — asking the provider "did *this* slot
 already land?" before re-sending. This change made that a pure addition rather than a second
 refactor: `Mailer.send(message, context?)` now returns a `MailReceipt` and carries a stable
-per-slot `deliveryKey` (`bryce:digest:2026-07-19`) — Postmark as `Metadata`, SMTP as an
+per-slot `deliveryKey` (`bryce:digest:2026-07-19`; since #190 the slot includes the lane, so the key
+is `bryce:digest:2026-07-19:list-1` — see
+[ADR 0059](0059-explicit-default-lane-supersedes-implicit-default.md) decision 3) — Postmark as `Metadata`, SMTP as an
 `X-Bryce-Delivery-Key` header, the console mailer ignores it. `provider_message_id` is stored on the
 settled row. The lookup itself was deliberately **not** built here; it is the amendment below.
 
