@@ -58,14 +58,27 @@ player in scope, which is the one outcome an unscoped digest must never have.
    duplicate digests. The constraint is carried from the rebuilt table's creation, not tightened
    afterwards, so no window exists in which the column is present and unpopulated.
 
-3. **The provider-side idempotency key carries the lane, and the default lane's key does not change.**
-   `deliveryKey` namespaces on the lane. Stale-claim recovery looks this key up at the provider to ask
-   whether a crashed attempt already landed, and a positive answer *suppresses* the send; two lanes
-   sharing `bryce:digest:<date>` would have one lane's delivered message suppress the other's — silent
-   loss, because a suppressed send looks exactly like a successful one. The **default** lane keeps
-   today's exact key byte for byte, because every recovery lookup in flight across the migration
-   boundary and every message already in the provider's history is keyed that way; only non-default
-   lanes are suffixed. The asymmetry is deliberate and pinned by its own test.
+3. **The provider-side idempotency key carries the lane's IMMUTABLE id — every lane, including the
+   default.** `deliveryKey` emits `bryce:<kind>:<date>:list-<id>`. Stale-claim recovery looks this key
+   up at the provider to ask whether a crashed attempt already landed, and a positive answer
+   *suppresses* the send; two lanes sharing `bryce:digest:<date>` would have one lane's delivered
+   message suppress the other's — silent loss, because a suppressed send looks exactly like a
+   successful one.
+
+   A draft of this decision exempted the **default** lane, keeping the pre-lane key byte for byte so
+   that recovery lookups in flight across the migration boundary — and messages already in the
+   provider's history — still resolved. The Reviewer refuted it: that ties the key to `is_default`, a
+   flag `set-default` **moves**. Lane A sends a date's digest while default, the HC re-points the
+   default at lane B, and B emits A's key; B then crashes after claiming and before sending, its
+   recovery finds A's accepted message, and B is settled as delivered having never sent. Silent, and
+   reachable through an operation this phase ships.
+
+   What the exemption bought is worth strictly less: it matters only for a slot that is `failed` or
+   lease-expired at the instant `0012` runs, which re-sends instead of reconciling — at most **one
+   duplicate email, once, loudly**. Delivery is at-least-once by design
+   ([ADR 0034](0034-digest-delivery-claim-at-least-once.md)), so a duplicate is the failure this
+   project already accepts; a silently skipped digest is the one it does not. Keying on the row id
+   makes the collision unconstructable rather than merely unlikely.
 
 4. **The default list cannot be deleted, and the refusal is atomic.** Soft-delete runs as one
    conditional `UPDATE ... WHERE name = ? AND deleted_at IS NULL AND is_default = 0` inside

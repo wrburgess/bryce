@@ -11,7 +11,7 @@ import type { DeliveryKind } from "../db/schema.js";
 import type { LookupResult, MailReceipt, Mailer } from "../mailer/types.js";
 import type { Db } from "../db/client.js";
 import { resolveDefaultList } from "../lists/service.js";
-import type { ClaimRefusal, ClaimResult, DeliveryLane, Tx } from "./delivery-claim.js";
+import type { ClaimRefusal, ClaimResult, Tx } from "./delivery-claim.js";
 import {
   claimDelivery,
   deliveryKey,
@@ -190,8 +190,7 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   // The on-demand path above returned already, so an explicitly scoped send
   // never needs a default and never takes a claim; #193 moves those onto the
   // claimed path.
-  const defaultList = await resolveDefaultList(db);
-  const lane: DeliveryLane = { id: defaultList.id, isDefault: defaultList.isDefault };
+  const laneId = (await resolveDefaultList(db)).id;
 
   const today = hostDate(now(), tz);
 
@@ -206,18 +205,18 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   // assembles ITS date's window (asOf), never today's, and never forces. One per
   // run bounds catch-up to a single extra email; a multi-day backlog drains a
   // day at a time rather than arriving as a burst.
-  const orphan = findOrphanedDigestDate(db, lane.id, today, now().getTime());
+  const orphan = findOrphanedDigestDate(db, laneId, today, now().getTime());
   if (orphan !== null) {
-    await deliverDailyDigest(deps, lane, orphan, orphan, false, warn);
+    await deliverDailyDigest(deps, laneId, orphan, orphan, false, warn);
   }
 
   // Only TODAY's run is replaced by the offseason heartbeat; the recovery above
   // is for an in-season day that still owes its digest.
   if (sleep.sleeping) {
-    return runHeartbeat(deps, lane, activePlayers.length, sleep.nextOpeningDay);
+    return runHeartbeat(deps, laneId, activePlayers.length, sleep.nextOpeningDay);
   }
 
-  return deliverDailyDigest(deps, lane, today, today, deps.force === true, warn);
+  return deliverDailyDigest(deps, laneId, today, today, deps.force === true, warn);
 }
 
 /**
@@ -228,7 +227,7 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
  */
 async function deliverDailyDigest(
   deps: DigestDeps,
-  lane: DeliveryLane,
+  laneId: number,
   dateCovered: string,
   asOf: string,
   force: boolean,
@@ -238,7 +237,7 @@ async function deliverDailyDigest(
   const claim = claimDelivery(db, {
     kind: "digest",
     dateCovered,
-    listId: lane.id,
+    listId: laneId,
     now: now(),
     force,
   });
@@ -270,7 +269,7 @@ async function deliverDailyDigest(
   // accidental protection that would evaporate the day someone adds one. The
   // explicit guard is the one to keep; the test pins the behaviour, not either
   // mechanism.
-  if (!claim.replay && (await reconciled(deps, "digest", dateCovered, lane, claim))) {
+  if (!claim.replay && (await reconciled(deps, "digest", dateCovered, laneId, claim))) {
     return {
       kind: "digest",
       action: "skipped",
@@ -313,7 +312,7 @@ async function deliverDailyDigest(
   try {
     receipt = await deps.mailer.send(
       { to: deps.to, from: deps.from, ...mail },
-      { deliveryKey: deliveryKey("digest", dateCovered, lane) },
+      { deliveryKey: deliveryKey("digest", dateCovered, laneId) },
     );
   } catch (err) {
     // Send failed: settle the claim as failed. A later run re-claims the slot
@@ -461,7 +460,7 @@ async function runOnDemandReport(
  */
 async function runHeartbeat(
   deps: DigestDeps,
-  lane: DeliveryLane,
+  laneId: number,
   watchedCount: number,
   nextOpeningDay: string | null,
 ): Promise<DigestResult> {
@@ -475,7 +474,7 @@ async function runHeartbeat(
     // A heartbeat is not lane-scoped — it is one liveness signal for the host —
     // but the slot it claims is, so it rides the default lane. A known wart,
     // recorded here rather than discovered later (#190).
-    listId: lane.id,
+    listId: laneId,
     now: now(),
     force: deps.force,
     precondition: (tx) => heartbeatWithinWeek(tx, nowMs),
@@ -494,7 +493,7 @@ async function runHeartbeat(
 
   // A replay never reconciles — see the digest path for why suppressing a
   // forced send here would both defeat force and rewrite a delivered row.
-  if (!claim.replay && (await reconciled(deps, "heartbeat", today, lane, claim))) {
+  if (!claim.replay && (await reconciled(deps, "heartbeat", today, laneId, claim))) {
     return {
       kind: "heartbeat",
       action: "skipped",
@@ -511,7 +510,7 @@ async function runHeartbeat(
   try {
     receipt = await deps.mailer.send(
       { to: deps.to, from: deps.from, ...mail },
-      { deliveryKey: deliveryKey("heartbeat", today, lane) },
+      { deliveryKey: deliveryKey("heartbeat", today, laneId) },
     );
   } catch (err) {
     // A replay holds no claim: nothing to settle, nothing to degrade.
@@ -590,7 +589,7 @@ async function reconciled(
   deps: DigestDeps,
   kind: DeliveryKind,
   dateCovered: string,
-  lane: DeliveryLane,
+  laneId: number,
   claim: RecoveredClaim,
 ): Promise<boolean> {
   if (!claim.recovered) return false;
@@ -601,7 +600,7 @@ async function reconciled(
   try {
     result = await lookup.call(
       deps.mailer,
-      deliveryKey(kind, dateCovered, lane),
+      deliveryKey(kind, dateCovered, laneId),
       claim.previousClaimedAt,
     );
   } catch {

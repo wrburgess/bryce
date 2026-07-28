@@ -90,16 +90,6 @@ export type ClaimRefusal =
   | "claimed-by-another-run"
   | "heartbeat-sent-within-week";
 
-/**
- * The LANE a delivery belongs to (#190) — the list's id, plus whether it is the
- * default. Both are load-bearing: the id is the slot key's third column, and the
- * flag decides the provider-side key's namespace (see `deliveryKey`).
- */
-export interface DeliveryLane {
-  id: number;
-  isDefault: boolean;
-}
-
 export interface ClaimArgs {
   kind: DeliveryKind;
   dateCovered: string;
@@ -446,20 +436,26 @@ export function findOrphanedDigestDate(
  * silently skip it. A suppressed send looks exactly like a successful one, so
  * the loss would be invisible.
  *
- * THE DEFAULT LANE KEEPS TODAY'S EXACT KEY, byte for byte. Every recovery lookup
- * in flight across the migration boundary — and every message already sitting in
- * the provider's searchable history — is keyed `bryce:digest:<date>`; namespacing
- * the default lane too would orphan all of it and turn the first post-migration
- * recovery into a duplicate send. Only NON-default lanes get a suffix. The
- * asymmetry is deliberate, and it is pinned by its own test.
+ * EVERY LANE IS SUFFIXED, INCLUDING THE DEFAULT — the lane is identified by its
+ * IMMUTABLE id, never by the mutable `is_default` flag (Reviewer P1 on #190). An
+ * earlier draft let the default lane keep the pre-lane key `bryce:digest:<date>`
+ * unsuffixed, to stay compatible with messages already in the provider's history.
+ * That tied the key to a flag `set-default` MOVES: lane A sends a date's digest
+ * while it is the default, the HC re-points the default at lane B, and B now emits
+ * the same unsuffixed key. B crashes after claiming and before sending, its
+ * recovery finds A's accepted message under the shared key, and B is settled as
+ * delivered without ever sending. Silent, and permanent — reachable any time the
+ * default moves, which is a supported operation this very phase ships.
+ *
+ * The compatibility that buys is worth strictly less than that. It matters only
+ * for a slot that is `failed` or lease-expired at the instant the 0012 migration
+ * runs: such a slot re-sends instead of reconciling, costing at most ONE duplicate
+ * email, once, loudly. A duplicate is the failure this project accepts (the
+ * delivery contract is at-least-once, ADR 0034); a silently skipped digest is the
+ * one it does not.
  */
-export function deliveryKey(
-  kind: DeliveryKind,
-  dateCovered: string,
-  lane: DeliveryLane,
-): string {
-  const base = `bryce:${kind}:${dateCovered}`;
-  return lane.isDefault ? base : `${base}:list-${lane.id}`;
+export function deliveryKey(kind: DeliveryKind, dateCovered: string, listId: number): string {
+  return `bryce:${kind}:${dateCovered}:list-${listId}`;
 }
 
 /**

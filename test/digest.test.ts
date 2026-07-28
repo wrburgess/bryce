@@ -13,6 +13,7 @@ import {
   NoDefaultListError,
   createList,
   resolveDefaultList,
+  setDefaultList,
 } from "../src/lists/service.js";
 import type { DigestDeps, DigestResult } from "../src/jobs/digest.js";
 import { runDigest } from "../src/jobs/digest.js";
@@ -238,7 +239,9 @@ describe("runDigest", () => {
     // slot did not also re-send its own Jul 18 content.
     expect(lookup.sent).toHaveLength(1);
     expect(lookup.sent[0]?.subject).toBe("ScoreKeeps Baseball (Default) - Sun, July 19, 2026");
-    expect(lookup.lookups.map((l) => l.deliveryKey)).toContain("bryce:digest:2026-07-19");
+    expect(lookup.lookups.map((l) => l.deliveryKey)).toContain(
+      `bryce:digest:2026-07-19:list-${await laneId(opened.db)}`,
+    );
   });
 
   it("a 7d request is not refused because the day's 1d digest already went out", async () => {
@@ -291,7 +294,7 @@ describe("runDigest", () => {
 
     const keys = mailer.contexts.map((c) => c?.deliveryKey);
     expect(keys).toContain("bryce:report:7d:2026-07-18");
-    expect(keys).toContain("bryce:digest:2026-07-19");
+    expect(keys).toContain(`bryce:digest:2026-07-19:list-${await laneId(opened.db)}`);
     expect(new Set(keys).size).toBe(2); // distinct namespaces, no collision
   });
 
@@ -1275,7 +1278,9 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
     const rows = await deliveries();
     expect(rows[0]?.providerMessageId).toBe("postmark-abc-123");
     // The slot key handed to the provider is stable per (kind, date).
-    expect(mailer.contexts[0]).toEqual({ deliveryKey: "bryce:digest:2026-07-19" });
+    expect(mailer.contexts[0]).toEqual({
+      deliveryKey: `bryce:digest:2026-07-19:list-${await laneId(opened.db)}`,
+    });
   });
 
   it("releases the slot on provider rejection so the retry re-claims it", async () => {
@@ -1374,7 +1379,10 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     // Asked about the right slot, bounded by the CRASHED attempt's claim time
     // (17:00) — not the recovery's own claim, which overwrote it.
     expect(mailer.lookups).toEqual([
-      { deliveryKey: "bryce:digest:2026-07-19", since: "2026-07-19T17:00:00.000Z" },
+      {
+        deliveryKey: `bryce:digest:2026-07-19:list-${await laneId(opened.db)}`,
+        since: "2026-07-19T17:00:00.000Z",
+      },
     ]);
 
     const rows = await deliveries();
@@ -1543,7 +1551,10 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     });
     expect(mailer.sent).toHaveLength(1); // no second heartbeat
     expect(mailer.lookups).toEqual([
-      { deliveryKey: "bryce:heartbeat:2026-12-05", since: "2026-12-05T18:00:00.000Z" },
+      {
+        deliveryKey: `bryce:heartbeat:2026-12-05:list-${await laneId(opened.db)}`,
+        since: "2026-12-05T18:00:00.000Z",
+      },
     ]);
     expect((await deliveries())[0]).toMatchObject({
       kind: "heartbeat",
@@ -2319,35 +2330,45 @@ describe("lane-scoped delivery slot (#190)", () => {
   });
 
   describe("deliveryKey lane namespace", () => {
-    it("keeps the DEFAULT lane's key byte-for-byte identical to the pre-lane key", async () => {
-      // Load-bearing asymmetry. Every recovery lookup in flight across the
-      // migration boundary, and every message already in the provider's
-      // searchable history, is keyed exactly like this. Namespacing the default
-      // lane too would orphan all of it and turn the first post-migration
-      // recovery into a duplicate send.
-      const lane = { id: await laneId(opened.db), isDefault: true };
-      expect(deliveryKey("digest", "2026-07-19", lane)).toBe("bryce:digest:2026-07-19");
-      expect(deliveryKey("heartbeat", "2026-12-05", lane)).toBe("bryce:heartbeat:2026-12-05");
-    });
-
-    it("namespaces a NON-default lane so two lanes never share an idempotency key", async () => {
+    it("namespaces EVERY lane, so two lanes never share an idempotency key", () => {
       // Without this, lane B's stale-claim recovery would find lane A's
       // delivered message, conclude its own digest had already landed, and
       // silently skip it — and a suppressed send looks exactly like a
       // successful one.
-      expect(deliveryKey("digest", "2026-07-19", { id: 7, isDefault: false })).toBe(
-        "bryce:digest:2026-07-19:list-7",
+      expect(deliveryKey("digest", "2026-07-19", 7)).toBe("bryce:digest:2026-07-19:list-7");
+      expect(deliveryKey("digest", "2026-07-19", 7)).not.toBe(
+        deliveryKey("digest", "2026-07-19", 8),
       );
-      expect(deliveryKey("digest", "2026-07-19", { id: 7, isDefault: false })).not.toBe(
-        deliveryKey("digest", "2026-07-19", { id: 8, isDefault: false }),
-      );
+      expect(deliveryKey("heartbeat", "2026-12-05", 7)).toBe("bryce:heartbeat:2026-12-05:list-7");
     });
 
-    it("hands the provider the default lane's unsuffixed key on a real scheduled send", async () => {
+    it("keys on the IMMUTABLE list id, never on which lane is currently default", async () => {
+      // The Reviewer's P1 on #190, as a test. An earlier draft let whichever
+      // lane held `is_default` keep the unsuffixed pre-lane key, for
+      // compatibility with messages already in the provider's history. But
+      // `set-default` MOVES that flag: lane A sends a date under the unsuffixed
+      // key, the HC re-points the default at lane B, and B inherits A's key —
+      // B's recovery then finds A's accepted message and settles B as delivered
+      // without ever sending it. Keying on the id makes that unconstructable.
+      const a = await laneId(opened.db);
+      const b = (await createList(opened.db, "Prospects", clock.now())).id;
+      const beforeMove = deliveryKey("digest", "2026-07-19", a);
+
+      await setDefaultList(opened.db, "Prospects", clock.now());
+
+      // A's key is unchanged by losing the flag, and B's is still its own.
+      expect(await laneId(opened.db)).toBe(b); // the flag really did move
+      expect(deliveryKey("digest", "2026-07-19", a)).toBe(beforeMove);
+      expect(deliveryKey("digest", "2026-07-19", b)).not.toBe(beforeMove);
+    });
+
+    it("hands the provider the lane-suffixed key on a real scheduled send", async () => {
       const player = await insertPlayer(opened.db);
       await insertStatLine(opened.db, { playerId: player.id });
       await runDigest(deps());
-      expect(mailer.contexts[0]).toEqual({ deliveryKey: "bryce:digest:2026-07-19" });
+      expect(mailer.contexts[0]).toEqual({
+        deliveryKey: `bryce:digest:2026-07-19:list-${await laneId(opened.db)}`,
+      });
     });
   });
 });
