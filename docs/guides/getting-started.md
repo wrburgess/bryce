@@ -2,7 +2,7 @@
 
 From nothing to your first digest email, step by step. No prior knowledge of this codebase is
 assumed — if you can use GitHub, you can run ScoreKeeps Baseball Tracker (the development project is named Bryce). Production operations (scheduling, remote
-access, backup) live in [Running Bryce](running-sk.md); this guide gets you testing locally.
+access, backup) live in [Running Bryce](running-bryce.md); this guide gets you testing locally.
 
 **What Bryce is, in one paragraph:** you keep a personal watch list of baseball players (MLB,
 minor league, NCAA). A nightly *Refresh* pulls each player's full season game log; a daily *Digest*
@@ -284,13 +284,13 @@ using the CLI. Tool list, REST routes, and remote setup: the [MCP](../mcp/README
 
 ## 11. Make it permanent (production)
 
-Everything so far ran by hand. [Running Bryce](running-sk.md) covers turning it into the
+Everything so far ran by hand. [Running Bryce](running-bryce.md) covers turning it into the
 set-and-forget daily email:
 
-1. [Scheduling with launchd](running-sk.md#scheduling-with-launchd) — nightly refresh + morning
+1. [Scheduling with launchd](running-bryce.md#scheduling-with-launchd) — nightly refresh + morning
    digest that self-heal if the laptop was asleep.
-2. [Litestream backup to Cloudflare R2](running-sk.md#backup-litestream-to-cloudflare-r2).
-3. [Cloudflare Tunnel](running-sk.md#remote-access-cloudflare-tunnel) +
+2. [Litestream backup to Cloudflare R2](running-bryce.md#backup-litestream-to-cloudflare-r2).
+3. [Cloudflare Tunnel](running-bryce.md#remote-access-cloudflare-tunnel) +
    [connecting a Claude client to the remote MCP endpoint](../mcp/README.md)
    — manage the watch list from your phone, from anywhere.
 
