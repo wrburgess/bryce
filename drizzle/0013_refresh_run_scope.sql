@@ -1,0 +1,25 @@
+-- #192: refresh_runs records WHICH LANES its sweep covered (ADR 0061), so the
+-- digest's freshness watermark can tell a whole-Watch-List run from a lane run.
+-- Without it, `sk refresh -l Prospects` settling `ok` would make the WHOLE
+-- watch list's digest banner read `fresh` — a forged completeness claim over
+-- players that sweep never touched.
+--
+-- Purely additive, and drizzle-kit's generated DDL is used VERBATIM: one
+-- nullable TEXT column needs no table rebuild, so none of drizzle/0012's
+-- FK-ordering hazards apply and none of 0011's explicit-column-list surgery is
+-- needed. The hand-extension house style (0004, 0008, 0009, 0011, 0012) exists
+-- for migrations the generator gets wrong; this is not one.
+--
+-- BACKFILL HONESTY — and here it is honest, unlike 0011's. Every historical row
+-- reads NULL, and NULL MEANS "the whole Watch List". That is not a placeholder
+-- standing in for an unrecorded fact: before #192 the sweep had no scope to
+-- record, so every pre-existing run swept exactly the whole Watch List. The
+-- backfill is therefore semantically correct BY CONSTRUCTION, and a reader who
+-- treats a NULL row as whole-list is right rather than merely charitable.
+--
+-- ENCODING. A scoped run stores its lane ids ascending, comma-delimited, with
+-- LEADING AND TRAILING sentinel commas (`,1,3,10,`) — see
+-- src/jobs/refresh-run.ts. The column is deliberately not JSON: the eligibility
+-- test is a substring containment that `instr` answers on any SQLite build,
+-- with no JSON1/`json_each` assumption.
+ALTER TABLE `refresh_runs` ADD `scope_list_ids` text;

@@ -346,10 +346,12 @@ describe("CLI real subprocess", () => {
     } finally { opened.close(); }
 
     // The fresh migrated database has no active players, and the child fixture
-    // makes any unexpected calendar fetch fail locally rather than egress.
+    // makes any unexpected calendar fetch fail locally rather than egress. Since
+    // #192 a bare `sk refresh` resolves the DEFAULT lane that drizzle/0012 seeds
+    // — an empty one here — so the terminal line names it.
     const refresh = runCli("refresh.ts", []);
     expect(refresh.status).toBe(0);
-    expect(`${refresh.stdout}`).toMatch(/refresh done status=ok players=0/);
+    expect(`${refresh.stdout}`).toMatch(/refresh done list=Watchlist status=ok players=0/);
     expect(`${refresh.stderr}`).toContain("offline subprocess fixture forbids fetch");
     opened = openReadonlyDb(dbPath);
     try {

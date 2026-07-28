@@ -317,6 +317,27 @@ export const refreshRuns = sqliteTable(
     statLinesInserted: integer("stat_lines_inserted").notNull().default(0),
     statLinesUpdated: integer("stat_lines_updated").notNull().default(0),
     errorMessage: text("error_message"),
+    /**
+     * WHETHER this run swept THE WHOLE WATCH LIST, and if not, which lanes it
+     * did cover (#192, ADR 0061 decision 8).
+     *
+     * `NULL` means **every active Player was swept** — the only thing a pre-#192
+     * run could ever have done, so drizzle/0013's NULL backfill is semantically
+     * correct by construction rather than a placeholder. A LANE run whose lanes
+     * happened to hold every active Player also records `NULL`, because it too
+     * swept everyone; `runRefresh` decides that from the SAME claim-time read
+     * that selected the sweep, so the two can never disagree.
+     *
+     * Otherwise the value is PROVENANCE for a genuinely partial run: the
+     * canonical encoding of its lane ids — ascending, deduped, comma-delimited,
+     * sentinel-wrapped (`,1,3,10,`). Nothing parses it back; the only reader is
+     * `digestFreshnessFor`, and all it asks is `IS NULL`.
+     * {@link encodeScopeListIds} is the one writer.
+     *
+     * Declared HERE, not only in drizzle/0013, so a future drizzle-kit table
+     * rebuild re-emits the column (`rules/backend.md`).
+     */
+    scopeListIds: text("scope_list_ids"),
     createdAt: text("created_at").notNull(),
   },
   (t) => [

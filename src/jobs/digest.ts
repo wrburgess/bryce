@@ -290,6 +290,10 @@ async function deliverDailyDigest(
   // delivery slot) and on the run's START (not its finish) are the two
   // correctness fixes ADR 0043 turns on.
   const contentDate = resolveWindow("1d", now(), tz, null, asOf).to;
+  // The watermark only accepts a run that swept EVERY active Player (#192,
+  // ADR 0061 decision 8). Bare `sk digest` still assembles the whole Watch List
+  // until #193, so a lane sweep — however recent, and whichever lane it was —
+  // certifies nothing here and the banner honestly reads `stale`.
   const freshness = digestFreshnessFor(db, contentDate, tz);
 
   // Pure assembly (src/digest/assemble.ts): what this Digest reports. A replay

@@ -3,6 +3,8 @@ import { loadDotEnv } from "../env.js";
 import type { Db } from "../db/client.js";
 import { startupDb } from "../db/startup.js";
 import { asciiField } from "../domain/names.js";
+import { NoDefaultListError, UnknownListError, resolveListOrDefault } from "../lists/service.js";
+import type { RefreshScope } from "../jobs/refresh.js";
 import { runRefresh } from "../jobs/refresh.js";
 import type {
   PlayerRef,
@@ -13,13 +15,23 @@ import type {
 import { REFRESH_CALL_KEYS, legacyNoticeText } from "../jobs/refresh-progress.js";
 import { MlbClient } from "../mlb/client.js";
 import { HighlightlyClient } from "../highlightly/client.js";
+import { parseList } from "./flags.js";
 import { exitAfterDrain, isMain } from "./main.js";
 import { normalizeDirect, preflightDirect } from "./router.js";
 
 /**
- * The refresh CLI: `npm run refresh [-- --quiet]`. The ONLY presenter of the
- * Refresh Liveness stream (ADR 0056) — the job emits typed events and this file
- * decides, alone, what becomes text and whether it is rendered at all.
+ * The refresh CLI: `npm run refresh [-- --quiet] [-- --list NAME]`. The ONLY
+ * presenter of the Refresh Liveness stream (ADR 0056) — the job emits typed
+ * events and this file decides, alone, what becomes text and whether it is
+ * rendered at all.
+ *
+ * SINCE #192 IT IS ALSO WHERE "which lane?" IS ANSWERED (ADR 0061). `runRefresh`
+ * with no scope still means the whole Watch List — that is what leaves MCP, REST,
+ * and every existing job test alone — but the COMMAND resolves the default lane
+ * when `--list` is absent, exactly as `sk players add` does. Both failure modes
+ * are closed BEFORE any claim is taken and with nothing swept: an unknown lane
+ * and a database with no default each print a greppable `error:` line and
+ * exit 1, because a typo must never widen a sweep.
  *
  * Injectable like the digest CLI (src/cli/digest.ts) so the WIRING — exit code,
  * failure print, TTY-ness, and the stall threshold — is testable and not merely
@@ -41,8 +53,10 @@ import { normalizeDirect, preflightDirect } from "./router.js";
  *   - a TTY: the same append-only lines, plus ONE in-place line for the call
  *     currently in flight whose elapsed time ticks every {@link TTY_TICK_MS}.
  * `--quiet` drops the whole stream and prints only the terminal summary — the
- * SAME summary path, which is why quiet mode reproduces today's output exactly
- * rather than reimplementing it.
+ * SAME summary path, never a second rendering. That is what makes its contract
+ * hold by construction: exactly ONE terminal line and nothing else, byte-identical
+ * to the verbose run's terminal line. (#192 added `list=` to that line; the
+ * property survives unchanged because both modes print it from here.)
  */
 
 /** How long an outstanding call runs before a piped run starts saying so, and the repeat period. */
@@ -113,6 +127,29 @@ export function parseQuiet(argv: string[]): boolean {
 function tokenField(raw: string): string {
   const folded = asciiField(raw).replace(/ /g, "_");
   return folded.length === 0 ? "?" : folded;
+}
+
+/**
+ * What separates two lane names inside one `list=` value (#192). A comma,
+ * because that is the delimiter every other multi-valued field on these lines
+ * uses (`sports=1,11`).
+ */
+const LANE_JOIN = ",";
+
+/**
+ * One lane name, folded so it can never be mistaken for TWO lanes.
+ *
+ * `tokenField` neutralises the token separator (a space) but NOT the list
+ * separator, and joining before folding left a lane genuinely named `A,B`
+ * rendering `list=A,B` — byte-identical to a two-lane scope. Latent while
+ * `resolveRefreshScope` yields exactly one lane, and reachable the moment #193's
+ * due-lane driver passes several. So the fold happens PER NAME and the delimiter
+ * is neutralised inside each one, exactly as the space already is: after this, a
+ * folded name cannot contain {@link LANE_JOIN}, so every comma in the rendered
+ * value is a real boundary between lanes.
+ */
+function laneToken(raw: string): string {
+  return tokenField(raw).replaceAll(LANE_JOIN, "_");
 }
 
 /**
@@ -330,6 +367,47 @@ export function createRefreshPresenter(deps: RefreshCliDeps, quiet: boolean): Pr
   return { sink, stop: () => { endCall(); } };
 }
 
+/**
+ * Answer "WHICH LANE?" for one invocation (#192): the three-state `--list`, then
+ * the shared resolve funnel `resolveListOrDefault`. Returns the scope, or the
+ * operator-facing message its caller prints with exit 1.
+ *
+ * Every failure is CLOSED. A malformed flag is a refusal, never "the default
+ * lane" and never "everyone" — `listName ?? undefined` would map "present but
+ * blank" onto "absent" and silently widen the sweep, which is the whole reason
+ * `parseList` has three states rather than two.
+ *
+ * Exported and split out of `runRefreshCli` for the reason `parseQuiet` is: the
+ * malformed state is refused by the ROUTER before any presenter runs (its
+ * `--list` validator rejects a blank or value-less flag), so calling this
+ * directly is the only way to drive this decision's own sad path and prove it
+ * fails closed rather than falling through to the default lane.
+ */
+export async function resolveRefreshScope(
+  db: Db,
+  argv: string[],
+): Promise<{ scope: RefreshScope } | { error: string }> {
+  const listName = parseList(argv);
+  // Word for word what `sk digest` says, because it is the same refusal about
+  // the same flag; two wordings would be two things to grep for.
+  if (listName === null) return { error: "--list requires a non-blank list name" };
+  try {
+    // An absent `--list` resolves the DEFAULT lane through the one funnel every
+    // surface uses (src/lists/service.ts), so bare `sk refresh` means the default
+    // lane and not "everyone" — the same rule `sk players add` follows.
+    const lane = await resolveListOrDefault(db, listName);
+    return { scope: { lists: [lane], listIds: [lane.id] } };
+  } catch (err) {
+    // ONLY these two are the operator's problem. Anything else is a broken
+    // database and must surface as a throw rather than be flattened into a
+    // greppable `error: no list named …` that sends the HC hunting a typo.
+    if (err instanceof UnknownListError || err instanceof NoDefaultListError) {
+      return { error: err.message };
+    }
+    throw err;
+  }
+}
+
 export async function runRefreshCli(argv: string[], deps: RefreshCliDeps): Promise<number> {
   const writeError = deps.writeError ?? deps.write;
   // Validated HERE as well as in main(), and that duplication is INTENTIONAL:
@@ -344,8 +422,18 @@ export async function runRefreshCli(argv: string[], deps: RefreshCliDeps): Promi
     return 1;
   }
   // Validate first, then collapse aliases/`=` forms to one canonical spelling,
-  // so the parser below never has to know an option has a short form (#191).
-  const presenter = createRefreshPresenter(deps, parseQuiet(normalizeDirect(["refresh"], argv)));
+  // so the parsers below never have to know an option has a short form (#191).
+  const normalized = normalizeDirect(["refresh"], argv);
+  // THE LANE, before the presenter and long before the claim (#192): a refusal
+  // here exits 1 having swept nothing and recorded no run, so a typo can never
+  // widen a sweep.
+  const resolved = await resolveRefreshScope(deps.db, normalized);
+  if ("error" in resolved) {
+    writeError(`error: ${resolved.error}`);
+    return 1;
+  }
+  const { scope } = resolved;
+  const presenter = createRefreshPresenter(deps, parseQuiet(normalized));
   let summary;
   try {
     summary = await runRefresh({
@@ -355,6 +443,7 @@ export async function runRefreshCli(argv: string[], deps: RefreshCliDeps): Promi
       now: deps.now,
       tz: deps.tz,
       onProgress: presenter.sink,
+      scope,
     });
   } finally {
     // Release the ticker even when the sweep throws, or a `.unref()`-less test
@@ -362,13 +451,25 @@ export async function runRefreshCli(argv: string[], deps: RefreshCliDeps): Promi
     presenter.stop();
   }
 
+  // `list=` leads BOTH terminal lines (#192). Bare `sk refresh` narrowed from
+  // every active Player to the default lane, and a semantic narrowing with no
+  // output change is a fail-quiet — one field removes it.
+  //
+  // It is FIRST, not appended, because of the convention pinned at
+  // test/cli-refresh.test.ts: the run's OWN counters are the real ones and they
+  // come LAST. And it is `tokenField`-folded like every other runtime-derived
+  // value on these lines: a lane name is operator-supplied free text, so an
+  // unfolded lane called `x failed=0` would forge a counter ahead of the real
+  // ones (ADR 0047, as amended for #146).
+  const laneField = `list=${scope.lists.map((l) => laneToken(l.name)).join(LANE_JOIN)}`;
+
   if (summary.skipped) {
-    deps.write(`refresh skipped reason=${summary.reason}`);
+    deps.write(`refresh skipped ${laneField} reason=${summary.reason}`);
     return 0;
   }
 
   deps.write(
-    `refresh done status=${summary.status} players=${summary.playersRefreshed} ` +
+    `refresh done ${laneField} status=${summary.status} players=${summary.playersRefreshed} ` +
       `skipped=${summary.playersSkipped} failed=${summary.playersFailed} ` +
       `inserted=${summary.statLinesInserted} updated=${summary.statLinesUpdated}`,
   );

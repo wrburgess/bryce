@@ -1,10 +1,11 @@
-import { and, eq, inArray, like, sql } from "drizzle-orm";
+import { and, count, eq, exists, getTableColumns, inArray, like, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import type { NewStatLineRow, PlayerRow } from "../db/schema.js";
+import type { NewStatLineRow, PlayerListRow, PlayerRow } from "../db/schema.js";
 import {
   highlightlyBoxScoreCache,
   highlightlyMatchCache,
   highlightlyPlayerCursors,
+  listMembers,
   players,
   seasonCalendar,
   statLines,
@@ -30,6 +31,25 @@ import { admitTargetedRefresh, claimRefreshRun, renewRefreshRun, settleRefreshRu
 import type { PlayerRef, RefreshCall, RefreshProgressEvent, RefreshProgressSink } from "./refresh-progress.js";
 import { emitNotice, safeEmit } from "./refresh-progress.js";
 
+/**
+ * WHICH LANES one sweep covers (#192, ADR 0061), resolved ONCE by the caller
+ * BEFORE the claim and then consumed by BOTH of `runRefresh`'s player-selection
+ * sites. Resolving once is the whole point: the settle-time re-read at the
+ * bottom of the sweep is the site that feeds `calendarBlocksFresh`, so a scope
+ * re-decided there — or not applied there at all — lets an off-lane player
+ * downgrade a clean lane run to `partial` while every pre-#192 test stays green.
+ */
+export interface RefreshScope {
+  /**
+   * The live lane rows this sweep covers. Carried alongside the ids because the
+   * caller has already paid for them and a presenter must never re-query to turn
+   * an id back into a name — one resolution, one set of lanes, one label.
+   */
+  lists: PlayerListRow[];
+  /** Their ids — what BOTH selection sites filter by. */
+  listIds: number[];
+}
+
 export interface RefreshDeps {
   db: Db;
   client: MlbClient;
@@ -52,6 +72,16 @@ export interface RefreshDeps {
    * stderr is unchanged. With a sink attached it is never used.
    */
   writeLegacyNotice?: (line: string) => void;
+  /**
+   * The lanes this sweep covers (#192, ADR 0061). OPTIONAL, and its absence
+   * means THE WHOLE WATCH LIST — every active Player, membership ignored. That
+   * unscoped default is the contract the MCP tool (`src/mcp/server.ts`), the
+   * REST route (`src/api/routes.ts`), and every pre-#192 refresh test rely on,
+   * and it is deliberately NOT the CLI's default: `sk refresh` resolves the
+   * default lane in `src/cli/refresh.ts`, mirroring `sk players add`. The lane
+   * default belongs to the command surface, not to the job.
+   */
+  scope?: RefreshScope;
 }
 
 /** The `player-settled` event, held back until the progress write has committed. */
@@ -317,8 +347,160 @@ export async function loadCalendars(db: Db): Promise<CalendarEntry[]> {
   }));
 }
 
-export async function loadActivePlayers(db: Db): Promise<PlayerRow[]> {
-  return db.select().from(players).where(eq(players.active, true));
+/**
+ * The active Players one sweep selects, optionally narrowed to a set of lanes
+ * (#192, ADR 0061).
+ *
+ * `players.active` STAYS THE MASTER GATE, above membership: a deactivated
+ * Player who is still enrolled in an in-scope lane is never fetched. That is the
+ * surviving half of ADR 0046 decision 2 and the ordering the predicate below is
+ * written in.
+ *
+ * `undefined` listIds ⇒ today's exact query, byte for byte — the whole Watch
+ * List. A non-empty set adds a CORRELATED `EXISTS` over `list_members` (the same
+ * shape `src/digest/assemble.ts` scopes its join with): constant-size regardless
+ * of how many Players a lane holds, so no bind parameter per Player and no
+ * SQLite ~999-param ceiling (`rules/backend.md`). `IN` over LANE ids is fine —
+ * a scope is a handful of lanes, never an unbounded id set — and it is also what
+ * makes UNION AND DEDUPE fall out of one query: a Player on two in-scope lanes
+ * satisfies `EXISTS` once and yields exactly one row, hence exactly one fetch.
+ *
+ * `runRefresh`'s PRE-CLAIM selection deliberately does NOT come through here —
+ * it goes through {@link selectSweepPlayers}, which answers the coverage
+ * question from the same read (PR #201 Reviewer P1). Pointing that site back at
+ * this function reopens the two-snapshot race; the callers that remain
+ * (`src/jobs/digest.ts`, `src/digest/assemble.ts`, `runRefreshForPlayer`, and
+ * the settle-time re-read) ask no coverage question at all.
+ */
+export async function loadActivePlayers(db: Db, listIds?: readonly number[]): Promise<PlayerRow[]> {
+  if (listIds === undefined) {
+    return db.select().from(players).where(eq(players.active, true));
+  }
+  // ZERO lanes in scope selects NOBODY, by an explicit early return rather than
+  // by whatever drizzle renders an empty `inArray` as. This is a real input, not
+  // a defensive one: #193's due-lane driver ticks with an empty due set whenever
+  // no lane's interval has elapsed, and "no lane is due" must sweep no Player —
+  // never, through a vacuously-true predicate, sweep every Player.
+  if (listIds.length === 0) return [];
+  return db
+    .select()
+    .from(players)
+    .where(
+      and(
+        eq(players.active, true),
+        exists(
+          db
+            .select({ x: sql`1` })
+            .from(listMembers)
+            .where(
+              and(
+                inArray(listMembers.listId, [...listIds]),
+                eq(listMembers.playerId, players.id),
+              ),
+            ),
+        ),
+      ),
+    );
+}
+
+/** What one sweep selects, and whether that selection is EVERYBODY (#192, ADR 0061 decision 8). */
+interface SweepSelection {
+  /** The active Players this sweep will fetch, in the read's own row order. */
+  players: PlayerRow[];
+  /**
+   * Does this sweep reach EVERY active Player?
+   *
+   * This is the question the digest's freshness banner actually asks — "was
+   * every player I am about to report on swept?" — and it is what the run
+   * records, in place of the "does the scope contain the default lane?" PROXY
+   * the Stage-4 self-review found wrong. The proxy holds only while the default
+   * lane contains every active Player; point the default at a fresh empty lane
+   * and a sweep of zero players certified the whole Watch List.
+   *
+   * It is a CLAIM-TIME SNAPSHOT, and deliberately not re-taken. A Player added
+   * mid-sweep is still picked up by the settle-time re-read that feeds
+   * `calendarBlocksFresh`, but he does not retroactively change what this run's
+   * row says it covered — a run's recorded coverage is a statement about the
+   * world it claimed against. The direction of that staleness is safe either
+   * way: the next sweep re-answers the question from scratch.
+   */
+  coversEveryActivePlayer: boolean;
+}
+
+/**
+ * Select the sweep's Players AND answer {@link SweepSelection.coversEveryActivePlayer}
+ * from ONE read (#192, ADR 0061 decision 8; PR #201 Reviewer P1).
+ *
+ * THE SINGLE READ IS THE INVARIANT, not an optimization — DO NOT "simplify" this
+ * back into `loadActivePlayers` plus a separate coverage query. Two reads take
+ * two snapshots, and they disagree in the FAIL-OPEN direction: enroll an
+ * already-active, off-lane Player into an in-scope lane BETWEEN them and
+ * selection misses him while coverage counts him as covered, so the run records
+ * `NULL` — "swept the whole Watch List" — over a Player it never fetched, and
+ * `digestFreshnessFor` reads `fresh`. The sweep's `activePlayers` array is fixed
+ * before the claim and never refreshed, so nothing downstream repairs that.
+ * Tagging each active row with its OWN coverage makes both answers halves of one
+ * snapshot, which cannot disagree at all.
+ *
+ * A transaction or a lock would also close the window and is deliberately NOT
+ * used: it would have to span this async drizzle read and the SYNCHRONOUS
+ * better-sqlite3 claim below, and it buys nothing the single read does not.
+ *
+ * The scoped read loads the UNCOVERED rows too and partitions in memory — the
+ * same shape `src/digest/assemble.ts` uses on the digest side. At this host's
+ * scale (one person's watch list) the discarded rows cost nothing, and it mints
+ * no `IN (...)` over Player ids (`rules/backend.md`); the `IN` is over the
+ * handful of LANE ids, which is bounded by construction.
+ */
+async function selectSweepPlayers(db: Db, listIds?: readonly number[]): Promise<SweepSelection> {
+  // UNSCOPED: today's exact query, byte for byte — no membership join at all.
+  // Coverage is true BY CONSTRUCTION rather than by a second query, because
+  // "every active Player" is literally what this predicate selects.
+  if (listIds === undefined) {
+    return { players: await loadActivePlayers(db), coversEveryActivePlayer: true };
+  }
+  // ZERO lanes selects NOBODY (see `loadActivePlayers`), so such a sweep covers
+  // everyone only on a host with nobody to cover. Still ONE read: selection is
+  // the empty set by construction, so this count is the whole answer and there
+  // is no second snapshot for it to disagree with. Split out rather than folded
+  // into the tagged read below, because an empty `inArray` is exactly the
+  // vacuous-truth shape `loadActivePlayers` refuses to rely on.
+  if (listIds.length === 0) {
+    const total = await db.select({ n: count() }).from(players).where(eq(players.active, true));
+    return { players: [], coversEveryActivePlayer: (total[0]?.n ?? 0) === 0 };
+  }
+  const rows = await db
+    .select({
+      ...getTableColumns(players),
+      // The SAME correlated `EXISTS` `loadActivePlayers` filters by, moved into
+      // the select list so one row set answers both questions. `players.active`
+      // stays the master gate ABOVE membership (ADR 0046 decision 2): a
+      // deactivated Player is absent from this read entirely, so he is neither
+      // swept nor counted against coverage.
+      covered: exists(
+        db
+          .select({ x: sql`1` })
+          .from(listMembers)
+          .where(
+            and(
+              inArray(listMembers.listId, [...listIds]),
+              eq(listMembers.playerId, players.id),
+            ),
+          ),
+      ).mapWith(Boolean),
+    })
+    .from(players)
+    .where(eq(players.active, true));
+
+  const selected: PlayerRow[] = [];
+  let coversEveryActivePlayer = true;
+  for (const { covered, ...player } of rows) {
+    // A Player on two in-scope lanes satisfies `EXISTS` once and yields exactly
+    // one row, so the union-and-dedupe still falls out of the query itself.
+    if (covered) selected.push(player);
+    else coversEveryActivePlayer = false;
+  }
+  return { players: selected, coversEveryActivePlayer };
 }
 
 /**
@@ -330,8 +512,20 @@ export async function loadActivePlayers(db: Db): Promise<PlayerRow[]> {
  */
 export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   const { db, now, tz } = deps;
-  const activePlayers = await loadActivePlayers(db);
+  // SELECTION SITE 1 (#192), which ALSO answers this run's coverage question in
+  // the same read (see `selectSweepPlayers`). `deps.scope` is undefined for the
+  // whole Watch List and carries the lanes otherwise; the SAME expression feeds
+  // selection site 2 at settle time below, which is what makes the scope one
+  // decision rather than two that can disagree.
+  const selection = await selectSweepPlayers(db, deps.scope?.listIds);
+  const activePlayers = selection.players;
   const calendars = await loadCalendars(db);
+  // Offseason Sleep is judged against THIS SWEEP'S players — so a lane sweep
+  // sleeps on its own lane's levels, not the host's. Deliberate: a lane of
+  // NCAA-only players has no reason to keep fetching because some other lane's
+  // MLB players are in season. Note `sleepWindow` returns `{sleeping:false}` for
+  // ZERO watched players (src/domain/season.ts), so an EMPTY lane sweeps
+  // (recording an `ok`, zero-player run) rather than sleeping.
   const sleep = sleepWindow(calendars, activePlayers, now(), tz);
   // Offseason Sleep stays a PURE no-op: it records no run at all, because the
   // weekly heartbeat — not a freshness row — is the offseason liveness signal
@@ -343,10 +537,37 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
     return skippedSummary("offseason-sleep", null);
   }
 
+  // WHAT THIS RUN WILL CLAIM TO HAVE COVERED (#192, ADR 0061 decision 8).
+  // `undefined` — stored as `NULL` — means "swept every active Player", so an
+  // unscoped run records it, AND SO DOES a lane run whose lanes happen to hold
+  // everyone: that is not a fudge, it is the column's documented meaning, and
+  // such a run genuinely did sweep the whole Watch List. Anything less records
+  // its lane ids as provenance for a genuinely partial run, which makes the
+  // digest's banner read an honest `stale` rather than forging `fresh` over
+  // players nobody fetched.
+  //
+  // The answer comes from SELECTION SITE 1's OWN read, never from a fresh query
+  // here (PR #201 Reviewer P1). A second read is a second snapshot, and the two
+  // race in the fail-open direction: an already-active Player enrolled into an
+  // in-scope lane in between reads as covered while `activePlayers` — fixed
+  // above and never refreshed — never fetches him.
+  const scopeListIds =
+    deps.scope === undefined || selection.coversEveryActivePlayer
+      ? undefined
+      : deps.scope.listIds;
+
   // Claim a run AFTER the sleep check (ADR 0043). A refusal means another sweep
   // holds a live lease — the wake-time overlap of the launchd job and a manual
   // run — so this one no-ops rather than double-sweeping.
-  const claim = claimRefreshRun(db, { now: now(), playersTotal: activePlayers.length });
+  //
+  // `playersTotal` is the SCOPED count, and `scopeListIds` records whether that
+  // count was the whole Watch List, so a lane run's N-of-M can never be read as
+  // a whole-list claim (#192).
+  const claim = claimRefreshRun(db, {
+    now: now(),
+    playersTotal: activePlayers.length,
+    scopeListIds,
+  });
   if (!claim.claimed) {
     safeEmit(deps.onProgress, { kind: "sweep-skipped", reason: claim.reason });
     return skippedSummary(claim.reason, null);
@@ -388,6 +609,9 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
       kind: "phase-finished", phase: "calendars", failures: calendarFailures.length,
     });
     safeEmit(deps.onProgress, { kind: "phase-started", phase: "ncaa-calendar" });
+    // The SAME scoped set again (#192): the NCAA calendar row is seeded only
+    // when a watched NCAA player is in THIS sweep, so a lane with no NCAA player
+    // does not seed one on another lane's behalf.
     await refreshNcaaCalendar(deps, season, activePlayers, fence);
     // The NCAA calendar is seeded from bundled dates, never fetched, so it has
     // no failure to collect; a missing bundled year is a `notice`, not a failure.
@@ -543,7 +767,17 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
     // that returned null (unpublished season) is not a failure and never blocks.
     // NCAA (sportId 22) is seeded from bundled dates, never fetched here, so it
     // never appears in calendarFailures and is unaffected.
-    const finalPlayers = await loadActivePlayers(db);
+    //
+    // SELECTION SITE 2 (#192), and TWO properties have to hold at once. It is
+    // LANE-SCOPED by the same `deps.scope?.listIds` site 1 used, or an off-lane
+    // player at a calendar-failed sport downgrades a clean lane run to `partial`
+    // — a completeness warning about data this run never claimed. And it still
+    // RE-QUERIES the database rather than reusing the array above: the scope
+    // narrows WHICH players are read, it does not FREEZE the set, so a mid-sweep
+    // call-up or lane addition is still reflected in the watched sportIds.
+    // Scoping without re-reading, or re-reading without scoping, each looks
+    // correct and each is wrong in one direction; both are pinned by tests.
+    const finalPlayers = await loadActivePlayers(db, deps.scope?.listIds);
     const finalCalendars = await loadCalendars(db);
     const watchedSportIds = new Set(
       finalPlayers.map((p) => sportIdForPlayer(p)).filter((id): id is number => id !== null),
@@ -1286,6 +1520,13 @@ export async function runRefreshForPlayer(
   calendarFailures: CalendarFailure[];
 }> {
   const { db, now, tz } = deps;
+  // WHOLE-LIST ON PURPOSE, even when `deps.scope` is set (#192, ADR 0061). This
+  // read exists only to answer "is the PIPELINE asleep?" before spending a
+  // backfill's HTTP, and Offseason Sleep is a host-wide state (ADR 0031). A
+  // seed-time backfill is not a lane operation — it targets one Player by id and
+  // records no freshness run — so narrowing it to whichever lane a caller
+  // happened to pass would make an unrelated lane's levels decide whether a new
+  // Player gets his first Refresh.
   const activePlayers = await loadActivePlayers(db);
   const calendars = await loadCalendars(db);
   if (sleepWindow(calendars, activePlayers, now(), tz).sleeping) {

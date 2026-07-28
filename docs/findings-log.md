@@ -105,6 +105,74 @@ keys and immutable columns — not from any column the codebase also writes an `
 
 ---
 
+### F003 — One decision was answered by two reads, and they could disagree fail-open
+
+- **Normalized failure class:** two-snapshot decision — computing a **derived predicate about a set**
+  (coverage, completeness, "did we get everyone?") in a *second* query, after the query that selected
+  the set has already returned, so a concurrent write landing in the gap makes the two answers describe
+  different worlds.
+- **Severity and blast radius:** **High** as it occurred. `runRefresh` selected the sweep's players and
+  then separately counted whether its lanes covered every active player. Enrolling an already-active,
+  off-lane player into an in-scope lane between the two made selection miss them while coverage counted
+  them covered — so the run recorded `scope_list_ids = NULL` ("swept the whole Watch List") over a
+  player it never fetched, became watermark-eligible, and made the whole-list digest banner read
+  `fresh`. Blast radius is a digest that asserts completeness it does not have — the same
+  "loss that reports itself as success" shape as [F002](#f002--a-durable-external-key-was-derived-from-a-role-flag-the-product-lets-you-move),
+  and reached through an ordinary lane enrollment. **Graded one notch below F002's Critical, and the
+  shape-similarity is not the grading:** F002 lost a *whole scheduled digest* while recording it
+  delivered; F003 omits the *players a racing enrollment adds* from an otherwise-complete sweep. Same
+  failure shape, an order of magnitude apart in blast radius.
+- **Enforcement status:** **the specific defect is enforced structurally** — the standalone
+  second-query function `coversEveryActivePlayer(db, listIds)` is deleted, and `selectSweepPlayers`
+  now returns the swept set and a `coversEveryActivePlayer` **field** as two projections of **one**
+  statement, so there is no second snapshot to disagree with. (The *name* survives as that field —
+  `grep` still finds it. Said precisely because an append-only entry cannot be quietly corrected, and
+  an auditor who greps for a deleted identifier would otherwise read a contradiction.)
+  `test/refresh-list.test.ts`
+  injects the racing enrollment at the moment the first `players` read completes and asserts the player
+  is unfetched **and** the run is not watermark-eligible (mutation-verified red against `14fd568`).
+  **The general lesson is not mechanically checkable** — "are these two reads answering one decision?"
+  is a question about intent, not a property the code exposes.
+- **Recurrence count:** 0 (first occurrence).
+- **Surfaced by:** [PR #201](https://github.com/wrburgess/bryce/pull/201) (issue
+  [#192](https://github.com/wrburgess/bryce/issues/192)), Stage-4 Reviewer, P1.
+- **Date recorded:** 2026-07-28
+- **Review date:** 2026-10-26
+
+**Why outcome 3 rather than 2.** The **minting freeze** is in force until the bounded corpus review
+dispositions the 45 loop-added bullets measured in
+[#185](https://github.com/wrburgess/bryce/issues/185), so outcome 2 is unavailable regardless of merit.
+
+The nearest existing bullet is `rules/backend.md`'s *"never swap a live data file into place by moving
+the old one aside and then renaming the new one in"*, and the honest reading is that it is **near, not
+the same**. That bullet is about **one actor crashing** between two non-atomic steps, leaving a path
+*absent*; this is about **a second actor writing** into a read-read gap, leaving a predicate *present
+and plausible but false*. Different cause, different symptom — only the two-steps-with-a-gap silhouette
+is shared. That makes F003 **more** novel than a "one domain over" framing would suggest, which
+strengthens the case for recording it rather than weakening it; what it does not do is make the case
+for minting a bullet today, which the freeze settles anyway. Recurrence, not conviction in the moment,
+decides that.
+
+**Outcome bifurcation, stated rather than left to be reconstructed.** The policy says every suggestion
+resolves to exactly one outcome. Here the **defect** took outcome 1 — fixed, guarded, and
+mutation-tested in `e26794c`, which the policy makes available under either setting and requires
+immediately for a high-severity first occurrence. The **suggestion** this entry records is the general
+two-snapshot lesson, which is a different artifact and takes outcome 3. One suggestion, one bucket; the
+fix was never the suggestion.
+
+**What made it hard to see:** the two-read shape was introduced *as the fix* for an earlier defect in
+this same PR — the freshness gate had been keyed on a proxy (`rules/backend.md`: *never re-decide a
+dependency's question with a proxy signal*), and replacing the proxy with a real coverage question was
+correct. The regression was in *where the answer came from*, not in what was asked. A fix that gets the
+question right can still get the snapshot wrong, and the second mistake hides behind the first one's
+correctness.
+
+**If it recurs:** promote toward *enforce* first. The mechanically checkable form, if one exists, is a
+check that no code path issues two reads of the same table between a selection and the durable write
+that records what the selection covered — narrower and more tractable than a general TOCTOU rule.
+
+---
+
 ## Archived
 
 _None yet._

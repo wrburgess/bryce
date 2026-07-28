@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import type { DigestCliDeps } from "../src/cli/digest.js";
-import { parseForce, parseList, parseTags, parseWindow, runDigestCli } from "../src/cli/digest.js";
+import { parseForce, parseTags, parseWindow, runDigestCli } from "../src/cli/digest.js";
+// `parseList` moved to the shared CLI module when `sk refresh` became its second
+// caller (#192); these cases are unchanged and still cover digest's use of it.
+import { parseList } from "../src/cli/flags.js";
 import { playerLists } from "../src/db/schema.js";
 import { addToList, createList } from "../src/lists/service.js";
 import { normalizeDirect, preflightDirect } from "../src/cli/router.js";

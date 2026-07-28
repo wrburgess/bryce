@@ -19,13 +19,15 @@ import {
   claimRefreshRun,
   admitTargetedRefresh,
   digestFreshnessFor,
+  encodeScopeListIds,
   refreshHealth,
   renewRefreshRun,
   settleRefreshRun,
   updateRefreshRunProgress,
   withIngestionFence,
 } from "../src/jobs/refresh-run.js";
-import { TEST_TZ, insertRefreshRun, testDb, testFileDb } from "./factories.js";
+import { resolveDefaultList } from "../src/lists/service.js";
+import { TEST_TZ, insertList, insertRefreshRun, testDb, testFileDb } from "./factories.js";
 
 /** A base instant and two derived ones straddling the 10-minute lease. */
 const T0 = "2026-07-19T07:00:00.000Z";
@@ -385,6 +387,142 @@ describe("digestFreshnessFor boundary (ADR 0043)", () => {
       playersRefreshed: 0,
       playersTotal: 0,
     });
+  });
+});
+
+/**
+ * The coverage-keyed freshness watermark, at the STORAGE layer (#192 / ADR 0061
+ * decision 8).
+ *
+ * Scoping the sweep opens a hole `digestFreshnessFor` did not have before: a
+ * `sk refresh -l Prospects` that settles `ok` is a completeness claim about
+ * Prospects and about nothing else, so letting it answer the whole watch list's
+ * banner would forge `fresh` over players it never touched.
+ *
+ * These cases pin the READER's half of the contract: a row with a recorded scope
+ * certifies nothing, a `NULL` row certifies everything, and the encoder produces
+ * a form in which no legal scope is falsy. WHO GETS `NULL` is `runRefresh`'s
+ * claim-time coverage decision, and it is tested where that decision lives —
+ * `test/refresh-list.test.ts` → *coverage-keyed freshness watermark*. Splitting
+ * them that way is deliberate: a `claimRefreshRun` fixture writes the scope by
+ * hand, so it can never demonstrate that the job DERIVED the right one.
+ */
+describe("coverage-keyed freshness watermark, storage layer (#192)", () => {
+  let opened: OpenedDb;
+  /** host date 2026-07-19, strictly after the content date — a qualifying start. */
+  const QUALIFYING_START = "2026-07-19T12:00:00.000Z";
+  const CONTENT_DATE = "2026-07-18";
+
+  beforeEach(() => {
+    opened = testDb();
+  });
+
+  afterEach(() => {
+    opened.close();
+  });
+
+  /** Claim + settle one run over `scopeListIds`, so the REAL encoder writes the row. */
+  const sweep = (
+    status: "ok" | "partial" | "failed",
+    scopeListIds: readonly number[] | undefined,
+    startedAt: string = QUALIFYING_START,
+  ): void => {
+    const claim = claimRefreshRun(opened.db, {
+      now: at(startedAt),
+      playersTotal: 2,
+      scopeListIds,
+    });
+    if (!claim.claimed) throw new Error("expected claim");
+    settleRefreshRun(opened.db, {
+      runId: claim.runId,
+      // Five minutes after its own start, so a second sweep in the same case
+      // claims cleanly rather than colliding with a live lease.
+      now: new Date(at(startedAt).getTime() + 5 * 60 * 1000),
+      status,
+      counts: { playersRefreshed: 2, playersSkipped: 0, playersFailed: 0, playersTotal: 2, statLinesInserted: 0, statLinesUpdated: 0 },
+    });
+  };
+
+  it("encodes a scope canonically: deduped, ascending, sentinel-wrapped", () => {
+    // Deduping and ordering make two sweeps of the same lanes store the same
+    // bytes, so the column is comparable and greppable as provenance.
+    expect(encodeScopeListIds(undefined)).toBeNull();
+    expect(encodeScopeListIds([3, 1, 10])).toBe(",1,3,10,");
+    expect(encodeScopeListIds([2, 2, 2])).toBe(",2,");
+    // The one property the FORM still has to carry, now that nothing does
+    // substring containment: zero lanes must not encode to the EMPTY STRING.
+    // `NULL` here means "swept everything", and `""` is a value that
+    // `if (!row.scopeListIds)`, SQL `ifnull()`, and most CSV/JSON round-trips
+    // cannot tell from `NULL` — the fail-OPEN direction. `,,` is falsy nowhere.
+    expect(encodeScopeListIds([])).toBe(",,");
+    expect(encodeScopeListIds([])).not.toBe("");
+    expect(Boolean(encodeScopeListIds([]))).toBe(true);
+  });
+
+  it("a run with ANY recorded scope certifies nothing, whichever lane it names", async () => {
+    // The run is real, recent, and `ok`. It swept less than the whole Watch
+    // List, so it answers for nothing the whole-list digest reports — and it is
+    // the DEFAULT lane here on purpose, because the predicate this replaced
+    // would have called exactly this row `fresh`.
+    const defaultLaneId = (await resolveDefaultList(opened.db)).id;
+    sweep("ok", [defaultLaneId]);
+
+    expect(opened.db.select().from(refreshRuns).all()[0]?.scopeListIds).toBe(`,${defaultLaneId},`);
+    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("stale");
+  });
+
+  it("an UNSCOPED (NULL) run reads fresh: MCP, REST, and every pre-#192 caller unchanged", () => {
+    sweep("ok", undefined);
+
+    expect(opened.db.select().from(refreshRuns).all()[0]?.scopeListIds).toBeNull();
+    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("fresh");
+  });
+
+  it("a HISTORICAL row migrated by drizzle/0013 reads fresh, not stale", async () => {
+    // Inserted directly, never through the claim, because that is what a
+    // pre-#192 row IS after the additive migration: every other column set and
+    // `scope_list_ids` NULL. If `NULL` were ever read as "unknown coverage"
+    // rather than "swept everything", every host would go `stale` on upgrade
+    // until its next sweep — a silent, self-healing-in-a-day regression that no
+    // fresh-database test can see.
+    await insertRefreshRun(opened.db, {
+      status: "ok",
+      startedAt: QUALIFYING_START,
+      claimedAt: QUALIFYING_START,
+      finishedAt: "2026-07-19T12:05:00.000Z",
+      playersRefreshed: 4,
+      playersTotal: 4,
+    });
+
+    expect(opened.db.select().from(refreshRuns).all()[0]?.scopeListIds).toBeNull();
+    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ)).toMatchObject({
+      state: "fresh",
+      playersRefreshed: 4,
+    });
+  });
+
+  it("a NEWER partial-coverage run never hides an older complete one — it is skipped, not preferred", async () => {
+    // The order-by picks the latest ELIGIBLE row, not the latest row that is
+    // then tested. A lane sweep runs far more often than a whole-list one, so
+    // reading "latest, then filter" would make the banner permanently `stale`
+    // on a host that uses lanes at all.
+    sweep("ok", undefined);
+    const other = await insertList(opened.db, { name: "Prospects" });
+    sweep("ok", [other.id], "2026-07-19T18:00:00.000Z");
+
+    expect(opened.db.select().from(refreshRuns).all()).toHaveLength(2);
+    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("fresh");
+  });
+
+  it("a lane-scoped FAILED run DOES surface in refreshHealth — the deliberate split", async () => {
+    const other = await insertList(opened.db, { name: "Prospects" });
+    sweep("failed", [other.id]);
+
+    // `/health` answers "what did ingestion last do", not "is this lane's digest
+    // fresh". Filtering it by lane would hide a real failure from the only
+    // surface that reports it, so the two functions take different filters on
+    // purpose and this pins it against a well-meaning "fix".
+    expect(refreshHealth(opened.db, at("2026-07-19T13:00:00.000Z"), TEST_TZ)?.state).toBe("failed");
   });
 });
 
