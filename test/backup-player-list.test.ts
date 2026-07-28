@@ -938,6 +938,36 @@ describe("lane configuration in the backup (v5, #190)", () => {
   // already fooled one run here — a stray raw BEL turned a *valid* address into
   // a control-bearing one, so the assertion passed while proving something other
   // than what its name claimed.
+  // Reviewer P2, delta 4. The normalization must run AFTER the version gate,
+  // never before it. A nested transform would rewrite `digestTo` out from under
+  // the `version < 5` check — erasing the very evidence that check looks for —
+  // so a hand-edited v2-v4 payload smuggling lane configuration would be
+  // silently ACCEPTED instead of rejected. Validate first, normalize second.
+  it("still rejects a pre-v5 payload smuggling digestTo, rather than normalizing its evidence away", async () => {
+    await createList(opened.db, "Prospects", NOW);
+    const v5 = await createPlayerListBackup(opened.db, () => NOW);
+    // EVERY other lane field is cleared on EVERY list, so `digestTo` is the only
+    // v5-only value left in the payload. Without this the migration-seeded
+    // `Watchlist` (refreshIntervalMinutes 1440, digestHour 5) trips the version
+    // gate on its own and the assertion passes whether or not the ordering is
+    // right — proving nothing, which is exactly what it did on the first draft.
+    const stripped = (v5.lists ?? []).map((l) => ({
+      ...l,
+      isDefault: false,
+      refreshIntervalMinutes: null,
+      digestHour: null,
+      digestTo: null,
+    }));
+    const control = { ...v5, version: 4, lists: stripped };
+    expect(() => parsePlayerListBackup(JSON.stringify(control))).not.toThrow();
+
+    const smuggled = {
+      ...control,
+      lists: stripped.map((l) => (l.name === "Prospects" ? { ...l, digestTo: "-" } : l)),
+    };
+    expect(() => parsePlayerListBackup(JSON.stringify(smuggled))).toThrow(/requires version 5/);
+  });
+
   it("NORMALIZES an unusable digestTo to null instead of making the backup unrestorable", async () => {
     await createList(opened.db, "Prospects", NOW);
     const backup = await createPlayerListBackup(opened.db, () => NOW);
