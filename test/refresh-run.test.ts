@@ -26,7 +26,7 @@ import {
   updateRefreshRunProgress,
   withIngestionFence,
 } from "../src/jobs/refresh-run.js";
-import { resolveDefaultList, setDefaultList } from "../src/lists/service.js";
+import { resolveDefaultList } from "../src/lists/service.js";
 import { TEST_TZ, insertList, insertRefreshRun, testDb, testFileDb } from "./factories.js";
 
 /** A base instant and two derived ones straddling the 10-minute lease. */
@@ -40,14 +40,9 @@ const at = (iso: string) => new Date(iso);
 
 describe("claimRefreshRun / settleRefreshRun (ADR 0043)", () => {
   let opened: OpenedDb;
-  let defaultLaneId: number;
 
-  beforeEach(async () => {
+  beforeEach(() => {
     opened = testDb();
-    // The lane drizzle/0012 seeded. `digestFreshnessFor` judges the watermark
-    // against THIS lane since #192, and the caller (the scheduled digest) always
-    // has it in hand, so the tests resolve it the same way rather than guessing.
-    defaultLaneId = (await resolveDefaultList(opened.db)).id;
   });
 
   afterEach(() => {
@@ -258,7 +253,7 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0043)", () => {
     expect(rowA).toMatchObject({ status: "failed", errorMessage: SUPERSEDED_MESSAGE });
 
     // The watermark is the LATEST by (started_at, id) — B, the real winner.
-    const fresh = digestFreshnessFor(opened.db, "2026-07-18", TEST_TZ, defaultLaneId);
+    const fresh = digestFreshnessFor(opened.db, "2026-07-18", TEST_TZ);
     expect(fresh.state).toBe("fresh"); // B started 2026-07-19 (host), > content 07-18, ok
     expect(fresh.playersRefreshed).toBe(3);
   });
@@ -286,12 +281,10 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0043)", () => {
 
 describe("digestFreshnessFor boundary (ADR 0043)", () => {
   let opened: OpenedDb;
-  let defaultLaneId: number;
   const CONTENT_DATE = "2026-07-18"; // a 1d digest run on 07-19 covers 07-18
 
-  beforeEach(async () => {
+  beforeEach(() => {
     opened = testDb();
-    defaultLaneId = (await resolveDefaultList(opened.db)).id;
   });
 
   afterEach(() => {
@@ -305,7 +298,7 @@ describe("digestFreshnessFor boundary (ADR 0043)", () => {
       startedAt: "2026-07-18T12:00:00.000Z",
       finishedAt: "2026-07-18T12:05:00.000Z",
     });
-    const fresh = digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, defaultLaneId);
+    const fresh = digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ);
     expect(fresh.state).toBe("stale");
     // asOf falls back to the latest ok/partial finish, so it is dated, not null.
     expect(fresh.asOf).toBe("2026-07-18T12:05:00.000Z");
@@ -317,7 +310,7 @@ describe("digestFreshnessFor boundary (ADR 0043)", () => {
       startedAt: "2026-07-19T12:00:00.000Z", // host date 2026-07-19
       finishedAt: "2026-07-19T12:05:00.000Z",
     });
-    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, defaultLaneId).state).toBe("fresh");
+    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("fresh");
   });
 
   it("a midnight-straddling run started before midnight is stale for that content date", async () => {
@@ -329,7 +322,7 @@ describe("digestFreshnessFor boundary (ADR 0043)", () => {
       startedAt: "2026-07-19T04:50:00.000Z",
       finishedAt: "2026-07-19T05:10:00.000Z", // 00:10 CDT on 07-19
     });
-    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, defaultLaneId).state).toBe("stale");
+    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("stale");
   });
 
   it("a qualifying PARTIAL run yields partial, carrying its N-of-M counts", async () => {
@@ -340,7 +333,7 @@ describe("digestFreshnessFor boundary (ADR 0043)", () => {
       playersRefreshed: 2,
       playersTotal: 5,
     });
-    const fresh = digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, defaultLaneId);
+    const fresh = digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ);
     expect(fresh).toMatchObject({ state: "partial", playersRefreshed: 2, playersTotal: 5 });
   });
 
@@ -353,7 +346,7 @@ describe("digestFreshnessFor boundary (ADR 0043)", () => {
       playersRefreshed: 0,
       playersTotal: 5,
     });
-    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, defaultLaneId)).toMatchObject({
+    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ)).toMatchObject({
       state: "stale",
       asOf: null,
     });
@@ -379,7 +372,7 @@ describe("digestFreshnessFor boundary (ADR 0043)", () => {
       playersTotal: 9,
     });
 
-    const fresh = digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, defaultLaneId);
+    const fresh = digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ);
     expect(fresh).toMatchObject({
       state: "fresh",
       asOf: "2026-07-19T12:06:00.000Z", // the SECOND row's finish
@@ -388,7 +381,7 @@ describe("digestFreshnessFor boundary (ADR 0043)", () => {
   });
 
   it("returns stale/never on an empty table", () => {
-    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, defaultLaneId)).toEqual({
+    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ)).toEqual({
       state: "stale",
       asOf: null,
       playersRefreshed: 0,
@@ -398,16 +391,23 @@ describe("digestFreshnessFor boundary (ADR 0043)", () => {
 });
 
 /**
- * The lane-scoped freshness watermark (#192 / ADR 0061).
+ * The coverage-keyed freshness watermark, at the STORAGE layer (#192 / ADR 0061
+ * decision 8).
  *
  * Scoping the sweep opens a hole `digestFreshnessFor` did not have before: a
  * `sk refresh -l Prospects` that settles `ok` is a completeness claim about
  * Prospects and about nothing else, so letting it answer the whole watch list's
- * banner would forge `fresh` over players it never touched. Eligibility is
- * DERIVED from the run's recorded scope against the CURRENT default lane, never
- * stored — which is what the `set-default` case below actually proves.
+ * banner would forge `fresh` over players it never touched.
+ *
+ * These cases pin the READER's half of the contract: a row with a recorded scope
+ * certifies nothing, a `NULL` row certifies everything, and the encoder produces
+ * a form in which no legal scope is falsy. WHO GETS `NULL` is `runRefresh`'s
+ * claim-time coverage decision, and it is tested where that decision lives —
+ * `test/refresh-list.test.ts` → *coverage-keyed freshness watermark*. Splitting
+ * them that way is deliberate: a `claimRefreshRun` fixture writes the scope by
+ * hand, so it can never demonstrate that the job DERIVED the right one.
  */
-describe("lane-scoped freshness watermark (#192)", () => {
+describe("coverage-keyed freshness watermark, storage layer (#192)", () => {
   let opened: OpenedDb;
   /** host date 2026-07-19, strictly after the content date — a qualifying start. */
   const QUALIFYING_START = "2026-07-19T12:00:00.000Z";
@@ -425,84 +425,93 @@ describe("lane-scoped freshness watermark (#192)", () => {
   const sweep = (
     status: "ok" | "partial" | "failed",
     scopeListIds: readonly number[] | undefined,
+    startedAt: string = QUALIFYING_START,
   ): void => {
     const claim = claimRefreshRun(opened.db, {
-      now: at(QUALIFYING_START),
+      now: at(startedAt),
       playersTotal: 2,
       scopeListIds,
     });
     if (!claim.claimed) throw new Error("expected claim");
     settleRefreshRun(opened.db, {
       runId: claim.runId,
-      now: at("2026-07-19T12:05:00.000Z"),
+      // Five minutes after its own start, so a second sweep in the same case
+      // claims cleanly rather than colliding with a live lease.
+      now: new Date(at(startedAt).getTime() + 5 * 60 * 1000),
       status,
       counts: { playersRefreshed: 2, playersSkipped: 0, playersFailed: 0, playersTotal: 2, statLinesInserted: 0, statLinesUpdated: 0 },
     });
   };
 
   it("encodes a scope canonically: deduped, ascending, sentinel-wrapped", () => {
-    // The stored form is what the eligibility test greps, so it is pinned
-    // directly rather than only through a run. Deduping and ordering make two
-    // sweeps of the same lanes store the same bytes; the bounding commas are
-    // what stop lane `1` matching `,10,` on its prefix.
+    // Deduping and ordering make two sweeps of the same lanes store the same
+    // bytes, so the column is comparable and greppable as provenance.
     expect(encodeScopeListIds(undefined)).toBeNull();
     expect(encodeScopeListIds([3, 1, 10])).toBe(",1,3,10,");
     expect(encodeScopeListIds([2, 2, 2])).toBe(",2,");
-    // Zero lanes is NOT "everything": a non-NULL value that contains no id, so
-    // it can never satisfy the containment test for any lane.
+    // The one property the FORM still has to carry, now that nothing does
+    // substring containment: zero lanes must not encode to the EMPTY STRING.
+    // `NULL` here means "swept everything", and `""` is a value that
+    // `if (!row.scopeListIds)`, SQL `ifnull()`, and most CSV/JSON round-trips
+    // cannot tell from `NULL` — the fail-OPEN direction. `,,` is falsy nowhere.
     expect(encodeScopeListIds([])).toBe(",,");
+    expect(encodeScopeListIds([])).not.toBe("");
+    expect(Boolean(encodeScopeListIds([]))).toBe(true);
   });
 
-  it("a NON-default lane run settles ok and the digest still reads stale", async () => {
-    const other = await insertList(opened.db, { name: "Prospects" });
-    sweep("ok", [other.id]);
-
-    const defaultLaneId = (await resolveDefaultList(opened.db)).id;
-    // The run is real, recent, and `ok` — and it certifies nothing about this
-    // lane. Without the scope gate this reads `fresh`.
-    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, defaultLaneId).state).toBe("stale");
-  });
-
-  it("a DEFAULT-lane run settles ok and the digest reads fresh", async () => {
+  it("a run with ANY recorded scope certifies nothing, whichever lane it names", async () => {
+    // The run is real, recent, and `ok`. It swept less than the whole Watch
+    // List, so it answers for nothing the whole-list digest reports — and it is
+    // the DEFAULT lane here on purpose, because the predicate this replaced
+    // would have called exactly this row `fresh`.
     const defaultLaneId = (await resolveDefaultList(opened.db)).id;
     sweep("ok", [defaultLaneId]);
 
-    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, defaultLaneId).state).toBe("fresh");
+    expect(opened.db.select().from(refreshRuns).all()[0]?.scopeListIds).toBe(`,${defaultLaneId},`);
+    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("stale");
   });
 
-  it("an UNSCOPED (NULL) run reads fresh: historical rows, MCP, and REST are unchanged", async () => {
+  it("an UNSCOPED (NULL) run reads fresh: MCP, REST, and every pre-#192 caller unchanged", () => {
     sweep("ok", undefined);
 
-    const defaultLaneId = (await resolveDefaultList(opened.db)).id;
     expect(opened.db.select().from(refreshRuns).all()[0]?.scopeListIds).toBeNull();
-    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, defaultLaneId).state).toBe("fresh");
+    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("fresh");
   });
 
-  it("the sentinel commas stop lane 10 from satisfying lane 1 on a prefix match", () => {
-    // The delimiter trap the encoding exists to close: a naive `like '%1%'` — or
-    // a comma-joined form with no bounding commas — matches `,10,` for lane 1
-    // and certifies the digest off a sweep of an entirely different lane.
-    sweep("ok", [10]);
+  it("a HISTORICAL row migrated by drizzle/0013 reads fresh, not stale", async () => {
+    // Inserted directly, never through the claim, because that is what a
+    // pre-#192 row IS after the additive migration: every other column set and
+    // `scope_list_ids` NULL. If `NULL` were ever read as "unknown coverage"
+    // rather than "swept everything", every host would go `stale` on upgrade
+    // until its next sweep — a silent, self-healing-in-a-day regression that no
+    // fresh-database test can see.
+    await insertRefreshRun(opened.db, {
+      status: "ok",
+      startedAt: QUALIFYING_START,
+      claimedAt: QUALIFYING_START,
+      finishedAt: "2026-07-19T12:05:00.000Z",
+      playersRefreshed: 4,
+      playersTotal: 4,
+    });
 
-    expect(opened.db.select().from(refreshRuns).all()[0]?.scopeListIds).toBe(",10,");
-    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, 1).state).toBe("stale");
-    // ...and lane 10 itself IS satisfied, so the guard is not vacuously strict.
-    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, 10).state).toBe("fresh");
+    expect(opened.db.select().from(refreshRuns).all()[0]?.scopeListIds).toBeNull();
+    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ)).toMatchObject({
+      state: "fresh",
+      playersRefreshed: 4,
+    });
   });
 
-  it("moving the default lane changes an OLD run's eligibility, proving it is derived", async () => {
-    const first = await resolveDefaultList(opened.db);
-    const second = await insertList(opened.db, { name: "Prospects" });
-    sweep("ok", [first.id]);
-    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, first.id).state).toBe("fresh");
+  it("a NEWER partial-coverage run never hides an older complete one — it is skipped, not preferred", async () => {
+    // The order-by picks the latest ELIGIBLE row, not the latest row that is
+    // then tested. A lane sweep runs far more often than a whole-list one, so
+    // reading "latest, then filter" would make the banner permanently `stale`
+    // on a host that uses lanes at all.
+    sweep("ok", undefined);
+    const other = await insertList(opened.db, { name: "Prospects" });
+    sweep("ok", [other.id], "2026-07-19T18:00:00.000Z");
 
-    // `set-default` re-points the schedule at a cohort that run never swept, so
-    // the very same row must stop certifying. A boolean written at claim time
-    // would still say "yes" here.
-    await setDefaultList(opened.db, "Prospects", at(QUALIFYING_START));
-    const moved = await resolveDefaultList(opened.db);
-    expect(moved.id).toBe(second.id);
-    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, moved.id).state).toBe("stale");
+    expect(opened.db.select().from(refreshRuns).all()).toHaveLength(2);
+    expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("fresh");
   });
 
   it("a lane-scoped FAILED run DOES surface in refreshHealth — the deliberate split", async () => {
@@ -751,8 +760,7 @@ describe("refresh fencing across a real child process (ADR 0048)", () => {
       expect(storedLines).toHaveLength(1);
       expect(storedLines[0]).toMatchObject({ gameId: 910001, opponentName: "New Opponent" });
       expect(storedLines[0]?.stats).toMatchObject({ hits: 3, atBats: 4 });
-      const laneId = (await resolveDefaultList(file.opened.db)).id;
-      expect(digestFreshnessFor(file.opened.db, "2026-07-18", TEST_TZ, laneId)).toMatchObject({
+      expect(digestFreshnessFor(file.opened.db, "2026-07-18", TEST_TZ)).toMatchObject({
         state: "fresh",
         playersRefreshed: 1,
         playersTotal: 1,
@@ -811,8 +819,7 @@ describe("refresh fencing across a real child process (ADR 0048)", () => {
         regularSeasonStart: "2026-03-25",
         regularSeasonEnd: "2026-09-27",
       });
-      const laneId = (await resolveDefaultList(file.opened.db)).id;
-      expect(digestFreshnessFor(file.opened.db,"2026-07-18",TEST_TZ,laneId)).toMatchObject({
+      expect(digestFreshnessFor(file.opened.db,"2026-07-18",TEST_TZ)).toMatchObject({
         state:"fresh", playersRefreshed:1, playersTotal:1,
       });
     } finally {

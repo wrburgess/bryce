@@ -48,9 +48,21 @@ exit **1** with no run recorded — a typo must never widen a sweep. The MCP `re
 `POST /refresh` are unchanged this phase and still sweep the whole Watch List.
 
 > **One-phase asymmetry.** `sk refresh` is lane-scoped from #192, while bare `sk digest` still assembles
-> the whole Watch List until [#193](https://github.com/wrburgess/bryce/issues/193). A lane run that is
-> *not* the default lane therefore does **not** make the daily digest read `fresh` — deliberately, so a
-> narrow sweep cannot forge a completeness claim over players it never touched.
+> the whole Watch List until [#193](https://github.com/wrburgess/bryce/issues/193). So the digest's
+> `fresh` banner requires a run that swept **every active Player** — a lane run that left anyone out
+> leaves the banner reading `stale`, deliberately, so a narrow sweep cannot forge a completeness claim
+> over players it never touched. A lane run that *does* happen to hold everyone counts as complete,
+> whichever lane it was: the test is coverage, not which lane you named
+> ([ADR 0061](../adr/0061-lane-scoped-refresh-supersedes-whole-sweep.md) decision 8).
+
+> **Two `refresh done` grammars exist — grep for the right one.** This sweep prints
+> `refresh done list=<lane> status=… players=… skipped=… failed=… inserted=… updated=…`. The
+> **first-refresh** line printed by `sk seed add` and `sk players add` for a brand-new player is a
+> different, shorter record: `refresh done inserted=… updated=…`, with no `list=` and no `status=`
+> (see [`players add`](#players-add--add-one-player-and-attach-him-to-a-lane) below). They report
+> different things — a whole sweep versus one player's backfill — and are **not** being reconciled;
+> match on `status=` (or on `list=`) when you mean the sweep. The other grammar is documented under
+> `players add` below.
 
 *Which* game logs each Player needs is derived per Player, not swept blindly across all six levels
 ([ADR 0060](../adr/0060-probe-plan-prunes-refresh-fanout.md)): his current level in all three stat
@@ -353,6 +365,15 @@ refresh done inserted=44 updated=0
 ```
 
 NCAA rows carry `highlightlyPlayerId=…` in place of `personId=…`.
+
+> **This `refresh done` is NOT the sweep's `refresh done` — grep for the right one.** This line is the
+> **first-refresh** record for one brand-new player (`sk seed add` prints the same one): only
+> `inserted=` and `updated=`, no `list=` and no `status=`. The `refresh` command's terminal line is
+> `refresh done list=<lane> status=… players=… skipped=… failed=… inserted=… updated=…` (see
+> [`refresh`](#refresh--re-ingest-a-lanes-current-season) above). The divergence predates #192 and is
+> **deliberately left alone** — reconciling two grammars that report genuinely different events would
+> churn unrelated tests for no correctness gain. Match on `status=` for the sweep, or anchor on
+> `^refresh done inserted=` for this one.
 
 **The two-write caveat, stated rather than hidden.** Creating the player and attaching him to the
 lane are two writes and **cannot** be one transaction — the create does network I/O and runs the

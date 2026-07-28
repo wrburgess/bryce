@@ -14,11 +14,11 @@ whole Watch List**.
 Concretely ([issue #192](https://github.com/wrburgess/bryce/issues/192), phase 3 of the
 [#189](https://github.com/wrburgess/bryce/issues/189) epic):
 
-- `RefreshScope` (`src/jobs/refresh.ts`) carries the live lane rows, their ids, and whether the default
-  lane is among them. `loadActivePlayers(db, listIds?)` narrows the selection with a correlated
-  `EXISTS` over `list_members`.
-- `refresh_runs` gains `scope_list_ids` (`drizzle/0013`), and `digestFreshnessFor` only accepts a run
-  that covered the lane it is answering for.
+- `RefreshScope` (`src/jobs/refresh.ts`) carries the live lane rows and their ids.
+  `loadActivePlayers(db, listIds?)` narrows the selection with a correlated `EXISTS` over
+  `list_members`.
+- `refresh_runs` gains `scope_list_ids` (`drizzle/0013`) recording whether the run covered **every**
+  active Player, and `digestFreshnessFor` only accepts a run that did.
 - `sk refresh` takes `--list NAME` / `-l NAME`, resolves the default lane when it is absent, and prints
   `list=<name>` first on both terminal lines.
 
@@ -100,31 +100,63 @@ green.
    whole Watch List. Lane parameters on the MCP `refresh` tool and `POST /refresh` are out of scope here;
    stated so their absence is not read as an oversight.
 
-8. **The freshness watermark is lane-gated, and eligibility is DERIVED, never stored.** Scoping the
-   sweep opens a hole the whole-list sweep did not have: `digestFreshnessFor` took the latest `ok`/
-   `partial` run regardless of scope, so `sk refresh -l Prospects` settling `ok` would make the whole
-   watch list's digest banner read `fresh` — a forged completeness claim over players that run never
-   touched. That is a High correctness defect **introduced by this change**, so it is closed here.
+8. **The freshness watermark is keyed on COVERAGE — "did this run sweep every active Player?" — not on
+   which lane the run named.** Scoping the sweep opens a hole the whole-list sweep did not have:
+   `digestFreshnessFor` took the latest `ok`/`partial` run regardless of scope, so `sk refresh -l
+   Prospects` settling `ok` would make the whole watch list's digest banner read `fresh` — a forged
+   completeness claim over players that run never touched. That is a High correctness defect
+   **introduced by this change**, so it is closed here.
 
-   `refresh_runs.scope_list_ids` is `NULL` for a whole-list run and otherwise the canonical
-   `,1,3,10,` — ids deduped, ascending, with **leading and trailing sentinel commas**. The sentinels
-   are load-bearing: a containment test for lane `1` would otherwise match `,10,` on its prefix. The
-   encoding is deliberately not JSON, so the test is an `instr` that needs no JSON1/`json_each` build
-   assumption. An empty scope encodes to `,,` — non-`NULL`, containing no id, certifying nothing.
+   **This decision was rewritten during the Stage-4 self-review of PR #201, and the first version was
+   wrong.** It gated the watermark on *"does this run's recorded scope contain the current default
+   lane's id?"* — a **proxy** for the question above, and one that holds only while the default lane
+   contains every active Player. That is true immediately after `drizzle/0012` and false as soon as
+   anyone uses the lane commands #191 shipped: `players lists create --name New` →
+   `players lists set-default --name New` → `refresh` sweeps zero players, settles a legitimate `ok`,
+   contains the default lane, and certified the **whole** Watch List as `fresh`. Two supported
+   commands reached exactly the forged claim this decision exists to prevent. The proxy is gone; the
+   real question is asked directly. `rules/backend.md` already names this shape — *"never re-decide a
+   dependency's question with a proxy signal instead of the dependency's own criterion"* — so no new
+   rule is owed; the existing bullet was simply not applied to a predicate written in SQL.
 
-   A run is watermark-eligible iff its scope is `NULL` **or** it contains the **current** default lane's
-   id. Derived at read time because `set-default` **moves** the default lane, and a run that swept the
-   *previous* default genuinely no longer certifies the new one; a boolean written at claim time would
-   be retroactively wrong. `digestFreshnessFor` takes the lane as a **parameter** rather than resolving
-   it, because its only caller — the scheduled digest — has already resolved it (it cannot claim its
-   delivery slot without one). That keeps this from becoming a second "what is the default lane?"
-   decision site, and it means a database with **no** default lane never reaches the question at all:
-   `resolveDefaultList` has already refused with `NoDefaultListError` before the claim.
+   **How it is asked.** At claim time `runRefresh` counts the active Players its lanes do *not* reach
+   (one `count()` over a correlated `NOT EXISTS`, never a row load). Zero uncovered ⇒ the run swept the
+   whole Watch List ⇒ `scope_list_ids` records **`NULL`** — including for a *lane* run, which is not a
+   fudge but the column's documented meaning, and such a run genuinely did sweep everyone. Otherwise
+   the lane ids are recorded as **provenance for a genuinely partial run**. `digestFreshnessFor`'s
+   eligibility test collapses to `scope_list_ids IS NULL`; it loses its lane parameter, and the
+   `instr` containment, the `RefreshScope.includesDefaultLane` flag, and the whole notion of a
+   default-lane plumbing path go with it.
+
+   Coverage is a **claim-time snapshot**. A Player added mid-sweep is still picked up by the
+   settle-time re-read that feeds `calendarBlocksFresh` (decision 2), but he does not retroactively
+   change what the run's row says it covered — a recorded coverage is a statement about the world the
+   run claimed against, and the next sweep re-answers it from scratch. A Player added *after* a
+   complete sweep likewise leaves that run's `fresh` verdict standing; that is the pre-#192 behavior
+   unchanged (a whole-list run has always certified the world it swept), and his own first Refresh is
+   what fills the gap.
+
+   **Eligibility therefore moves from read time to claim time, and the reason the old ADR gave for
+   read-time derivation no longer applies.** The first version derived it on every read because
+   `set-default` *moves* the default lane, which would make a claim-time boolean retroactively wrong.
+   Coverage has no such dependency: whether a run swept everyone is a fact about that run, and
+   re-pointing the default lane afterwards does not change it. Nothing is left that a later
+   configuration change can invalidate.
+
+   **The storage form keeps its sentinel commas, on a different and smaller basis.** `,1,3,10,` — ids
+   deduped, ascending, comma-delimited, bounded. The original justification (a containment test for
+   lane `1` must not match `,10,` on its prefix) died with the containment test, and is recorded here
+   as dead rather than quietly restated. What survives is one present-tense reason: an **empty** scope
+   must not encode to the empty string. `NULL` here means "swept everything", and `""` is a value that
+   `if (!row.scopeListIds)` in TypeScript, `ifnull()` in SQL, and most CSV/JSON round-trips cannot tell
+   from `NULL` — the fail-**open** direction. `,,` is falsy nowhere. Canonical ordering and dedupe stay
+   for the reason they always applied: two runs over the same lanes store the same bytes, so the column
+   is comparable and greppable as provenance.
 
    **`refreshHealth` is deliberately NOT filtered**, and the asymmetry is the decision. `/health` and
    the MCP `status` tool answer "what did ingestion last do on this host?"; hiding a lane run that
    settled `failed` there would suppress a real operational signal because the failure happened to be
-   scoped. A freshness *claim* must be narrowed to the lane it claims for; an operational *signal* must
+   scoped. A freshness *claim* must be narrowed to what it claims for; an operational *signal* must
    not be. Both halves are pinned by tests so neither reads as an oversight to be "fixed".
 
 9. **The digest stays whole-list for one phase, and the asymmetry is expected.** After this change
@@ -142,23 +174,44 @@ green.
     with no safety benefit — the members are still active Players whose data is still wanted, and the
     run is already fenced by its lease.
 
-    One consequence, stated rather than discovered: such a run's `scope_list_ids` names a now-dead lane,
-    so it can never be watermark-eligible again (the default lane is by definition live). That is the
-    fail-closed direction, and it is intended.
+    One consequence, stated rather than discovered: unless the dead lane happened to hold every active
+    Player — in which case the run recorded `NULL`, having genuinely swept everyone — such a run's
+    `scope_list_ids` names a now-dead lane and can never be watermark-eligible (decision 8 accepts only
+    `NULL`). That is the fail-closed direction, and it is intended.
 
-11. **An empty default lane settles `ok` with `playersTotal: 0`, and DOES advance the watermark.** By
-    `deriveRefreshStatus`: nothing failed, nothing was passed over, nothing blocks. This is not a
-    regression — an empty watch list has always behaved this way, and a sweep of zero players genuinely
-    left nothing behind. It is recorded because the reading changes once a lane can be empty *while the
-    host has players*: the digest for an empty lane is then correctly `fresh` and correctly empty.
+11. **An empty default lane settles `ok` with `playersTotal: 0`, and does NOT advance the watermark.**
+    The status is unchanged and correct: by `deriveRefreshStatus`, nothing failed, nothing was passed
+    over, nothing blocks — and an empty watch list has always behaved this way.
 
-12. **The orphan-player gap is real, out of scope, and tracked.** `sk seed add`
+    **The second half of this decision was wrong, and this records the contradiction rather than
+    quietly reworded text.** The first version argued that such a run *should* advance the watermark
+    because "the digest for an empty lane is then correctly `fresh` and correctly empty". That is only
+    true once the digest is **lane-scoped** — and decision 9 records that bare `sk digest` still
+    assembles the **whole Watch List** until #193. Decisions 9 and 11 could not both hold in this
+    phase, and 11 was the one asserting a completeness claim over players the run never touched.
+
+    Resolved by decision 8's coverage predicate rather than by argument: an empty default lane on a
+    host with active players elsewhere leaves those players uncovered, so the run records its lane id,
+    is not watermark-eligible, and the whole-Watch-List digest banner reads **`stale`** — which is
+    true. On a host with **no** active players at all the same run covers everyone (vacuously) and does
+    advance the watermark, which is also true. The distinction the proxy could not draw is exactly the
+    one that matters.
+
+12. **The orphan-player gap is real, out of scope, and tracked as
+    [#202](https://github.com/wrburgess/bryce/issues/202).** `sk seed add`
     (`src/watchlist/service.ts`) attaches a Player to **no** lane, and `drizzle/0012` enrolled only the
     players active *at migration time*. Once bare `sk refresh` means the default lane, such a Player is
     active, digested, and never ingested — the same "behaves like a correctly configured system while
     configured wrong" shape ADR 0059 named. It is outside this issue's acceptance criteria (the fix is a
-    seed-path change, not a refresh-path one), so it is deferred to a tracked follow-up on the #189 epic
-    rather than folded in here.
+    seed-path change, not a refresh-path one), so it is deferred to #202 (*Part of* #189) rather than
+    folded in here. Today's behavior is **pinned by a test** (`test/cli-refresh.test.ts`) so #202
+    cannot change it by accident: an orphan is not swept by a bare `sk refresh`.
+
+    **Decision 8 downgrades this gap's severity, and that is why deferring it is defensible.** Before
+    the coverage predicate, a default-lane run that missed an orphan certified the whole Watch List
+    anyway — the gap was a *silent lie*. Now an uncovered active Player makes the run partial-coverage,
+    so the banner reads an honest `stale`. The data is still missing; the system no longer claims
+    otherwise. A fail-loud gap may wait for its own issue; a fail-quiet one may not.
 
 ## Consequences
 
@@ -174,12 +227,18 @@ green.
   exactly one terminal line and nothing else, and that line is byte-identical to the verbose run's
   terminal line.**
 
-- **The lane name is folded like every other runtime-derived field.** It is operator-supplied free text
-  on a `key=value` line, and it now leads that line — so an unfolded lane called `x status=ok players=999`
-  would put forged tokens *ahead* of the real ones
+- **The lane name is folded like every other runtime-derived field, PER NAME and before the join.** It
+  is operator-supplied free text on a `key=value` line, and it now leads that line — so an unfolded
+  lane called `x status=ok players=999` would put forged tokens *ahead* of the real ones
   ([ADR 0047](0047-app-clis-emit-utf8-ascii-scopes-to-machine-output.md), as amended for #146). Control
   bytes are refused earlier by the router's validator and `requireName`; the vector that reaches the
   presenter is the space, and the fold closes it.
+
+  Folding happens **per name**, and the comma that joins two lanes is neutralised inside each one
+  exactly as the space is. Joining first and folding after — the shape this PR shipped and Stage-4
+  caught — left `,` untouched, so a single lane genuinely named `A,B` rendered `list=A,B`,
+  indistinguishable from a two-lane scope. Latent while `resolveRefreshScope` yields exactly one lane,
+  and reachable the moment #193's due-lane driver passes several.
 
 - **`drizzle/0013` is additive and its NULL backfill is semantically correct by construction.** No table
   rebuild, so none of `drizzle/0012`'s FK-ordering hazards apply. Every historical row reads `NULL`, and

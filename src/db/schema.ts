@@ -318,15 +318,20 @@ export const refreshRuns = sqliteTable(
     statLinesUpdated: integer("stat_lines_updated").notNull().default(0),
     errorMessage: text("error_message"),
     /**
-     * WHICH LANES this run swept (#192, ADR 0061). `NULL` means the WHOLE Watch
-     * List — the only thing a pre-#192 run could ever have swept, so the
-     * migration's NULL backfill is semantically correct by construction rather
-     * than a placeholder. Otherwise it is the CANONICAL encoding of the scoped
-     * lane ids: ascending, comma-delimited, with LEADING AND TRAILING sentinel
-     * commas (`,1,3,10,`). The sentinels are load-bearing — a containment test
-     * for lane `1` against a bare `10` would otherwise match on the prefix.
-     * {@link encodeScopeListIds} is the one writer and
-     * {@link watermarkEligible} the one reader.
+     * WHETHER this run swept THE WHOLE WATCH LIST, and if not, which lanes it
+     * did cover (#192, ADR 0061 decision 8).
+     *
+     * `NULL` means **every active Player was swept** — the only thing a pre-#192
+     * run could ever have done, so drizzle/0013's NULL backfill is semantically
+     * correct by construction rather than a placeholder. A LANE run whose lanes
+     * happened to hold every active Player also records `NULL`, because it too
+     * swept everyone; `runRefresh` decides that with one claim-time count.
+     *
+     * Otherwise the value is PROVENANCE for a genuinely partial run: the
+     * canonical encoding of its lane ids — ascending, deduped, comma-delimited,
+     * sentinel-wrapped (`,1,3,10,`). Nothing parses it back; the only reader is
+     * `digestFreshnessFor`, and all it asks is `IS NULL`.
+     * {@link encodeScopeListIds} is the one writer.
      *
      * Declared HERE, not only in drizzle/0013, so a future drizzle-kit table
      * rebuild re-emits the column (`rules/backend.md`).

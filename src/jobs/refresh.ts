@@ -1,4 +1,4 @@
-import { and, eq, exists, inArray, like, sql } from "drizzle-orm";
+import { and, count, eq, exists, inArray, like, notExists, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { NewStatLineRow, PlayerListRow, PlayerRow } from "../db/schema.js";
 import {
@@ -48,15 +48,6 @@ export interface RefreshScope {
   lists: PlayerListRow[];
   /** Their ids — what BOTH selection sites filter by. */
   listIds: number[];
-  /**
-   * True when THE default lane is among them. The resolve-time statement of this
-   * run's freshness consequence: only a sweep covering the default lane can
-   * advance the digest's watermark. It is deliberately NOT what the watermark is
-   * judged by — {@link import("./refresh-run.js").watermarkEligible} DERIVES that
-   * from the recorded ids against the CURRENT default, so a later `set-default`
-   * cannot leave a stored boolean retroactively wrong (ADR 0061 decision 8).
-   */
-  includesDefaultLane: boolean;
 }
 
 export interface RefreshDeps {
@@ -406,6 +397,62 @@ export async function loadActivePlayers(db: Db, listIds?: readonly number[]): Pr
 }
 
 /**
+ * Does a sweep over `listIds` reach EVERY active Player? (#192, ADR 0061
+ * decision 8.)
+ *
+ * This is the question the digest's freshness banner actually asks — "was every
+ * player I am about to report on swept?" — and it is what the run records, in
+ * place of the "does the scope contain the default lane?" PROXY the Stage-4
+ * self-review found wrong. The proxy holds only while the default lane contains
+ * every active Player; point the default at a fresh empty lane and a sweep of
+ * zero players certified the whole Watch List.
+ *
+ * It COUNTS THE UNCOVERED rather than comparing two counts. Comparing
+ * `activePlayers.length` against a total taken moments later would answer "were
+ * my two reads consistent?", which is a different question and one that goes the
+ * wrong way under concurrent writes; a single `NOT EXISTS` count asks the real
+ * one in one statement. `count()`, never a row load — the answer is a number and
+ * this runs on every sweep (`rules/backend.md`).
+ *
+ * It is a CLAIM-TIME SNAPSHOT, and deliberately not re-taken. A Player added
+ * mid-sweep is still picked up by the settle-time re-read that feeds
+ * `calendarBlocksFresh`, but he does not retroactively change what this run's
+ * row says it covered — a run's recorded coverage is a statement about the world
+ * it claimed against. The direction of that staleness is safe either way: the
+ * next sweep re-answers the question from scratch.
+ */
+async function coversEveryActivePlayer(db: Db, listIds: readonly number[]): Promise<boolean> {
+  // ZERO lanes covers nobody, so coverage can hold only on a host with nobody to
+  // cover. Split out rather than folded into the predicate below, because an
+  // empty `inArray` is exactly the vacuous-truth shape `loadActivePlayers`
+  // refuses to rely on.
+  if (listIds.length === 0) {
+    const total = await db.select({ n: count() }).from(players).where(eq(players.active, true));
+    return (total[0]?.n ?? 0) === 0;
+  }
+  const uncovered = await db
+    .select({ n: count() })
+    .from(players)
+    .where(
+      and(
+        eq(players.active, true),
+        notExists(
+          db
+            .select({ x: sql`1` })
+            .from(listMembers)
+            .where(
+              and(
+                inArray(listMembers.listId, [...listIds]),
+                eq(listMembers.playerId, players.id),
+              ),
+            ),
+        ),
+      ),
+    );
+  return (uncovered[0]?.n ?? 0) === 0;
+}
+
+/**
  * The Refresh (ADR 0030): re-ingest every active Player's complete current-season
  * game log and upsert idempotently on the ADR 0029 key. No date windows, ever —
  * every pair fetched is fetched whole-season. WHICH pairs are fetched is the
@@ -437,18 +484,30 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
     return skippedSummary("offseason-sleep", null);
   }
 
+  // WHAT THIS RUN WILL CLAIM TO HAVE COVERED (#192, ADR 0061 decision 8).
+  // `undefined` — stored as `NULL` — means "swept every active Player", so an
+  // unscoped run records it, AND SO DOES a lane run whose lanes happen to hold
+  // everyone: that is not a fudge, it is the column's documented meaning, and
+  // such a run genuinely did sweep the whole Watch List. Anything less records
+  // its lane ids as provenance for a genuinely partial run, which makes the
+  // digest's banner read an honest `stale` rather than forging `fresh` over
+  // players nobody fetched.
+  const scopeListIds =
+    deps.scope === undefined || (await coversEveryActivePlayer(db, deps.scope.listIds))
+      ? undefined
+      : deps.scope.listIds;
+
   // Claim a run AFTER the sleep check (ADR 0043). A refusal means another sweep
   // holds a live lease — the wake-time overlap of the launchd job and a manual
   // run — so this one no-ops rather than double-sweeping.
   //
-  // `playersTotal` is the SCOPED count, and `scopeListIds` records which lanes
-  // produced it, so a lane run's N-of-M can never be read as a whole-list claim
-  // (#192): the recorded scope is what `digestFreshnessFor` gates the digest's
-  // freshness banner on.
+  // `playersTotal` is the SCOPED count, and `scopeListIds` records whether that
+  // count was the whole Watch List, so a lane run's N-of-M can never be read as
+  // a whole-list claim (#192).
   const claim = claimRefreshRun(db, {
     now: now(),
     playersTotal: activePlayers.length,
-    scopeListIds: deps.scope?.listIds,
+    scopeListIds,
   });
   if (!claim.claimed) {
     safeEmit(deps.onProgress, { kind: "sweep-skipped", reason: claim.reason });

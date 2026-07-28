@@ -130,6 +130,29 @@ function tokenField(raw: string): string {
 }
 
 /**
+ * What separates two lane names inside one `list=` value (#192). A comma,
+ * because that is the delimiter every other multi-valued field on these lines
+ * uses (`sports=1,11`).
+ */
+const LANE_JOIN = ",";
+
+/**
+ * One lane name, folded so it can never be mistaken for TWO lanes.
+ *
+ * `tokenField` neutralises the token separator (a space) but NOT the list
+ * separator, and joining before folding left a lane genuinely named `A,B`
+ * rendering `list=A,B` — byte-identical to a two-lane scope. Latent while
+ * `resolveRefreshScope` yields exactly one lane, and reachable the moment #193's
+ * due-lane driver passes several. So the fold happens PER NAME and the delimiter
+ * is neutralised inside each one, exactly as the space already is: after this, a
+ * folded name cannot contain {@link LANE_JOIN}, so every comma in the rendered
+ * value is a real boundary between lanes.
+ */
+function laneToken(raw: string): string {
+  return tokenField(raw).replaceAll(LANE_JOIN, "_");
+}
+
+/**
  * The call's own payload keys, in their declared order (`RefreshCall` is the source of truth).
  *
  * `tokenField`, not `asciiField`, DELIBERATELY. Every payload field today is a
@@ -373,9 +396,7 @@ export async function resolveRefreshScope(
     // surface uses (src/lists/service.ts), so bare `sk refresh` means the default
     // lane and not "everyone" — the same rule `sk players add` follows.
     const lane = await resolveListOrDefault(db, listName);
-    return {
-      scope: { lists: [lane], listIds: [lane.id], includesDefaultLane: lane.isDefault },
-    };
+    return { scope: { lists: [lane], listIds: [lane.id] } };
   } catch (err) {
     // ONLY these two are the operator's problem. Anything else is a broken
     // database and must surface as a throw rather than be flattened into a
@@ -440,7 +461,7 @@ export async function runRefreshCli(argv: string[], deps: RefreshCliDeps): Promi
   // value on these lines: a lane name is operator-supplied free text, so an
   // unfolded lane called `x failed=0` would forge a counter ahead of the real
   // ones (ADR 0047, as amended for #146).
-  const laneField = `list=${tokenField(scope.lists.map((l) => l.name).join(","))}`;
+  const laneField = `list=${scope.lists.map((l) => laneToken(l.name)).join(LANE_JOIN)}`;
 
   if (summary.skipped) {
     deps.write(`refresh skipped ${laneField} reason=${summary.reason}`);

@@ -80,10 +80,12 @@ _Avoid_: "yesterday fetch", "incremental sync" (there is no window to fall out o
 **Scope** (of a Refresh):
 Which **Lanes** one **Sweep** covers, resolved *once* before the run is claimed and used by every
 selection the sweep makes. Absent means the whole **Watch List**; `sk refresh` with no `--list`
-resolves the **Default Lane**. A run records its Scope, and only a run whose Scope covered the
-Default Lane can advance the Digest's freshness watermark.
+resolves the **Default Lane**. A run records whether its Scope reached **every active Player**, and
+only a run that did can advance the Digest's freshness watermark — the test is *coverage*, not which
+Lane was named ([ADR 0061](../adr/0061-lane-scoped-refresh-supersedes-whole-sweep.md) decision 8).
 _Avoid_: "filter" (a Scope is decided before the sweep, not applied to its results); treating an
-empty Scope as "everyone"
+empty Scope as "everyone"; "the run covered the Default Lane" as a synonym for "the run is
+watermark-eligible"
 
 **Probe Plan**:
 The set of (level, stat group) pairs one **Refresh** fetches game logs for, for one Player: his

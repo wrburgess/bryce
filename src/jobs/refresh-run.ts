@@ -1,5 +1,4 @@
-import { and, desc, eq, gt, inArray, isNull, lte, max, or, sql } from "drizzle-orm";
-import type { SQL } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, lte, max, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { RefreshRunStatus } from "../db/schema.js";
 import { refreshRuns } from "../db/schema.js";
@@ -50,9 +49,12 @@ export interface ClaimRefreshArgs {
   /** How many active players this run intends to sweep — recorded on the row. */
   playersTotal: number;
   /**
-   * The lanes this run sweeps (#192, ADR 0061), or `undefined` for the whole
-   * Watch List. Recorded on the row so the digest's freshness watermark can tell
-   * the two apart; see {@link encodeScopeListIds}.
+   * The lanes this run sweeps (#192, ADR 0061) — or `undefined` when it swept
+   * THE WHOLE WATCH LIST, which includes a lane run whose lanes happened to hold
+   * every active Player. The caller decides that (`runRefresh`'s claim-time
+   * coverage check); this argument is only the answer. Recorded on the row so
+   * the digest's freshness watermark can tell a complete sweep from a partial
+   * one; see {@link encodeScopeListIds}.
    */
   scopeListIds?: readonly number[];
   leaseMs?: number;
@@ -61,47 +63,30 @@ export interface ClaimRefreshArgs {
 /**
  * The CANONICAL storage form of a run's lane scope (#192, ADR 0061).
  *
- * `undefined` ⇒ `NULL` ⇒ the whole Watch List, which is exactly what every
- * pre-#192 run swept, so the migration's NULL backfill needs no interpretation.
+ * `undefined` ⇒ `NULL` ⇒ **this run swept every active Player**, which is
+ * exactly what every pre-#192 run did, so the migration's NULL backfill needs no
+ * interpretation. Otherwise the value is PROVENANCE for a genuinely partial
+ * run — which lanes it did cover — never an input to an eligibility test.
  *
- * Otherwise: ids DEDUPED and sorted ASCENDING, comma-delimited, wrapped in
- * LEADING AND TRAILING SENTINEL COMMAS — `,1,3,10,`. The sentinels are
- * load-bearing, not decoration: {@link watermarkEligible} asks whether the
- * stored text CONTAINS the default lane's id, and without them a search for lane
- * `1` would match `,10,` on its prefix and certify a digest off a sweep that
- * never touched lane 1. Canonical ordering means two runs over the same lanes
- * store the same bytes, so the column is comparable and greppable.
+ * The form: ids DEDUPED and sorted ASCENDING, comma-delimited, wrapped in
+ * LEADING AND TRAILING SENTINEL COMMAS — `,1,3,10,`.
  *
- * An EMPTY scope encodes to `,,` — a non-NULL value containing no id at all.
- * That is the right reading: a run that swept zero lanes swept nothing, so it
- * certifies nothing, and it must not be confused with `NULL`'s "everything".
+ * WHY THE SENTINELS SURVIVE, now that nothing does containment. Until the
+ * Stage-4 loop-back on #192 they were load-bearing for an `instr` test that
+ * asked whether the text contained the default lane's id; that test is gone
+ * (ADR 0061 decision 8), and with it the prefix trap they closed. What is left
+ * is one present-tense reason, not nostalgia: the EMPTY scope must not encode to
+ * the empty string. `,,` is visibly "swept zero lanes"; `""` is a value that
+ * `if (!row.scopeListIds)` in TypeScript, `ifnull()` in SQL, and most CSV/JSON
+ * round-trips cannot tell from `NULL` — and `NULL` here means "swept
+ * EVERYTHING". That confusion is the fail-OPEN direction, so the format keeps a
+ * shape in which no legal scope is falsy. Canonical ordering and dedupe stay for
+ * the same reason they always applied: two runs over the same lanes store the
+ * same bytes, so the column is comparable and greppable as provenance.
  */
 export function encodeScopeListIds(listIds: readonly number[] | undefined): string | null {
   if (listIds === undefined) return null;
   return `,${[...new Set(listIds)].sort((a, b) => a - b).join(",")},`;
-}
-
-/**
- * THE ONE eligibility rule for the digest's freshness watermark (#192, ADR 0061):
- * a run certifies the default lane's data iff it swept the WHOLE Watch List
- * (`scope_list_ids IS NULL`) or its recorded scope CONTAINS the lane id passed
- * in. One exported predicate, so the writer's encoding and every reader's test
- * can never drift into two definitions of "covers this lane".
- *
- * DERIVED AT READ TIME, never stored as a boolean. `set-default` MOVES the
- * default lane, and a run that swept the PREVIOUS default genuinely no longer
- * certifies the new one — a flag written at claim time would be retroactively
- * wrong the moment the HC re-points the schedule.
- *
- * `instr` rather than JSON1/`json_each`: the containment test needs no JSON
- * build assumption, and the sentinel commas make the substring exact.
- */
-export function watermarkEligible(defaultListId: number): SQL {
-  const sentinel = `,${defaultListId},`;
-  return or(
-    isNull(refreshRuns.scopeListIds),
-    sql`instr(${refreshRuns.scopeListIds}, ${sentinel}) > 0`,
-  )!;
 }
 
 /** Settled onto a `running` row a successor reaps because its lease expired. */
@@ -372,32 +357,35 @@ export interface DigestFreshness {
  * anything else (a failed qualifier, or none at all) is `stale`, dated by the
  * most recent ok/partial run's `finished_at` (or null: "never").
  *
- * `defaultLaneId` narrows "run" to a run that ACTUALLY COVERED THIS LANE (#192,
- * ADR 0061). Without it, `sk refresh -l Prospects` settling `ok` would make the
- * daily digest's banner read `fresh` over a watch list that sweep never touched
- * — a forged completeness claim, and precisely the hazard scoping the sweep
- * introduces. The lane is a PARAMETER rather than resolved here on purpose: the
- * only caller is the scheduled digest, which has already resolved the default
- * lane (it cannot claim its delivery slot without one), so taking it keeps this
- * function from becoming a SECOND "what is the default lane?" decision site — and
- * means a database with no default lane never reaches here at all, having
- * already refused with `NoDefaultListError` before the claim.
+ * A QUALIFYING RUN MUST ALSO HAVE COVERED EVERY ACTIVE PLAYER (#192, ADR 0061
+ * decision 8) — `scope_list_ids IS NULL`. Scoping the sweep opened a hole the
+ * whole-list sweep did not have: `sk refresh -l Prospects` settling `ok` would
+ * otherwise make this banner read `fresh` over a watch list that sweep never
+ * touched, a forged completeness claim.
+ *
+ * THE PREDICATE IS COVERAGE, NOT IDENTITY, and that distinction is the whole
+ * finding of the Stage-4 loop-back. This function used to take the default
+ * lane's id and ask "did the run's scope contain it?" — a PROXY that holds only
+ * while the default lane contains every active Player. It fails the moment
+ * anyone uses the lane commands #191 shipped: point the default at a brand-new
+ * empty lane and a sweep of zero players certified the whole Watch List as
+ * `fresh`. The question this function actually answers is "was every player I am
+ * about to report on swept?", so that is the question the column now records
+ * (`runRefresh` writes `NULL` for a run whose lanes covered everyone) and this is
+ * the question the filter asks. No proxy is left to drift, and the parameter
+ * goes away with it.
  */
-export function digestFreshnessFor(
-  db: Db,
-  contentDate: string,
-  tz: string,
-  defaultLaneId: number,
-): DigestFreshness {
+export function digestFreshnessFor(db: Db, contentDate: string, tz: string): DigestFreshness {
   // The LATEST ELIGIBLE ok/partial by (started_at, id) is authoritative: if IT
   // does not clear the content date, no OLDER success can either. One indexed,
   // LIMIT 1 read replaces the old whole-table materialize-and-scan. An
-  // INELIGIBLE newer lane run is skipped rather than allowed to answer, so a
-  // frequent lane sweep can never hide an older whole-list run's verdict.
+  // INELIGIBLE newer partial-coverage run is skipped rather than allowed to
+  // answer, so a frequent lane sweep can never hide an older complete run's
+  // verdict.
   const latest = db
     .select()
     .from(refreshRuns)
-    .where(and(inArray(refreshRuns.status, ["ok", "partial"]), watermarkEligible(defaultLaneId)))
+    .where(and(inArray(refreshRuns.status, ["ok", "partial"]), isNull(refreshRuns.scopeListIds)))
     .orderBy(desc(refreshRuns.startedAt), desc(refreshRuns.id))
     .limit(1)
     .all()[0];
@@ -454,14 +442,14 @@ export interface RefreshHealth {
  * `lastStartedAt`/`lastFinishedAt` and the counts come from the latest run row;
  * `lastSuccessAt` from the latest ok/partial.
  *
- * DELIBERATELY LANE-BLIND (#192, ADR 0061), unlike {@link digestFreshnessFor}
+ * DELIBERATELY SCOPE-BLIND (#192, ADR 0061), unlike {@link digestFreshnessFor}
  * directly above. The two answer different questions, so they take different
  * filters — this is a decision, not an omission. `/health` and the MCP `status`
- * tool answer "what did INGESTION last do on this host?", and applying
- * {@link watermarkEligible} here would HIDE a lane run that settled `failed`
- * from the only surface that reports it, suppressing a real operational signal
- * because the failure happened to be scoped. A freshness CLAIM must be narrowed
- * to the lane it claims for; an operational SIGNAL must not be.
+ * tool answer "what did INGESTION last do on this host?", and adding that
+ * function's `scope_list_ids IS NULL` filter here would HIDE a lane run that
+ * settled `failed` from the only surface that reports it, suppressing a real
+ * operational signal because the failure happened to be scoped. A freshness
+ * CLAIM must be narrowed to what it claims for; an operational SIGNAL must not be.
  */
 export function refreshHealth(db: Db, now: Date, tz: string): RefreshHealth | null {
   const order = [desc(refreshRuns.startedAt), desc(refreshRuns.id)] as const;

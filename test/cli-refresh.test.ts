@@ -470,6 +470,35 @@ describe("refresh CLI (#23 MF6 wiring, #146 presenter)", () => {
     expect(enrolled.externalId).toBe(691185);
   });
 
+  it("PINS the orphan-player gap: a player on NO lane is not swept, and the run says so (#202)", async () => {
+    // TODAY'S BEHAVIOR, PINNED SO IT CANNOT CHANGE BY ACCIDENT — not an
+    // endorsement of it. `sk seed add` (src/watchlist/service.ts) attaches a
+    // Player to no lane, and drizzle/0012 enrolled only the players active when
+    // it ran, so an ORPHAN active Player is reachable today. Since #192 bare
+    // `sk refresh` means the default lane, so he is digested and never ingested.
+    //
+    // The fix is a seed-path change, tracked as
+    // https://github.com/wrburgess/bryce/issues/202 (Part of #189) and recorded
+    // in ADR 0061 decision 12. When #202 lands, this case must be UPDATED
+    // deliberately — that is the whole point of writing it down.
+    //
+    // What #192 DOES fix is the lie: the run no longer certifies a watch list it
+    // did not cover. The orphan makes the sweep partial-coverage, so the row
+    // records its lane and the digest banner reads an honest `stale` rather than
+    // a forged `fresh` (ADR 0061 decision 8).
+    await watchedPlayer({ externalId: 691185 });
+    const orphan = await insertPlayer(opened.db, { externalId: 660271 });
+    expect(orphan.active).toBe(true);
+
+    expect(await runRefreshCli([], deps({ isTty: false }))).toBe(0);
+
+    expect(api.callsMatching(/\/people\/660271\?/)).toEqual([]);
+    expect(output.at(-1)).toContain("players=1");
+    const run = opened.db.select().from(refreshRuns).all()[0];
+    expect(run?.playersTotal).toBe(1);
+    expect(run?.scopeListIds).not.toBeNull();
+  });
+
   it("`--list NAME` and `-l NAME` are the same flag and sweep the same lane", async () => {
     const listed = await insertPlayer(opened.db, { externalId: 691185 });
     // The DEFAULT lane holds someone else, so a run that ignored `--list` would
@@ -597,8 +626,13 @@ describe("refresh CLI (#23 MF6 wiring, #146 presenter)", () => {
     });
     // ...and the happy path through the same seam still yields the default lane.
     const resolved = await resolveRefreshScope(opened.db, []);
-    expect(resolved).toMatchObject({ scope: { includesDefaultLane: true } });
     expect("scope" in resolved && resolved.scope.lists.map((l) => l.name)).toEqual(["Watchlist"]);
+    // It is THE DEFAULT lane that a bare invocation resolves, not merely some
+    // lane — asserted off the resolved row itself. `RefreshScope` no longer
+    // carries an `includesDefaultLane` flag: the freshness watermark is keyed on
+    // COVERAGE, not on which lane a run named (#192, ADR 0061 decision 8), so
+    // nothing downstream ever read it.
+    expect("scope" in resolved && resolved.scope.lists.every((l) => l.isDefault)).toBe(true);
   });
 
   it("re-throws a lane lookup I/O fault instead of reporting it as an unknown lane", async () => {
@@ -646,6 +680,30 @@ describe("refresh CLI (#23 MF6 wiring, #146 presenter)", () => {
     // The run's OWN counters are the real ones, and they come last.
     expect(terminal).toMatch(/ status=ok players=1 skipped=0 failed=0 inserted=1 updated=0$/);
     for (const line of output) expect(line, line).toMatch(/^[\x20-\x7e]*$/);
+  });
+
+  it("a COMMA in a lane name cannot forge a second lane in `list=`", async () => {
+    // One lane genuinely named `A,B` must not render byte-identically to a
+    // two-lane scope `A` + `B`. The comma is the separator BETWEEN lanes, and
+    // `tokenField` neutralises the token separator (a space) but not this one —
+    // so the first version joined the names and then folded, and `,` survived
+    // untouched. Latent while `resolveRefreshScope` yields exactly one lane, and
+    // reachable the moment #193's due-lane driver passes several; a reader
+    // counting lanes off the log would then be off by one, silently.
+    //
+    // The fold is now PER NAME and neutralises the delimiter inside each one, so
+    // every comma left in the rendered value is a real lane boundary. Asserted
+    // as an EXACT value: `toContain("list=A_B")` would also pass on the unfixed
+    // `list=A,B` if the substring were chosen loosely.
+    const listed = await insertPlayer(opened.db, { externalId: 691185 });
+    await insertLane(opened.db, "A,B", [listed]);
+
+    expect(await runRefreshCli(["--list", "A,B"], deps({ isTty: false }))).toBe(0);
+
+    const terminal = output.at(-1)!;
+    expect(terminal.split(" ")[2]).toBe("list=A_B");
+    expect(terminal).not.toContain("list=A,B");
+    expect((terminal.match(/,/g) ?? []).length).toBe(0);
   });
 });
 

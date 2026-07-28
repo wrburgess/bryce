@@ -3,15 +3,17 @@ import type { OpenedDb } from "../src/db/client.js";
 import { refreshRuns } from "../src/db/schema.js";
 import type { RefreshDeps, RefreshScope } from "../src/jobs/refresh.js";
 import { runRefresh, runRefreshForPlayer } from "../src/jobs/refresh.js";
-import { claimRefreshRun } from "../src/jobs/refresh-run.js";
+import { claimRefreshRun, digestFreshnessFor } from "../src/jobs/refresh-run.js";
 import { deleteList } from "../src/lists/service.js";
 import { MlbClient } from "../src/mlb/client.js";
 import {
   FakeStatsApi,
   MID_SEASON,
   TEST_TZ,
+  enrollInDefaultLane,
   fakeClock,
   insertCalendar,
+  insertCalendars2026,
   insertLane,
   insertListMember,
   insertPlayer,
@@ -107,10 +109,9 @@ describe("lane-scoped refresh (#192)", () => {
       delayMs: 0,
     });
 
-  const scopeOf = (...lists: { id: number; isDefault: boolean }[]): RefreshScope => ({
+  const scopeOf = (...lists: { id: number }[]): RefreshScope => ({
     lists: lists as RefreshScope["lists"],
     listIds: lists.map((l) => l.id),
-    includesDefaultLane: lists.some((l) => l.isDefault),
   });
 
   /** Every `getPlayerGameLog`-equivalent fetch issued for one MLB person id. */
@@ -305,7 +306,7 @@ describe("lane-scoped refresh (#192)", () => {
     await insertPlayer(opened.db, { externalId: 691185 });
 
     const summary = await runRefresh(
-      deps({ scope: { lists: [], listIds: [], includesDefaultLane: false } }),
+      deps({ scope: { lists: [], listIds: [] } }),
     );
 
     expect(summary.playersRefreshed).toBe(0);
@@ -329,19 +330,53 @@ describe("lane-scoped refresh (#192)", () => {
   it("runRefreshForPlayer ignores a scope entirely — its whole-list read is on purpose", async () => {
     // The seed-time backfill targets ONE Player by id and records no freshness
     // run; its list read exists only to answer "is the pipeline asleep?", which
-    // is a host-wide question. A Player in NO lane must still get his first
-    // Refresh even when the caller happens to carry a scope, so this pins the
-    // comment in src/jobs/refresh.ts rather than leaving it untested prose.
-    const unlisted = await insertPlayer(opened.db, { externalId: 691185 });
-    const otherLane = await insertLane(opened.db, "Prospects", []);
+    // is a host-wide question (ADR 0031, ADR 0061 decision 3). A Player in NO
+    // lane must still get his first Refresh even when the caller happens to
+    // carry a scope.
+    //
+    // THE FIXTURE IS THE GUARD, and the first version of this test had none. It
+    // scoped an EMPTY lane, and `sleepWindow` short-circuits to `{sleeping:
+    // false}` on zero watched sportIds (src/domain/season.ts) — so the scoped
+    // and unscoped reads returned the SAME verdict and scoping the read under
+    // test left every assertion passing. A guard whose two worlds agree pins
+    // nothing (`rules/testing.md` #36). This fixture makes them DISAGREE:
+    //
+    //   - the lane holds a Triple-A player whose sportId-11 season opens
+    //     2026-09-01, AFTER the clock's 2026-07-19 — a scoped read sees only
+    //     sportId 11, `today < awakeStart`, and SLEEPS;
+    //   - the target is an MLB player on NO lane, in season — the correct
+    //     unscoped read sees sportIds {1, 11}, `awakeStart` is MLB's March
+    //     opening, and it is AWAKE.
+    //
+    // So a wrongly-scoped read returns `skipped: "offseason-sleep"` and fetches
+    // nothing. Verified by mutating the read to `loadActivePlayers(db,
+    // deps.scope?.listIds)` and watching this test go red.
+    await insertCalendar(opened.db); // sportId 1: opens 2026-03-25, in season
+    await insertCalendar(opened.db, {
+      sportId: 11,
+      regularSeasonStart: "2026-09-01",
+      regularSeasonEnd: "2026-09-20",
+      postSeasonStart: null,
+      postSeasonEnd: null,
+      springStart: null,
+      springEnd: null,
+    });
+    const onLane = await insertPlayer(opened.db, {
+      externalId: AAA_PERSON_ID,
+      level: "milb",
+      milbLevel: "Triple-A",
+    });
+    const offSeasonLane = await insertLane(opened.db, "Prospects", [onLane]);
+    const unlisted = await insertPlayer(opened.db, {
+      externalId: MLB_PERSON_ID,
+      level: "mlb",
+      milbLevel: null,
+    });
 
-    const result = await runRefreshForPlayer(
-      deps({ scope: scopeOf(otherLane) }),
-      unlisted.id,
-    );
+    const result = await runRefreshForPlayer(deps({ scope: scopeOf(offSeasonLane) }), unlisted.id);
 
     expect(result).toMatchObject({ skipped: false, reason: null });
-    expect(peopleFetched()).toEqual([691185]);
+    expect(peopleFetched()).toEqual([MLB_PERSON_ID]);
   });
 
   // --- Concurrency and lane lifetime -----------------------------------------
@@ -389,5 +424,144 @@ describe("lane-scoped refresh (#192)", () => {
     const summary = await runRefresh(deps({ scope: scopeOf(lane), client: deletingClient }));
 
     expect(summary).toMatchObject({ skipped: false, status: "ok", playersRefreshed: 1 });
+  });
+
+  // --- The COVERAGE-keyed freshness watermark (ADR 0061 decision 8) -----------
+  //
+  // These live here, not in test/refresh-run.test.ts beside the rest of the
+  // freshness cases, because the decision under test is `runRefresh`'s — it
+  // counts the uncovered active Players at claim time and writes `NULL` when
+  // there are none. A `claimRefreshRun` fixture would hand-write the very value
+  // the code is supposed to derive, which is the one thing these cases must not
+  // do. The pure encode/eligibility cases stay in refresh-run.test.ts.
+  //
+  // WHAT WENT WRONG THE FIRST TIME. The gate shipped keyed on "does this run's
+  // scope contain the DEFAULT LANE?" — a proxy for the question the digest asks,
+  // which is "did this run sweep every player I am about to report on?". The
+  // proxy holds only while the default lane holds everyone, and `players lists
+  // create` + `set-default` breaks it in two commands: the first case below is
+  // that exact sequence, and it read `fresh` off a sweep of zero players.
+  describe("coverage-keyed freshness watermark (#192)", () => {
+    /** The digest's content day; the clock's host date (2026-07-19) is strictly after it. */
+    const CONTENT_DATE = "2026-07-18";
+
+    /** The recorded scope of the one run this suite's sweeps produce. */
+    const recordedScope = async (): Promise<string | null> => {
+      const rows = await opened.db.select().from(refreshRuns);
+      expect(rows).toHaveLength(1);
+      return rows[0]?.scopeListIds ?? null;
+    };
+
+    beforeEach(async () => {
+      // Both watched sports published, so nothing a calendar does can downgrade
+      // these runs and every one of them settles a clean `ok`.
+      await insertCalendars2026(opened.db);
+    });
+
+    it("an EMPTY default lane with players elsewhere settles `ok` and the digest reads STALE", async () => {
+      // THE #192 STAGE-4 REGRESSION CASE, reachable through supported commands:
+      // `players lists create --name New`, `players lists set-default --name
+      // New`, `refresh`. The sweep touches zero players and legitimately settles
+      // `ok` (nothing failed, nothing was passed over), and under the old
+      // default-lane proxy that `ok` certified the WHOLE Watch List as `fresh`.
+      const stranded = await insertPlayer(opened.db, { externalId: MLB_PERSON_ID });
+      const emptyDefault = await enrollInDefaultLane(opened.db, []);
+      expect(stranded.active).toBe(true);
+
+      const summary = await runRefresh(deps({ scope: scopeOf(emptyDefault) }));
+
+      // The run is honest about itself...
+      expect(summary).toMatchObject({ skipped: false, status: "ok", playersRefreshed: 0 });
+      // ...and honest about what it covered: one active player was left out, so
+      // the row records the lane rather than the whole-list `NULL`.
+      expect(await recordedScope()).toBe(`,${emptyDefault.id},`);
+      // ...so the banner over a whole-Watch-List digest reads `stale`, which is
+      // TRUE. This is the assertion the shipped predicate failed.
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("stale");
+    });
+
+    it("a default lane missing EXACTLY ONE active player reads STALE", async () => {
+      // One player short is the boundary: the predicate is coverage, so it must
+      // fail on the smallest possible gap, not only on an empty lane.
+      const covered = await insertPlayer(opened.db, { externalId: MLB_PERSON_ID });
+      await insertPlayer(opened.db, { externalId: AAA_PERSON_ID }); // on no lane
+      const lane = await enrollInDefaultLane(opened.db, [covered]);
+
+      const summary = await runRefresh(deps({ scope: scopeOf(lane) }));
+
+      expect(summary).toMatchObject({ skipped: false, status: "ok", playersRefreshed: 1 });
+      expect(await recordedScope()).toBe(`,${lane.id},`);
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("stale");
+    });
+
+    it("a default lane containing EVERY active player reads FRESH, recorded as NULL", async () => {
+      const one = await insertPlayer(opened.db, { externalId: MLB_PERSON_ID });
+      const two = await insertPlayer(opened.db, { externalId: AAA_PERSON_ID });
+      const lane = await enrollInDefaultLane(opened.db, [one, two]);
+
+      const summary = await runRefresh(deps({ scope: scopeOf(lane) }));
+
+      expect(summary).toMatchObject({ skipped: false, status: "ok", playersRefreshed: 2 });
+      // `NULL` is not a fudge here — it is the column's documented meaning, and
+      // this run genuinely did sweep the whole Watch List.
+      expect(await recordedScope()).toBeNull();
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("fresh");
+    });
+
+    it("a NON-DEFAULT lane containing every active player also reads FRESH", async () => {
+      // The predicate is COVERAGE, NOT IDENTITY. This run swept everyone, so it
+      // certifies everyone — even though the default lane is empty and its id
+      // appears nowhere. Under the old proxy this was `stale`, which was a
+      // pessimistic lie in the same way the case above was an optimistic one.
+      const one = await insertPlayer(opened.db, { externalId: MLB_PERSON_ID });
+      const two = await insertPlayer(opened.db, { externalId: AAA_PERSON_ID });
+      const named = await insertLane(opened.db, "Everyone", [one, two]);
+      const defaultLane = await enrollInDefaultLane(opened.db, []);
+      expect(named.id).not.toBe(defaultLane.id);
+
+      const summary = await runRefresh(deps({ scope: scopeOf(named) }));
+
+      expect(summary).toMatchObject({ skipped: false, status: "ok", playersRefreshed: 2 });
+      expect(await recordedScope()).toBeNull();
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("fresh");
+    });
+
+    it("an UNSCOPED run reads FRESH — MCP, REST, and every pre-#192 caller unchanged", async () => {
+      await insertPlayer(opened.db, { externalId: MLB_PERSON_ID });
+      await insertPlayer(opened.db, { externalId: AAA_PERSON_ID });
+
+      const summary = await runRefresh(deps());
+
+      expect(summary).toMatchObject({ skipped: false, status: "ok", playersRefreshed: 2 });
+      expect(await recordedScope()).toBeNull();
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("fresh");
+    });
+
+    it("a DEACTIVATED player off the lane does not block coverage", async () => {
+      // `players.active` is the master gate above membership (decision 1), so
+      // the coverage count has to apply it too — otherwise every host that has
+      // ever deactivated a player would be permanently `stale`.
+      const covered = await insertPlayer(opened.db, { externalId: MLB_PERSON_ID });
+      await insertPlayer(opened.db, { externalId: AAA_PERSON_ID, active: false });
+      const lane = await enrollInDefaultLane(opened.db, [covered]);
+
+      await runRefresh(deps({ scope: scopeOf(lane) }));
+
+      expect(await recordedScope()).toBeNull();
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("fresh");
+    });
+
+    it("a ZERO-LANE scope on a host with active players records its (empty) scope and reads STALE", async () => {
+      // #193's due-lane driver ticks with an empty due set. Zero lanes cover
+      // nobody, so on a host with anybody active this must never collapse to the
+      // whole-list `NULL` through a vacuously-true coverage test.
+      await insertPlayer(opened.db, { externalId: MLB_PERSON_ID });
+
+      const summary = await runRefresh(deps({ scope: { lists: [], listIds: [] } }));
+
+      expect(summary).toMatchObject({ skipped: false, status: "ok", playersRefreshed: 0 });
+      expect(await recordedScope()).toBe(",,");
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("stale");
+    });
   });
 });
