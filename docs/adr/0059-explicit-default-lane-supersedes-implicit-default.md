@@ -81,6 +81,18 @@ player in scope, which is the one outcome an unscoped digest must never have.
    and leaves the default alone. A pre-v5 payload that *does* carry lists leaves none, and the restore
    says so, naming `players lists set-default`.
 
+   **The win is announced, never silent.** Payload-wins has one real cost: a restore run months later
+   for an unrelated reason — recovering a player deleted by mistake — also re-points the schedule at
+   whichever lane was default when the backup was written, and the next digest simply covers a cohort
+   the HC did not choose. Database-wins would avoid that but makes the restored state depend on prior
+   state, which is the thing a restore exists to eliminate, and it leaves a restore into a fresh
+   database with no default at all. So the policy stands and the restore **prints the change**, naming
+   both lanes and the `set-default` command that undoes it. The comparison is by list **id** between
+   the pre-restore and post-restore endpoints, not by whether the flag was rewritten: merge-by-name
+   reuses the incumbent row, so a restore whose payload names the lane that was already default reports
+   nothing. When the restore leaves **no** default, the existing no-default warning is the only line —
+   it is the same event stated in the form that names the fix.
+
 ## Consequences
 
 - **The delivery-slot change lands early and provably inert.** Until #193 routes lane-scoped sends onto

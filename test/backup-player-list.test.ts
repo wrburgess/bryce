@@ -103,7 +103,13 @@ describe("restorePlayerListBackup: import semantics", () => {
     const summary = restorePlayerListBackup(opened.db, rows, NOW);
     // The payload carries no `lists` array at all, so it makes no statement
     // about lists and the migration-seeded default lane is left alone (#190).
-    expect(summary).toEqual({ inserted: 1, updated: 0, total: 1, noDefaultList: false });
+    expect(summary).toEqual({
+      inserted: 1,
+      updated: 0,
+      total: 1,
+      noDefaultList: false,
+      defaultListChange: null,
+    });
 
     const stored = (await opened.db.select().from(players))[0];
     expect(stored?.id).toBe(1); // fresh autoincrement, NOT the source-local 5
@@ -121,7 +127,13 @@ describe("restorePlayerListBackup: import semantics", () => {
     backup.players[0]!.fullName = "New Name";
     backup.players[0]!.teamName = "Traded Team";
     const summary = restorePlayerListBackup(opened.db, backup.players, NOW);
-    expect(summary).toEqual({ inserted: 0, updated: 1, total: 1, noDefaultList: false });
+    expect(summary).toEqual({
+      inserted: 0,
+      updated: 1,
+      total: 1,
+      noDefaultList: false,
+      defaultListChange: null,
+    });
 
     const rows = await opened.db.select().from(players);
     expect(rows).toHaveLength(1);
@@ -225,7 +237,13 @@ describe("restorePlayerListBackup: import semantics", () => {
       }),
     ]);
     const summary = restorePlayerListBackup(opened.db, rows, NOW);
-    expect(summary).toEqual({ inserted: 0, updated: 1, total: 1, noDefaultList: false });
+    expect(summary).toEqual({
+      inserted: 0,
+      updated: 1,
+      total: 1,
+      noDefaultList: false,
+      defaultListChange: null,
+    });
 
     const stored = await opened.db.select().from(players);
     expect(stored).toHaveLength(1);
@@ -266,6 +284,7 @@ describe("restorePlayerListBackup: import semantics", () => {
         updated: 1,
         total: 1,
         noDefaultList: false,
+        defaultListChange: null,
       });
 
       const restored = opened.db.select().from(players).where(eq(players.externalId, externalId)).all()[0];
@@ -697,7 +716,16 @@ describe("named lists in the backup (v2, #70 / ADR 0046)", () => {
     // `noDefaultList` is true because the payload CARRIES a lists array whose
     // only entry is non-default, so the finding-4 policy cleared the lane the
     // migration seeded and the payload replaced it with nothing (#190).
-    expect(summary).toEqual({ inserted: 1, updated: 0, total: 1, noDefaultList: true });
+    // The seeded lane WAS the default and no longer is, so the change is
+    // reported too — the CLI leaves it to the louder no-default warning to
+    // speak, but the fact itself is never inferred from silence (#190).
+    expect(summary).toEqual({
+      inserted: 1,
+      updated: 0,
+      total: 1,
+      noDefaultList: true,
+      defaultListChange: { from: "Watchlist", to: null },
+    });
     const lists = await listLists(opened.db);
     expect(lists.map((l) => l.name)).toEqual(["L", "Watchlist"]); // reused, not duplicated
     // Both the original and the backed-up member are present (memberships merged).
@@ -961,6 +989,62 @@ describe("lane configuration in the backup (v5, #190)", () => {
     }
   });
 
+  it("REPORTS which lane the default moved from and to, so the win is never silent", async () => {
+    // The payload wins (above) — but a restore run months later to recover one
+    // deleted player also re-points the schedule at whatever lane was default
+    // when the backup was written. Unannounced, that is discovered by reading a
+    // digest full of players the HC never asked for. The summary carries the
+    // change; the CLI says it out loud (#190).
+    await createList(opened.db, "Backed Up", NOW);
+    await setDefaultList(opened.db, "Backed Up", NOW);
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+
+    const dest = testDb();
+    try {
+      await createList(dest.db, "Incumbent", NOW);
+      await setDefaultList(dest.db, "Incumbent", NOW);
+
+      const parsed = parsePlayerListBackup(JSON.stringify(backup));
+      const summary = restorePlayerListBackup(dest.db, parsed.players, NOW, {
+        lists: parsed.lists,
+        members: parsed.members,
+      });
+
+      expect(summary.defaultListChange).toEqual({ from: "Incumbent", to: "Backed Up" });
+    } finally {
+      dest.close();
+    }
+  });
+
+  it("reports NO change when the payload's default is the list that ALREADY held the flag", async () => {
+    // Compared by list id, not by the flag being rewritten: the clear-then-apply
+    // sequence touches the incumbent row twice even when nothing moved, so a
+    // change detected from the writes rather than the endpoints would warn on
+    // every single restore and train the HC to ignore the line.
+    await createList(opened.db, "Shared", NOW);
+    await setDefaultList(opened.db, "Shared", NOW);
+    const backup = await createPlayerListBackup(opened.db, () => NOW);
+
+    const dest = testDb();
+    try {
+      await createList(dest.db, "Shared", NOW);
+      await setDefaultList(dest.db, "Shared", NOW);
+
+      const parsed = parsePlayerListBackup(JSON.stringify(backup));
+      const summary = restorePlayerListBackup(dest.db, parsed.players, NOW, {
+        lists: parsed.lists,
+        members: parsed.members,
+      });
+
+      expect(summary.defaultListChange).toBeNull();
+      expect((await listLists(dest.db)).filter((l) => l.isDefault).map((l) => l.name)).toEqual([
+        "Shared",
+      ]);
+    } finally {
+      dest.close();
+    }
+  });
+
   it("the payload wins for a SAME-NAME list whose default flag differs", async () => {
     // The merge-by-name path, not the insert path: the destination already has a
     // live list of this name, and its lane configuration is overwritten wholesale
@@ -1014,9 +1098,32 @@ describe("lane configuration in the backup (v5, #190)", () => {
     });
 
     expect(summary.noDefaultList).toBe(true);
+    expect(summary.defaultListChange).toEqual({ from: "Watchlist", to: null });
     const lists = await listLists(opened.db);
     expect(lists.map((l) => l.name).sort()).toEqual(["Legacy", "Watchlist"]);
     expect(lists.filter((l) => l.isDefault)).toEqual([]);
+  });
+
+  it("reports NO change when the database had no default to lose", async () => {
+    // Nothing is overwritten when there was no incumbent, so there is nothing to
+    // announce — and the alternative would print `from "undefined"` on the one
+    // path where a restore is unambiguously an improvement (#190).
+    await opened.db.update(playerLists).set({ isDefault: false });
+    const payload = {
+      ...makeBackupEnvelope([makeBackupEntry({ externalId: 691185 })], { version: 5 }),
+      lists: [makeBackupList({ name: "Fresh", isDefault: true })],
+    };
+    const parsed = parsePlayerListBackup(JSON.stringify(payload));
+    const summary = restorePlayerListBackup(opened.db, parsed.players, NOW, {
+      lists: parsed.lists,
+      members: parsed.members,
+    });
+
+    expect(summary.defaultListChange).toBeNull();
+    expect(summary.noDefaultList).toBe(false);
+    expect((await listLists(opened.db)).filter((l) => l.isDefault).map((l) => l.name)).toEqual([
+      "Fresh",
+    ]);
   });
 
   it("REJECTS lane configuration on a pre-v5 payload", async () => {

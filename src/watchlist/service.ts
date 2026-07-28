@@ -666,6 +666,22 @@ export interface RestorePlayerListSummary {
    * that state would be discovered by the next digest not arriving.
    */
   noDefaultList: boolean;
+  /**
+   * Set when the restore moved the default flag to a DIFFERENT list than the one
+   * the database held (#190) — `from` is the lane that lost it, `to` the lane
+   * that took it, or `null` when the payload left none. `null` overall means the
+   * default did not move: either the payload's default is the incumbent, or
+   * there was no incumbent to overwrite.
+   *
+   * The payload wins (see the precedence comment in the restore), and that is
+   * the whole reason this field exists: a restore run months later to recover
+   * one deleted player also re-points the schedule at whichever lane was default
+   * when the backup was written. Reported by ENDPOINT, not by whether the flag
+   * was rewritten — the clear-then-apply sequence touches the incumbent row even
+   * when nothing moves, and a line that fired on every restore would be ignored
+   * by the time it mattered.
+   */
+  defaultListChange: { from: string; to: string | null } | null;
 }
 
 /**
@@ -886,6 +902,18 @@ export function restorePlayerListBackup(
     // the restored state must not depend on which list happened to be default
     // beforehand.
     //
+    // The one cost of that choice is that a restore run for an unrelated reason
+    // — recovering a player deleted by mistake, say — silently re-points the
+    // schedule at whatever lane was default when the backup was written. So the
+    // incumbent is captured HERE, before the clear, and the endpoints are
+    // compared at the end: the payload still wins, but the win is announced by
+    // the caller rather than discovered by reading the wrong digest.
+    const priorDefault = tx
+      .select()
+      .from(playerLists)
+      .where(and(eq(playerLists.isDefault, true), isNull(playerLists.deletedAt)))
+      .all()[0];
+
     // The clear is conditioned on the payload carrying a `lists` ARRAY at all. A
     // v1 backup predates named lists and says nothing about them; treating its
     // silence as "no lists, therefore no default" would destroy a default the
@@ -1012,7 +1040,21 @@ export function restorePlayerListBackup(
       .where(and(eq(playerLists.isDefault, true), isNull(playerLists.deletedAt)))
       .all()[0];
 
-    return { inserted, updated, total: rows.length, noDefaultList: liveDefault === undefined };
+    // Compared by id, not by name: a merge-by-name restore REUSES the incumbent
+    // row when the payload names it, so an id match is "the default did not
+    // move" even though the flag was cleared and re-set on the way through.
+    const defaultListChange =
+      priorDefault !== undefined && priorDefault.id !== liveDefault?.id
+        ? { from: priorDefault.name, to: liveDefault?.name ?? null }
+        : null;
+
+    return {
+      inserted,
+      updated,
+      total: rows.length,
+      noDefaultList: liveDefault === undefined,
+      defaultListChange,
+    };
   });
 }
 

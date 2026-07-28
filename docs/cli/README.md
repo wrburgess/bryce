@@ -351,6 +351,13 @@ identity (MLB `external_id`, legacy NCAA `stats_player_seq`, or Highlightly play
 **Stat Line** history stays intact. Reports `player-list restored inserted=N updated=M total=T`. An
 invalid payload or an identity conflict fails the whole import with a non-zero exit.
 
+**The backup's default Lane wins**, so a restore can move which Lane is the default
+([ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md)). It never does so
+quietly: the restore prints `warning: default list changed from "X" to "Y"` with the
+`players lists set-default` command that changes it back, or — for a pre-v5 payload, which carries no
+Lane configuration and can only leave the database default-less — `warning: no default list after
+restore`, since every unscoped command fails until one is set.
+
 | Flag | Required | Notes |
 |---|---|---|
 | `--in FILE` | **yes** | The Player List Backup JSON to import. |

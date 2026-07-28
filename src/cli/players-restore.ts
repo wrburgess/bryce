@@ -110,6 +110,23 @@ export async function runPlayersRestore(
       deps.write(
         "warning: no default list after restore — unscoped commands will fail until you run: sk players lists set-default --name NAME",
       );
+    } else if (summary.defaultListChange !== null) {
+      // ANNOUNCE THE RE-POINT (#190). The backup's default wins by design — a
+      // restored state that depended on which lane happened to be default
+      // beforehand would defeat the point of restoring. But the losing move is
+      // silent: an unrelated restore months from now moves the schedule back to
+      // the lane that was default when the backup was written, and the next
+      // digest simply covers a cohort the HC did not choose. So the change is
+      // named at the moment it happens, with the command that undoes it.
+      //
+      // `else`, not a second `if`: when the restore leaves NO default the branch
+      // above is the same event said better — it names the fix. Two lines for
+      // one event train the reader to skip both.
+      const { from, to } = summary.defaultListChange;
+      deps.write(
+        `warning: default list changed from "${from}" to "${to}" — the backup's default won; ` +
+          `run: sk players lists set-default --name "${from}" to change it back`,
+      );
     }
     return 0;
   } catch (err) {
