@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -138,6 +141,48 @@ describe("MCP server over Streamable HTTP", () => {
       content: Array<{ type: string; text: string }>;
     };
   }
+
+  it("is documented tool-for-tool in the MCP reference, count word included", () => {
+    // #190 shipped `list_set_default` and left docs/mcp/README.md advertising
+    // "twenty-two tools" and "Seven tools over the named-list service" — the
+    // repo's dominant defect shape (one idea, several places) landing on the
+    // published interface, where the reader has no way to notice. Code-side the
+    // list is already pinned three ways (this suite, ALL_TOOLS in
+    // src/cli/connector-smoke.ts, and the server itself); the reference was the
+    // only copy nothing checked. Now adding a tool without documenting it is red.
+    const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
+    const doc = readFileSync(join(repo, "docs", "mcp", "README.md"), "utf8");
+    const undocumented = ALL_TOOLS.filter((name) => !doc.includes(`\`${name}\``));
+    expect(undocumented).toEqual([]);
+
+    // The count is prose, so it drifts silently. Spelled out because that is how
+    // the document writes it; the map only needs to span plausible tool counts.
+    const COUNT_WORDS: Record<number, string> = {
+      20: "twenty", 21: "twenty-one", 22: "twenty-two", 23: "twenty-three",
+      24: "twenty-four", 25: "twenty-five", 26: "twenty-six", 27: "twenty-seven",
+      28: "twenty-eight", 29: "twenty-nine", 30: "thirty",
+    };
+    const expected = COUNT_WORDS[ALL_TOOLS.length];
+    expect(expected, `no count word for ${ALL_TOOLS.length} tools — extend COUNT_WORDS`).toBeDefined();
+
+    // BOTH published copies, not just the reference: the count was stale in the
+    // runbook too, and checking one file would have left the other free to drift
+    // — the same one-idea-several-places shape, one file over.
+    for (const path of [
+      join(repo, "docs", "mcp", "README.md"),
+      join(repo, "docs", "guides", "running-bryce.md"),
+    ]) {
+      const text = readFileSync(path, "utf8");
+      expect(text, path).toContain(`${expected} tools`);
+      // And no STALE count survives beside the right one.
+      for (const [count, word] of Object.entries(COUNT_WORDS)) {
+        if (Number(count) === ALL_TOOLS.length) continue;
+        expect(text.toLowerCase(), `${path}: stale count "${word} tools"`).not.toContain(
+          `${word} tools`,
+        );
+      }
+    }
+  });
 
   it("exposes exactly the advertised tools", async () => {
     const { tools } = await client.listTools();

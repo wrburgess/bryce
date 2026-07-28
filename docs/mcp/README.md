@@ -1,7 +1,7 @@
 # MCP Reference
 
 The ScoreKeeps MCP server (the application is developed under the internal name Bryce) is the
-**primary interface** ([ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)): twenty-two tools
+**primary interface** ([ADR 0027](../adr/0027-mcp-first-interface-no-web-ui.md)): twenty-five tools
 over the same service layer and Zod schemas the [REST API](../api/README.md) and
 [CLI](../cli/README.md) use. Its activated `sk` command is the preferred operator entry point; a
 Claude client (web, mobile, or CLI) is the front end, and there is no web UI. It is mounted at
@@ -289,7 +289,8 @@ Health snapshot, the same shape as `GET /health`.
 
 ### Named player lists (`#70`)
 
-Seven tools over the named-list service ([ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)).
+Eight tools over the named-list service ([ADR 0046](../adr/0046-named-player-lists-scoped-digests.md),
+[ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md)).
 A list is curated membership over the Watch List — distinct from tags (#30) and rosters (#69). A
 named-list scope selects a list's **active** members; `players.active` stays the master gate. Names are
 trimmed, non-blank, and case-sensitively unique among live lists. An unknown list surfaces as `isError`
@@ -299,7 +300,10 @@ trimmed, non-blank, and case-sensitively unique among live lists. An unknown lis
 - **`list_create`** — create a list. Input `name`. `{ "list": {...} }`.
 - **`list_rename`** — rename a live list. Inputs `name`, `newName`.
 - **`list_delete`** — **soft-delete** a list (its name frees for reuse; membership rows are kept).
-  Input `name`.
+  Input `name`. The **default lane** is refused (`isError`) — point the default elsewhere first.
+- **`list_set_default`** — point the **default lane** at this list: what a tool or command that names
+  no list means. Input `name`. `{ "list": {...} }`. Clears the previous holder in the same
+  transaction; re-pointing at the current default writes nothing. An unknown list is `isError`.
 - **`list_members`** — a list's active members, ordered by id. Input `name`. `{ "list", "members" }`.
 - **`list_add_players`** — add members, idempotently. Inputs `name` and `players` (an array of
   references, each exactly one of `personId` or `ncaaPlayerSeq`). `{ "list", "added", "players" }`. A
@@ -319,7 +323,7 @@ client end to end:
 API_TOKEN=... MCP_URL=https://your-host.example.com/mcp sk connector smoke
 ```
 
-It runs `initialize` → `tools/list` (asserts all twenty-two tools) → `status` → a read-only
+It runs `initialize` → `tools/list` (asserts all twenty-five tools) → `status` → a read-only
 `digest_preview`, then checks that a no-bearer request still `401`s — and never prints a secret. See
 [Running Bryce → Cloudflare Access](../guides/running-bryce.md#cloudflare-access-in-front-of-the-tunnel)
 for the full flag set and the Cloudflare Access topology.

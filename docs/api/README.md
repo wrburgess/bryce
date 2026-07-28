@@ -193,7 +193,10 @@ no daily slot, whatever its window — and an unknown list is rejected (**404**)
 ([#140](https://github.com/wrburgess/bryce/issues/140)) scopes the send to a **cohort** and is
 likewise **on-demand only** (the delivery-slot key has no tag dimension); with `list` the two
 **intersect**, and a malformed selector is rejected (**400**) with nothing sent. Malformed JSON is a
-client error (**400**). On success returns **200** with the run result. **When the run's `action` is `"failed"`
+client error (**400**). A send with **no** `list` is the **scheduled** artifact and claims its slot in
+the **default lane**; if no live default exists it is refused with **409** rather than mailed to an
+unknown cohort ([ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md)) — an
+on-demand `list` or `tags` send is unaffected, since it takes no slot. On success returns **200** with the run result. **When the run's `action` is `"failed"`
 the status is 502** and the body is the normal result object (not an error envelope) — a failed send
 is reported as data, so the caller sees the run detail.
 
@@ -205,7 +208,9 @@ the Watch List — distinct from tags (#30) and rosters (#69). A named-list scop
 case-sensitively unique among **live** lists.
 
 - **`GET /api/lists`** — every live list with its active-member count: `{ "lists": [{ id, name,
-  memberCount, createdAt, updatedAt }] }`.
+  memberCount, isDefault, createdAt, updatedAt }] }`. Exactly one live list carries
+  `isDefault: true` — the **default lane** a request that names no list means
+  ([ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md)).
 - **`POST /api/lists`** — create a list. Body `{ "name": NAME }`. **201** with `{ "list": {...} }`;
   a duplicate live name is **409**; a blank name is **400**.
 - **`GET /api/lists/:name`** — the list plus its active members: `{ "list": {...}, "members": [...] }`.
@@ -213,7 +218,12 @@ case-sensitively unique among **live** lists.
 - **`PATCH /api/lists/:name`** — rename. Body `{ "name": NEW }`. Unknown list **404**; a collision with
   another live list **409**.
 - **`DELETE /api/lists/:name`** — **soft-delete** the list (its name frees for reuse; membership rows
-  are left in place). Unknown list **404**.
+  are left in place). Unknown list **404**; the **default lane** is **409** — point the default
+  elsewhere first, or every unscoped request would start failing.
+- **`PUT /api/lists/:name/default`** — point the **default lane** at this list. No body; returns
+  `{ "list": {...} }`. Idempotent: re-pointing at the current default writes nothing. A sub-resource
+  rather than a field on `PATCH`, because setting the default also moves the flag **off** another
+  row. Unknown list **404**.
 - **`POST /api/lists/:name/members`** — add members. Body `{ "players": [ { "personId": N } | {
   "ncaaPlayerSeq": N } ] }`. Idempotent (re-adding a member is a no-op). Returns `{ "list", "added",
   "players" }`. Unknown list **404**; a reference to a Player not on the Watch List **404**.

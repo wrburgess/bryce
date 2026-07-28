@@ -100,7 +100,7 @@ function toPlayerRef(ref: { personId?: number; highlightlyPlayerId?: number }): 
 }
 
 /**
- * The MCP server — Bryce's primary interface (ADR 0027). Twenty-three tools over the
+ * The MCP server — Bryce's primary interface (ADR 0027). Twenty-five tools over the
  * same service layer and Zod schemas the REST routes use; every result is
  * JSON, returned both as structuredContent and as a text part for clients
  * that read only text. Mounted at /mcp behind the bearer middleware.
