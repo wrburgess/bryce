@@ -249,12 +249,16 @@ or digest behavior; it records the intent those phases will act on.
 |---|---|---|
 | `--refresh-every MINUTES` | `refresh_interval_minutes` | a **canonical** positive integer, or the reserved `none` |
 | `--digest-hour HOUR` | `digest_hour` | a **canonical** integer `0`–`23` inclusive, or the reserved `none` |
-| `--digest-to ADDRESS` | `digest_to` | any non-blank recipient value, or the reserved `none` |
+| `--digest-to ADDRESS` | `digest_to` | any non-blank recipient value except the reserved `-`, or the reserved `none` |
 
 - **Only the flags you pass are written.** Setting `--digest-hour` leaves `refresh_every` and
   `digest_to` exactly as they were; configuring one column never silently clears another.
 - **`none` is a RESERVED word** meaning *clear this column to NULL*. It therefore cannot be used as a
   literal `--digest-to` address.
+- **`-` is RESERVED too**, because it is how an unset column *renders*. Accepting it as a recipient
+  would make a configured lane print identically to a cleared one, so `--digest-to -` is refused at the
+  input rather than encoded on the way out. A recipient that merely *contains* a hyphen
+  (`a-b@example.com`) is fine.
 - **`--digest-hour 0` is valid** — it means a midnight digest, and the database `CHECK` allows it.
 - **Read the values back with `players lists show`**, which appends `refreshEvery=` · `digestHour=` ·
   `digestTo=` to each list line, rendering an unset column as `-` — the same null spelling `configure`

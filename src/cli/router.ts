@@ -21,6 +21,21 @@ const CLI_NAME = "sk";
  * docs cannot drift on what "clear it" is spelled as.
  */
 export const CLEAR_LITERAL = "none";
+/**
+ * How a NULL lane-configuration column RENDERS (#191). Exported so the reader
+ * and the writer share it: `players lists show` and `list configured` print it,
+ * and `--digest-to` REFUSES it as input.
+ *
+ * That refusal is the point. `--digest-to` is otherwise free-form (`DIGEST_TO`
+ * in the environment is an unvalidated string), so without it a literal `-`
+ * recipient would render identically to an unset column and an operator — or a
+ * script parsing the line — would read a configured lane as cleared. Reserving
+ * the sentinel at the INPUT keeps the output unambiguous by construction, which
+ * is cheaper than encoding it on the way out at each of the two print sites.
+ * (Reviewer P2, delta 1. `--refresh-every` and `--digest-hour` already reject it
+ * by taking only a canonical integer or `none`.)
+ */
+export const DISPLAY_NULL = "-";
 const cli = (text: string): string => text.replaceAll("bryce", CLI_NAME);
 
 export type Option = { name: string; value?: boolean; aliases?: string[]; values?: readonly string[]; description: string; validate?: (value: string) => string | null; inline?: boolean; repeatable?: boolean };
@@ -95,6 +110,14 @@ const clearableInteger = (expected: string, inRange: (candidate: number) => bool
   const parsed = Number(value);
   return /^\d+$/.test(value) && String(parsed) === value && Number.isSafeInteger(parsed) && inRange(parsed) ? null : expected;
 };
+/**
+ * A lane's recipients: free-form, but never the bare display sentinel — see
+ * `DISPLAY_NULL`. Deliberately no email-shape rule: `DIGEST_TO` in the
+ * environment is an unvalidated string, and a CLI stricter than the value it
+ * falls back to would reject addresses the host already accepts.
+ */
+const digestToValue = (value: string): string | null =>
+  value.trim() === DISPLAY_NULL ? `a recipient other than '${DISPLAY_NULL}', which is reserved (use '${CLEAR_LITERAL}' to clear)` : null;
 const refreshEveryValue = clearableInteger("a canonical positive integer of minutes or 'none'", (candidate) => candidate > 0);
 const digestHourValue = clearableInteger("a canonical hour 0-23 or 'none'", (candidate) => candidate >= 0 && candidate <= 23);
 const positiveIntegerList = (value: string): string | null => value.split(",").every((part) => positiveInteger(part.trim()) === null) ? null : "a comma-separated list of positive integers";
@@ -192,7 +215,7 @@ export const COMMANDS: readonly Command[] = [
   leaf(["players", "lists", "add"], "Add players to a named list.", "sk players lists add --name NAME [--person-ids IDS] [--highlightly-player-ids IDS]", "sk players lists add --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids.", undefined, undefined, positiveIntegerList), value("highlightly-player-ids", "Comma-separated Highlightly NCAA ids.", undefined, undefined, positiveIntegerList)], { required: ["name"], oneOf: [["person-ids", "highlightly-player-ids"]] }),
   leaf(["players", "lists", "remove"], "Remove players from a named list.", "sk players lists remove --name NAME [--person-ids IDS] [--highlightly-player-ids IDS]", "sk players lists remove --name Prospects --person-ids 691185", () => import("./lists.js"), [value("name", "List name."), value("person-ids", "Comma-separated MLB ids.", undefined, undefined, positiveIntegerList), value("highlightly-player-ids", "Comma-separated Highlightly NCAA ids.", undefined, undefined, positiveIntegerList)], { required: ["name"], oneOf: [["person-ids", "highlightly-player-ids"]] }),
   leaf(["players", "add"], "Add one player to a named list in a single command.", "sk players add --name NAME [--list NAME|-l NAME] [--pick I] [--ncaa]", "sk players add --name 'Maximo Acosta' --list Prospects", () => import("./players-add.js"), [value("name", "Player name to search."), listOption(), value("pick", "One-based MLB search result.", undefined, undefined, positiveInteger), flag("ncaa", "Search NCAA players by Highlightly name.")], { required: ["name"], requires: [["pick", "name"]], semantic: playersAddShape }),
-  leaf(["players", "lists", "configure"], "Configure a lane's cadence and recipients.", "sk players lists configure --name NAME [--refresh-every MINUTES|none] [--digest-hour HOUR|none] [--digest-to ADDRESS|none]", "sk players lists configure --name Prospects --digest-hour 5", () => import("./lists.js"), [value("name", "List name."), value("refresh-every", "Minutes between this lane's automatic refreshes; the reserved word 'none' clears it.", undefined, undefined, refreshEveryValue), value("digest-hour", "Host-timezone hour 0-23 this lane digests at; the reserved word 'none' clears it.", undefined, undefined, digestHourValue), value("digest-to", "This lane's recipients; the reserved word 'none' clears it.")], { required: ["name"], oneOf: [["refresh-every", "digest-hour", "digest-to"]] }),
+  leaf(["players", "lists", "configure"], "Configure a lane's cadence and recipients.", "sk players lists configure --name NAME [--refresh-every MINUTES|none] [--digest-hour HOUR|none] [--digest-to ADDRESS|none]", "sk players lists configure --name Prospects --digest-hour 5", () => import("./lists.js"), [value("name", "List name."), value("refresh-every", "Minutes between this lane's automatic refreshes; the reserved word 'none' clears it.", undefined, undefined, refreshEveryValue), value("digest-hour", "Host-timezone hour 0-23 this lane digests at; the reserved word 'none' clears it.", undefined, undefined, digestHourValue), value("digest-to", `This lane's recipients; the reserved word 'none' clears it ('${DISPLAY_NULL}' is reserved as the display sentinel).`, undefined, undefined, digestToValue)], { required: ["name"], oneOf: [["refresh-every", "digest-hour", "digest-to"]] }),
   leaf(["players", "lists", "show"], "Show named lists or their members.", "sk players lists show [--name NAME]", "sk players lists show", () => import("./lists.js"), [value("name", "List name.")]),
   leaf(["players", "backup"], "Write a player-list backup.", "sk players backup --out FILE", "sk players backup --out backups/players.json", () => import("./players-backup.js"), [value("out", "Output file.")], { required: ["out"] }),
   leaf(["players", "restore"], "Restore a player-list backup.", "sk players restore --in FILE", "sk players restore --in backups/players.json", () => import("./players-restore.js"), [value("in", "Input file.")], { required: ["in"] }),

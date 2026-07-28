@@ -25,7 +25,7 @@ import {
 } from "../lists/service.js";
 import { parseFlags } from "./flags.js";
 import { exitAfterDrain, isMain } from "./main.js";
-import { CLEAR_LITERAL, normalizeDirect, preflightDirect } from "./router.js";
+import { CLEAR_LITERAL, DISPLAY_NULL, normalizeDirect, preflightDirect } from "./router.js";
 
 /**
  * Named-list CLI (issue #70 / ADR 0046): a thin presenter over the list service
@@ -200,8 +200,8 @@ async function runConfigure(flags: Map<string, string>, deps: ListsDeps): Promis
   // `-` for an unset column, the same null spelling `seed list` uses, so one
   // greppable line always carries all three fields.
   deps.write(
-    `list configured id=${list.id} name=${list.name} refreshEvery=${list.refreshIntervalMinutes ?? "-"} ` +
-      `digestHour=${list.digestHour ?? "-"} digestTo=${list.digestTo ?? "-"}`,
+    `list configured id=${list.id} name=${list.name} refreshEvery=${list.refreshIntervalMinutes ?? DISPLAY_NULL} ` +
+      `digestHour=${list.digestHour ?? DISPLAY_NULL} digestTo=${list.digestTo ?? DISPLAY_NULL}`,
   );
   return 0;
 }
@@ -273,8 +273,8 @@ async function runShow(flags: Map<string, string>, deps: ListsDeps): Promise<num
     // `configure` prints, so the two commands read alike (#191).
     deps.write(
       `list id=${l.id} name=${l.name} members=${l.memberCount} default=${l.isDefault} ` +
-        `refreshEvery=${l.refreshIntervalMinutes ?? "-"} digestHour=${l.digestHour ?? "-"} ` +
-        `digestTo=${l.digestTo ?? "-"}`,
+        `refreshEvery=${l.refreshIntervalMinutes ?? DISPLAY_NULL} digestHour=${l.digestHour ?? DISPLAY_NULL} ` +
+        `digestTo=${l.digestTo ?? DISPLAY_NULL}`,
     );
   }
   deps.write(`total=${lists.length}`);

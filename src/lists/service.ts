@@ -259,6 +259,15 @@ function validatePatch(patch: ListConfigPatch): void {
   if (to !== undefined && to !== null && (to.trim().length === 0 || /\p{Cc}/u.test(to))) {
     throw new InvalidListConfigError("digestTo", "a non-blank value without control characters");
   }
+  // `-` is how a NULL column RENDERS on every surface that prints a lane, so
+  // storing it as a recipient would make a configured lane indistinguishable
+  // from a cleared one to a reader — including a script parsing that line.
+  // Guarded HERE and not only at the router because this function is reachable
+  // from a test, a future REST/MCP surface, and any caller that never sees a CLI
+  // option table (Reviewer P2, delta 1). Use `null` to clear.
+  if (to !== undefined && to !== null && to.trim() === "-") {
+    throw new InvalidListConfigError("digestTo", "a recipient other than '-', which is reserved as the display sentinel");
+  }
 }
 
 /**

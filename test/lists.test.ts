@@ -572,6 +572,24 @@ describe("default list / lane (#190)", () => {
       expect((await cadence(lane.id)).hour).toBe(23);
     });
 
+    // Reviewer P2, delta 1. The CLI's generic "a value must not start with -"
+    // rule blocks the bare spelling, but this function is reachable from a test,
+    // a future REST/MCP surface, and any caller with no option table at all —
+    // so the guarantee lives here, not only at the router.
+    it("refuses a digestTo of '-', the sentinel a NULL column renders as", async () => {
+      const lane = await createList(opened.db, "Lane", clock.now());
+      for (const candidate of ["-", "  -  "]) {
+        await expect(
+          configureList(opened.db, "Lane", { digestTo: candidate }, clock.now()),
+          candidate,
+        ).rejects.toBeInstanceOf(InvalidListConfigError);
+      }
+      // Nothing was written, and a hyphen INSIDE a recipient is still fine.
+      expect((await cadence(lane.id)).to).toBeNull();
+      await configureList(opened.db, "Lane", { digestTo: "a-b@example.com" }, clock.now());
+      expect((await cadence(lane.id)).to).toBe("a-b@example.com");
+    });
+
     it("refuses an EMPTY patch rather than silently bumping updated_at", async () => {
       await createList(opened.db, "Lane", clock.now());
       await expect(configureList(opened.db, "Lane", {}, clock.now()))

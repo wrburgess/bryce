@@ -495,6 +495,20 @@ describe("CLI router metadata", () => {
     for (const flag of ["--digest-hour", "--refresh-every", "--digest-to"]) {
       expect(preflight(configure, ["--name", "P", flag, "none"]), flag).toBeNull();
     }
+    // `-` is RESERVED as the DISPLAY sentinel (Reviewer P2, delta 1). It is
+    // rejected at the input so a configured recipient can never render
+    // identically to a cleared column — an operator, or a script parsing the
+    // line, would otherwise read a live lane as unconfigured. The two numeric
+    // flags already refuse it by taking only a canonical integer or `none`.
+    // A BARE `-` never reaches the validator: preflight's generic rule already
+    // refuses any value starting with `-`, so this was never the open door the
+    // finding described. The PADDED form is, because it does not start with `-`
+    // and only trims to the sentinel later — that is what the new validator
+    // closes, and the service closes it again for non-CLI callers.
+    expect(preflight(configure, ["--name", "P", "--digest-to", "-"])).toContain("requires a value");
+    expect(preflight(configure, ["--name", "P", "--digest-to", "  -  "])).toContain("reserved");
+    // A recipient that merely CONTAINS the sentinel is still perfectly valid.
+    expect(preflight(configure, ["--name", "P", "--digest-to", "a-b@example.com"])).toBeNull();
     // Non-canonical spellings are usage errors, never coerced numbers.
     for (const bad of ["07", "1e2", "+5", "3.0", "-1"]) {
       expect(preflight(configure, ["--name", "P", "--digest-hour", bad]), bad).not.toBeNull();
