@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, like, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { NewStatLineRow, PlayerRow } from "../db/schema.js";
 import {
@@ -197,6 +197,96 @@ export function summarizeRefreshFailures(
 const STAT_GROUPS: readonly StatGroup[] = ["hitting", "pitching", "fielding"];
 const UPSERT_CHUNK = 50;
 
+/** One game-log fetch: a swept sportId paired with one stat group. */
+export interface ProbePair {
+  sportId: number;
+  group: StatGroup;
+}
+
+/**
+ * What one Player's Refresh will fetch (#197, ADR 0060): either the FULL fan-out
+ * SENTINEL — every swept sportId x every stat group, ADR 0030's original sweep —
+ * or the exact pairs to probe. A sentinel rather than the expanded eighteen pairs,
+ * so "deliberately everything" stays distinguishable from "everything happened to
+ * be seen"; the two mean different things to a reader and to a test.
+ */
+export type ProbePlan = { kind: "full" } | { kind: "probe"; pairs: ProbePair[] };
+
+/** The whole 6x3 fan-out, expanded once. */
+const FULL_FAN_OUT: readonly ProbePair[] = SPORT_IDS.flatMap((sportId) =>
+  STAT_GROUPS.map((group) => ({ sportId, group })),
+);
+
+/** SPORT_IDS as plain numbers: the tuple's literal type rejects a `number` lookup. */
+const SWEPT_SPORT_IDS: readonly number[] = SPORT_IDS;
+
+/** stat_lines stores hitting as `batting`; the game-log API asks for `hitting`. */
+function groupForStatType(statType: "batting" | "pitching" | "fielding"): StatGroup {
+  return statType === "batting" ? "hitting" : statType;
+}
+
+/**
+ * The pure probe-plan rule (#197, ADR 0060), superseding the unconditional 6x3
+ * nested loop. Extracted and pure so the matrix is table-tested directly, not only
+ * through the orchestration — the same treatment as {@link deriveRefreshStatus}.
+ *
+ * FULL fan-out — the exact prior behavior — whenever the plan cannot be trusted to
+ * be complete:
+ *  - an EMPTY seen set is a FIRST refresh. The watchlist-add backfill shares this
+ *    code path, and a mid-season call-up added with zero rows must not lose the
+ *    lower-level season he played before the call-up;
+ *  - NO current sport (the person carries no `currentTeam`) leaves nothing to
+ *    anchor the plan on;
+ *  - a current sport OUTSIDE `SPORT_IDS` is not one the MLB path sweeps. This one
+ *    predicate is load-bearing for BOTH the unknown-id and the NCAA case, because
+ *    the non-NCAA keys of the level map are exactly `SPORT_IDS` — adding a
+ *    `levelForSportId` check beside it would be two branches no input can reach.
+ *
+ * Otherwise: the CURRENT level in all three groups — so a two-way player's first
+ * pitching appearance is ingested the sweep it happens, never a sweep late — plus
+ * every seen pair at any OTHER level, because that is exactly where a historical
+ * level's quiet corrections keep landing. A stored sportId outside `SPORT_IDS` is
+ * dropped HERE, BEFORE the emptiness check, so a malformed or legacy row can never
+ * mint a game-log request through this function in isolation — and a seen set made
+ * ENTIRELY of such rows still reads as a first refresh and takes the FULL fan-out.
+ */
+export function probePlanFor(args: {
+  /** DISTINCT (sportId, statType) rows this Player has THIS season from the MLB path. */
+  seen: readonly { sportId: number; statType: "batting" | "pitching" | "fielding" }[];
+  /** sportId of the team the identity fetch just resolved; null when he has none. */
+  currentSportId: number | null;
+}): ProbePlan {
+  const { currentSportId } = args;
+  // Unswept rows are dropped BEFORE the emptiness check: a seen set consisting
+  // ONLY of unswept sportIds must read as "nothing usable seen" and take the FULL
+  // fan-out, exactly as if the caller's WHERE had filtered them. This ordering is
+  // what makes the function safe in isolation — swap it and the caller's inArray
+  // becomes load-bearing for that input.
+  const seen = args.seen.filter((row) => SWEPT_SPORT_IDS.includes(row.sportId));
+  if (seen.length === 0) return { kind: "full" };
+  if (currentSportId === null || !SWEPT_SPORT_IDS.includes(currentSportId)) return { kind: "full" };
+
+  const pairs = new Map<string, ProbePair>();
+  const add = (sportId: number, group: StatGroup): void => {
+    pairs.set(`${sportId}:${group}`, { sportId, group });
+  };
+  for (const group of STAT_GROUPS) add(currentSportId, group);
+  for (const row of seen) {
+    if (row.sportId === currentSportId) continue; // already probed in full
+    add(row.sportId, groupForStatType(row.statType));
+  }
+
+  // Emit in the level ladder's own order (SPORT_IDS declaration order), then
+  // STAT_GROUPS — the exact order the pre-#197 nested loop issued its calls in, so
+  // pruning changes which calls are made and never the order of the survivors.
+  const ordered = [...pairs.values()].sort(
+    (a, b) =>
+      SWEPT_SPORT_IDS.indexOf(a.sportId) - SWEPT_SPORT_IDS.indexOf(b.sportId) ||
+      STAT_GROUPS.indexOf(a.group) - STAT_GROUPS.indexOf(b.group),
+  );
+  return { kind: "probe", pairs: ordered };
+}
+
 /** A guarded mutation was deliberately refused; never classify it as provider failure. */
 class RefreshFenceLostError extends Error {
   constructor(readonly reason: "superseded" | "whole-refresh-running") { super(reason); }
@@ -232,10 +322,11 @@ export async function loadActivePlayers(db: Db): Promise<PlayerRow[]> {
 }
 
 /**
- * The Refresh (ADR 0030): re-ingest every active Player's complete
- * current-season game log and upsert idempotently on the ADR 0029 key.
- * No date windows, ever. During Offseason Sleep the whole job is a no-op —
- * zero API calls (ADR 0031).
+ * The Refresh (ADR 0030): re-ingest every active Player's complete current-season
+ * game log and upsert idempotently on the ADR 0029 key. No date windows, ever —
+ * every pair fetched is fetched whole-season. WHICH pairs are fetched is the
+ * per-player probe plan (ADR 0060), not a fixed sweep of every sportId. During
+ * Offseason Sleep the whole job is a no-op — zero API calls (ADR 0031).
  */
 export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   const { db, now, tz } = deps;
@@ -902,8 +993,12 @@ function highlightlyRowsForMatch(
 
 /**
  * Refresh one Player: current identity/location first (a call-up CHANGES the
- * row — one Player forever, per the domain model), then the full-season game
- * log across every sportId and every stat group (hitting, pitching, fielding).
+ * row — one Player forever, per the domain model), then the full-season game log
+ * at each pair of {@link probePlanFor}'s plan — his current level in all three
+ * stat groups, plus every level/group pair his history has already produced
+ * (#197, ADR 0060). A player with no history this season still takes the whole
+ * 6x3 fan-out. Every probed pair is fetched WHOLE-SEASON: the pruning is in the
+ * breadth of the fan-out, never in the dates (ADR 0030).
  */
 export async function refreshPlayer(
   deps: RefreshDeps,
@@ -941,11 +1036,17 @@ export async function refreshPlayer(
   if (person.primaryPosition?.abbreviation !== undefined) {
     identity.position = person.primaryPosition.abbreviation;
   }
+  // Where he is TODAY, straight off the identity fetch — the probe plan's anchor.
+  // Deliberately the RAW sportId, not a derived level: probePlanFor owns the
+  // decision about which sports are swept, and a promotion resolved here is
+  // therefore probed in full on this very sweep, not the next one.
+  let currentSportId: number | null = null;
   if (person.currentTeam !== undefined) {
     const teamId = person.currentTeam.id;
     const team = await timedCall(
       deps, callRef, { call: "getTeam", teamId }, () => client.getTeam(teamId),
     );
+    currentSportId = team.sport.id;
     const info = levelForSportId(team.sport.id);
     if (info !== null && info.level !== "ncaa") {
       identity.level = info.level;
@@ -954,21 +1055,47 @@ export async function refreshPlayer(
     }
   }
 
+  // The seen set (#197, ADR 0060): every (sportId, statType) pair this Player has
+  // produced a line at THIS season, on the MLB path. One query, before any game
+  // log, so a fault here costs zero game-log HTTP (identity was already fetched).
+  //
+  // `source` is what keeps a STORED value from minting a REQUEST: another
+  // provider's row must never be read back as a level to fetch MLB game logs for,
+  // and its sportId alone cannot be relied on to disqualify it. `game_date LIKE
+  // '<season>-%'` scopes the set to this season, so last year's levels do not keep
+  // a probe alive forever.
+  //
+  // The sportId `inArray` narrows what SQLite reads; it is NOT the behavioral
+  // guard. probePlanFor re-applies the same constraint to its own input BEFORE its
+  // emptiness check — that ordering is what makes this copy deletable with no
+  // outcome change, and the all-unswept-rows unit case pins it.
+  const seen = await db
+    .selectDistinct({ sportId: statLines.sportId, statType: statLines.statType })
+    .from(statLines)
+    .where(
+      and(
+        eq(statLines.playerId, player.id),
+        eq(statLines.source, "mlb_stats_api"),
+        inArray(statLines.sportId, [...SPORT_IDS]),
+        like(statLines.gameDate, `${season}-%`),
+      ),
+    );
+  const plan = probePlanFor({ seen, currentSportId });
+  const probes = plan.kind === "full" ? FULL_FAN_OUT : plan.pairs;
+
   const rows: NewStatLineRow[] = [];
-  for (const sportId of SPORT_IDS) {
-    for (const group of STAT_GROUPS) {
-      const log = await timedCall(
-        deps, callRef,
-        { call: "getGameLog", personId, sportId, statGroup: group },
-        () => client.getGameLog({ personId, sportId, group, season }),
-      );
-      const statType = group === "hitting" ? "batting" : group;
-      for (const stat of log.stats) {
-        for (const split of stat.splits) {
-          if (!isIngestedGameType(split.gameType)) continue;
-          if (split.date >= hostToday) continue; // not yet final — see the gate above
-          rows.push(splitToRow(player.id, statType, split, now().toISOString()));
-        }
+  for (const { sportId, group } of probes) {
+    const log = await timedCall(
+      deps, callRef,
+      { call: "getGameLog", personId, sportId, statGroup: group },
+      () => client.getGameLog({ personId, sportId, group, season }),
+    );
+    const statType = group === "hitting" ? "batting" : group;
+    for (const stat of log.stats) {
+      for (const split of stat.splits) {
+        if (!isIngestedGameType(split.gameType)) continue;
+        if (split.date >= hostToday) continue; // not yet final — see the gate above
+        rows.push(splitToRow(player.id, statType, split, now().toISOString()));
       }
     }
   }

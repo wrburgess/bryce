@@ -3,15 +3,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db, OpenedDb } from "../src/db/client.js";
 import type { NewStatLineRow } from "../src/db/schema.js";
 import { playerTags, players, refreshRuns, seasonCalendar, statLines } from "../src/db/schema.js";
-import type { RefreshDeps } from "../src/jobs/refresh.js";
+import type { ProbePlan, RefreshDeps } from "../src/jobs/refresh.js";
 import {
   deriveRefreshStatus,
+  probePlanFor,
   runRefresh,
   runRefreshForPlayer,
   writePlayerRefresh,
 } from "../src/jobs/refresh.js";
 import { SUPERSEDED_MESSAGE, claimRefreshRun } from "../src/jobs/refresh-run.js";
 import { MlbClient } from "../src/mlb/client.js";
+import { SPORT_IDS } from "../src/mlb/levels.js";
 import {
   FakeNcaaApi,
   FakeStatsApi,
@@ -183,6 +185,73 @@ function seasonCalendarSelectThrows(db: Db, err: Error, nth: number): Db {
   }) as Db;
 }
 
+/**
+ * A db whose `selectDistinct` throws — the seen-pairs query of the #197 probe
+ * plan, and NOTHING else. Targeting `selectDistinct` rather than `select` is what
+ * makes the fault provably land on the NEW query: refreshPlayer's other read (the
+ * existing-keys preload) goes through `select`, and it runs AFTER the game logs,
+ * so a fault there could never explain zero game-log calls.
+ *
+ * `nth` selects which player's query dies, so the sweep's continuation past a
+ * failed player is proven by a NEIGHBOR that still refreshes.
+ */
+function seenPairsSelectThrows(db: Db, err: Error, nth: number): Db {
+  let count = 0;
+  return new Proxy(db, {
+    get(target, prop) {
+      const value: unknown = Reflect.get(target, prop);
+      if (prop !== "selectDistinct") {
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (...args: unknown[]): unknown => {
+        count += 1;
+        if (count === nth) throw err;
+        return (value as (...a: unknown[]) => unknown).apply(target, args);
+      };
+    },
+  }) as Db;
+}
+
+/** The `sportId:group` of every game-log URL requested, in request order. */
+function gameLogProbes(api: FakeStatsApi, personId?: number): string[] {
+  const pattern = personId === undefined ? /stats=gameLog/ : new RegExp(`/people/${personId}/stats\\?`);
+  return api.callsMatching(pattern).map((u) => {
+    const q = new URL(u).searchParams;
+    return `${q.get("sportId")}:${q.get("group")}`;
+  });
+}
+
+/**
+ * Order `sportId:group` keys by NUMERIC sportId, then group. A plain string sort
+ * puts "11:hitting" ahead of "1:fielding" (the digit sorts before the colon), which
+ * would make every expectation below read backwards from the level ladder.
+ */
+function sortProbes(keys: readonly string[]): string[] {
+  return [...keys].sort((a, b) => {
+    const [sa = "", ga = ""] = a.split(":");
+    const [sb = "", gb = ""] = b.split(":");
+    return Number(sa) - Number(sb) || ga.localeCompare(gb);
+  });
+}
+
+/**
+ * The pre-#197 sweep: every swept sportId x every stat group, 18 pairs. Built from
+ * the imported ladder so a level added to SPORT_IDS widens this pin instead of
+ * leaving it silently under-asserting. The three groups are the MLB API's own
+ * fixed enumeration, not repo config, so they stay literal.
+ */
+const FULL_FAN_OUT = sortProbes(
+  SPORT_IDS.flatMap((sportId) =>
+    ["hitting", "pitching", "fielding"].map((group) => `${sportId}:${group}`),
+  ),
+);
+
+/** Sorted `sportId:group` keys of a PRUNED plan; a FULL plan is a test failure here. */
+function probeKeys(plan: ProbePlan): string[] {
+  if (plan.kind === "full") throw new Error("expected a pruned probe plan, got the FULL fan-out");
+  return sortProbes(plan.pairs.map((p) => `${p.sportId}:${p.group}`));
+}
+
 /** A minimal NewStatLineRow for the direct writePlayerRefresh atomicity test (MF4). */
 function statRow(playerId: number, gameId: number): NewStatLineRow {
   return {
@@ -296,16 +365,171 @@ describe("runRefresh", () => {
     expect(keys.has("prospect:prospect")).toBe(true);
   });
 
-  it("sweeps all 6 sportIds x all three stat groups per player", async () => {
+  // The #197 pruning matrix (ADR 0060), asserted as EXACT requested-URL sets. It
+  // replaces the pin that fixed the sweep at 18 calls per player: the fan-out is
+  // now derived, so what needs pinning is which pairs each history shapes.
+  it("a first refresh (zero stat lines) takes the FULL 6x3 fan-out — the backfill path is untouched", async () => {
     await insertPlayer(opened.db, { externalId: 691185 });
     await runRefresh(deps());
-    const gameLogCalls = api.callsMatching(/stats=gameLog/);
-    expect(gameLogCalls).toHaveLength(18);
-    for (const sportId of [1, 11, 12, 13, 14, 16]) {
-      for (const group of ["hitting", "pitching", "fielding"]) {
-        expect(gameLogCalls.some((u) => u.includes(`sportId=${sportId}`) && u.includes(`group=${group}`))).toBe(true);
-      }
-    }
+    expect(sortProbes(gameLogProbes(api))).toEqual(FULL_FAN_OUT);
+  });
+
+  it("a second sweep of an MLB-only player probes sport 1 only — the 15 minor-league calls are gone", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185, level: "mlb", milbLevel: null });
+    api.options.person = makePerson({
+      currentTeam: { id: 146, name: "Miami Marlins", link: "/api/v1/teams/146" },
+    });
+    await insertStatLine(opened.db, {
+      playerId: player.id, sportId: 1, statType: "batting", gameDate: "2026-05-01",
+    });
+
+    await runRefresh(deps());
+    expect(sortProbes(gameLogProbes(api))).toEqual(["1:fielding", "1:hitting", "1:pitching"]);
+    // Stated the other way round, so a regression that ADDS a minor-league sport
+    // fails by naming it rather than by an opaque length mismatch.
+    expect(gameLogProbes(api).filter((p) => !p.startsWith("1:"))).toEqual([]);
+  });
+
+  it("a called-up player probes MLB in full plus his AAA batting history, and the AAA correction still lands", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    // Stored history: one AAA batting line from April, written before this sweep.
+    const stored = await insertStatLine(opened.db, {
+      playerId: player.id, sportId: 11, statType: "batting",
+      gameId: 900001, gameDate: "2026-04-15", stats: { hits: 1, atBats: 3 },
+    });
+    api.options.person = makePerson({
+      currentTeam: { id: 146, name: "Miami Marlins", link: "/api/v1/teams/146" },
+    });
+    api.options.gameLogs = {
+      // The April AAA line comes back CORRECTED: one hit became two.
+      "11:hitting": makeGameLogBody("hitting", [
+        makeSplit({
+          date: "2026-04-15", game: { gamePk: 900001, gameNumber: 1 },
+          stat: { hits: 2, atBats: 3 },
+        }),
+      ]),
+      "1:hitting": makeGameLogBody("hitting", [
+        makeSplit({
+          date: "2026-07-18",
+          sport: { id: 1, link: "/api/v1/sports/1", abbreviation: "MLB" },
+          team: { id: 146, name: "Miami Marlins" },
+          game: { gamePk: 910001, gameNumber: 1 },
+        }),
+      ]),
+    };
+
+    const summary = await runRefresh(deps());
+    expect(sortProbes(gameLogProbes(api))).toEqual(["1:fielding", "1:hitting", "1:pitching", "11:hitting"]);
+    expect(summary.statLinesInserted).toBe(1); // the new MLB game
+    expect(summary.statLinesUpdated).toBe(1); // the corrected AAA game
+
+    const rows = await opened.db.select().from(statLines).where(eq(statLines.playerId, player.id));
+    const aaa = rows.find((r) => r.gameId === 900001);
+    expect((aaa?.stats as Record<string, unknown>).hits).toBe(2);
+    expect(aaa?.createdAt).toBe(stored.createdAt); // a correction is quiet, never "new"
+    expect(rows.some((r) => r.gameId === 910001 && r.sportId === 1)).toBe(true);
+  });
+
+  it("never mints a probe from ANOTHER provider's stat line, even at a swept sportId", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185, level: "mlb", milbLevel: null });
+    api.options.person = makePerson({
+      currentTeam: { id: 146, name: "Miami Marlins", link: "/api/v1/teams/146" },
+    });
+    await insertStatLine(opened.db, {
+      playerId: player.id, sportId: 1, statType: "batting", gameDate: "2026-05-01",
+    });
+    // A non-MLB-path row carrying a SWEPT sportId — the malformed shape the
+    // `source` filter exists for. Its sportId alone cannot disqualify it, so this
+    // is the only case in which that filter is the sole thing standing in the way.
+    await insertStatLine(opened.db, {
+      playerId: player.id, source: "highlightly_ncaa", sportId: 11,
+      statType: "batting", gameDate: "2026-05-02",
+    });
+
+    await runRefresh(deps());
+    expect(sortProbes(gameLogProbes(api))).toEqual(["1:fielding", "1:hitting", "1:pitching"]);
+  });
+
+  it("a MiLB-current player probes AAA in full plus his MLB batting history (the demotion direction)", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    // Default makePerson/makeTeam put him on the Triple-A club today; his history
+    // carries an MLB batting line from a stint earlier this season.
+    await insertStatLine(opened.db, {
+      playerId: player.id, sportId: 1, statType: "batting", gameDate: "2026-05-01",
+    });
+
+    await runRefresh(deps());
+    expect(sortProbes(gameLogProbes(api))).toEqual(["1:hitting", "11:fielding", "11:hitting", "11:pitching"]);
+  });
+
+  it("probes the current level's pitching with no pitching line ever seen, ingesting the split the SAME sweep", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    await insertStatLine(opened.db, {
+      playerId: player.id, sportId: 11, statType: "batting", gameDate: "2026-05-01",
+    });
+    // He takes the mound for the first time. Nothing in his history says he pitches.
+    api.options.gameLogs = {
+      "11:pitching": makeGameLogBody("pitching", [
+        makeSplit({
+          date: "2026-07-18", game: { gamePk: 920001, gameNumber: 1 },
+          stat: { inningsPitched: "2.0", strikeOuts: 3 },
+        }),
+      ]),
+    };
+
+    const summary = await runRefresh(deps());
+    expect(gameLogProbes(api)).toContain("11:pitching");
+    expect(summary.statLinesInserted).toBe(1);
+    const rows = await opened.db.select().from(statLines).where(eq(statLines.playerId, player.id));
+    expect(rows.some((r) => r.statType === "pitching" && r.gameId === 920001)).toBe(true);
+  });
+
+  it("a player whose only lines are LAST season falls back to the full fan-out (the season scoping)", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    await insertStatLine(opened.db, {
+      playerId: player.id, sportId: 11, statType: "batting", gameDate: "2025-08-01",
+    });
+
+    await runRefresh(deps());
+    expect(sortProbes(gameLogProbes(api))).toEqual(FULL_FAN_OUT);
+  });
+
+  it("runRefreshForPlayer on a zero-line player takes the full fan-out (it shares refreshPlayer)", async () => {
+    const player = await insertPlayer(opened.db, { externalId: 691185 });
+    await runRefreshForPlayer(deps(), player.id);
+    expect(sortProbes(gameLogProbes(api))).toEqual(FULL_FAN_OUT);
+  });
+
+  it("collects a seen-pairs query failure as that player's failure: no game logs for him, no partial write, sweep continues", async () => {
+    const failing = await insertPlayer(opened.db, { externalId: 691185, fullName: "Probe Query Fails" });
+    const neighbor = await insertPlayer(opened.db, { externalId: 700001, fullName: "Neighbor Refreshes" });
+    api.options.gameLogs = {
+      "11:hitting": makeGameLogBody("hitting", [makeSplit({ game: { gamePk: 900001, gameNumber: 1 } })]),
+    };
+
+    const summary = await runRefresh({
+      ...deps(),
+      db: seenPairsSelectThrows(opened.db, new Error("seen-pairs read boom"), 1),
+    });
+
+    expect(summary.playersFailed).toBe(1);
+    expect(summary.playerFailures).toEqual([
+      { playerId: failing.id, reason: expect.stringContaining("seen-pairs read boom") },
+    ]);
+    // The sweep did not abort: the next player refreshed normally.
+    expect(summary.playersRefreshed).toBe(1);
+    expect(summary.status).toBe("partial");
+
+    // The fault landed BEFORE any game-log fetch for him — zero calls, not merely
+    // fewer — while his neighbor's pruning-free first refresh ran in full.
+    expect(gameLogProbes(api, 691185)).toEqual([]);
+    expect(sortProbes(gameLogProbes(api, 700001))).toEqual(FULL_FAN_OUT);
+
+    // No partial write: he buffers every fetch before his one atomic write.
+    const failedRows = await opened.db.select().from(statLines).where(eq(statLines.playerId, failing.id));
+    expect(failedRows).toEqual([]);
+    const neighborRows = await opened.db.select().from(statLines).where(eq(statLines.playerId, neighbor.id));
+    expect(neighborRows).toHaveLength(1);
   });
 
   it("ingests fielding game logs as fielding stat lines, idempotently", async () => {
@@ -772,6 +996,128 @@ describe("runRefresh records a freshness run (ADR 0043)", () => {
  * The `cb` (calendarBlocksFresh) column downgrades an otherwise-`ok` run to
  * `partial` but NEVER overrides a `failed` (blocked) run.
  */
+/**
+ * The probe plan, table-tested directly (#197, ADR 0060). Every FULL-fallback case
+ * carries a NON-EMPTY seen set on purpose: with an empty one it would pass through
+ * the first rule and prove nothing about the rule it names.
+ */
+describe("probePlanFor (#197, ADR 0060)", () => {
+  const seenAaaBatting = [{ sportId: 11, statType: "batting" as const }];
+
+  it("falls back to FULL on an empty seen set — a first refresh must still backfill", () => {
+    expect(probePlanFor({ seen: [], currentSportId: 1 })).toEqual({ kind: "full" });
+  });
+
+  it("falls back to FULL with no currentTeam, despite a non-empty history", () => {
+    expect(probePlanFor({ seen: seenAaaBatting, currentSportId: null })).toEqual({ kind: "full" });
+  });
+
+  it("falls back to FULL when the current team's sport is outside SPORT_IDS", () => {
+    expect(probePlanFor({ seen: seenAaaBatting, currentSportId: 99 })).toEqual({ kind: "full" });
+  });
+
+  it("falls back to FULL when the current team's sport is NCAA (levelForSportId says ncaa)", () => {
+    expect(probePlanFor({ seen: seenAaaBatting, currentSportId: 22 })).toEqual({ kind: "full" });
+  });
+
+  it("probes the current level in ALL three groups, whatever the seen groups are", () => {
+    const plan = probePlanFor({
+      seen: [
+        { sportId: 1, statType: "batting" },
+        { sportId: 1, statType: "fielding" },
+      ],
+      currentSportId: 1,
+    });
+    expect(probeKeys(plan)).toEqual(["1:fielding", "1:hitting", "1:pitching"]);
+  });
+
+  it("a call-up probes MLB in full plus his AAA batting pair, and nothing else", () => {
+    const plan = probePlanFor({ seen: seenAaaBatting, currentSportId: 1 });
+    expect(probeKeys(plan)).toEqual(["1:fielding", "1:hitting", "1:pitching", "11:hitting"]);
+  });
+
+  it("a MiLB-current player probes AAA in full plus his MLB batting pair (the demotion direction)", () => {
+    const plan = probePlanFor({
+      seen: [{ sportId: 1, statType: "batting" }],
+      currentSportId: 11,
+    });
+    expect(probeKeys(plan)).toEqual(["1:hitting", "11:fielding", "11:hitting", "11:pitching"]);
+  });
+
+  it("maps stored statType to the API's stat group: batting->hitting, pitching and fielding unchanged", () => {
+    // The group->statType direction (hitting stored back as `batting`) is pinned
+    // by the ingest suites above, which assert stored statType on ingested rows.
+    const plan = probePlanFor({
+      seen: [
+        { sportId: 12, statType: "batting" },
+        { sportId: 13, statType: "fielding" },
+        { sportId: 14, statType: "pitching" },
+      ],
+      currentSportId: 1,
+    });
+    expect(probeKeys(plan)).toEqual([
+      "1:fielding", "1:hitting", "1:pitching", "12:hitting", "13:fielding", "14:pitching",
+    ]);
+  });
+
+  it("never mints a probe for a stored sportId outside SPORT_IDS (a legacy or malformed row)", () => {
+    const plan = probePlanFor({
+      seen: [
+        { sportId: 1, statType: "batting" },
+        { sportId: 99, statType: "batting" },
+        { sportId: 22, statType: "batting" },
+      ],
+      currentSportId: 1,
+    });
+    expect(probeKeys(plan)).toEqual(["1:fielding", "1:hitting", "1:pitching"]);
+  });
+
+  it("falls back to FULL when EVERY seen row is at an unswept sportId — unswept rows are dropped before the emptiness check", () => {
+    // The case that makes the drop-then-check ordering load-bearing: were the
+    // emptiness check first, this non-empty-but-unusable set would prune to a
+    // three-call plan and the caller's WHERE clause would become the real guard.
+    const plan = probePlanFor({
+      seen: [
+        { sportId: 99, statType: "batting" },
+        { sportId: 22, statType: "pitching" },
+      ],
+      currentSportId: 1,
+    });
+    expect(plan).toEqual({ kind: "full" });
+  });
+
+  it("emits pairs in ladder order (SPORT_IDS declaration order, then STAT_GROUPS) — the pre-#197 call order", () => {
+    // Asserted WITHOUT sorting helpers, deliberately: every other assertion in
+    // this file normalizes order away, so this is the one test that dies if the
+    // sort inside probePlanFor is removed. Order is a contract because the pairs
+    // become ADR 0056 progress events in call order.
+    const plan = probePlanFor({
+      seen: [{ sportId: 1, statType: "batting" }],
+      currentSportId: 11,
+    });
+    if (plan.kind === "full") throw new Error("expected a pruned probe plan");
+    expect(plan.pairs).toEqual([
+      { sportId: 1, group: "hitting" },
+      { sportId: 11, group: "hitting" },
+      { sportId: 11, group: "pitching" },
+      { sportId: 11, group: "fielding" },
+    ]);
+  });
+
+  it("dedupes repeated seen pairs and never double-probes one at the current sport", () => {
+    const plan = probePlanFor({
+      seen: [
+        { sportId: 11, statType: "batting" },
+        { sportId: 11, statType: "batting" },
+        { sportId: 1, statType: "batting" },
+        { sportId: 1, statType: "pitching" },
+      ],
+      currentSportId: 1,
+    });
+    expect(probeKeys(plan)).toEqual(["1:fielding", "1:hitting", "1:pitching", "11:hitting"]);
+  });
+});
+
 describe("deriveRefreshStatus truth table (#23 SC1/MF7, P1)", () => {
   const cases = [
     { r: 0, s: 0, f: 0, cb: false, expected: "ok", note: "zero active players — vacuous ok" },
