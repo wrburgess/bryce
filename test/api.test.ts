@@ -17,7 +17,9 @@ import {
   TEST_TZ,
   fakeClock,
   insertCalendars2026,
+  insertLanePlayer,
   insertPlayer,
+  onFirstReadComplete,
   insertPlayerTag,
   insertStatLine,
   makeGameLogBody,
@@ -182,6 +184,11 @@ describe("REST API", () => {
         statLines: 0,
         lastDelivery: null,
         refresh: null,
+        // Additive in #193 and pinned as part of the public empty-DB snapshot:
+        // the seeded default lane, scheduled at hour 5 and never delivered.
+        lanes: [
+          { listId: 1, name: "Watchlist", isDefault: true, digestHour: 5, lastDelivery: null },
+        ],
       });
     });
   });
@@ -936,7 +943,9 @@ describe("REST API", () => {
 
   describe("POST /api/digest/send", () => {
     it("sends the digest, records the delivery, and stamps nothing", async () => {
-      const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+      // Enrolled in the default lane: since #193 the daily 1d send assembles
+      // THAT lane's members, exactly as drizzle/0012 left a migrated host.
+      const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
       await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
       const res = await app().request("/api/digest/send", { method: "POST", headers: AUTH });
@@ -1013,7 +1022,7 @@ describe("REST API", () => {
       expect(mailer.sent).toHaveLength(1); // fail closed: nothing else went out
     });
 
-    it("sends a named-list Digest with its public title and only that list's content", async () => {
+    it("sends a named-lane Digest as that lane's CLAIMED daily artifact (#193)", async () => {
       const member = await insertPlayer(opened.db, { externalId: 811, fullName: "Prospect Member" });
       await insertStatLine(opened.db, { playerId: member.id, gameDate: "2026-07-18" });
       const excluded = await insertPlayer(opened.db, { externalId: 812, fullName: "Excluded Veteran" });
@@ -1041,11 +1050,73 @@ describe("REST API", () => {
       expect(await sent.json()).toMatchObject({ action: "sent", playerCount: 1, statLineCount: 1 });
       expect(mailer.sent).toHaveLength(1);
       expect(mailer.sent[0]?.subject).toBe("ScoreKeeps Baseball (Prospects) - Sat, July 18, 2026");
-      expect(mailer.sent[0]?.text.split("\n")[0]).toBe(
+      expect(mailer.sent[0]?.text).toContain(
         "ScoreKeeps Baseball - Prospects List - Sat, July 18, 2026",
       );
       expect(mailer.sent[0]?.text).toContain("Member, P");
       expect(mailer.sent[0]?.text).not.toContain("Veteran");
+
+      // THE CONTRACT CHANGE (#193 / ADR 0062 decision 1, superseding ADR 0046
+      // decision 4): this REST send is the Prospects lane's scheduled daily
+      // artifact, so it now RECORDS a delivery row on that lane's own slot where
+      // it used to record none. It is also freshness-annotated for the same
+      // reason — no refresh has run in this fixture, so the body opens on the
+      // stale banner rather than the heading, which is why the heading is
+      // asserted with `toContain` rather than as line 0.
+      const rows = await opened.db.select().from(digestDeliveries);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ kind: "digest", dateCovered: "2026-07-19", status: "sent" });
+      expect(rows[0]?.listId).not.toBe(1); // the Prospects lane, not the default
+
+      // And a SECOND send for that lane on that date is refused — the whole
+      // point of the slot. A different lane on the same date is not.
+      const again = await app().request("/api/digest/send", {
+        method: "POST",
+        headers: JSON_AUTH,
+        body: JSON.stringify({ list: "Prospects" }),
+      });
+      expect(again.status).toBe(200);
+      expect(await again.json()).toMatchObject({
+        action: "skipped",
+        reason: "already-sent-today",
+      });
+      expect(mailer.sent).toHaveLength(1); // nothing mailed twice
+    });
+
+    it("404s a lane deleted between resolution and the job's own re-read (#193)", async () => {
+      // Reviewer must-fix 4, on the REST seam. The claimed path re-reads the lane
+      // by id inside `runDigest`, so the delete raises UnknownListError from a
+      // SECOND place — and it must map to the same 404 the name lookup already
+      // does, never fall through `onError` as a 500.
+      const member = await insertPlayer(opened.db, { externalId: 911, fullName: "Racy Member" });
+      await insertStatLine(opened.db, { playerId: member.id, gameDate: "2026-07-18" });
+      await app().request("/api/lists", {
+        method: "POST", headers: JSON_AUTH, body: JSON.stringify({ name: "Racy" }),
+      });
+      await app().request("/api/lists/Racy/members", {
+        method: "POST", headers: JSON_AUTH, body: JSON.stringify({ players: [{ personId: 911 }] }),
+      });
+
+      const racing = createApp(
+        testAppDeps(opened, {
+          mailer,
+          now: clock.now,
+          tz: TEST_TZ,
+          db: onFirstReadComplete(opened.db, () => {
+            opened.sqlite
+              .prepare("update player_lists set deleted_at = ? where name = ?")
+              .run("2026-07-19T00:00:00.000Z", "Racy");
+          }),
+        }),
+      );
+      const res = await racing.request("/api/digest/send", {
+        method: "POST", headers: JSON_AUTH, body: JSON.stringify({ list: "Racy" }),
+      });
+      expect(res.status).toBe(404);
+      expect((await res.json()) as Record<string, unknown>).toMatchObject({
+        error: 'no list named "Racy"',
+      });
+      expect(mailer.sent).toHaveLength(0);
       expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
     });
 
@@ -1078,7 +1149,7 @@ describe("REST API", () => {
     });
 
     it("re-sends with {force:true} after a same-day send, recording nothing new", async () => {
-      const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+      const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
       await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
       const first = await app().request("/api/digest/send", { method: "POST", headers: AUTH });

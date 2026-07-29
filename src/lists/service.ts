@@ -154,6 +154,42 @@ export async function resolveListByName(db: Db, name: string): Promise<PlayerLis
 }
 
 /**
+ * Resolve a LIVE lane by its id, or throw UnknownListError (#193).
+ *
+ * The id twin of {@link resolveListByName}, and it exists because the claimed
+ * digest path receives an ALREADY-RESOLVED id from its caller and must re-read
+ * the row itself: the caller resolved a name to an id at request time, and by
+ * the time the job runs that lane may have been renamed (so the caller's name is
+ * stale — ADR 0062, the rendered name comes from THIS row) or soft-deleted (so
+ * the send must be refused rather than mailed from a dead lane).
+ *
+ * IT THROWS THE EXISTING TYPED ERROR RATHER THAN A NEW ONE, deliberately.
+ * `UnknownListError` is already mapped on every surface — CLI usage error, REST
+ * 4xx, MCP known-error — so a resolve-time miss here inherits three consistent
+ * mappings and three existing tests instead of minting a fourth error that would
+ * fall through as a REST 500 and an unhandled CLI rejection (`rules/backend.md`:
+ * thread every error type through every seam).
+ *
+ * `label` is what the message NAMES. A surface that resolved by name passes it,
+ * so the operator reads the lane he typed; a bare programmatic caller gets
+ * `#<id>`, which is at least unambiguous.
+ *
+ * This closes only the RESOLVE-time race. A delete landing between this read and
+ * the claim is closed separately, inside the claim transaction — see
+ * `src/jobs/digest.ts`.
+ */
+export async function listById(db: Db, id: number, label?: string): Promise<PlayerListRow> {
+  const row = (
+    await db
+      .select()
+      .from(playerLists)
+      .where(and(eq(playerLists.id, id), isNull(playerLists.deletedAt)))
+  )[0];
+  if (row === undefined) throw new UnknownListError(label ?? `#${id}`);
+  return row;
+}
+
+/**
  * THE default lane, or NoDefaultListError (#190). The single place "no `--list`"
  * is answered, so an unscoped command can never resolve to something other than
  * a real, nameable list — the reversal of ADR 0046 decision 1's implicit default.
@@ -472,6 +508,21 @@ export async function listLists(db: Db): Promise<ListSummary[]> {
     createdAt: r.createdAt,
     updatedAt: r.updatedAt,
   }));
+}
+
+/**
+ * Every LIVE lane row, ordered by id (#193). The row-level twin of
+ * {@link listLists}, which returns a presentation summary with member counts.
+ *
+ * The tick needs whole rows — `refresh_interval_minutes`, `digest_hour`,
+ * `digest_to`, and the `PlayerListRow` shape `RefreshScope.lists` carries — and
+ * it needs them in a STABLE order, because that order decides which lane the
+ * tick attempts first and therefore what a partial-failure tick's output reads
+ * like. Ordered by `id` (creation order) rather than by name, so renaming a lane
+ * cannot silently reorder the scheduler.
+ */
+export async function liveLists(db: Db): Promise<PlayerListRow[]> {
+  return db.select().from(playerLists).where(isNull(playerLists.deletedAt)).orderBy(playerLists.id);
 }
 
 /** Active member player ids for a list id, ordered by players.id (scope helper). */

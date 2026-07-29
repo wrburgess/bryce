@@ -331,6 +331,31 @@ export async function enrollInDefaultLane(
   return lane;
 }
 
+/**
+ * `insertPlayer` PLUS enrollment in the default lane — a Player the scheduled
+ * digest can actually see (#193).
+ *
+ * The scheduled 1d digest assembles the DEFAULT LANE's members rather than every
+ * active Player (ADR 0062 decision 1), so a test about what the daily email
+ * CONTAINS has to put its Players on that lane, exactly as `drizzle/0012` did for
+ * every Player that existed when it ran. This pairs the two calls at one site so
+ * the intent reads as "a watched Player on the scheduled lane" rather than as
+ * two lines whose second one is easy to forget.
+ *
+ * `insertPlayer` deliberately still does NOT enroll (see `enrollInDefaultLane`):
+ * a test about the SCOPING — an active Player on no lane — needs the bare
+ * builder, and making enrollment a side effect of creating a Player would make
+ * that case unconstructable.
+ */
+export async function insertLanePlayer(
+  db: Db,
+  overrides: Partial<typeof players.$inferInsert> = {},
+): Promise<PlayerRow> {
+  const player = await insertPlayer(db, overrides);
+  await enrollInDefaultLane(db, [player]);
+  return player;
+}
+
 /** A live NAMED lane holding exactly `members` — the non-default half of the pair above. */
 export async function insertLane(
   db: Db,
@@ -852,6 +877,70 @@ export class GatedMailer implements Mailer {
       return true;
     });
   }
+}
+
+/**
+ * A `Db` that runs `onFirstRead()` the moment its FIRST read COMPLETES — after
+ * the rows are in hand and before the caller resumes to issue anything else.
+ *
+ * That instant is the check-then-act window every "resolved, then it changed
+ * underneath me" race lives in (#193): a lane resolved by name or listed by the
+ * tick, then soft-deleted or renamed before the job re-reads it. Driving it here
+ * makes the interleaving DETERMINISTIC; a mailer barrier cannot express it,
+ * because by the time the mailer is reached the claim has already been taken and
+ * the window has closed.
+ *
+ * The hook is on COMPLETION, not on issue, and that distinction is the whole
+ * fixture: firing before the read would simply hide the row from the caller,
+ * which is not a defect at all.
+ *
+ * `then` is what `await` calls, so intercepting it observes a completion without
+ * re-implementing drizzle's execution. The chainable methods are RE-WRAPPED
+ * because `.from()`/`.where()`/`.orderBy()` return a builder — handing back an
+ * unwrapped one drops the hook before anything is ever awaited, and the fixture
+ * then silently does nothing while the test still reads as coverage.
+ */
+export function onFirstReadComplete(db: Db, onFirstRead: () => void): Db {
+  let fired = false;
+  const fire = (): void => {
+    if (fired) return;
+    fired = true;
+    onFirstRead();
+  };
+  const hooked = (builder: object): object =>
+    new Proxy(builder, {
+      get(b, p) {
+        const bv: unknown = Reflect.get(b, p);
+        if (p === "then") {
+          return (onOk?: (v: unknown) => unknown, onErr?: (e: unknown) => unknown): unknown =>
+            (bv as (ok?: unknown, err?: unknown) => unknown).call(
+              b,
+              (value: unknown) => {
+                fire();
+                return onOk?.(value);
+              },
+              onErr,
+            );
+        }
+        if (typeof bv === "function") {
+          return (...args: unknown[]): unknown => {
+            const out: unknown = (bv as (...a: unknown[]) => unknown).apply(b, args);
+            return typeof out === "object" && out !== null ? hooked(out as object) : out;
+          };
+        }
+        return bv;
+      },
+    });
+  return new Proxy(db, {
+    get(target, prop) {
+      const value: unknown = Reflect.get(target, prop);
+      if (prop !== "select" || fired) {
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (...args: unknown[]): unknown =>
+        hooked((value as (...a: unknown[]) => object).apply(target, args));
+    },
+  }) as Db;
 }
 
 // --- Fault injection over the database (crash-window tests) -----------------

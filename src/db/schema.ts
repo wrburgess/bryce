@@ -89,9 +89,19 @@ export const playerLists = sqliteTable(
      * not expressing "weekdays only". Inert until #192 reads it.
      */
     refreshIntervalMinutes: integer("refresh_interval_minutes"),
-    /** Host-timezone hour (0-23) this lane digests at; null = never auto-digests. Inert until #193. */
+    /**
+     * Host-timezone hour (0-23) this lane digests at; null = never
+     * auto-digests. Read by the tick (#193): a lane is due once the host hour
+     * has REACHED it and today's slot holds no `sent` row — `>=`, not `==`, so a
+     * laptop asleep at the hour still sends on wake.
+     */
     digestHour: integer("digest_hour"),
-    /** This lane's recipients; null = fall back to the DIGEST_TO env value. Inert until #193. */
+    /**
+     * This lane's recipients; null = fall back to the DIGEST_TO env value.
+     * Read by the CLAIMED digest path (#193): a lane's scheduled daily send goes
+     * here. An on-demand report keeps the host recipients — it answers the person
+     * who asked for it, not the lane's subscribers.
+     */
     digestTo: text("digest_to"),
   },
   (t) => [
@@ -178,10 +188,13 @@ export const digestDeliveries = sqliteTable(
       .references(() => playerLists.id),
   },
   (t) => [
-    // The slot key gains the lane dimension: two lanes may digest the same date,
-    // one lane may not digest it twice. Until #193 routes lane-scoped sends onto
-    // the claimed path every row carries the default lane, so this behaves
-    // exactly like the two-column key it replaces.
+    // The slot key carries the lane dimension: two lanes may digest the same
+    // date, one lane may not digest it twice. That third column is load-bearing
+    // as of #193 (ADR 0062 decision 1), which routes every tag-free 1d send —
+    // including an explicitly named lane's, on any surface — onto the claimed
+    // path. Rows genuinely differ by lane now, where before the migration every
+    // one carried the default lane and this behaved like the two-column key it
+    // replaced.
     uniqueIndex("digest_deliveries_kind_date_list_uq").on(t.kind, t.dateCovered, t.listId),
   ],
 );

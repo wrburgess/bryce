@@ -20,6 +20,7 @@ import {
   admitTargetedRefresh,
   digestFreshnessFor,
   encodeScopeListIds,
+  latestCoveringRun,
   refreshHealth,
   renewRefreshRun,
   settleRefreshRun,
@@ -512,6 +513,121 @@ describe("coverage-keyed freshness watermark, storage layer (#192)", () => {
 
     expect(opened.db.select().from(refreshRuns).all()).toHaveLength(2);
     expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("fresh");
+  });
+
+  /**
+   * The PER-LANE half of the same predicate (#193, ADR 0062 decision 2). #192
+   * asked one question — "did a run sweep EVERYONE?" — and #193 adds a second —
+   * "did a run sweep THIS LANE?" — answered from the same column by the same
+   * exported helper, because two authorings of the fenced `LIKE` is how the
+   * fencing quietly stops matching at one of them.
+   */
+  describe("per-lane coverage (#193)", () => {
+    it("a NULL-scope run covers EVERY lane, including ones that did not exist yet", async () => {
+      sweep("ok", undefined);
+      const a = await insertList(opened.db, { name: "A" });
+      const b = await insertList(opened.db, { name: "B" });
+
+      // "Swept every active Player" is a statement about players, not about the
+      // lane table, so it answers for a lane created afterwards too.
+      expect(latestCoveringRun(opened.db, a.id)?.scopeListIds).toBeNull();
+      expect(latestCoveringRun(opened.db, b.id)?.scopeListIds).toBeNull();
+      expect(latestCoveringRun(opened.db, null)?.scopeListIds).toBeNull();
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+    });
+
+    it("a scoped run covers the lanes it names and no others", async () => {
+      const a = await insertList(opened.db, { name: "A" });
+      const b = await insertList(opened.db, { name: "B" });
+      const c = await insertList(opened.db, { name: "C" });
+      sweep("ok", [a.id, c.id]);
+
+      expect(latestCoveringRun(opened.db, a.id)).toBeDefined();
+      expect(latestCoveringRun(opened.db, c.id)).toBeDefined();
+      expect(latestCoveringRun(opened.db, b.id)).toBeUndefined();
+      // ...and the whole-list question still reads UNCOVERED, which is exactly
+      // the #192 rule this narrowing must not weaken.
+      expect(latestCoveringRun(opened.db, null)).toBeUndefined();
+
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, b.id).state).toBe("stale");
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, null).state).toBe("stale");
+    });
+
+    it("FENCING: lane 11's sweep does not cover lane 1", () => {
+      // The correctness edge the sentinel commas exist for. An unfenced
+      // `LIKE '%1%'` over `,11,` matches, so lane 1's digest would read `fresh`
+      // over players lane 11's sweep never touched — a forged completeness
+      // claim, and silent. Written against the ENCODER's own output so it fails
+      // if the encoding ever drops a sentinel.
+      expect(encodeScopeListIds([11])).toBe(",11,");
+      sweep("ok", [11]);
+
+      expect(latestCoveringRun(opened.db, 11)).toBeDefined();
+      expect(latestCoveringRun(opened.db, 1)).toBeUndefined();
+      // The mirror case: lane 1's sweep must not cover lane 11 either.
+      expect(latestCoveringRun(opened.db, 111)).toBeUndefined();
+    });
+
+    it("a newer OTHER-LANE run does not hide an older covering one", async () => {
+      // The per-lane twin of the whole-list ordering invariant above: the
+      // order-by picks the latest ELIGIBLE row, never the latest row that is
+      // then tested. Lane B sweeping every ten minutes must not make lane A read
+      // `stale` while A's own recent sweep sits one row down.
+      const a = await insertList(opened.db, { name: "A" });
+      const b = await insertList(opened.db, { name: "B" });
+      sweep("ok", [a.id], "2026-07-19T12:00:00.000Z");
+      sweep("ok", [b.id], "2026-07-19T18:00:00.000Z");
+
+      expect(opened.db.select().from(refreshRuns).all()).toHaveLength(2);
+      expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe("2026-07-19T12:00:00.000Z");
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+    });
+
+    it("a FAILED run never covers, however recent or on-lane", async () => {
+      const a = await insertList(opened.db, { name: "A" });
+      sweep("ok", [a.id], "2026-07-19T12:00:00.000Z");
+      sweep("failed", [a.id], "2026-07-19T18:00:00.000Z");
+
+      // The older `ok` still answers — a failure does not erase a success, it
+      // simply is not one.
+      expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe("2026-07-19T12:00:00.000Z");
+
+      // With ONLY a failure on the lane, nothing covers it.
+      const b = await insertList(opened.db, { name: "B" });
+      sweep("failed", [b.id], "2026-07-19T19:00:00.000Z");
+      expect(latestCoveringRun(opened.db, b.id)).toBeUndefined();
+    });
+
+    it("`partial` covers, carrying its own N/M to the banner", async () => {
+      const a = await insertList(opened.db, { name: "A" });
+      sweep("partial", [a.id]);
+
+      expect(latestCoveringRun(opened.db, a.id)?.status).toBe("partial");
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id)).toMatchObject({
+        state: "partial",
+        playersRefreshed: 2,
+        playersTotal: 2,
+      });
+    });
+
+    it("the anchor is started_at: a covering run that started BEFORE the content day ended is stale", async () => {
+      // The start-time rule (ADR 0040's forward-clock finality), restated per
+      // lane. A run that started ON the content date saw games that were still
+      // live, so it cannot certify that day whatever lane it covered.
+      const a = await insertList(opened.db, { name: "A" });
+      sweep("ok", [a.id], "2026-07-18T12:00:00.000Z"); // host date 2026-07-18
+
+      expect(latestCoveringRun(opened.db, a.id)).toBeDefined(); // it DOES cover…
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("stale"); // …but too early
+    });
+
+    it("refuses a non-integer lane id rather than building a pattern that matches anything", () => {
+      // Safe in isolation, not because a caller is suspected: the id is
+      // interpolated into the LIKE pattern, so a non-integer is a refusal.
+      expect(() => latestCoveringRun(opened.db, 1.5)).toThrow(/must be an integer/);
+      expect(() => latestCoveringRun(opened.db, Number.NaN)).toThrow(/must be an integer/);
+    });
   });
 
   it("a lane-scoped FAILED run DOES surface in refreshHealth — the deliberate split", async () => {

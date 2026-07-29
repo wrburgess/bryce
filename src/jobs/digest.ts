@@ -1,5 +1,6 @@
-import { and, desc, eq } from "drizzle-orm";
-import { digestDeliveries } from "../db/schema.js";
+import { and, desc, eq, isNull } from "drizzle-orm";
+import type { PlayerListRow } from "../db/schema.js";
+import { digestDeliveries, playerLists } from "../db/schema.js";
 import type { DigestAssembly } from "../digest/assemble.js";
 import { assembleDigest } from "../digest/assemble.js";
 import { assembleGameWindow } from "../digest/game-window.js";
@@ -10,7 +11,7 @@ import { isGameCountSpec, resolveWindow } from "../domain/window.js";
 import type { DeliveryKind } from "../db/schema.js";
 import type { LookupResult, MailReceipt, Mailer } from "../mailer/types.js";
 import type { Db } from "../db/client.js";
-import { resolveDefaultList } from "../lists/service.js";
+import { listById, resolveDefaultList } from "../lists/service.js";
 import type { ClaimRefusal, ClaimResult, Tx } from "./delivery-claim.js";
 import {
   claimDelivery,
@@ -41,15 +42,31 @@ export interface DigestDeps {
    */
   spec: ReportWindowSpec;
   /**
-   * Scope an ON-DEMAND send to a named list's active members (issue #70 /
-   * ADR 0046). A named-list send is never the scheduled daily slot — the slot
-   * key `(kind, date_covered)` has no list dimension — so any run carrying a
-   * listId is routed to the on-demand path (no claim, no delivery row),
-   * whatever its window. The scheduler passes no list, so the daily 1d slot is
-   * unaffected.
+   * WHICH LANE this run is about (#193, ADR 0062 decision 1) — no longer an
+   * automatic ticket to the on-demand path.
+   *
+   * ADR 0046 decision 4 routed every named-list send on-demand because the slot
+   * key `(kind, date_covered)` had no list dimension, so two lanes sending on
+   * one date would fight over one slot. #190 added `list_id` to that key, which
+   * removed the reason; #193 removes the routing. A **1d, tag-free** send now
+   * CLAIMS its lane's own slot on every surface — CLI, MCP, REST — so a lane's
+   * daily digest is the scheduled artifact it always described itself as, with
+   * de-duplication, crash recovery, and orphan catch-up. Any other window, and
+   * any tag scope, still routes on-demand.
+   *
+   * Absent on the claimed path means THE DEFAULT LANE, not "everyone".
    */
   listId?: number;
-  /** Validated named-list display name, preserved for the rendered Digest. */
+  /**
+   * The lane's display name AS THE CALLER RESOLVED IT, used for the on-demand
+   * path's rendering and for naming the lane in a resolve-time refusal.
+   *
+   * The CLAIMED path deliberately does NOT render from this (#193): the job
+   * re-reads the lane row by id and renders from THAT name, because an arbitrary
+   * amount of time passes between a caller resolving a name and the job running,
+   * and a rename inside that gap would otherwise mail a digest titled with a name
+   * the lane no longer carries.
+   */
   listName?: string;
   /**
    * Scope an ON-DEMAND send to the players matching a tag selector (#140 /
@@ -167,30 +184,39 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   // It also ignores Offseason Sleep. Sleep stops the daily artifact mailing
   // nothing every day for months. Answering an explicit "give me my season to
   // date" with a liveness heartbeat is not that, it is refusing the question.
-  // A named-list send is on-demand by definition (ADR 0046 decision 4): it never
-  // takes the daily slot, whose key has no list dimension. A TAG-scoped send is
-  // on-demand for the identical reason (#140 / ADR 0050) — the slot key has no
+  //
+  // A TAG-scoped send is on-demand (#140 / ADR 0050) because the slot key has no
   // tag dimension, so two cohorts on one date would fight over one slot. A
   // game-count report (issue #153) is likewise on-demand: it has no single date
   // to key a daily slot on, and every game-count spec is non-1d, so the
-  // `!== "1d"` test already routes it here. Route any run with a list, a tag
-  // scope, or any non-1d window (date OR game-count) to the on-demand path.
-  if (deps.spec !== "1d" || deps.listId !== undefined || deps.tagScope !== undefined) {
+  // `!== "1d"` test already routes it here.
+  //
+  // A NAMED-LIST SEND IS NO LONGER ROUTED HERE (#193, ADR 0062 decision 1,
+  // superseding ADR 0046 decision 4). Its reason was the same missing dimension
+  // — and #190 added `list_id` to the slot key, so it is gone. A 1d, tag-free
+  // send is now the SCHEDULED artifact for its lane, whichever surface asked for
+  // it, and the `listId` disjunct that used to stand here with the tag one is
+  // deliberately absent rather than merely unreachable.
+  if (deps.spec !== "1d" || deps.tagScope !== undefined) {
     return runOnDemandReport(deps, warn);
   }
 
   // Everything past this point is the SCHEDULED artifact, and the scheduled
-  // artifact now belongs to a lane (#190): `digest_deliveries.list_id` is NOT
-  // NULL, so the slot cannot be claimed without one. Resolving it HERE — once,
-  // before recovery, the sleep decision, and the claim — is what keeps the daily
-  // digest working the moment the column goes NOT NULL. A missing default is
-  // NoDefaultListError: a refusal the operator can fix, never a silent send to
-  // some other cohort.
+  // artifact belongs to a lane (#190): `digest_deliveries.list_id` is NOT NULL,
+  // so the slot cannot be claimed without one. Resolving it HERE — once, before
+  // recovery, the sleep decision, and the claim — is what makes the whole run
+  // one lane's run.
   //
-  // The on-demand path above returned already, so an explicitly scoped send
-  // never needs a default and never takes a claim; #193 moves those onto the
-  // claimed path.
-  const laneId = (await resolveDefaultList(db)).id;
+  // Both failure modes are CLOSED, and both are typed errors every surface
+  // already maps (#193): an explicit id that names no live lane is
+  // UnknownListError, and an absent id on a database with no default is
+  // NoDefaultListError — a refusal the operator can fix, never a silent send to
+  // some other cohort. Resolution is a READ, so it can go stale; the claim
+  // re-checks liveness under its own write lock (see `deliverDailyDigest`).
+  const lane =
+    deps.listId !== undefined
+      ? await listById(db, deps.listId, deps.listName)
+      : await resolveDefaultList(db);
 
   const today = hostDate(now(), tz);
 
@@ -205,18 +231,36 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
   // assembles ITS date's window (asOf), never today's, and never forces. One per
   // run bounds catch-up to a single extra email; a multi-day backlog drains a
   // day at a time rather than arriving as a burst.
-  const orphan = findOrphanedDigestDate(db, laneId, today, now().getTime());
+  const orphan = findOrphanedDigestDate(db, lane.id, today, now().getTime());
   if (orphan !== null) {
-    await deliverDailyDigest(deps, laneId, orphan, orphan, false, warn);
+    await deliverDailyDigest(deps, lane, orphan, orphan, false, warn);
   }
 
   // Only TODAY's run is replaced by the offseason heartbeat; the recovery above
   // is for an in-season day that still owes its digest.
   if (sleep.sleeping) {
-    return runHeartbeat(deps, laneId, activePlayers.length, sleep.nextOpeningDay);
+    // ONLY THE UNSCOPED INVOCATION SUBSTITUTES THE HEARTBEAT (#193, ADR 0062
+    // decision 4). The heartbeat proves the HOST is alive — one signal per host,
+    // ADR 0059's amendment — so letting each scheduled lane substitute one would
+    // multiply offseason mail by the lane count and say nothing extra. A lane
+    // that was asked for BY NAME during Sleep therefore skips outright, taking no
+    // claim, and the tick's own unscoped invocation is what keeps the heartbeat
+    // running.
+    if (deps.listId !== undefined) {
+      return {
+        kind: "digest",
+        action: "skipped",
+        reason: "offseason-sleep",
+        statLineCount: 0,
+        playerCount: activePlayers.length,
+        window: null,
+        freshness: null,
+      };
+    }
+    return runHeartbeat(deps, lane.id, activePlayers.length, sleep.nextOpeningDay);
   }
 
-  return deliverDailyDigest(deps, laneId, today, today, deps.force === true, warn);
+  return deliverDailyDigest(deps, lane, today, today, deps.force === true, warn);
 }
 
 /**
@@ -227,19 +271,33 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
  */
 async function deliverDailyDigest(
   deps: DigestDeps,
-  laneId: number,
+  lane: PlayerListRow,
   dateCovered: string,
   asOf: string,
   force: boolean,
   warn: (message: string) => void,
 ): Promise<DigestResult> {
   const { db, now, tz } = deps;
+  const laneId = lane.id;
   const claim = claimDelivery(db, {
     kind: "digest",
     dateCovered,
     listId: laneId,
     now: now(),
     force,
+    // LANE LIVENESS IS DECIDED INSIDE THE CLAIM (#193, Reviewer must-fix 1).
+    // `runDigest` resolved the lane with an ordinary read, and an arbitrary
+    // amount of work happens between that read and here — recovery, the sleep
+    // decision — so a `lists delete` landing in the gap would otherwise let this
+    // run claim a slot and mail a soft-deleted cohort's digest from a stale row.
+    // Passing it as a `requirement` puts the check under the claim's own
+    // BEGIN IMMEDIATE write lock, which serializes it with the delete.
+    //
+    // It is a `requirement`, not a `precondition`, so FORCE CANNOT REPLAY PAST
+    // IT. Force overrides de-duplication bookkeeping; "this cohort still exists"
+    // is not bookkeeping, and a forced send to a deleted lane is the same wrong
+    // email as an unforced one.
+    requirement: (tx) => (laneIsLive(tx, laneId) ? null : "lane-deleted"),
   });
   if (!claim.claimed) {
     return {
@@ -290,18 +348,39 @@ async function deliverDailyDigest(
   // delivery slot) and on the run's START (not its finish) are the two
   // correctness fixes ADR 0043 turns on.
   const contentDate = resolveWindow("1d", now(), tz, null, asOf).to;
-  // The watermark only accepts a run that swept EVERY active Player (#192,
-  // ADR 0061 decision 8). Bare `sk digest` still assembles the whole Watch List
-  // until #193, so a lane sweep — however recent, and whichever lane it was —
-  // certifies nothing here and the banner honestly reads `stale`.
-  const freshness = digestFreshnessFor(db, contentDate, tz);
+  // The watermark accepts a run that COVERED THIS LANE (#193, ADR 0062 decision
+  // 2): either a whole-list sweep, or a scoped sweep whose fenced id list
+  // contains this lane. That is exactly the set of players this email is about,
+  // which is the question a freshness banner exists to answer — narrower than
+  // #192's whole-list-only rule, and correct for the same reason that rule was:
+  // the claim is narrowed to what it claims for.
+  const freshness = digestFreshnessFor(db, contentDate, tz, laneId);
 
   // Pure assembly (src/digest/assemble.ts): what this Digest reports. A replay
   // assembles exactly what an ordinary run would — the window is the content,
   // and it does not depend on what any previous delivery reported. `asOf`
   // anchors the window on the slot's own date, so a recovered prior day reports
   // its day, not today's.
-  const assembly = await assembleDigest(db, { now, tz, spec: "1d", asOf });
+  //
+  // SCOPED TO THE LANE (#193). Bare `sk digest` therefore assembles the DEFAULT
+  // LANE's members rather than every active Player — behavior-preserving on a
+  // migrated host, where drizzle/0012 enrolled every active Player in the seeded
+  // default lane, and the endpoint this file's routing comment has promised
+  // since #190. The two-selection-site leak guard already lives in
+  // `assembleDigest`; this is parameter threading, not an assembly change.
+  //
+  // The NAME comes from the row this job read (`lane.name`), never from
+  // `deps.listName` (Reviewer should-consider 3): a rename between the caller's
+  // resolution and this send must change the rendered title, not be papered over
+  // with the name the caller happened to hold.
+  const assembly = await assembleDigest(db, {
+    now,
+    tz,
+    spec: "1d",
+    asOf,
+    listId: laneId,
+    listName: lane.name,
+  });
 
   // Fail-closed has two halves. Excluding an unrecognised stat key is the safe
   // one; SAYING SO is the other. Without this an upstream field addition is
@@ -315,7 +394,12 @@ async function deliverDailyDigest(
   let receipt: MailReceipt;
   try {
     receipt = await deps.mailer.send(
-      { to: deps.to, from: deps.from, ...mail },
+      // THE LANE'S OWN RECIPIENTS, falling back to the host's (#193, ADR 0062
+      // decision 6). `deps.to` is the `DIGEST_TO`-derived host value, which is
+      // exactly what `digest_to`'s schema comment has always said NULL means, so
+      // a lane that never configured recipients is unchanged. An on-demand
+      // report keeps `deps.to` unconditionally: it answers the person who asked.
+      { to: lane.digestTo ?? deps.to, from: deps.from, ...mail },
       { deliveryKey: deliveryKey("digest", dateCovered, laneId) },
     );
   } catch (err) {
@@ -648,6 +732,35 @@ function heartbeatWithinWeek(tx: Tx, nowMs: number): ClaimRefusal | null {
     return "heartbeat-sent-within-week";
   }
   return null;
+}
+
+/**
+ * Is this lane still LIVE, asked under the claim's write lock (#193)?
+ *
+ * The synchronous, transaction-scoped twin of `listById`. It is a separate
+ * function rather than a re-use because the two answer at different moments and
+ * only this one is serialized with a concurrent `lists delete`: `listById` is an
+ * ordinary async read that tells the caller whether to proceed at all,
+ * this is the guarantee that the lane still existed at the instant the slot was
+ * reserved. Same shape as `addPlayerIdsToLiveList`'s re-check (ADR 0059
+ * decision 4) — the database refuses, not a prior read.
+ *
+ * DELIBERATELY NOT APPLIED TO THE HEARTBEAT. A heartbeat proves the HOST is
+ * alive and rides the default lane's slot only because `list_id` is NOT NULL
+ * (ADR 0059 → *Amendment (#191)*); refusing the one offseason liveness signal
+ * because a lane row was soft-deleted would silence the host over a storage
+ * detail. The default lane cannot be deleted anyway
+ * (`CannotDeleteDefaultListError`), so there is no live hazard here to close.
+ */
+function laneIsLive(tx: Tx, laneId: number): boolean {
+  return (
+    tx
+      .select({ id: playerLists.id })
+      .from(playerLists)
+      .where(and(eq(playerLists.id, laneId), isNull(playerLists.deletedAt)))
+      .limit(1)
+      .all()[0] !== undefined
+  );
 }
 
 /**

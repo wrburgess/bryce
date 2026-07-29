@@ -287,8 +287,8 @@ using the CLI. Tool list, REST routes, and remote setup: the [MCP](../mcp/README
 Everything so far ran by hand. [Running Bryce](running-bryce.md) covers turning it into the
 set-and-forget daily email:
 
-1. [Scheduling with launchd](running-bryce.md#scheduling-with-launchd) — nightly refresh + morning
-   digest that self-heal if the laptop was asleep.
+1. [Scheduling with launchd](running-bryce.md#scheduling-with-launchd) — one 15-minute *tick* that
+   runs whatever your lanes owe (refresh, then digest) and self-heals if the laptop was asleep.
 2. [Litestream backup to Cloudflare R2](running-bryce.md#backup-litestream-to-cloudflare-r2).
 3. [Cloudflare Tunnel](running-bryce.md#remote-access-cloudflare-tunnel) +
    [connecting a Claude client to the remote MCP endpoint](../mcp/README.md)

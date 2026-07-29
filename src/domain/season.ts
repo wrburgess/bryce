@@ -42,6 +42,27 @@ export function hostDate(now: Date, tz: string): string {
   }).format(now);
 }
 
+/**
+ * The hour 0-23 for `now` in the host timezone (#193).
+ *
+ * `hourCycle: "h23"` is load-bearing, not decoration: several locales render
+ * midnight as `24` under the default `h24` cycle, and an hour of 24 compared
+ * against a lane's `digest_hour` (which the database CHECKs to 0-23) would make
+ * a midnight lane read as due at midnight for the wrong reason and never read as
+ * NOT due. Fixing the cycle makes the value's range the same one the column
+ * declares. `en-US` fixes the numbering system too, so a host locale using
+ * non-Latin digits cannot make `Number()` return NaN.
+ */
+export function hostHour(now: Date, tz: string): number {
+  return Number(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      hour: "2-digit",
+      hourCycle: "h23",
+    }).format(now),
+  );
+}
+
 export function sportIdForPlayer(player: WatchedLevel): number | null {
   return sportIdForLevel(player.level, player.milbLevel);
 }

@@ -13,7 +13,7 @@ import {
   fakeClock,
   insertCalendars2026,
   insertDelivery,
-  insertPlayer,
+  insertLanePlayer,
   insertRefreshRun,
   insertStatLine,
   testDb,
@@ -59,7 +59,7 @@ describe("digest freshness gate (ADR 0043)", () => {
   });
 
   it("stale: no qualifying refresh → stale banner and freshness === 'stale'", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     const result = await runDigest(deps());
@@ -73,11 +73,11 @@ describe("digest freshness gate (ADR 0043)", () => {
     expect(mail?.text).toContain("as of last successful refresh: never");
     expect(mail?.html).toContain("<p>⚠️");
     // The subject is untouched — it names the content day, not the warning.
-    expect(mail?.subject).toBe("ScoreKeeps Baseball (Default) - Sat, July 18, 2026");
+    expect(mail?.subject).toBe("ScoreKeeps Baseball (Watchlist) - Sat, July 18, 2026");
   });
 
   it("stale banner dates itself by the last successful refresh when one exists", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
     // A successful run, but it STARTED on the content date itself (07-18) — not
     // after it, so it does not qualify: stale, dated by its finish.
@@ -93,7 +93,7 @@ describe("digest freshness gate (ADR 0043)", () => {
   });
 
   it("stale: a FAILED latest run still yields the stale banner (a refresh ran, none succeeded)", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
     // The latest run FAILED after starting past the content date. A refresh DID
     // run, so the old "no refresh has run since" wording would have lied; the
@@ -116,7 +116,7 @@ describe("digest freshness gate (ADR 0043)", () => {
   });
 
   it("partial: a qualifying partial run → partial banner with N of M and freshness === 'partial'", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
     await insertRefreshRun(opened.db, {
       status: "partial",
@@ -135,7 +135,7 @@ describe("digest freshness gate (ADR 0043)", () => {
   });
 
   it("fresh: a qualifying ok run → NO banner and freshness === 'fresh'", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
     await insertRefreshRun(opened.db, {
       status: "ok",
@@ -148,11 +148,11 @@ describe("digest freshness gate (ADR 0043)", () => {
     const mail = mailer.sent[0];
     expect(mail?.text).not.toContain("⚠️");
     // The body opens straight on the content heading — no banner line prepended.
-    expect(mail?.text.startsWith("ScoreKeeps Baseball - Default List - Sat, July 18, 2026")).toBe(true);
+    expect(mail?.text.startsWith("ScoreKeeps Baseball - Watchlist List - Sat, July 18, 2026")).toBe(true);
   });
 
   it("pins the NORMAL scheduled case: refresh at 02:00, digest at 05:00 same host day → fresh", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
     // 02:00 America/Chicago on 2026-07-19 == 07:00 UTC.
     await insertRefreshRun(opened.db, {
@@ -169,7 +169,7 @@ describe("digest freshness gate (ADR 0043)", () => {
   });
 
   it("an on-demand report NEVER annotates freshness, even with no refresh run", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     const result = await runDigest({ ...deps(), spec: "7d" });
@@ -179,7 +179,7 @@ describe("digest freshness gate (ADR 0043)", () => {
   });
 
   it("a claim-refusal (already-sent-today) returns freshness null", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     await runDigest(deps()); // sends and settles today's slot
@@ -190,7 +190,7 @@ describe("digest freshness gate (ADR 0043)", () => {
   });
 
   it("a reconciled recovery returns freshness null (it composes no digest)", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
     // An expired sending slot for today whose crashed attempt the provider
     // confirms already landed → settled reconciled, never composed.
@@ -211,7 +211,7 @@ describe("digest freshness gate (ADR 0043)", () => {
   });
 
   it("the offseason heartbeat returns freshness null", async () => {
-    await insertPlayer(opened.db, { fullName: "Watched", level: "mlb", milbLevel: null });
+    await insertLanePlayer(opened.db, { fullName: "Watched", level: "mlb", milbLevel: null });
     clock.set(OFFSEASON);
 
     const result = await runDigest(deps());
@@ -224,7 +224,7 @@ describe("digest freshness gate (ADR 0043)", () => {
     // (dateCovered 07-19) covers 07-18. A single ok refresh STARTED on 07-19
     // qualifies for the orphan (07-18) but not for today (07-19), so the two
     // emails must carry DIFFERENT freshness verdicts.
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-17" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
     await insertDelivery(opened.db, {
@@ -262,7 +262,7 @@ describe("digest freshness gate (ADR 0043)", () => {
   });
 
   it("TOCTOU: a refresh landing AFTER the pre-assembly read still yields the conservative reading", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
     // No refresh run exists when freshness is read → stale.
 

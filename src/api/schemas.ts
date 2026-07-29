@@ -490,13 +490,22 @@ const WindowSchema = z
  * client sending `force: "yes"` should be told it is wrong, not silently obeyed.
  */
 /**
- * Named-list scope for a digest (issue #70 / ADR 0046). Omit ⇒ all active
- * players (today's path). When set, the digest covers only that list's active
- * members; an unknown list is rejected. A named-list SEND is on-demand only —
- * it never takes the scheduled daily slot — so the scheduler leaves this unset.
+ * Lane scope for a digest (issue #70 / ADR 0046, amended by #193 / ADR 0062).
+ * When set, the report covers only that lane's active members; an unknown or
+ * soft-deleted lane is rejected.
+ *
+ * WHAT OMITTING IT MEANS NOW DIFFERS BY OPERATION, and the difference is
+ * deliberate rather than an oversight of one surface. A tag-free 1d SEND is the
+ * scheduled artifact for a lane, so omitting the lane resolves THE DEFAULT LANE
+ * — the same rule `sk refresh` and `sk players add` follow — and the send claims
+ * that lane's daily slot. Every other send, and every PREVIEW, is a question
+ * somebody asked: omitting the lane there still means every active player, and
+ * changing that would narrow a read-only preview's answer for no reason.
+ *
+ * This schema is shared by both operations, so the description states both.
  */
 const DigestListSchema = ListNameSchema.optional().describe(
-  "Named player list (issue #70) to scope the digest to its active members; an unknown list is rejected. Omit for all active players. A named-list send is on-demand only (it takes no daily slot).",
+  "Named player list (lane) to scope the digest to its active members; an unknown or deleted list is rejected. Omitting it means all active players — EXCEPT on a tag-free 1d send_digest / POST /digest/send, where it means THE DEFAULT LANE, because that send is the lane's scheduled daily artifact and claims the lane's own once-per-date slot (#193). A named-lane 1d send is therefore claimed, not on-demand: a second one for the same lane on the same date returns already-sent-today, while a different lane may still send that date. Every other window, and any tag scope, stays on-demand (no slot, no delivery row).",
 );
 
 /**

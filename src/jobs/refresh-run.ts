@@ -1,6 +1,6 @@
-import { and, desc, eq, gt, inArray, isNull, lte, max, or } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, like, lte, max, or } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import type { RefreshRunStatus } from "../db/schema.js";
+import type { RefreshRunRow, RefreshRunStatus } from "../db/schema.js";
 import { refreshRuns } from "../db/schema.js";
 import { hostDate } from "../domain/season.js";
 
@@ -71,14 +71,20 @@ export interface ClaimRefreshArgs {
  * The form: ids DEDUPED and sorted ASCENDING, comma-delimited, wrapped in
  * LEADING AND TRAILING SENTINEL COMMAS — `,1,3,10,`.
  *
- * WHY THE SENTINELS SURVIVE, now that nothing does containment. Until the
- * Stage-4 loop-back on #192 they were load-bearing for an `instr` test that
- * asked whether the text contained the default lane's id; that test is gone
- * (ADR 0061 decision 8), and with it the prefix trap they closed. What is left
- * is one present-tense reason, not nostalgia: the EMPTY scope must not encode to
- * the empty string. `,,` is visibly "swept zero lanes"; `""` is a value that
- * `if (!row.scopeListIds)` in TypeScript, `ifnull()` in SQL, and most CSV/JSON
- * round-trips cannot tell from `NULL` — and `NULL` here means "swept
+ * THE SENTINELS ARE LOAD-BEARING AGAIN (#193, ADR 0062 decision 2). This column
+ * was demoted to "provenance that nothing parses back" at the end of #192; #193
+ * promotes it to a QUERYABLE COVERAGE RECORD, because the question "did a run
+ * cover lane L?" is now asked twice — by the digest's per-lane freshness banner
+ * and by the tick's refresh due-ness clock — and both are answered from this one
+ * column by {@link latestCoveringRun}. The fencing commas are what make that
+ * containment test exact: `LIKE '%,1,%'` matches `,1,3,` and NOT `,11,`, whereas
+ * an unfenced `LIKE '%1%'` would read lane 11's sweep as covering lane 1 and
+ * forge a `fresh` banner over players nobody fetched. A test pins that exact pair.
+ *
+ * The empty-scope reason stands unchanged beside it: the EMPTY scope must not
+ * encode to the empty string. `,,` is visibly "swept zero lanes"; `""` is a value
+ * that `if (!row.scopeListIds)` in TypeScript, `ifnull()` in SQL, and most
+ * CSV/JSON round-trips cannot tell from `NULL` — and `NULL` here means "swept
  * EVERYTHING". That confusion is the fail-OPEN direction, so the format keeps a
  * shape in which no legal scope is falsy. Canonical ordering and dedupe stay for
  * the same reason they always applied: two runs over the same lanes store the
@@ -347,6 +353,56 @@ export interface DigestFreshness {
 }
 
 /**
+ * THE latest ok/partial run whose sweep COVERED `laneId` (#193, ADR 0062
+ * decision 2) — the one place the coverage predicate is authored.
+ *
+ * `null` asks the WHOLE-WATCH-LIST question ("did a run sweep every active
+ * Player?") and accepts only `scope_list_ids IS NULL`. A lane id asks the
+ * narrower one ("did a run sweep this lane?") and accepts either a whole-list
+ * run — which covers every lane by definition — or a scoped run whose fenced id
+ * list contains it.
+ *
+ * TWO CALLERS, ONE PREDICATE, and that is the point rather than a tidiness
+ * preference. {@link digestFreshnessFor} asks it to decide whether a lane's
+ * digest may claim `fresh`, and the tick (`src/jobs/tick.ts`) asks it to decide
+ * whether a lane's refresh interval has elapsed. Re-authoring the `LIKE` at
+ * either call site is how the fencing quietly stops matching at one of them —
+ * `rules/scripting.md`, and the exact defect shape this repo keeps finding.
+ *
+ * `failed` runs never cover, and the anchor is `started_at`, not `finished_at`
+ * (see this file's header): a run that STARTED after the content day ended saw
+ * every one of that day's now-final games.
+ *
+ * ORDERING IS (started_at desc, id desc) OVER THE ELIGIBLE SET, never over every
+ * run. A newer INELIGIBLE run — another lane's sweep — must not be allowed to
+ * answer and hide an older covering one, which is the per-lane twin of the
+ * invariant #192 pinned for whole-list coverage.
+ */
+export function latestCoveringRun(db: Db, laneId: number | null): RefreshRunRow | undefined {
+  // A non-integer id would be interpolated into the LIKE pattern below, so it is
+  // refused here rather than allowed to build a pattern that matches nothing (or,
+  // worse, something). Every real caller passes a `player_lists.id`; this exists
+  // so the function is safe in isolation, not because a caller is suspected.
+  if (laneId !== null && !Number.isSafeInteger(laneId)) {
+    throw new Error(`latestCoveringRun: laneId must be an integer, got ${String(laneId)}`);
+  }
+  const covers =
+    laneId === null
+      ? isNull(refreshRuns.scopeListIds)
+      : // The fenced containment test. `,1,` matches `,1,3,` and NOT `,11,`,
+        // which is the whole reason `encodeScopeListIds` keeps its sentinel
+        // commas. The pattern is a bound parameter, never spliced SQL.
+        or(isNull(refreshRuns.scopeListIds), like(refreshRuns.scopeListIds, `%,${laneId},%`));
+  return db
+    .select()
+    .from(refreshRuns)
+    .where(and(inArray(refreshRuns.status, ["ok", "partial"]), covers))
+    .orderBy(desc(refreshRuns.startedAt), desc(refreshRuns.id))
+    .limit(1)
+    .all()[0];
+}
+
+/**
  * The freshness of the data a digest for `contentDate` would carry (ADR 0043).
  *
  * `contentDate` is the digest's content day — `assembly.window.to`, yesterday.
@@ -357,38 +413,34 @@ export interface DigestFreshness {
  * anything else (a failed qualifier, or none at all) is `stale`, dated by the
  * most recent ok/partial run's `finished_at` (or null: "never").
  *
- * A QUALIFYING RUN MUST ALSO HAVE COVERED EVERY ACTIVE PLAYER (#192, ADR 0061
- * decision 8) — `scope_list_ids IS NULL`. Scoping the sweep opened a hole the
- * whole-list sweep did not have: `sk refresh -l Prospects` settling `ok` would
- * otherwise make this banner read `fresh` over a watch list that sweep never
- * touched, a forged completeness claim.
+ * THE PREDICATE IS COVERAGE, NOT IDENTITY (#192, ADR 0061 decision 8). Scoping
+ * the sweep opened a hole the whole-list sweep did not have: `sk refresh -l
+ * Prospects` settling `ok` must not make this banner read `fresh` over players
+ * that sweep never touched. So the question asked is always "was every player I
+ * am about to report on swept?" — never "which lane was named?".
  *
- * THE PREDICATE IS COVERAGE, NOT IDENTITY, and that distinction is the whole
- * finding of the Stage-4 loop-back. This function used to take the default
- * lane's id and ask "did the run's scope contain it?" — a PROXY that holds only
- * while the default lane contains every active Player. It fails the moment
- * anyone uses the lane commands #191 shipped: point the default at a brand-new
- * empty lane and a sweep of zero players certified the whole Watch List as
- * `fresh`. The question this function actually answers is "was every player I am
- * about to report on swept?", so that is the question the column now records
- * (`runRefresh` writes `NULL` for a run whose lanes covered everyone) and this is
- * the question the filter asks. No proxy is left to drift, and the parameter
- * goes away with it.
+ * `laneId` IS WHICH PLAYERS THE DIGEST IS ABOUT (#193, ADR 0062). Bare `sk
+ * digest` now assembles the DEFAULT LANE's members rather than the whole Watch
+ * List, and a named-lane 1d send assembles that lane's — so demanding a
+ * whole-list sweep would leave every lane digest permanently `stale` on a host
+ * whose lanes do not happen to hold everyone. Passing the lane narrows the claim
+ * to exactly what the email claims for; `null` keeps the whole-list read for a
+ * caller reporting on every active Player. Narrowing is safe in the direction
+ * that matters: a whole-list run still covers every lane, so it still answers.
  */
-export function digestFreshnessFor(db: Db, contentDate: string, tz: string): DigestFreshness {
-  // The LATEST ELIGIBLE ok/partial by (started_at, id) is authoritative: if IT
+export function digestFreshnessFor(
+  db: Db,
+  contentDate: string,
+  tz: string,
+  laneId: number | null = null,
+): DigestFreshness {
+  // The LATEST COVERING ok/partial by (started_at, id) is authoritative: if IT
   // does not clear the content date, no OLDER success can either. One indexed,
   // LIMIT 1 read replaces the old whole-table materialize-and-scan. An
-  // INELIGIBLE newer partial-coverage run is skipped rather than allowed to
-  // answer, so a frequent lane sweep can never hide an older complete run's
-  // verdict.
-  const latest = db
-    .select()
-    .from(refreshRuns)
-    .where(and(inArray(refreshRuns.status, ["ok", "partial"]), isNull(refreshRuns.scopeListIds)))
-    .orderBy(desc(refreshRuns.startedAt), desc(refreshRuns.id))
-    .limit(1)
-    .all()[0];
+  // INELIGIBLE newer run — one that did not cover this lane — is skipped rather
+  // than allowed to answer, so another lane's frequent sweep can never hide this
+  // lane's older covering run's verdict.
+  const latest = latestCoveringRun(db, laneId);
 
   if (latest === undefined) {
     return { state: "stale", asOf: null, playersRefreshed: 0, playersTotal: 0 };

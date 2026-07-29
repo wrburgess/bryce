@@ -33,8 +33,21 @@ _Avoid_: "group"/"collection" (say *list*); "roster" (see **Watch List**)
 A **Named List** that also carries its own schedule and recipients — a refresh interval, a digest
 hour, and a `digest_to`. Exactly one live list is the **Default Lane**: what a command means when it
 names no list. A Lane is a Named List with a cadence, never a second kind of object
-([ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md)).
+([ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md)). All three columns are
+live: the **Tick** reads the two cadence values, and a Lane's daily **Digest** is a claimed send to its
+own recipients ([ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md)).
 _Avoid_: "channel"/"feed"; calling every list a Lane (a list with no cadence is just a list)
+
+**Tick**:
+The one recurring job that asks *what is owed right now* and runs it — sweeping the **Lanes** whose
+refresh interval has elapsed, then digesting the Lanes whose digest hour has arrived. It replaced the
+two fixed daily jobs because a Lane's cadence lives in the database, where a fixed clock time cannot
+reach it. Its due-selection is *advisory*: the durable claims underneath are what guarantee one send
+per slot, so a Tick that overlaps a manual run, the server, or a not-yet-retired old job is refused
+rather than duplicated ([ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md)
+decision 3).
+_Avoid_: "cron"/"the scheduler" (there is one Tick, and it decides nothing on its own); "poll" for what
+a Tick *does* (it runs the work, it does not merely look)
 
 **Default Lane**:
 The one live list marked `is_default` — the audience of an unscoped Digest or Refresh. It cannot be
@@ -82,7 +95,10 @@ Which **Lanes** one **Sweep** covers, resolved *once* before the run is claimed 
 selection the sweep makes. Absent means the whole **Watch List**; `sk refresh` with no `--list`
 resolves the **Default Lane**. A run records whether its Scope reached **every active Player**, and
 only a run that did can advance the Digest's freshness watermark — the test is *coverage*, not which
-Lane was named ([ADR 0061](../adr/0061-lane-scoped-refresh-supersedes-whole-sweep.md) decision 8).
+Lane was named ([ADR 0061](../adr/0061-lane-scoped-refresh-supersedes-whole-sweep.md) decision 8). The
+record is *queryable*, not just provenance: one shared helper asks it "did a run cover **this** Lane?"
+for both the freshness watermark and the **Tick**'s refresh clock
+([ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md) decision 2).
 _Avoid_: "filter" (a Scope is decided before the sweep, not applied to its results); treating an
 empty Scope as "everyone"; "the run covered the Default Lane" as a synonym for "the run is
 watermark-eligible"
@@ -206,6 +222,11 @@ _Avoid_: overloading the delivery-ledger sense ("guarantee restored across the d
   lane: the delivery slot is keyed `(kind, date_covered, list_id)`, so two lanes may report the same
   date and one lane may not report it twice
   ([ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md)).
+- A named-Lane daily Digest is a **claimed** send on every surface, not an ad-hoc report: it takes that
+  Lane's slot, reports that Lane's members, and goes to that Lane's recipients
+  ([ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md) decision 1,
+  superseding [ADR 0046](../adr/0046-named-player-lists-scoped-digests.md) decision 4). A wider window or
+  a **Tag** scope is still an on-demand report, because the slot key has neither dimension.
 - A **Player** produces at most two **Stat Lines** per game — one batting, one pitching (a two-way
   player produces both).
 - One date can hold several **Stat Lines** for the same Player (doubleheaders): uniqueness is

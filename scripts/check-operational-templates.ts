@@ -6,27 +6,47 @@ const TEMPLATE_DIR = join("ops", "templates");
 const ALLOWED_TOKENS = new Set(["BRYCE_ROOT", "BRYCE_DATA_DIR", "R2_BUCKET", "R2_ENDPOINT"]);
 const SECRET_ASSIGNMENT = /(?:AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|POSTMARK_SERVER_TOKEN|API_TOKEN|SMTP_PASS)\s*[:=]/;
 
+/**
+ * WHEN a scheduled job runs — a wall-clock time, or a repeating interval (#193).
+ *
+ * A union rather than optional fields, because the two are mutually exclusive in
+ * launchd: `StartCalendarInterval` and `StartInterval` are different keys, and a
+ * plist carrying both is a configuration nobody meant to write. Modelling them
+ * as a union means the validator cannot accidentally accept a template that
+ * declares one and is checked against the other.
+ */
+type PlistSchedule = { hour: number; minute: number } | { intervalSeconds: number };
+
 interface PlistSpec {
   file: string;
   label: string;
   command: string;
   log: string;
-  hour: number;
-  minute: number;
+  schedule: PlistSchedule;
   /**
    * Arguments the scheduled job passes THROUGH npm to the CLI, exactly as they
    * must appear. Pinned here rather than left free-form because the `--`
    * separator is the whole contract: without it npm swallows the flag and the
    * job silently runs in the wrong mode, which is the failure this gate exists
-   * to catch (#146, ops/templates/com.sk.refresh.plist).
+   * to catch (#146, and again for the tick at #193).
    */
   args?: string;
 }
 const PLISTS: readonly PlistSpec[] = [
-  { file: "com.sk.backup.plist", label: "com.sk.backup", command: "db:backup", log: "backup", hour: 3, minute: 0 },
-  { file: "com.sk.refresh.plist", label: "com.sk.refresh", command: "refresh", log: "refresh", hour: 3, minute: 30, args: "-- --quiet" },
-  { file: "com.sk.digest.plist", label: "com.sk.digest", command: "digest", log: "digest", hour: 5, minute: 0 },
+  { file: "com.sk.backup.plist", label: "com.sk.backup", command: "db:backup", log: "backup", schedule: { hour: 3, minute: 0 } },
+  // ONE tick replaces the fixed refresh (03:30) and digest (05:00) agents
+  // (#193, ADR 0062 decision 3). Their templates are asserted ABSENT below.
+  { file: "com.sk.tick.plist", label: "com.sk.tick", command: "tick", log: "tick", schedule: { intervalSeconds: 900 }, args: "-- --quiet" },
 ];
+
+/**
+ * Templates that must NOT exist (#193). Deleting a retired agent's template is
+ * not enough on its own: a stale copy re-added by a bad merge, or restored from
+ * a branch, would still be copyable into `~/Library/LaunchAgents` and would put
+ * the host back on the fixed schedule alongside the tick. Naming them here makes
+ * their absence a checked property rather than the current state of the tree.
+ */
+const RETIRED_PLISTS: readonly string[] = ["com.sk.refresh.plist", "com.sk.digest.plist"];
 
 function tokens(text: string): string[] {
   return [...text.matchAll(/\b(?:BRYCE_ROOT|BRYCE_DATA_DIR|R2_BUCKET|R2_ENDPOINT|[A-Z][A-Z0-9_]{2,})\b/g)].map((m) => m[0]!);
@@ -107,9 +127,27 @@ export function validateOperationalTemplates(root: string): string[] {
     const expected = `mkdir -p "BRYCE_ROOT/logs" && ${invocation} >> "BRYCE_ROOT/logs/${spec.log}.log" 2>&1`;
     const args = dict.get("ProgramArguments");
     if (args?.tag !== "array" || args.children?.join("\0") !== ["/bin/zsh", "-lc", expected].join("\0")) issues.push(`${spec.file}: ProgramArguments must provision logs and run npm script ${spec.command}`);
-    const calendar = dict.get("StartCalendarInterval")?.children;
-    if (calendar?.join("\0") !== ["Hour", String(spec.hour), "Minute", String(spec.minute)].join("\0")) issues.push(`${spec.file}: schedule must be ${String(spec.hour).padStart(2, "0")}:${String(spec.minute).padStart(2, "0")}`);
+    if ("intervalSeconds" in spec.schedule) {
+      // `StartInterval` is a plain integer pair, so it comes back through the
+      // dict's string|integer branch. The TAG is checked as well as the value:
+      // launchd reads `<string>900</string>` as a type error and never schedules
+      // the job, which would be a silently-never-runs agent.
+      const interval = dict.get("StartInterval");
+      if (interval?.tag !== "integer" || interval.value !== String(spec.schedule.intervalSeconds)) {
+        issues.push(`${spec.file}: schedule must be StartInterval ${spec.schedule.intervalSeconds}`);
+      }
+      // A template carrying BOTH keys is ambiguous rather than merely redundant.
+      if (dict.has("StartCalendarInterval")) issues.push(`${spec.file}: interval schedule must not also declare StartCalendarInterval`);
+    } else {
+      const { hour, minute } = spec.schedule;
+      const calendar = dict.get("StartCalendarInterval")?.children;
+      if (calendar?.join("\0") !== ["Hour", String(hour), "Minute", String(minute)].join("\0")) issues.push(`${spec.file}: schedule must be ${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`);
+      if (dict.has("StartInterval")) issues.push(`${spec.file}: calendar schedule must not also declare StartInterval`);
+    }
     if (scripts[spec.command] === undefined) issues.push(`${spec.file}: package.json lacks npm script ${spec.command}`);
+  }
+  for (const retired of RETIRED_PLISTS) {
+    if (existsSync(join(templateDir, retired))) issues.push(`${retired}: retired template must be absent (#193 replaced it with com.sk.tick.plist)`);
   }
   const litestream = join(templateDir, "litestream.yml");
   if (!existsSync(litestream)) issues.push("litestream.yml: missing template");

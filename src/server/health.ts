@@ -1,7 +1,7 @@
-import { count, desc, eq, sql } from "drizzle-orm";
+import { count, desc, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { DeliveryKind, DeliveryStatus } from "../db/schema.js";
-import { digestDeliveries, players, statLines } from "../db/schema.js";
+import { digestDeliveries, playerLists, players, statLines } from "../db/schema.js";
 import type { RefreshHealth } from "../jobs/refresh-run.js";
 import { refreshHealth } from "../jobs/refresh-run.js";
 
@@ -36,6 +36,50 @@ export interface HealthSnapshot {
    * phantom `running`.
    */
   refresh: RefreshHealth | null;
+  /**
+   * PER-LANE delivery state (#193, ADR 0062 decision 5) — the owed view ADR 0059
+   * amendment 2 named, alongside the host-wide `lastDelivery` above rather than
+   * replacing it.
+   *
+   * ADDITIVE, keyed on LANES rather than on delivery rows, and that is the whole
+   * design. `lastDelivery` answers "is the host delivering at all?", which a
+   * single healthy lane keeps green while another has been silent for a month.
+   * This answers "is EVERY lane delivering?", and it can only do so by starting
+   * from the lanes: a view built from delivery rows cannot report a lane that has
+   * never produced one, which is exactly the dead-lane case worth seeing.
+   *
+   * Three states are distinguishable BY CONSTRUCTION:
+   *   - `digestHour: null` — not scheduled. Healthy by configuration, not silent.
+   *   - scheduled, `lastDelivery: null` — configured and NEVER delivered.
+   *   - scheduled, stale `lastDelivery` — the dead lane ADR 0059 named.
+   * Ordered by lane id, the same stable order the tick attempts lanes in.
+   */
+  lanes: LaneHealth[];
+}
+
+export interface LaneHealth {
+  listId: number;
+  name: string;
+  isDefault: boolean;
+  /** The lane's configured digest hour, or null when it never auto-digests. */
+  digestHour: number | null;
+  /**
+   * This lane's CURRENT delivery state — its latest `kind = 'digest'` row by the
+   * same ordering the host-wide field uses, or null when it has none.
+   *
+   * ALL STATUSES ARE INCLUDED DELIBERATELY (Reviewer must-fix 3). A newest
+   * `failed` or in-flight `sending` row IS the lane's current state and
+   * supersedes an older `sent` one — suppressing it in favour of the last
+   * success would hide precisely the signal this view exists to show. And
+   * `kind = 'digest'` ONLY: a heartbeat rides the DEFAULT lane's slot as a
+   * storage detail (ADR 0059 → *Amendment (#191)*), so counting one here would
+   * forge weekly liveness for that one lane and for no other.
+   */
+  lastDelivery: {
+    dateCovered: string;
+    status: DeliveryStatus;
+    sentAt: string | null;
+  } | null;
 }
 
 export async function healthSnapshot(db: Db, now: Date, tz: string): Promise<HealthSnapshot> {
@@ -76,5 +120,59 @@ export async function healthSnapshot(db: Db, now: Date, tz: string): Promise<Hea
             sentAt: last.sentAt,
           },
     refresh: refreshHealth(db, now, tz),
+    lanes: await laneHealth(db),
   };
+}
+
+/**
+ * One row per LIVE lane, each carrying its latest `digest` delivery (#193).
+ *
+ * ONE query for the deliveries, not one per lane (`rules/backend.md`: no N+1),
+ * and no materialized `IN (<every lane id>)` either — the whole digest-delivery
+ * set is read once and reduced in memory, the same shape the digest side uses.
+ * At this host's scale (one person's lanes, one row per lane per day) that is a
+ * small, bounded read; a correlated per-lane subquery would be a query per lane
+ * dressed up as one statement.
+ *
+ * The reduction keeps the FIRST row it sees per lane, which is authoritative
+ * because the read is already ordered by the host-wide rule —
+ * `coalesce(sent_at, created_at) DESC, created_at DESC, id DESC` — restated here
+ * ONLY in the sense that both call sites must agree; they are asserted to agree
+ * by a test that builds the ambiguous cases (a retried row, a fresh failure, a
+ * live claim). `id DESC` is the final tiebreak so two rows with identical
+ * timestamps still order deterministically rather than by insertion luck.
+ */
+async function laneHealth(db: Db): Promise<LaneHealth[]> {
+  const lanes = await db
+    .select()
+    .from(playerLists)
+    .where(isNull(playerLists.deletedAt))
+    .orderBy(playerLists.id);
+  if (lanes.length === 0) return [];
+
+  const rows = await db
+    .select()
+    .from(digestDeliveries)
+    .where(eq(digestDeliveries.kind, "digest"))
+    .orderBy(
+      desc(sql`coalesce(${digestDeliveries.sentAt}, ${digestDeliveries.createdAt})`),
+      desc(digestDeliveries.createdAt),
+      desc(digestDeliveries.id),
+    );
+  const latestByLane = new Map<number, (typeof rows)[number]>();
+  for (const row of rows) if (!latestByLane.has(row.listId)) latestByLane.set(row.listId, row);
+
+  return lanes.map((lane) => {
+    const last = latestByLane.get(lane.id);
+    return {
+      listId: lane.id,
+      name: lane.name,
+      isDefault: lane.isDefault,
+      digestHour: lane.digestHour,
+      lastDelivery:
+        last === undefined
+          ? null
+          : { dateCovered: last.dateCovered, status: last.status, sentAt: last.sentAt },
+    };
+  });
 }

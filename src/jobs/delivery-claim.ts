@@ -88,7 +88,13 @@ export type ClaimResult =
 export type ClaimRefusal =
   | "already-sent-today"
   | "claimed-by-another-run"
-  | "heartbeat-sent-within-week";
+  | "heartbeat-sent-within-week"
+  /**
+   * The lane this slot belongs to was soft-deleted (#193). Raised by the claimed
+   * digest path's `requirement` below, so it is decided under the claim's write
+   * lock rather than by a read that a concurrent `lists delete` can land behind.
+   */
+  | "lane-deleted";
 
 export interface ClaimArgs {
   kind: DeliveryKind;
@@ -113,12 +119,30 @@ export interface ClaimArgs {
    */
   precondition?: (tx: Tx) => ClaimRefusal | null;
   /**
+   * An eligibility rule evaluated inside the claim transaction that FORCE MAY
+   * NEVER OVERRIDE (#193) — the un-forceable twin of `precondition` above.
+   *
+   * The distinction is the whole reason both exist. `precondition` states
+   * DE-DUPLICATION BOOKKEEPING (the heartbeat's rolling week), and `force` is
+   * defined as an override of exactly that: refusing there becomes a replay,
+   * which sends without disturbing the clock. `requirement` states a FACT ABOUT
+   * THE WORLD the send would be addressed to — today, that the lane still
+   * exists. Replaying past it would mail a soft-deleted cohort's digest, which
+   * is not "bookkeeping overridden", it is the refusal defeated. So this branch
+   * returns the refusal whether or not `force` was passed, and sits ABOVE the
+   * forceable one.
+   *
+   * It runs after the live-lease branch for the same reason everything does:
+   * mutual exclusion is ADR 0034's guarantee and answers first.
+   */
+  requirement?: (tx: Tx) => ClaimRefusal | null;
+  /**
    * Operator override for the de-duplication bookkeeping ONLY (testing
    * affordance). When force is what allows the run to proceed — an
    * `already-sent-today` slot, or a precondition that would have refused — the
    * result is a REPLAY that writes nothing. When the run was eligible anyway,
    * force is unused and the claim is entirely ordinary. Force never overrides a
-   * live lease.
+   * live lease, and never overrides a `requirement`.
    */
   force?: boolean;
 }
@@ -167,6 +191,15 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
       ) {
         return { claimed: false, reason: "claimed-by-another-run" };
       }
+
+      // The UN-FORCEABLE rule (the claimed digest's lane liveness, #193) is
+      // asked next, and its refusal is final. Evaluating it HERE — inside the
+      // same BEGIN IMMEDIATE transaction that reserves the slot — is what
+      // serializes it with a concurrent `lists delete`: a caller-side liveness
+      // read taken before this transaction is a check-then-act split, and the
+      // delete lands in the gap. `force` deliberately cannot reach this branch.
+      const unmet = args.requirement?.(tx) ?? null;
+      if (unmet !== null) return { claimed: false, reason: unmet };
 
       // The extra rule (the heartbeat's rolling seven days) is always ASKED,
       // even when forced — a forced run must not take a fresh slot and settle

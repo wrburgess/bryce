@@ -90,12 +90,18 @@ working directory for predictable operation.
 
 ## Scheduling with launchd
 
-Three jobs: Backup (03:00), Refresh (nightly, after West Coast games finish), and Digest (~5 AM Central). Refresh is
-idempotent ([ADR 0030](../adr/0030-full-season-refresh-report-once-digest.md)), so re-running it is
-free. Each Player's game logs are fetched at the levels his history and current team actually call for
-rather than at all six every night ([ADR 0060](../adr/0060-probe-plan-prunes-refresh-fanout.md)); every
-level fetched is still fetched for the whole season, so re-running remains a complete refresh. launchd
-runs missed jobs on wake, which is exactly what a sometimes-asleep laptop needs.
+**Two jobs: Backup (03:00) and Tick (every 15 minutes).** The Tick replaces the fixed Refresh (03:30)
+and Digest (05:00) agents ([#193](https://github.com/wrburgess/bryce/issues/193) /
+[ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md)): each lane now carries
+its own refresh interval and digest hour in the database (`sk players lists configure`, #191), and a
+fixed clock time in a plist cannot express a value the HC edits. Each tick asks what is owed — sweeping
+the lanes whose interval has elapsed, then digesting the lanes whose hour has arrived — and a tick with
+nothing due writes one line and exits. Refresh is idempotent
+([ADR 0030](../adr/0030-full-season-refresh-report-once-digest.md)), so re-running it is free. Each
+Player's game logs are fetched at the levels his history and current team actually call for rather than
+at all six ([ADR 0060](../adr/0060-probe-plan-prunes-refresh-fanout.md)); every level fetched is still
+fetched for the whole season, so re-running remains a complete refresh. launchd runs missed jobs on
+wake, which is exactly what a sometimes-asleep laptop needs.
 
 **That wake behaviour is why Digest re-entry is not theoretical.** On wake, the missed Digest job
 fires as its own process at the moment the long-lived server may be handling an MCP `send_digest`
@@ -113,8 +119,7 @@ missing digest. See *Stuck deliveries and duplicate emails* below for what that 
 to do about it.
 
 The canonical, checked source templates are
-[`ops/templates/com.sk.refresh.plist`](../../ops/templates/com.sk.refresh.plist),
-[`com.sk.digest.plist`](../../ops/templates/com.sk.digest.plist), and
+[`ops/templates/com.sk.tick.plist`](../../ops/templates/com.sk.tick.plist) and
 [`com.sk.backup.plist`](../../ops/templates/com.sk.backup.plist). Copy each one to
 `~/Library/LaunchAgents/` and replace every literal `BRYCE_ROOT` with the absolute
 repository path before loading it. These are source templates, not launchable files
@@ -130,27 +135,66 @@ Each command first runs `mkdir -p BRYCE_ROOT/logs` **inside the shell before its
 redirection**, so the first scheduled run cannot fail merely because `logs/` does not already
 exist. You may still create it during setup (`mkdir -p logs`) to make the location visible early.
 
-The fixed host-local schedule is backup at 03:00, refresh at 03:30, and digest at
-05:00. Keep the Mac's local timezone and `BRYCE_TZ` aligned with the intended Central
-time cadence; launchd itself uses the host-local timezone.
+The host-local schedule is **backup at 03:00** and **tick every 15 minutes**. Keep the Mac's local
+timezone and `BRYCE_TZ` aligned with the intended Central time cadence; launchd itself uses the
+host-local timezone, and a lane's `digest_hour` is read in `BRYCE_TZ`.
 
-Load all three:
+Load both:
 
 ```sh
-launchctl load ~/Library/LaunchAgents/com.sk.refresh.plist
-launchctl load ~/Library/LaunchAgents/com.sk.digest.plist
+launchctl load ~/Library/LaunchAgents/com.sk.tick.plist
 launchctl load ~/Library/LaunchAgents/com.sk.backup.plist
 ```
 
+The tick writes to `BRYCE_ROOT/logs/tick.log` in quiet mode — one line per tick, so roughly 96 short
+lines a day. **Log rotation remains out of scope** (as it does for `backup.log`); truncate or rotate it
+by hand if it ever matters.
+
 During Offseason Sleep ([ADR 0031](../adr/0031-offseason-sleep-world-series-to-opening-day.md))
-the schedules keep firing but Refresh exits without API calls and Digest degrades to the weekly
+the tick keeps firing but Refresh exits without API calls and the digest side degrades to the weekly
 heartbeat — no plist changes needed across seasons.
+
+### Upgrading from the fixed schedule (#193)
+
+If this host was set up before the tick, it still has `com.sk.refresh` and `com.sk.digest` loaded.
+Their templates are gone from the repository, but the **copies in `~/Library/LaunchAgents/` are yours
+and launchd will keep running them** until you unload them. Do this once:
+
+```sh
+launchctl unload ~/Library/LaunchAgents/com.sk.refresh.plist
+launchctl unload ~/Library/LaunchAgents/com.sk.digest.plist
+rm ~/Library/LaunchAgents/com.sk.refresh.plist ~/Library/LaunchAgents/com.sk.digest.plist
+# then copy ops/templates/com.sk.tick.plist, replace BRYCE_ROOT, and:
+launchctl load ~/Library/LaunchAgents/com.sk.tick.plist
+```
+
+**Order does not matter, and an overlap is safe.** Both jobs claim the same durable slots — the tick's
+digest claims the same `(kind, date, lane)` row the old digest agent did, and its sweep claims the same
+refresh run — so whichever gets there first wins and the second is refused, exactly as a manual run
+overlapping a scheduled one already was
+([ADR 0034](../adr/0034-digest-delivery-claim-at-least-once.md),
+[ADR 0043](../adr/0043-persist-refresh-freshness-and-gate-digest.md)). That safety is why this migration
+is a runbook step rather than something `bin/setup` performs: `bin/setup` is the business-neutral
+Config-Bundle installer, and launchd has always been operator-run here.
+
+**Set each lane's cadence**, or the tick will find nothing due — the columns default to NULL, which
+means "never auto-refreshes" / "never auto-digests":
+
+```sh
+sk players lists configure --name Watchlist --refresh-every 1440 --digest-hour 5
+```
+
+Check what the tick sees with `GET /health` → `lanes`, which reports every live lane's digest hour and
+its latest delivery.
 
 ### Refresh freshness & the Refresh→Digest contract
 
-The two launchd jobs are **independent**, and a sleep/wake laptop runs them late and out of order.
-So Refresh records what it did and Digest reads it — the policy for missed and overlapping runs is
-deterministic ([ADR 0043](../adr/0043-persist-refresh-freshness-and-gate-digest.md)).
+Within one tick, Refresh runs **before** the digests, so a due digest reports data the same tick just
+fetched. Across ticks they are still independent — a sleep/wake laptop runs them late, a manual
+`run_refresh` or `sk digest` interleaves with them, and a lane's refresh interval need not line up with
+its digest hour at all. So Refresh records what it did and Digest reads it, and the policy for missed
+and overlapping runs is deterministic
+([ADR 0043](../adr/0043-persist-refresh-freshness-and-gate-digest.md)).
 
 - **Every whole-watch-list Refresh records a run** — start, finish, outcome (`ok` / `partial` /
   `failed`), and counts — on its own `refresh_runs` row. A run **owns its row** (a stream, not a
@@ -161,6 +205,12 @@ deterministic ([ADR 0043](../adr/0043-persist-refresh-freshness-and-gate-digest.
   across processes. The lease is **renewed after every player**, so a healthy long sweep stays live;
   a **crashed** run stops renewing and its lease expires after `REFRESH_LEASE_MS` (10 minutes), after
   which the next run may claim and recover — a crash never wedges Refresh shut.
+- **Coverage is judged PER LANE** ([#193](https://github.com/wrburgess/bryce/issues/193) /
+  [ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md) decision 2). A lane's
+  digest may read `fresh` only if a run that *covered that lane* qualifies — a whole-list sweep (which
+  covers every lane) or a scoped sweep whose recorded `scope_list_ids` contains it. So one lane's
+  frequent sweep never certifies another's data, and a lane swept an hour ago is not held to a
+  whole-Watch-List standard it has no reason to meet.
 - **Missed refresh (the whole point).** The daily Digest reads the freshness watermark **before it
   assembles**, judged on the run's **start time** vs the **content date** (yesterday): only a Refresh
   that *started after that day ended* is proven to have captured every one of its now-final games
@@ -175,6 +225,16 @@ deterministic ([ADR 0043](../adr/0043-persist-refresh-freshness-and-gate-digest.
   `state` (`fresh` / `stale` / `running` / `partial` / `failed`), last start/finish, last success,
   player counts, and Stat Line inserted/updated counts — or `null` before any refresh has run. A **crashed** run (expired lease) reports
   its last terminal outcome, never a phantom `running`.
+- **Observing DELIVERY, per lane.** The same two surfaces carry a `lanes` array
+  ([#193](https://github.com/wrburgess/bryce/issues/193) /
+  [ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md) decision 5), one
+  entry per live lane with its `digestHour` and its latest `digest` delivery. Three states read
+  distinctly: `digestHour: null` is **not scheduled** (healthy by configuration), a scheduled lane with
+  `lastDelivery: null` has **never delivered**, and a scheduled lane with a stale or `failed`
+  `lastDelivery` is the **dead lane** ADR 0059 named. All statuses are included on purpose — a newest
+  `failed` or in-flight `sending` row *is* the lane's current state. Heartbeat rows are excluded: one
+  rides the default lane's slot as a storage detail and would forge weekly liveness for that lane
+  alone. The host-wide `lastDelivery` field is unchanged beside it.
 - **Offseason caveat.** During Sleep, Refresh is a **pure no-op** and records nothing, so freshness
   reads `stale` — expected: the weekly heartbeat, not a freshness row, is the offseason liveness
   signal.
@@ -234,9 +294,11 @@ hand first:
    Litestream so nothing is writing the file:
 
    ```sh
-   launchctl unload ~/Library/LaunchAgents/com.sk.refresh.plist
-   launchctl unload ~/Library/LaunchAgents/com.sk.digest.plist
+   launchctl unload ~/Library/LaunchAgents/com.sk.tick.plist
    launchctl unload ~/Library/LaunchAgents/com.sk.backup.plist
+   # plus any pre-#193 agents this host still has loaded:
+   launchctl unload ~/Library/LaunchAgents/com.sk.refresh.plist 2>/dev/null
+   launchctl unload ~/Library/LaunchAgents/com.sk.digest.plist 2>/dev/null
    # stop the server process (Ctrl-C or its launchd/label), and:
    brew services stop litestream   # or stop the litestream replicate job
    ```
@@ -611,10 +673,13 @@ gives, naming `set-default` as the fix.
 
 `sk players lists configure` writes the three lane columns and **only the flags you pass** — setting a
 digest hour never clears the refresh interval. The reserved word `none` clears a column back to
-unset, and `--digest-hour 0` is a legitimate midnight digest, not a rejected zero. **These columns are
-still inert**: nothing reads them until [#192](https://github.com/wrburgess/bryce/issues/192) and
-[#193](https://github.com/wrburgess/bryce/issues/193), so configuring a lane today records intent and
-changes no scheduled behavior.
+unset, and `--digest-hour 0` is a legitimate midnight digest, not a rejected zero. **All three columns
+are live** as of [#193](https://github.com/wrburgess/bryce/issues/193): the
+[tick](../cli/README.md#tick--run-whatever-the-lanes-owe-right-now) reads `refresh_interval_minutes`
+and `digest_hour` every 15 minutes, and a lane's claimed daily digest is mailed to its `digest_to` when
+one is set (otherwise to `DIGEST_TO`). A lane with both cadence columns NULL is never scheduled — which
+is the healthy-by-configuration state `GET /health` → `lanes` reports distinctly from a scheduled lane
+that has gone silent.
 
 Every command that scopes to a lane takes `--list NAME`, `--list=NAME`, **or the short `-l NAME`** —
 all three are the same flag, including on `sk digest`. Full syntax and every sad path are in the

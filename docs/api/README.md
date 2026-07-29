@@ -30,7 +30,23 @@ fixed body and the token is never echoed or logged:
 server is up, is public (no bearer required); everything under `/api` requires the token. Requests
 and responses are JSON.
 
-`GET /health` returns `{ ok, players, statLines, lastDelivery, refresh }`. Its `refresh` block carries
+`GET /health` returns `{ ok, players, statLines, lastDelivery, refresh, lanes }`.
+
+`lanes` is **additive** in [#193](https://github.com/wrburgess/bryce/issues/193)
+([ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md) decision 5): one entry
+per **live** lane, ordered by id, each
+`{ listId, name, isDefault, digestHour, lastDelivery: { dateCovered, status, sentAt } | null }`. It
+answers "is **every** lane delivering?", which the host-wide `lastDelivery` above cannot — one healthy
+lane keeps that field fresh while another has been silent for a month. Three states read distinctly:
+`digestHour: null` is **not scheduled**; scheduled with `lastDelivery: null` has **never delivered**;
+scheduled with a stale or `failed` `lastDelivery` is a **dead lane**. All statuses are included
+deliberately — a newest `failed` or in-flight `sending` row *is* the lane's current state — ordered by
+the same rule the host-wide field uses (`coalesce(sent_at, created_at)`, then `created_at`, then `id`,
+all descending). `kind: "heartbeat"` rows are **excluded**: one rides the default lane's slot as a
+storage detail and would forge weekly liveness for that lane alone. The host-wide `lastDelivery` is
+byte-identical to before.
+
+Its `refresh` block carries
 `state`, `lastStartedAt`, `lastFinishedAt`, `lastSuccessAt`, `playersRefreshed`, **`playersSkipped`**,
 **`playersFailed`**, `playersTotal`, `statLinesInserted`, and `statLinesUpdated`. The two bolded
 fields are **additive** in #146, so the durable Accounting carries the same three-way per-player
