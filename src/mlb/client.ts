@@ -1,3 +1,4 @@
+import { SPORT_IDS } from "./levels.js";
 import type { GameLogResponse, Person, Season, Team } from "./schemas.js";
 import {
   GameLogResponseSchema,
@@ -7,6 +8,14 @@ import {
 } from "./schemas.js";
 
 const BASE_URL = "https://statsapi.mlb.com/api/v1";
+
+/**
+ * Most people `/people/search` will return for one query — measured, not
+ * documented: `names=Garcia` yields exactly 50 both bare and with `limit=1000`,
+ * so `limit` does NOT raise it. A caller rendering a result set of this size as
+ * the complete candidate list is showing a truncated one (`src/cli/pick.ts`).
+ */
+export const SEARCH_RESULT_CAP = 50;
 
 export type FetchLike = (url: string) => Promise<{
   ok: boolean;
@@ -70,8 +79,21 @@ export class MlbClient {
     return res.json();
   }
 
+  /**
+   * Name search, scoped to `SPORT_IDS` — search resolves exactly the population
+   * the Refresh ingests, so the two can never disagree about who is watchable.
+   *
+   * `sportIds` is REQUIRED by design, for the same reason `getGameLog`'s is.
+   * Omitting it does not mean "every sport"; it means "whatever scope the API
+   * defaults to today", which is undocumented and MOVES — it silently stopped
+   * covering Single-A and Rookie, and five rostered players became unfindable
+   * by name while remaining resolvable by id (#204). An unset parameter here is
+   * not a neutral default but an inherited one.
+   */
   async searchPeople(name: string): Promise<Person[]> {
-    const body = await this.request(`/people/search?names=${encodeURIComponent(name)}`);
+    const body = await this.request(
+      `/people/search?names=${encodeURIComponent(name)}&sportIds=${SPORT_IDS.join(",")}`,
+    );
     return PeopleResponseSchema.parse(body).people;
   }
 

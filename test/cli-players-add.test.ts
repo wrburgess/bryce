@@ -5,7 +5,7 @@ import type { PlayersAddDeps } from "../src/cli/players-add.js";
 import { runPlayersAdd } from "../src/cli/players-add.js";
 import { listMembers, playerLists, players } from "../src/db/schema.js";
 import { HighlightlyClient } from "../src/highlightly/client.js";
-import { MlbClient } from "../src/mlb/client.js";
+import { MlbClient, SEARCH_RESULT_CAP } from "../src/mlb/client.js";
 import { createList, resolveDefaultList, setDefaultList } from "../src/lists/service.js";
 import {
   FakeStatsApi,
@@ -13,6 +13,7 @@ import {
   TEST_TZ,
   fakeClock,
   makePerson,
+  makeSearchHits,
   makeTeam,
   testDb,
 } from "./factories.js";
@@ -191,6 +192,67 @@ describe("players add CLI", () => {
     expect(err[0]).toBe("error: --pick 9 out of range 1..2");
     expect(countPlayers()).toBe(before);
     expect(countMembers()).toBe(0);
+  });
+
+  // #204 — a result set AT the API's cap is indistinguishable from a truncated
+  // one, so the operator is told. The notice is asserted HERE on `err` and in
+  // test/cli-seed-surface.test.ts on `out`: `pickFromSearch` is shared, each
+  // caller wires its own sink, and pinning both is what makes a future
+  // caller-specific rewiring that drops or misroutes the line visible.
+  it("marks a candidate list at the API cap as possibly truncated, last on stderr", async () => {
+    searchResults = makeSearchHits(SEARCH_RESULT_CAP);
+    const before = countPlayers();
+
+    expect(await runPlayersAdd(["--name", "smith"], deps())).toBe(1);
+    expect(err[0]).toBe("multiple matches for search=smith; re-run with --pick I");
+    expect(err).toHaveLength(SEARCH_RESULT_CAP + 2);
+    expect(err[SEARCH_RESULT_CAP]).toContain(`[${SEARCH_RESULT_CAP}] personId=${SEARCH_RESULT_CAP}`);
+    expect(err.at(-1)).toBe(
+      `note: the API caps this search at ${SEARCH_RESULT_CAP} candidates; the list may be incomplete — narrow the name`,
+    );
+    expect(countPlayers()).toBe(before);
+  });
+
+  it("still discloses the cap when --pick resolves off a capped list, and still exits 0", async () => {
+    searchResults = makeSearchHits(SEARCH_RESULT_CAP);
+
+    expect(await runPlayersAdd(["--name", "smith", "--pick", "2"], deps())).toBe(0);
+    // Advisory, not fatal: the add succeeds AND the caveat is on the record.
+    const rows = await opened.db.select().from(players);
+    expect(rows.map((r) => r.externalId)).toEqual([2]);
+    expect(err).toEqual([
+      `note: the API caps this search at ${SEARCH_RESULT_CAP} candidates; the list may be incomplete — narrow the name`,
+    ]);
+  });
+
+  it("discloses the cap when --pick is out of range ON a capped list", async () => {
+    // The crossed case the Reviewer found missing: an existing out-of-range
+    // test and an existing capped test, neither combined. `1..50` reads as an
+    // authoritative range when 50 is a cap and candidate 51 may simply be
+    // hidden — so the refusal that writes nothing still owes the caveat.
+    searchResults = makeSearchHits(SEARCH_RESULT_CAP);
+    const before = countPlayers();
+
+    expect(await runPlayersAdd(["--name", "smith", "--pick", "99"], deps())).toBe(1);
+    expect(err[0]).toBe(`error: --pick 99 out of range 1..${SEARCH_RESULT_CAP}`);
+    expect(err[1]).toBe(
+      `note: the API caps this search at ${SEARCH_RESULT_CAP} candidates; the list may be incomplete — narrow the name`,
+    );
+    expect(countPlayers()).toBe(before);
+    expect(countMembers()).toBe(0);
+  });
+
+  it("says nothing about truncation one candidate BELOW the cap", async () => {
+    // The boundary case: this is what goes red if the comparison is written `>`
+    // instead of `>=`, which a 2-candidate case could never detect.
+    searchResults = makeSearchHits(SEARCH_RESULT_CAP - 1);
+
+    expect(await runPlayersAdd(["--name", "smith"], deps())).toBe(1);
+    // Header + every candidate and nothing more. Spelled as the sum rather than
+    // the cap constant, which it coincidentally equals at this size.
+    expect(err).toHaveLength(1 + (SEARCH_RESULT_CAP - 1));
+    expect(err.at(-1)).toContain(`[${SEARCH_RESULT_CAP - 1}] personId=${SEARCH_RESULT_CAP - 1}`);
+    expect(err.some((line) => line.includes("caps this search"))).toBe(false);
   });
 
   it("refuses a name nothing matches", async () => {

@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
 import { MlbApiError, MlbClient } from "../src/mlb/client.js";
 import { isIngestedGameType } from "../src/mlb/gameTypes.js";
-import { levelForSportId, sportIdForLevel } from "../src/mlb/levels.js";
+import { levelForSportId, sportIdForLevel, SPORT_IDS } from "../src/mlb/levels.js";
 import type { Team } from "../src/mlb/schemas.js";
 import { FakeStatsApi, loadFixture, makePerson } from "./factories.js";
 
@@ -155,6 +155,19 @@ describe("MlbClient people and teams (real captured fixtures)", () => {
     expect(people).toHaveLength(1);
     expect(people[0]?.id).toBe(694973);
     expect(people[0]?.fullName).toBe("Paul Skenes");
+  });
+
+  // The only half of this contract we control is the REQUEST. Asserting the
+  // API's answer would pin THEIR behavior and rot; #204 is precisely a case of
+  // that answer moving underneath an unscoped question. `SPORT_IDS`' literal
+  // membership is pinned separately (test/levels.test.ts), so this derives its
+  // expectation from the ladder and widens with it rather than breaking.
+  it("scopes searchPeople to every swept sportId (#204)", async () => {
+    const { client, calls } = clientWithBody({ people: [] });
+    await client.searchPeople("leanders matos");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain(`sportIds=${SPORT_IDS.join(",")}`);
+    expect(calls[0]).toContain("names=leanders%20matos");
   });
 });
 
