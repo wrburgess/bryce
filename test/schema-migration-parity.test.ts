@@ -8,6 +8,7 @@ import {
   integer,
   sqliteTable,
   text,
+  uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
@@ -106,9 +107,73 @@ const TABLES_AT_TIME_OF_WRITING = [
   "stat_lines",
 ];
 
+/** A span of SQL text that is either CODE or one single-quoted string literal. */
+interface SqlSpan {
+  /** The raw source of this span, opening and closing quotes included. */
+  text: string;
+  literal: boolean;
+  /** False only for a trailing literal whose closing quote never arrived. */
+  terminated: boolean;
+}
+
 /**
- * Identifier QUOTING and WHITESPACE only — deliberately not case, and
- * deliberately not string literals.
+ * Split SQL text into alternating CODE and STRING-LITERAL spans — the ONE place
+ * this file knows where a `'...'` starts and ends.
+ *
+ * Both things below that must respect a string literal read it from here.
+ * `stripOuterParens` once carried this scan inline while `normalizeSql` had no
+ * notion of literals at all, and that split is exactly how the false green
+ * described below survived: one function knew the rule and the other did not.
+ * Authoring the same idea twice is this repository's signature defect shape, so
+ * the scan lives once and both callers consume it.
+ *
+ * A doubled `''` is SQLite's escape for a quote INSIDE a literal, so it is
+ * consumed as part of the literal rather than closing it. An unterminated
+ * literal is reported as `terminated: false` rather than silently treated as
+ * closed — a caller that must not guess can then decline to.
+ */
+function scanSqlSpans(source: string): SqlSpan[] {
+  const spans: SqlSpan[] = [];
+  let code = "";
+  let i = 0;
+  const flushCode = (): void => {
+    if (code !== "") spans.push({ text: code, literal: false, terminated: true });
+    code = "";
+  };
+  while (i < source.length) {
+    if (source[i] !== "'") {
+      code += source[i];
+      i += 1;
+      continue;
+    }
+    flushCode();
+    let literal = "'";
+    let terminated = false;
+    i += 1;
+    while (i < source.length) {
+      if (source[i] === "'") {
+        if (source[i + 1] === "'") {
+          literal += "''";
+          i += 2;
+          continue;
+        }
+        literal += "'";
+        i += 1;
+        terminated = true;
+        break;
+      }
+      literal += source[i];
+      i += 1;
+    }
+    spans.push({ text: literal, literal: true, terminated });
+  }
+  flushCode();
+  return spans;
+}
+
+/**
+ * Identifier QUOTING and WHITESPACE, **outside string literals only** —
+ * deliberately not case, and deliberately nothing whatsoever inside a `'...'`.
  *
  * `rules/testing.md`: never normalize away the difference the assertion exists
  * to catch. Lowercasing would fold `= 'Level'` into `= 'level'` inside a partial
@@ -117,9 +182,36 @@ const TABLES_AT_TIME_OF_WRITING = [
  * reported rather than swallowed. Quoting style (`"x"` vs `` `x` ``) carries no
  * meaning for the identifiers this schema uses (none contains a space or a
  * reserved word), so folding it is safe.
+ *
+ * THE NARROWING, AND WHY IT WAS NOT OPTIONAL. This was once a blind
+ * `replace(/[`"]/g, "")` plus a blind whitespace collapse over the WHOLE string.
+ * Both are correct rules about identifier quoting and layout, and neither is a
+ * rule about data — but applied blindly they also edited the CONTENTS of string
+ * literals, and `DEFAULT 'a"b'` then normalized to `DEFAULT 'ab'`. Two
+ * genuinely different defaults compared EQUAL and the parity guard accepted the
+ * drift in silence. `rules/scripting.md` prices the two directions differently
+ * for exactly this reason: a false red costs minutes and announces itself, a
+ * false green costs the whole guard and says nothing. So the rule is now the
+ * narrower one it always meant — outside a literal, quoting and whitespace
+ * fold; inside one, every byte (quotes, doubled `''` escapes, runs of spaces)
+ * survives exactly as SQLite reported it.
+ *
+ * The narrowing costs nothing the fold was ever for, because identifier quoting
+ * lives OUTSIDE the literals by definition. Today the two sides of a stored
+ * predicate happen to agree on style — the migration's text IS drizzle-kit's
+ * rendering of the ORM's own `sql` fragment, so both read
+ * `"player_tags"."namespace" = 'level'` (drizzle/0006, 0007, 0012) — but this
+ * repo HAND-EDITS its rebuild migrations (0012, 0014), where backtick quoting is
+ * the house style, which is the same reason `ddlCheckNames` already has to
+ * accept all three spellings. Folding quoting outside a literal is what keeps a
+ * re-quoted predicate from reading as drift; it never needed to reach inside one
+ * to do that.
  */
 function normalizeSql(text: string): string {
-  return text.replace(/[`"]/g, "").replace(/\s+/g, " ").trim();
+  return scanSqlSpans(text)
+    .map((span) => (span.literal ? span.text : span.text.replace(/[`"]/g, "").replace(/\s+/g, " ")))
+    .join("")
+    .trim();
 }
 
 /**
@@ -134,50 +226,62 @@ function normalizeSql(text: string): string {
  * comparison about the expression rather than about SQLite's echo rules.
  *
  * Only a layer that spans the whole string is peeled: `(a) + (b)` is left alone,
- * because its first `(` does not close at the end. The scan skips single-quoted
- * spans so a paren inside a string literal cannot fake a depth change.
+ * because its first `(` does not close at the end. The depth scan runs over a
+ * MASK in which each literal is replaced by filler of identical length, so a
+ * paren inside a string literal cannot fake a depth change and every index into
+ * the mask is still an index into the text.
  */
 function stripOuterParens(text: string): string {
   let out = text.trim();
   while (out.startsWith("(") && out.endsWith(")")) {
+    const spans = scanSqlSpans(out);
+    // An unterminated literal means the text is not something this can reason
+    // about; leave it exactly as found rather than peeling a layer on a guess.
+    if (spans.some((span) => span.literal && !span.terminated)) break;
+    const masked = spans.map((span) => (span.literal ? "_".repeat(span.text.length) : span.text)).join("");
     let depth = 0;
-    let inString = false;
     let wrapsWhole = true;
-    for (let i = 0; i < out.length; i += 1) {
-      const ch = out[i];
-      if (inString) {
-        // A doubled '' reads as close-then-open here, which lands in the same
-        // state as treating it as an escape — so it needs no special case.
-        if (ch === "'") inString = false;
-        continue;
-      }
-      if (ch === "'") {
-        inString = true;
-      } else if (ch === "(") {
+    for (let i = 0; i < masked.length; i += 1) {
+      if (masked[i] === "(") {
         depth += 1;
-      } else if (ch === ")") {
+      } else if (masked[i] === ")") {
         depth -= 1;
-        if (depth === 0 && i < out.length - 1) {
+        if (depth === 0 && i < masked.length - 1) {
           wrapsWhole = false;
           break;
         }
       }
     }
-    if (!wrapsWhole || depth !== 0 || inString) break;
+    if (!wrapsWhole || depth !== 0) break;
     out = out.slice(1, -1).trim();
   }
   return out;
 }
 
 /**
- * A DDL default that is a LITERAL by FORM: a signed number (including exponent
- * and blob-hex spellings), a quoted string, or one of SQLite's literal keywords.
- * Keyword case is folded because SQLite's keywords are case-insensitive — this
- * decides which CURRENCY the two sides are compared in, and is not itself the
- * comparison, so it cannot swallow a divergence (see `classifyDdlDefault`).
+ * A DDL default that is a LITERAL by FORM: a signed number in either of
+ * SQLite's spellings — decimal (with optional exponent) or HEXADECIMAL — a blob
+ * literal, a quoted string, or one of SQLite's literal keywords. Keyword case is
+ * folded because SQLite's keywords are case-insensitive — this decides which
+ * CURRENCY the two sides are compared in, and is not itself the comparison, so
+ * it cannot swallow a divergence (see `classifyDdlDefault`).
+ *
+ * THE HEXADECIMAL FORM IS HERE BECAUSE SQLITE'S GRAMMAR HAS IT, verified against
+ * better-sqlite3 rather than inferred from the docs: `DEFAULT 0x1`,
+ * `DEFAULT 0X1F`, `DEFAULT -0x1` and `DEFAULT +0x1` all build, `PRAGMA
+ * table_info` echoes each spelling back VERBATIM (`-0x1` comes back `-0x1`, not
+ * `-1`) — so the sign is part of the accepted form, exactly as it is for the
+ * decimal spelling — and `0x` with no digit and `0xg` are rejected by SQLite's
+ * tokenizer, so at least one digit is required. Omitting the form did not make
+ * the guard stricter, only wronger: an ORM `sql\`0x1\`` and a migration
+ * `DEFAULT 1` are the SAME default, and classifying the hexadecimal one as an
+ * expression failed parity on spelling alone.
+ *
+ * The `i` flag carries `0X`/`A-F`; the blob form `x'…'` is unreachable from the
+ * hexadecimal one, which must start `0`.
  */
 const LITERAL_DEFAULT_FORM =
-  /^(?:[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|'(?:[^']|'')*'|x'(?:[0-9a-f][0-9a-f])*'|NULL|TRUE|FALSE)$/i;
+  /^(?:[+-]?0x[0-9a-f]+|[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|'(?:[^']|'')*'|x'(?:[0-9a-f][0-9a-f])*'|NULL|TRUE|FALSE)$/i;
 
 /**
  * Classify a DDL default TEXT — from either side — by its FORM.
@@ -808,6 +912,110 @@ describe("compares a column DEFAULT in the currency its FORM dictates", () => {
     const wrong = migrated("probe_literal_wrong", "`active` integer DEFAULT 0 NOT NULL");
     expect(wrong[0]!.default).toEqual({ kind: "value", value: 0 });
     expect(wrong).not.toEqual(ormSide);
+  });
+
+  it("still reddens when two defaults differ ONLY inside a string literal", () => {
+    // THE FALSE GREEN THIS CLOSED. `normalizeSql` folds identifier quoting, and
+    // it once did so with a blind `replace(/[`"]/g, "")` over the whole string —
+    // which also deleted those characters out of the DATA. `'a"b'` and `'ab'`
+    // are different defaults that normalized to the same text, evaluated to the
+    // same value, and compared EQUAL: real drift accepted, silently. The same
+    // held for whitespace, which was collapsed inside literals too. Per
+    // `rules/scripting.md` the two directions do not cost the same — a false red
+    // costs minutes and announces itself; a false green costs the whole guard
+    // and says nothing — so each of the three characters that stripping could
+    // eat out of a literal is pinned here.
+    const cases = [
+      { suffix: "dquote", orm: sql`'a"b'`, value: 'a"b' },
+      { suffix: "backtick", orm: sql`'a\`b'`, value: "a`b" },
+      { suffix: "spaces", orm: sql`'a  b'`, value: "a  b" },
+    ];
+    for (const { suffix, orm, value } of cases) {
+      const declared = sqliteTable(`probe_literal_${suffix}`, {
+        label: text("label").notNull().default(orm),
+      });
+      // The migration says the literal WITHOUT the character in question — the
+      // exact pair the old normalization folded together.
+      const fromMigration = migrated(`probe_literal_${suffix}`, "`label` text DEFAULT 'a b' NOT NULL");
+      expect(ormColumns(scratch, declared)[0]!.default).toEqual({ kind: "value", value });
+      expect(fromMigration[0]!.default).toEqual({ kind: "value", value: "a b" });
+      expect(fromMigration).not.toEqual(ormColumns(scratch, declared));
+    }
+  });
+
+  it("still folds identifier quoting OUTSIDE a literal, so a cosmetic quoting difference still agrees", () => {
+    // The control for the narrowing above, exercised through `normalizeSql`'s
+    // OTHER consumer — the partial-index predicate — because a DEFAULT cannot
+    // contain a quoted identifier at all (SQLite rejects `DEFAULT ("x")` as
+    // "not constant"), so the default path could not host this control.
+    //
+    // The two sides are made to differ in quoting style and in nothing else:
+    // the ORM renders `"probe_predicate"."namespace"` while the migration here
+    // is written with backticks, which is what a hand-edited rebuild migration
+    // looks like in this repo (0012, 0014 — the same reason `ddlCheckNames`
+    // accepts all three spellings). That difference must still fold — while the
+    // string literal sitting inside the SAME predicate, doubled space and all,
+    // must not be touched. Narrowing the rule must not become normalizing
+    // nothing, and this is the assertion that would catch it if it had.
+    const declared = sqliteTable(
+      "probe_predicate",
+      { id: integer("id").primaryKey(), namespace: text("namespace").notNull() },
+      (t) => [uniqueIndex("probe_predicate_ns_uq").on(t.id).where(sql`${t.namespace} = 'a  b'`)],
+    );
+    scratch.exec("CREATE TABLE probe_predicate (id integer PRIMARY KEY, namespace text NOT NULL)");
+    scratch.exec(
+      "CREATE UNIQUE INDEX probe_predicate_ns_uq ON probe_predicate (`id`)" +
+        " WHERE `probe_predicate`.`namespace` = 'a  b'",
+    );
+
+    expect(dbIndexes(scratch, "probe_predicate")).toEqual(ormIndexes(declared));
+    // …and as CONTENT on each side, so the agreement is not two predicates that
+    // both parsed to null: quoting gone, literal byte-intact.
+    expect(dbIndexes(scratch, "probe_predicate")[0]!.where).toBe("probe_predicate.namespace = 'a  b'");
+    expect(ormIndexes(declared)[0]!.where).toBe("probe_predicate.namespace = 'a  b'");
+  });
+
+  it("compares a HEXADECIMAL integer default as the VALUE it is, not as its spelling", () => {
+    // SQLite accepts `0x…` integer literals — verified against better-sqlite3
+    // rather than inferred from the docs: `DEFAULT 0x1`, `DEFAULT 0X1F`,
+    // `DEFAULT -0x1` and `DEFAULT +0x1` all build, and `PRAGMA table_info`
+    // echoes the spelling back VERBATIM, sign included (`-0x1` comes back
+    // `-0x1`), which is why the sign is part of the accepted form. Classified
+    // as an EXPRESSION, an ORM `sql`0x1`` and a migration `DEFAULT 1` — the same
+    // default — failed parity on spelling alone: a false red on correct code,
+    // whose tempting repair is to loosen the guard that catches real drift.
+    const declared = sqliteTable("probe_hex", {
+      one: integer("one").notNull().default(sql`0x1`),
+      thirtyOne: integer("thirty_one").notNull().default(sql`0X1F`),
+      minusOne: integer("minus_one").notNull().default(sql`-0x1`),
+      plusOne: integer("plus_one").notNull().default(sql`+0x1`),
+    });
+    const fromMigration = migrated(
+      "probe_hex",
+      "`one` integer DEFAULT 1 NOT NULL," +
+        " `thirty_one` integer DEFAULT 31 NOT NULL," +
+        " `minus_one` integer DEFAULT -1 NOT NULL," +
+        " `plus_one` integer DEFAULT 1 NOT NULL",
+    );
+
+    expect(fromMigration).toEqual(ormColumns(scratch, declared));
+    const byName = new Map(ormColumns(scratch, declared).map((c) => [c.name, c.default]));
+    expect(byName.get("one")).toEqual({ kind: "value", value: 1 });
+    expect(byName.get("thirty_one")).toEqual({ kind: "value", value: 31 });
+    expect(byName.get("minus_one")).toEqual({ kind: "value", value: -1 });
+  });
+
+  it("still reddens when a hexadecimal default and a decimal one are DIFFERENT values", () => {
+    // Not a blanket acceptance of the spelling — `0x10` is 16, and a migration
+    // that says 10 has genuinely drifted from an ORM that says `0x10`.
+    const declared = sqliteTable("probe_hex_wrong", {
+      value: integer("value").notNull().default(sql`0x10`),
+    });
+    const fromMigration = migrated("probe_hex_wrong", "`value` integer DEFAULT 10 NOT NULL");
+
+    expect(ormColumns(scratch, declared)[0]!.default).toEqual({ kind: "value", value: 16 });
+    expect(fromMigration[0]!.default).toEqual({ kind: "value", value: 10 });
+    expect(fromMigration).not.toEqual(ormColumns(scratch, declared));
   });
 
   it("never mistakes an expression default for a literal one, in either direction", () => {
