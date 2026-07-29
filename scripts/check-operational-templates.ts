@@ -1,6 +1,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+// The REAL constant, not a copy of its value: this gate exists to prove the
+// schedule is authored once, and re-typing the number here would be the second
+// authoring it is meant to forbid (`rules/backend.md` — never re-decide a
+// dependency's question with a proxy signal).
+import { TICK_PERIOD_MS } from "../src/jobs/tick.js";
 
 const TEMPLATE_DIR = join("ops", "templates");
 const ALLOWED_TOKENS = new Set(["BRYCE_ROOT", "BRYCE_DATA_DIR", "R2_BUCKET", "R2_ENDPOINT"]);
@@ -15,7 +20,17 @@ const SECRET_ASSIGNMENT = /(?:AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|POSTMARK_S
  * as a union means the validator cannot accidentally accept a template that
  * declares one and is checked against the other.
  */
-type PlistSchedule = { hour: number; minute: number } | { intervalSeconds: number };
+type PlistSchedule =
+  | { hour: number; minute: number }
+  | {
+      intervalSeconds: number;
+      /**
+       * A code constant SIZED FROM this interval, which must not drift from it
+       * (PR #203 Reviewer, Medium). Carrying the runtime value here — rather than
+       * a second literal — is what makes the pair checkable at all.
+       */
+      sizedConstant?: { name: string; source: string; ms: number };
+    };
 
 interface PlistSpec {
   file: string;
@@ -36,7 +51,13 @@ const PLISTS: readonly PlistSpec[] = [
   { file: "com.sk.backup.plist", label: "com.sk.backup", command: "db:backup", log: "backup", schedule: { hour: 3, minute: 0 } },
   // ONE tick replaces the fixed refresh (03:30) and digest (05:00) agents
   // (#193, ADR 0062 decision 3). Their templates are asserted ABSENT below.
-  { file: "com.sk.tick.plist", label: "com.sk.tick", command: "tick", log: "tick", schedule: { intervalSeconds: 900 }, args: "-- --quiet" },
+  {
+    file: "com.sk.tick.plist", label: "com.sk.tick", command: "tick", log: "tick", args: "-- --quiet",
+    schedule: {
+      intervalSeconds: 900,
+      sizedConstant: { name: "TICK_PERIOD_MS", source: "src/jobs/tick.ts", ms: TICK_PERIOD_MS },
+    },
+  },
 ];
 
 /**
@@ -138,6 +159,24 @@ export function validateOperationalTemplates(root: string): string[] {
       }
       // A template carrying BOTH keys is ambiguous rather than merely redundant.
       if (dict.has("StartCalendarInterval")) issues.push(`${spec.file}: interval schedule must not also declare StartCalendarInterval`);
+      // ONE AUTHORED CADENCE, NOT TWO (PR #203 Reviewer, Medium). `TICK_PERIOD_MS`
+      // is sourced BY COMMENT to this interval and sizes `REFRESH_DUE_TOLERANCE_MS`
+      // (half a period) in turn — but nothing made the pair agree, so an operator
+      // who edits the plist to 30 minutes silently keeps a tolerance sized for 15.
+      // That is the one-idea-in-two-places shape this PR already fixed twice.
+      //
+      // Compared against the TEMPLATE'S OWN parsed value rather than
+      // `spec.intervalSeconds`, because the plist is where the schedule is
+      // authored: someone changing the cadence edits the plist (and the spec
+      // above, to keep this gate green) while the constant stays behind, and only
+      // a comparison anchored on the plist catches that.
+      const sized = spec.schedule.sizedConstant;
+      const authoredSeconds = interval?.tag === "integer" ? Number(interval.value) : Number.NaN;
+      if (sized !== undefined && Number.isSafeInteger(authoredSeconds) && authoredSeconds * 1000 !== sized.ms) {
+        issues.push(
+          `${spec.file}: StartInterval ${authoredSeconds}s (${authoredSeconds * 1000}ms) disagrees with ${sized.name} = ${sized.ms}ms in ${sized.source} — the cadence is authored in the plist and ${sized.name} is sized from it, so both must change together`,
+        );
+      }
     } else {
       const { hour, minute } = spec.schedule;
       const calendar = dict.get("StartCalendarInterval")?.children;

@@ -28,7 +28,7 @@ import {
   withIngestionFence,
 } from "../src/jobs/refresh-run.js";
 import { resolveDefaultList } from "../src/lists/service.js";
-import { TEST_TZ, insertList, insertRefreshRun, testDb, testFileDb } from "./factories.js";
+import { TEST_TZ, insertList, insertListMember, insertPlayer, insertRefreshRun, testDb, testFileDb } from "./factories.js";
 
 /** A base instant and two derived ones straddling the 10-minute lease. */
 const T0 = "2026-07-19T07:00:00.000Z";
@@ -639,6 +639,131 @@ describe("coverage-keyed freshness watermark, storage layer (#192)", () => {
 
       expect(latestCoveringRun(opened.db, a.id)).toBeDefined(); // it DOES cover…
       expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("stale"); // …but too early
+    });
+
+    /**
+     * MEMBERSHIP COVERAGE (PR #203 Reviewer P2) — the second identity trap.
+     *
+     * The lane-id test above is `,<id>,` containment, which is IDENTITY one
+     * level down from the one #192 refused. A scoped run records the lane it
+     * swept, never the players it selected, so enrolling an active Player in
+     * lane L after L's sweep began leaves the run still naming L while
+     * `assembleDigest` now reports a player nobody fetched — exactly the forged
+     * completeness claim ADR 0061 decision 8 exists to prevent, one layer down.
+     *
+     * Every case here is driven through `digestFreshnessFor` as well as the
+     * helper, because the BANNER is the user-visible claim; pinning only the
+     * helper would leave the thing the reader believes untested.
+     */
+    describe("membership coverage (PR #203 Reviewer P2)", () => {
+      /** Enroll a Player in `laneId` with an EXACT join instant. */
+      const joins = async (laneId: number, createdAt: string, active = true): Promise<void> => {
+        const player = await insertPlayer(opened.db, { active });
+        await insertListMember(opened.db, { listId: laneId, playerId: player.id, createdAt });
+      };
+
+      it("a player who joins AFTER the sweep started makes that run non-covering", async () => {
+        const a = await insertList(opened.db, { name: "A" });
+        await joins(a.id, "2026-07-19T11:00:00.000Z"); // swept: he was there first
+        sweep("ok", [a.id], QUALIFYING_START);
+        expect(latestCoveringRun(opened.db, a.id)).toBeDefined();
+
+        // The enrollment the run cannot possibly have swept.
+        await joins(a.id, "2026-07-19T12:30:00.000Z");
+
+        expect(latestCoveringRun(opened.db, a.id)).toBeUndefined();
+        // And the claim the HC actually reads: the banner degrades to `stale`
+        // rather than certifying a player whose stats were never fetched.
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("stale");
+
+        // SELF-HEALING, and the reason degrading is safe: the tick reads this
+        // lane as due (never-swept), sweeps it, and the new run started after
+        // the join, so it covers.
+        sweep("ok", [a.id], "2026-07-19T13:00:00.000Z");
+        expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe("2026-07-19T13:00:00.000Z");
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+      });
+
+      it("a player who joined BEFORE the sweep started keeps it covering", async () => {
+        // The negative control. Without it, a blanket "any membership row
+        // rejects" would pass every other case here and make the banner
+        // permanently `stale` on every lane that has members at all.
+        const a = await insertList(opened.db, { name: "A" });
+        await joins(a.id, "2026-07-19T11:59:59.999Z");
+        sweep("ok", [a.id], QUALIFYING_START);
+
+        expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe(QUALIFYING_START);
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+      });
+
+      it("`>=`, not `>`: a join in the run's OWN start instant is not covered", async () => {
+        // The sweep takes its selection snapshot at — in fact just before — the
+        // claim, so a member added in that same instant may never have been in
+        // it. Equality therefore has to fall on the REJECTING side. Two lanes,
+        // because one lane cannot hold both sides of a boundary at once.
+        const onTheInstant = await insertList(opened.db, { name: "on-the-instant" });
+        const oneMsEarlier = await insertList(opened.db, { name: "one-ms-earlier" });
+        await joins(onTheInstant.id, QUALIFYING_START);
+        await joins(oneMsEarlier.id, "2026-07-19T11:59:59.999Z");
+        sweep("ok", [onTheInstant.id, oneMsEarlier.id], QUALIFYING_START);
+
+        expect(latestCoveringRun(opened.db, onTheInstant.id)).toBeUndefined();
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, onTheInstant.id).state).toBe("stale");
+        expect(latestCoveringRun(opened.db, oneMsEarlier.id)).toBeDefined();
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, oneMsEarlier.id).state).toBe("fresh");
+      });
+
+      it("a WHOLE-LIST (NULL-scope) run still covers a lane that gains a member afterwards", async () => {
+        // Deliberately NOT narrowed (#192 / ADR 0061, untouched here): a
+        // whole-list run swept every THEN-ACTIVE Player, so moving one of those
+        // players onto a lane afterwards changes no fact about what it fetched.
+        // Rejecting here would retighten pre-existing behavior this fix has no
+        // business touching — and would flip every lane's banner to `stale` on a
+        // host that never scopes a sweep at all.
+        const a = await insertList(opened.db, { name: "A" });
+        sweep("ok", undefined, QUALIFYING_START);
+        await joins(a.id, "2026-07-19T12:30:00.000Z");
+
+        expect(latestCoveringRun(opened.db, a.id)?.scopeListIds).toBeNull();
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+      });
+
+      it("an INACTIVE player joining afterwards does not spoil coverage", async () => {
+        // `players.active` is the master gate (ADR 0046 decision 2), and the
+        // membership test reproduces the sweep's OWN selection predicate
+        // (`selectSweepPlayers`: active AND a member of a scoped lane). An
+        // inactive enrollee is fetched by no sweep and reported by no digest, so
+        // treating him as a coverage gap would banner `stale` forever over a
+        // player nobody claims anything about.
+        const a = await insertList(opened.db, { name: "A" });
+        sweep("ok", [a.id], QUALIFYING_START);
+        await joins(a.id, "2026-07-19T12:30:00.000Z", false);
+
+        expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe(QUALIFYING_START);
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+
+        // ...and re-activating him — the act ADR 0046 says puts a player back in
+        // scope — is what makes the same row a real gap. This is the pair that
+        // stops the case above from reading as "membership is ignored".
+        await opened.db.update(players).set({ active: true }).where(eq(players.active, false));
+        expect(latestCoveringRun(opened.db, a.id)).toBeUndefined();
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("stale");
+      });
+
+      it("another lane's fresh enrollment never spoils THIS lane's coverage", async () => {
+        // The correlated EXISTS is keyed on the lane being asked about. A
+        // membership test that dropped that key would make every lane's banner
+        // hostage to every other lane's enrollments.
+        const a = await insertList(opened.db, { name: "A" });
+        const b = await insertList(opened.db, { name: "B" });
+        sweep("ok", [a.id, b.id], QUALIFYING_START);
+        await joins(b.id, "2026-07-19T12:30:00.000Z");
+
+        expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe(QUALIFYING_START);
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+        expect(latestCoveringRun(opened.db, b.id)).toBeUndefined();
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, b.id).state).toBe("stale");
+      });
     });
 
     it("refuses a non-integer lane id rather than building a pattern that matches anything", () => {

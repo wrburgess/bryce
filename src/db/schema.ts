@@ -341,11 +341,17 @@ export const refreshRuns = sqliteTable(
      * swept everyone; `runRefresh` decides that from the SAME claim-time read
      * that selected the sweep, so the two can never disagree.
      *
-     * Otherwise the value is PROVENANCE for a genuinely partial run: the
-     * canonical encoding of its lane ids — ascending, deduped, comma-delimited,
-     * sentinel-wrapped (`,1,3,10,`). Nothing parses it back; the only reader is
-     * `digestFreshnessFor`, and all it asks is `IS NULL`.
-     * {@link encodeScopeListIds} is the one writer.
+     * Otherwise the value is the canonical encoding of the lanes it did cover —
+     * ascending, deduped, comma-delimited, sentinel-wrapped (`,1,3,10,`).
+     *
+     * IT IS QUERIED, not merely recorded (#193, ADR 0062 decision 2 — which
+     * amends the "provenance that nothing parses back" contract #192 left here).
+     * `latestCoveringRun` is the ONE reader and asks two things of it: `IS NULL`
+     * for the whole-list question, and fenced containment (`LIKE '%,1,%'`, which
+     * is why the sentinel commas are load-bearing) for the per-lane one. A lane
+     * hit by containment is covered only while its active membership has not
+     * grown since that run's `started_at` — naming a lane is not covering its
+     * members (PR #203). {@link encodeScopeListIds} is the one writer.
      *
      * Declared HERE, not only in drizzle/0013, so a future drizzle-kit table
      * rebuild re-emits the column (`rules/backend.md`).

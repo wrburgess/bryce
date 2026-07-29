@@ -56,6 +56,14 @@ exit **1** with no run recorded — a typo must never widen a sweep. The MCP `re
 > not which lane you named ([ADR 0061](../adr/0061-lane-scoped-refresh-supersedes-whole-sweep.md)
 > decision 8, narrowed per lane by
 > [ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md) decision 2).
+>
+> **Adding a player to a lane makes that lane `stale` until its next sweep**, and that is the same rule
+> rather than a new one: a scoped run records the lane, not the players it fetched, so an active Player
+> who joined *after* that sweep started would otherwise be reported under a `fresh` banner over stats
+> nobody ever fetched. The tick reads the lane as due and re-sweeps it, which restores `fresh`
+> automatically. A *whole-list* sweep is unaffected — it swept every then-active player, so a later lane
+> enrollment says nothing about what it covered — and an **inactive** enrollee is never a gap, because
+> `players.active` is the master gate.
 
 > **Two `refresh done` grammars exist — grep for the right one.** This sweep prints
 > `refresh done list=<lane> status=… players=… skipped=… failed=… inserted=… updated=…`. The

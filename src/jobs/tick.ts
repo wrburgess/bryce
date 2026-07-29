@@ -137,6 +137,14 @@ const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
  * under load, and restarts the countdown across sleep/wake. Nothing here may
  * assume a tick lands on a grid; this value exists only to SIZE the tolerance
  * below in terms of the cadence it has to survive.
+ *
+ * THE PAIR IS ASSERTED, not merely documented (PR #203 Reviewer). The template's
+ * `StartInterval` and this constant are checked to agree by the
+ * operational-templates gate (`scripts/check-operational-templates.ts`, run in
+ * CI through `test/tooling/operational-templates.test.ts`), which imports this
+ * value rather than re-typing it. Without that, editing the plist to 30 minutes
+ * leaves the tolerance below sized for 15 — a schedule that drifts silently,
+ * which is precisely the one-idea-two-places shape this file exists to avoid.
  */
 export const TICK_PERIOD_MS = 15 * 60_000;
 

@@ -1,7 +1,7 @@
-import { and, desc, eq, gt, inArray, isNull, like, lte, max, or } from "drizzle-orm";
+import { and, desc, eq, exists, gt, gte, inArray, isNull, like, lte, max, not, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { RefreshRunRow, RefreshRunStatus } from "../db/schema.js";
-import { refreshRuns } from "../db/schema.js";
+import { listMembers, players, refreshRuns } from "../db/schema.js";
 import { hostDate } from "../domain/season.js";
 
 /**
@@ -369,6 +369,32 @@ export interface DigestFreshness {
  * either call site is how the fencing quietly stops matching at one of them —
  * `rules/scripting.md`, and the exact defect shape this repo keeps finding.
  *
+ * NAMING A LANE IS NOT COVERING ITS MEMBERS (PR #203 Reviewer P2). A scoped run
+ * records the lane ID, never the players it selected, so the id test alone is
+ * IDENTITY one level down — the very thing this predicate exists to refuse. Add
+ * an active Player to lane L after L's sweep began and the old run still names
+ * L, while `assembleDigest` now reports a player it never fetched: a forged
+ * `fresh`. So a SCOPED run covers L only while NO current active member of L
+ * joined at or after that run's `started_at`. A join is `>=`, not `>`: the sweep
+ * takes its selection snapshot at (in fact just before) the claim, so a member
+ * added in the run's own start instant may never have been in it.
+ *
+ * DELIBERATELY SCOPED TO SCOPED RUNS. A whole-list run (`scope_list_ids IS
+ * NULL`) swept every THEN-ACTIVE Player, and its claim is about players rather
+ * than lanes — moving one of those players onto a lane afterwards changes no
+ * fact about what it fetched. Widening the membership test to NULL rows would
+ * silently retighten the pre-existing #192 / ADR 0061 whole-list behavior this
+ * change has no business touching (a fresh enrollment would flip every lane
+ * banner to `stale` on a host that never scopes a sweep at all). A genuinely NEW
+ * active Player is a different matter and is already handled elsewhere: he is
+ * absent from the run's `players_total`, and the next sweep re-answers.
+ *
+ * The degradation is CONSERVATIVE BY CONSTRUCTION — it can only demote a claim,
+ * never manufacture one. When the newest scoped run stops covering, the query
+ * falls through to an older covering run or to `undefined`, so the banner reads
+ * `stale` and the tick reads the lane as due and re-sweeps it. Self-healing:
+ * that sweep starts after the join, so it covers again.
+ *
  * `failed` runs never cover, and the anchor is `started_at`, not `finished_at`
  * (see this file's header): a run that STARTED after the content day ended saw
  * every one of that day's now-final games.
@@ -389,10 +415,48 @@ export function latestCoveringRun(db: Db, laneId: number | null): RefreshRunRow 
   const covers =
     laneId === null
       ? isNull(refreshRuns.scopeListIds)
-      : // The fenced containment test. `,1,` matches `,1,3,` and NOT `,11,`,
-        // which is the whole reason `encodeScopeListIds` keeps its sentinel
-        // commas. The pattern is a bound parameter, never spliced SQL.
-        or(isNull(refreshRuns.scopeListIds), like(refreshRuns.scopeListIds, `%,${laneId},%`));
+      : or(
+          // A whole-list run covers every lane by definition, and no membership
+          // test applies to it (see the doc comment: its claim is about players,
+          // not lanes).
+          isNull(refreshRuns.scopeListIds),
+          and(
+            // The fenced containment test. `,1,` matches `,1,3,` and NOT `,11,`,
+            // which is the whole reason `encodeScopeListIds` keeps its sentinel
+            // commas. The pattern is a bound parameter, never spliced SQL.
+            like(refreshRuns.scopeListIds, `%,${laneId},%`),
+            // ...AND the lane's membership has not moved under it. A CORRELATED
+            // EXISTS on the run row's own `started_at`, never a materialized id
+            // list (rules/backend.md): it stays constant-size however many
+            // members the lane holds, and SQLite short-circuits on the first
+            // offending row. `players.active` is the master gate (ADR 0046
+            // decision 2) and the join reproduces the sweep's OWN selection
+            // predicate (`selectSweepPlayers`: active AND a member of a scoped
+            // lane), so an INACTIVE player added afterwards spoils nothing —
+            // the sweep would not have fetched him and the digest does not
+            // report him.
+            not(
+              exists(
+                db
+                  .select({ x: sql`1` })
+                  .from(listMembers)
+                  .innerJoin(players, eq(players.id, listMembers.playerId))
+                  .where(
+                    and(
+                      eq(listMembers.listId, laneId),
+                      eq(players.active, true),
+                      // Both columns are `Date#toISOString()` bytes — the app
+                      // writes them (`insertMemberships`, `claimRefreshRun`) and
+                      // so does drizzle/0012's backfill
+                      // (`strftime('%Y-%m-%dT%H:%M:%fZ')`) — so this string
+                      // comparison is a chronological one.
+                      gte(listMembers.createdAt, refreshRuns.startedAt),
+                    ),
+                  ),
+              ),
+            ),
+          ),
+        );
   return db
     .select()
     .from(refreshRuns)
@@ -418,6 +482,14 @@ export function latestCoveringRun(db: Db, laneId: number | null): RefreshRunRow 
  * Prospects` settling `ok` must not make this banner read `fresh` over players
  * that sweep never touched. So the question asked is always "was every player I
  * am about to report on swept?" — never "which lane was named?".
+ *
+ * AND NOT LANE IDENTITY EITHER (PR #203 Reviewer P2). A run's lane id is a
+ * second identity, one level down: a scoped run records the lane, never its
+ * members, so a player who joined the lane AFTER that sweep began is reported by
+ * `assembleDigest` and was never fetched. {@link latestCoveringRun} therefore
+ * expires a scoped run's coverage of a lane whose active membership grew at or
+ * after its `started_at`, which lands here as an honest `stale` rather than a
+ * forged `fresh`. The `null` (whole-list) question is untouched.
  *
  * `laneId` IS WHICH PLAYERS THE DIGEST IS ABOUT (#193, ADR 0062). Bare `sk
  * digest` now assembles the DEFAULT LANE's members rather than the whole Watch

@@ -213,6 +213,12 @@ and overlapping runs is deterministic
   covers every lane) or a scoped sweep whose recorded `scope_list_ids` contains it. So one lane's
   frequent sweep never certifies another's data, and a lane swept an hour ago is not held to a
   whole-Watch-List standard it has no reason to meet.
+- **Adding a player to a lane makes it `stale` until the next sweep.** A scoped run records the lane, not
+  the players it fetched, so an active Player enrolled *after* that sweep started would otherwise appear
+  in the digest under a `fresh` banner over stats nobody fetched. The lane reads as due at the next tick
+  and the sweep restores `fresh` — usually within 15 minutes, and always before the next digest hour.
+  Only *scoped* runs are affected (a whole-list sweep already covered every then-active player), and an
+  **inactive** enrollee changes nothing, since `players.active` is the master gate.
 - **Missed refresh (the whole point).** The daily Digest reads the freshness watermark **before it
   assembles**, judged on the run's **start time** vs the **content date** (yesterday): only a Refresh
   that *started after that day ended* is proven to have captured every one of its now-final games

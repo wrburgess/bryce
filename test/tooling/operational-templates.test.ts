@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { validateOperationalTemplates } from "../../scripts/check-operational-templates.js";
+import { TICK_PERIOD_MS } from "../../src/jobs/tick.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const RUNNING_GUIDE = join(ROOT, "docs/guides/running-bryce.md");
@@ -97,6 +98,34 @@ describe("operational templates", () => {
       writeFileSync(tick, source.replace("<integer>900</integer>", "<string>900</string>"));
       expect(validateOperationalTemplates(root)).toContain(
         "com.sk.tick.plist: schedule must be StartInterval 900",
+      );
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  it("rejects a plist interval that has drifted from TICK_PERIOD_MS (PR #203)", () => {
+    // `TICK_PERIOD_MS` sizes `REFRESH_DUE_TOLERANCE_MS` (half a period) and is
+    // sourced BY COMMENT to this plist — two places holding one idea, with
+    // nothing asserting they agree. Edit the interval to 30 minutes and the
+    // scheduler keeps a tolerance sized for 15: the sweep is judged due up to
+    // 7.5 minutes early against a cadence that now fires half as often, silently
+    // and forever. This is the assertion that makes that edit loud.
+    //
+    // The shipped pair AGREES, asserted against the real template rather than
+    // against a re-typed 900_000 here — a literal in this file would be a third
+    // authoring of the number the gate exists to keep single.
+    expect(validateOperationalTemplates(ROOT)).toEqual([]);
+
+    const root = copyRoot();
+    try {
+      const tick = join(root, "ops/templates/com.sk.tick.plist");
+      writeFileSync(tick, readFileSync(tick, "utf8").replace("<integer>900</integer>", "<integer>1800</integer>"));
+      // The message names BOTH sources, because an operator reading a CI failure
+      // has to know which two things to reconcile. Composed from the imported
+      // constant rather than a re-typed literal: a copy here would be the third
+      // authoring of the very number this gate exists to keep single.
+      expect(validateOperationalTemplates(root)).toContain(
+        `com.sk.tick.plist: StartInterval 1800s (1800000ms) disagrees with TICK_PERIOD_MS = ${TICK_PERIOD_MS}ms in src/jobs/tick.ts` +
+          " — the cadence is authored in the plist and TICK_PERIOD_MS is sized from it, so both must change together",
       );
     } finally { rmSync(root, { recursive: true, force: true }); }
   });

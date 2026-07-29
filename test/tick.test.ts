@@ -26,6 +26,7 @@ import {
   insertCalendars2026,
   insertDelivery,
   insertLane,
+  insertListMember,
   insertPlayer,
   insertStatLine,
   makeSeasonBody,
@@ -269,7 +270,18 @@ describe("runTick", () => {
 
     it("a covering run YOUNGER than the interval is not due; an OLDER one is", async () => {
       const player = await insertPlayer(opened.db);
-      const lane = await insertLane(opened.db, "A", [player]);
+      const lane = await insertLane(opened.db, "A");
+      // ENROLLED BEFORE THE SWEEP, explicitly. Coverage now expires when a lane's
+      // active membership grows at or after a scoped run's `started_at` (PR #203
+      // Reviewer P2), so a member dated at the factory's default "now" would be a
+      // player the 16:30 sweep could not have fetched — this lane would be due
+      // for that reason and the interval clock under test would never be
+      // consulted. The fixture states the chronology the case assumes.
+      await insertListMember(opened.db, {
+        listId: lane.id,
+        playerId: player.id,
+        createdAt: "2026-07-19T16:00:00.000Z",
+      });
       await configureList(opened.db, "A", { refreshIntervalMinutes: 60 }, clock.now());
 
       recordSweep("2026-07-19T16:30:00.000Z", [lane.id]); // 30 min before now
@@ -279,6 +291,38 @@ describe("runTick", () => {
       // Push the clock past the interval and it becomes due.
       clock.set("2026-07-19T17:31:00.000Z");
       expect((await runTick(deps())).refresh?.lanes).toHaveLength(1);
+      expect(await opened.db.select().from(refreshRuns)).toHaveLength(2);
+    });
+
+    it("a lane that GAINS a member reads as due, however recent its sweep (PR #203)", async () => {
+      // The tick half of the shared coverage predicate. The digest's banner and
+      // this clock read `latestCoveringRun` precisely so they cannot disagree,
+      // and the pairing pays off here: the same enrollment that makes the banner
+      // honest (`stale`) is what makes the lane due, so the next tick fetches the
+      // new member's stats instead of leaving the lane stale until its interval
+      // happens to elapse.
+      const player = await insertPlayer(opened.db);
+      const lane = await insertLane(opened.db, "A");
+      await insertListMember(opened.db, {
+        listId: lane.id,
+        playerId: player.id,
+        createdAt: "2026-07-19T16:00:00.000Z",
+      });
+      await configureList(opened.db, "A", { refreshIntervalMinutes: 60 }, clock.now());
+      recordSweep("2026-07-19T16:30:00.000Z", [lane.id]); // only 30 of 60 minutes ago
+
+      // Not due on the clock alone — the control that keeps the assertion below
+      // from passing for the ordinary reason.
+      expect((await runTick(deps())).refresh).toBeNull();
+
+      const joiner = await insertPlayer(opened.db, { fullName: "Late Joiner" });
+      await insertListMember(opened.db, {
+        listId: lane.id,
+        playerId: joiner.id,
+        createdAt: "2026-07-19T16:45:00.000Z",
+      });
+
+      expect((await runTick(deps())).refresh?.lanes.map((l) => l.id)).toEqual([lane.id]);
       expect(await opened.db.select().from(refreshRuns)).toHaveLength(2);
     });
 

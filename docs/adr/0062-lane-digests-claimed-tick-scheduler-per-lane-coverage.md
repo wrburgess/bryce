@@ -85,10 +85,35 @@ So the alternative to doing all three was doing none of them.
    Two callers share the predicate: the digest's freshness banner and the tick's refresh clock.
    Re-authoring the `LIKE` at either is how the fencing quietly stops matching at one of them.
 
+   **Naming a lane is not covering its members** (added in review of
+   [PR #203](https://github.com/wrburgess/bryce/pull/203)). A scoped run records the lane ID and *not the
+   players it selected*, so the containment test alone is **identity one level down** — the very thing
+   ADR 0061 decision 8 refused. Enroll an active Player in lane L after L's sweep began and the run still
+   names L, while `assembleDigest` now reports a player whose stats were never fetched: a forged `fresh`,
+   arrived at by a different route. So a **scoped** run covers L only while **no current active member of
+   L joined at or after that run's `started_at`** — a correlated `EXISTS` over `list_members` in the same
+   predicate, `>=` because the sweep's selection snapshot is taken at (in fact just before) the claim.
+   `players.active` stays the master gate (ADR 0046 decision 2) and the test reproduces the sweep's own
+   selection predicate, so an *inactive* enrollee is not a gap — re-activating him is.
+
+   The membership test is deliberately **scoped to scoped runs**. A whole-list run (`scope_list_ids IS
+   NULL`) swept every *then-active* Player, and its claim is about players rather than lanes: moving one
+   of them onto a lane afterwards changes no fact about what it fetched, and rejecting there would
+   retighten pre-existing #192 behavior — flipping every lane's banner to `stale` on a host that never
+   scopes a sweep. The degradation is conservative by construction: it can only demote a claim, never
+   manufacture one, and it self-heals, because the tick reads the lane as due and the next sweep starts
+   after the join.
+
 3. **One 15-minute tick replaces the two fixed agents; due-selection is advisory and the claim is the
    gate.** A lane's cadence lives in a database column the HC edits with `sk players lists configure`. A
    `StartCalendarInterval` cannot read that column, and a plist per lane would put the schedule in two
    places that drift. `StartInterval` 900 can, and does.
+
+   The plist is where that cadence is **authored**, and `TICK_PERIOD_MS` (`src/jobs/tick.ts`) is **sized
+   from** it — which was itself two places holding one idea until the operational-templates gate
+   (`scripts/check-operational-templates.ts`) was made to assert they agree, naming both sources in the
+   failure (added in review of [PR #203](https://github.com/wrburgess/bryce/pull/203)). Edit the plist to
+   30 minutes without the constant and `REFRESH_DUE_TOLERANCE_MS` stays sized for 15, silently.
 
    Everything the tick decides — has the interval elapsed, has the hour arrived, is today's slot already
    `sent` — is a **cheap pre-read whose only job is to keep a quiet tick quiet**. Correctness rests
