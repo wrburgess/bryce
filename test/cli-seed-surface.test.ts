@@ -5,7 +5,7 @@ import type { SeedDeps } from "../src/cli/seed.js";
 import { runSeed } from "../src/cli/seed.js";
 import { players } from "../src/db/schema.js";
 import { HighlightlyClient } from "../src/highlightly/client.js";
-import { MlbClient } from "../src/mlb/client.js";
+import { MlbClient, SEARCH_RESULT_CAP } from "../src/mlb/client.js";
 import {
   FakeStatsApi,
   MID_SEASON,
@@ -13,6 +13,7 @@ import {
   fakeClock,
   insertPlayer,
   makePerson,
+  makeSearchHits,
   makeTeam,
   testDb,
 } from "./factories.js";
@@ -103,6 +104,40 @@ describe("seed CLI surface", () => {
       expect(await runSeed(["add", "--search", "smith", "--pick", "9"], deps())).toBe(1);
       expect(out[0]).toBe("error: --pick 9 out of range 1..2");
       expect(countPlayers()).toBe(1); // only the --pick 2 add
+    });
+
+    // #204 — the twin of the cases in test/cli-players-add.test.ts. Same shared
+    // resolver (src/cli/pick.ts), different sink: `seed` wires only `write`, so
+    // the notice lands on STDOUT here and on STDERR there. Pinning both is what
+    // makes a caller-specific rewiring that drops or misroutes it visible —
+    // either test alone would stay green while the other caller lost the line.
+    it("marks a candidate list at the API cap as possibly truncated, last on stdout", async () => {
+      searchResults = makeSearchHits(SEARCH_RESULT_CAP);
+      expect(await runSeed(["add", "--search", "smith"], deps())).toBe(1);
+      expect(out[0]).toBe("multiple matches for search=smith; re-run with --pick I");
+      expect(out).toHaveLength(SEARCH_RESULT_CAP + 2);
+      expect(out.at(-1)).toBe(
+        `note: the API caps this search at ${SEARCH_RESULT_CAP} candidates; the list may be incomplete — narrow the name`,
+      );
+      expect(countPlayers()).toBe(0);
+    });
+
+    it("discloses the cap ahead of the success line when --pick resolves off a capped list", async () => {
+      searchResults = makeSearchHits(SEARCH_RESULT_CAP);
+      expect(await runSeed(["add", "--search", "smith", "--pick", "2"], deps())).toBe(0);
+      // Sole sink, so the caveat precedes the result rather than trailing it.
+      expect(out[0]).toBe(
+        `note: the API caps this search at ${SEARCH_RESULT_CAP} candidates; the list may be incomplete — narrow the name`,
+      );
+      expect(out[1]).toContain("personId=2");
+      expect(countPlayers()).toBe(1);
+    });
+
+    it("says nothing about truncation one candidate BELOW the cap", async () => {
+      searchResults = makeSearchHits(SEARCH_RESULT_CAP - 1);
+      expect(await runSeed(["add", "--search", "smith"], deps())).toBe(1);
+      expect(out).toHaveLength(SEARCH_RESULT_CAP);
+      expect(out.some((line) => line.includes("caps this search"))).toBe(false);
     });
 
     it("refuses a search nothing matches", async () => {

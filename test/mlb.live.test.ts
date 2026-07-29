@@ -36,4 +36,40 @@ describe("MLB Stats API live contract smoke", () => {
     expect(team.id).toBe(147);
     expect(team.name).toContain("Yankees");
   });
+
+  /**
+   * #204: the unscoped `/people/search` stopped covering Single-A and Rookie,
+   * and five rostered players became unfindable by name. No OFFLINE test can
+   * catch that — it is a change in an upstream default we do not control, and
+   * an offline test asserting their answer would pin their behavior and rot.
+   * This is the one place the round trip can be proven end to end.
+   *
+   * personId 837864 is deliberate: a DSL player is the FURTHEST rung from the
+   * API's default scope, so this fails first if the scope is dropped on our
+   * side or narrows again on theirs. Both halves are asserted because they are
+   * different failures with the same symptom — "we stopped asking correctly"
+   * versus "they stopped answering".
+   */
+  it("scoped searchPeople resolves a Rookie-level identity by name", async (ctx) => {
+    const urls: string[] = [];
+    const client = new MlbClient({
+      delayMs: 0,
+      fetchImpl: (url) => {
+        urls.push(url);
+        return fetch(url);
+      },
+    });
+    let people: Awaited<ReturnType<MlbClient["searchPeople"]>>;
+    try {
+      people = await client.searchPeople("Leanders Matos");
+    } catch (err) {
+      if (isNetworkUnavailable(err)) {
+        ctx.skip();
+        return;
+      }
+      throw err;
+    }
+    expect(urls[0]).toContain("sportIds=");
+    expect(people.map((p) => p.id)).toContain(837864);
+  });
 });

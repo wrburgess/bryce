@@ -1,6 +1,7 @@
 import type { HighlightlyClient, HighlightlyNcaaPlayerSearchResult } from "../highlightly/client.js";
 import { HighlightlyError } from "../highlightly/client.js";
 import type { MlbClient } from "../mlb/client.js";
+import { SEARCH_RESULT_CAP } from "../mlb/client.js";
 
 /**
  * The ONE home for the two identity-resolution rules an `add` command shares —
@@ -34,10 +35,26 @@ export interface NcaaPickDeps {
 }
 
 /**
+ * The one line that tells an operator the candidate list they are reading is
+ * the API's maximum rather than the whole truth. Names NO flag, deliberately:
+ * the two callers spell the same input differently (`players add --name`,
+ * `seed add --search`), so a message naming one is wrong at the other.
+ */
+const cappedNotice = (): string =>
+  `note: the API caps this search at ${SEARCH_RESULT_CAP} candidates; the list may be incomplete — narrow the name`;
+
+/**
  * Resolve an MLB/MiLB name to exactly one `personId`, or null having already
  * written the operator-facing reason. One hit and no `--pick` resolves
  * silently; several hits print a NUMBERED candidate list and refuse, because a
  * guessed pick is a wrong player added under a right-looking summary.
+ *
+ * A result set AT `SEARCH_RESULT_CAP` is indistinguishable from a truncated one
+ * — the API returns no total and `limit` cannot raise the cap — so both the
+ * refusal and the `--pick` path say so. Rendering a capped list as complete
+ * turns this function's own guarantee inside out: the numbered list exists to
+ * stop a guessed pick, and a pick off a silently truncated list is the same
+ * wrong player arriving by a quieter route (#204).
  */
 export async function pickFromSearch(
   name: string,
@@ -45,6 +62,7 @@ export async function pickFromSearch(
   deps: MlbPickDeps,
 ): Promise<number | null> {
   const results = await deps.client.searchPeople(name);
+  const capped = results.length >= SEARCH_RESULT_CAP;
   if (results.length === 0) {
     deps.write(`error: no matches for search=${name}`);
     return null;
@@ -60,6 +78,8 @@ export async function pickFromSearch(
         `[${i + 1}] personId=${p.id} name=${p.fullName} position=${p.primaryPosition?.abbreviation ?? "?"}`,
       );
     });
+    // Last, so it is the line still on screen after 50 candidates scroll past.
+    if (capped) deps.write(cappedNotice());
     return null;
   }
   const pick = Number.parseInt(pickFlag, 10);
@@ -68,6 +88,8 @@ export async function pickFromSearch(
     deps.write(`error: --pick ${pickFlag} out of range 1..${results.length}`);
     return null;
   }
+  // Advisory, never fatal: a capped list with a valid --pick still succeeds.
+  if (capped) deps.write(cappedNotice());
   return chosen.id;
 }
 
