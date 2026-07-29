@@ -109,11 +109,24 @@ So the alternative to doing all three was doing none of them.
    membership test is still the rejecting side, now because the watermark is read just before the query
    whose snapshot it stands for.
 
-   No migration: the column's *meaning* is narrowed, not its type, and moving a run's recorded start
-   **earlier** is conservative in every reader. `digestFreshnessFor` requires the start's host date to be
-   strictly after the content date, so an earlier start can only weaken a freshness claim; the tick's
-   `refreshIsDue` anchors on it, so an earlier anchor makes the next sweep due *sooner*. Historical rows,
-   whose `started_at` is a claim instant, keep reading exactly as they did.
+   **No data migration**, and this paragraph first said "no migration" outright: the column's *meaning* is
+   narrowed, not its type, and moving a run's recorded start **earlier** is conservative in every reader.
+   `digestFreshnessFor` requires the start's host date to be strictly after the content date, so an
+   earlier start can only weaken a freshness claim; the tick's `refreshIsDue` anchors on it, so an earlier
+   anchor makes the next sweep due *sooner*. Historical rows, whose `started_at` is a claim instant, keep
+   reading exactly as they did.
+
+   **But the ORDERING it creates does need one** (added later in the same delta review, superseding the
+   flat "no migration" above). `started_at <= claimed_at` went from a tautology — one `nowIso` string
+   written to both columns — to a load-bearing invariant the moment the two became different instants:
+   coverage is judged against `started_at`, the lease against `claimed_at`, and an inverted row would date
+   every enrollment made inside a run's own selection-to-claim gap as already swept. `rules/backend.md`
+   requires such an invariant in the **database, declared in the ORM schema**, so it joins the eight CHECKs
+   `refresh_runs` already carries in `src/db/schema.ts`. SQLite has no `ALTER TABLE ... ADD CONSTRAINT`, so
+   applying it to an existing database is a table rebuild — **`drizzle/0014`**, the same shape `drizzle/0011`
+   used on this table, and the migration this decision previously said was unnecessary. It is still not a
+   *data* migration: every existing row was written with the two columns equal, which `<=` admits, and
+   `renewRefreshRun` only ever moves `claimed_at` forward, so nothing is rewritten and no row is at risk.
 
    One reader did have to move with it: `refreshHealth` ranks runs to find "the latest", and watermark
    order and claim order stopped agreeing the moment a run could select before it claims. It now orders

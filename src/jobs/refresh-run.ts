@@ -46,9 +46,11 @@ import { hostDate } from "../domain/season.js";
  * the instant it took its selection snapshot (`ClaimRefreshArgs.startedAt`) and
  * THAT is what the row records; `claimed_at` remains the claim instant, because
  * it is the LEASE clock and a lease may only ever be measured from when it was
- * actually taken. `started_at <= claimed_at` from here on, and everything that
- * reads `started_at` treats an earlier value conservatively: a freshness claim
- * gets weaker, never stronger, and the tick's next sweep comes sooner.
+ * actually taken. `started_at <= claimed_at` from here on — a DATABASE CHECK
+ * since drizzle/0014, because an ordering this much is riding on is not a
+ * guarantee while it lives only in this file (rules/backend.md) — and everything
+ * that reads `started_at` treats an earlier value conservatively: a freshness
+ * claim gets weaker, never stronger, and the tick's next sweep comes sooner.
  */
 
 /** How long a `running` claim is honored before another run may take over. */

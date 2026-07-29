@@ -301,7 +301,8 @@ export const refreshRuns = sqliteTable(
      * date an enrollment made inside that gap as older than the run and read it
      * as covered by a selection that never saw it. So `runRefresh` stamps the
      * instant it read its clock before selecting, and `started_at <= claimed_at`
-     * holds; `claimed_at` alone is the lease clock.
+     * holds — ENFORCED, not merely upheld, by the CHECK below (drizzle/0014);
+     * `claimed_at` alone is the lease clock.
      */
     startedAt: text("started_at").notNull(),
     /** Null WHILE running; stamped when the run settles (CHECK below enforces the iff). */
@@ -395,6 +396,20 @@ export const refreshRuns = sqliteTable(
     check("refresh_runs_players_total_nonneg_ck", sql`${t.playersTotal} >= 0`),
     check("refresh_runs_stat_lines_inserted_nonneg_ck", sql`${t.statLinesInserted} >= 0`),
     check("refresh_runs_stat_lines_updated_nonneg_ck", sql`${t.statLinesUpdated} >= 0`),
+    // THE SELECTION NEVER FOLLOWS THE CLAIM (PR #203 delta review). Splitting the
+    // two instants (see `startedAt` above) created an ORDERING that is load-bearing
+    // rather than incidental: coverage is judged against `started_at` and the lease
+    // against `claimed_at`, so an inverted row would let a run claim to have
+    // selected AFTER it claimed — dating enrollments made during its own
+    // selection-to-claim gap as already swept, which is the forged `fresh` the
+    // split exists to prevent. `runRefresh` reads its clock before selecting and
+    // `claimRefreshRun` stamps the claim itself, so the code upholds it; a
+    // validation is not a guarantee (rules/backend.md), and `started_at` also
+    // arrives from a CALLER-SUPPLIED instant, which is exactly the seam a
+    // constraint has to cover. Equality is legal and is the common case — every
+    // pre-#193 row has it, and so does any caller that passes no separate
+    // watermark. `claimed_at` is NOT NULL, so no null arm is needed.
+    check("refresh_runs_started_before_claimed_ck", sql`${t.startedAt} <= ${t.claimedAt}`),
   ],
 );
 

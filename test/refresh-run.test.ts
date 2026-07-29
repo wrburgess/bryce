@@ -662,6 +662,95 @@ describe("coverage-keyed freshness watermark, storage layer (#192)", () => {
       expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
     });
 
+    /**
+     * THE ORDERING ITSELF — `(started_at desc, id desc)` over the ELIGIBLE set
+     * (PR #203 delta review). `refreshHealth`'s opposite claim ("latest is claim
+     * order") got its regression test when the two orderings stopped agreeing;
+     * this one, the reason they had to differ, did not.
+     *
+     * Both cases are built so a NAIVE ordering picks the WRONG row: the first
+     * inverts watermark order against id order, the second ties the watermark so
+     * only `id` can decide. Neither can pass by accident on a build that dropped
+     * a key.
+     */
+    describe("ordering: (started_at desc, id desc) over the eligible set", () => {
+      it("the strongest WATERMARK wins, not the newest claim — id order is not a proxy", async () => {
+        // Two covering sweeps of the same lane whose claim order INVERTS their
+        // selection order: the second one selected an hour earlier and claimed
+        // ten minutes later (a long selection-to-claim gap, the very split this
+        // PR introduced). This function asks which PROVABLE COVERAGE CLAIM is
+        // strongest, and that is the later SELECTION — the one whose snapshot
+        // saw the most recent state of the lane. `refreshHealth` deliberately
+        // answers the other question with the other key (see its own test), so
+        // an ordering copied from there would land here as a silent regression.
+        const a = await insertList(opened.db, { name: "A" });
+        sweep("ok", [a.id], QUALIFYING_START, QUALIFYING_START); // selected 12:00, claimed 12:00
+        sweep("ok", [a.id], "2026-07-19T11:00:00.000Z", "2026-07-19T12:10:00.000Z");
+
+        const rows = opened.db.select().from(refreshRuns).orderBy(refreshRuns.id).all();
+        const [earlierClaim, laterClaim] = rows;
+        // The inversion is REAL, not assumed: higher id, earlier watermark.
+        expect(rows).toHaveLength(2);
+        expect(laterClaim!.id).toBeGreaterThan(earlierClaim!.id);
+        expect(laterClaim!.startedAt < earlierClaim!.startedAt).toBe(true);
+
+        // Ordering by id alone would return `laterClaim` and date this lane's
+        // coverage an hour older than it is — which, since the tick's
+        // `refreshIsDue` anchors on exactly this row's `started_at`, would make
+        // the lane read as due an hour early, every tick, forever.
+        expect(latestCoveringRun(opened.db, a.id)?.id).toBe(earlierClaim!.id);
+        expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe(QUALIFYING_START);
+      });
+
+      it("a watermark TIE is broken by id: the later-claimed run wins, deterministically", async () => {
+        // Same lane, same selection instant, different claims — two sweeps that
+        // read their clock in the same millisecond. The later CLAIM is the right
+        // winner: it is the one whose selection cannot have preceded the
+        // other's, and it carries the newer data.
+        //
+        // WHAT THIS CASE CATCHES, STATED HONESTLY (rules/testing.md: never
+        // believe a guard you have not broken on purpose — this one WAS broken,
+        // three ways). It reds on a REVERSED tie-break (`asc(id)`) and on a
+        // dropped `started_at` key. It does NOT red when `desc(id)` is simply
+        // DELETED: with `refresh_runs_status_started_idx` in place, SQLite's
+        // descending scan happens to yield the highest rowid first within an
+        // equal-key group, so the naive form coincidentally agrees today. That
+        // coincidence is precisely why the key is written explicitly rather than
+        // relied upon — it makes the answer a property of the QUERY instead of
+        // of the plan the optimizer picks — and saying so here keeps this case
+        // from reading as more coverage than it is.
+        const a = await insertList(opened.db, { name: "A" });
+        sweep("ok", [a.id], QUALIFYING_START, QUALIFYING_START);
+        sweep("ok", [a.id], QUALIFYING_START, "2026-07-19T12:10:00.000Z");
+
+        const rows = opened.db.select().from(refreshRuns).orderBy(refreshRuns.id).all();
+        expect(rows).toHaveLength(2);
+        expect(rows[0]!.startedAt).toBe(rows[1]!.startedAt); // the tie is real
+        expect(rows[1]!.id).toBeGreaterThan(rows[0]!.id);
+
+        const winner = latestCoveringRun(opened.db, a.id);
+        expect(winner?.id).toBe(rows[1]!.id);
+        // Pinned through the row's own claim instant too, so the case still
+        // discriminates if ids ever stop being the insertion order.
+        expect(winner?.claimedAt).toBe("2026-07-19T12:10:00.000Z");
+      });
+
+      it("an INELIGIBLE newer run never enters the ordering — the sort is over the eligible set", async () => {
+        // The ordering and the filter compose in one direction only: filter
+        // first, then rank. A build that ranked first and tested the winner
+        // would answer `undefined` here — lane A's own covering sweep sits one
+        // row down under a newer, `failed`, other-lane run.
+        const a = await insertList(opened.db, { name: "A" });
+        const b = await insertList(opened.db, { name: "B" });
+        sweep("ok", [a.id], QUALIFYING_START, QUALIFYING_START);
+        sweep("failed", [a.id, b.id], "2026-07-19T18:00:00.000Z");
+        sweep("ok", [b.id], "2026-07-19T19:00:00.000Z");
+
+        expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe(QUALIFYING_START);
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+      });
+    });
+
     it("a FAILED run never covers, however recent or on-lane", async () => {
       const a = await insertList(opened.db, { name: "A" });
       sweep("ok", [a.id], "2026-07-19T12:00:00.000Z");
