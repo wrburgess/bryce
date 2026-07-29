@@ -225,6 +225,23 @@ describe("players add CLI", () => {
     ]);
   });
 
+  it("discloses the cap when --pick is out of range ON a capped list", async () => {
+    // The crossed case the Reviewer found missing: an existing out-of-range
+    // test and an existing capped test, neither combined. `1..50` reads as an
+    // authoritative range when 50 is a cap and candidate 51 may simply be
+    // hidden — so the refusal that writes nothing still owes the caveat.
+    searchResults = makeSearchHits(SEARCH_RESULT_CAP);
+    const before = countPlayers();
+
+    expect(await runPlayersAdd(["--name", "smith", "--pick", "99"], deps())).toBe(1);
+    expect(err[0]).toBe(`error: --pick 99 out of range 1..${SEARCH_RESULT_CAP}`);
+    expect(err[1]).toBe(
+      `note: the API caps this search at ${SEARCH_RESULT_CAP} candidates; the list may be incomplete — narrow the name`,
+    );
+    expect(countPlayers()).toBe(before);
+    expect(countMembers()).toBe(0);
+  });
+
   it("says nothing about truncation one candidate BELOW the cap", async () => {
     // The boundary case: this is what goes red if the comparison is written `>`
     // instead of `>=`, which a 2-candidate case could never detect.

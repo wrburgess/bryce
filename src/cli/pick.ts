@@ -56,11 +56,17 @@ const cappedNotice = (): string =>
  * guessed pick is a wrong player added under a right-looking summary.
  *
  * A result set AT `SEARCH_RESULT_CAP` is indistinguishable from a truncated one
- * — the API returns no total and `limit` cannot raise the cap — so both the
- * refusal and the `--pick` path say so. Rendering a capped list as complete
- * turns this function's own guarantee inside out: the numbered list exists to
- * stop a guessed pick, and a pick off a silently truncated list is the same
- * wrong player arriving by a quieter route (#204).
+ * — the API returns no total and `limit` cannot raise the cap — so EVERY exit
+ * that showed or consumed a candidate list says so. Rendering a capped list as
+ * complete turns this function's own guarantee inside out: the numbered list
+ * exists to stop a guessed pick, and a pick off a silently truncated list is
+ * the same wrong player arriving by a quieter route (#204).
+ *
+ * That "every exit" is structural, not a rule three returns each remember: the
+ * `--pick` tail emits ONCE for both its exits. The first draft of this shipped
+ * a per-exit reminder, and the out-of-range return promptly forgot it — so
+ * `error: --pick 51 out of range 1..50` presented a capped range as the whole
+ * truth, which is the defect this notice exists to prevent, one branch over.
  */
 export async function pickFromSearch(
   name: string,
@@ -92,11 +98,13 @@ export async function pickFromSearch(
   const chosen = Number.isInteger(pick) ? results[pick - 1] : undefined;
   if (chosen === undefined) {
     deps.write(`error: --pick ${pickFlag} out of range 1..${results.length}`);
-    return null;
   }
-  // Advisory, never fatal: a capped list with a valid --pick still succeeds.
+  // ONE emission for both tail exits, so neither can drift from the other: the
+  // out-of-range refusal needs it most (its `1..N` reads as authoritative when
+  // N is a cap), and the success path needs it because a pick off a truncated
+  // list is a wrong player. Advisory in both — it never changes an exit code.
   if (capped) deps.write(cappedNotice());
-  return chosen.id;
+  return chosen?.id ?? null;
 }
 
 /**

@@ -133,6 +133,16 @@ describe("seed CLI surface", () => {
       expect(countPlayers()).toBe(1);
     });
 
+    it("discloses the cap when --pick is out of range ON a capped list", async () => {
+      searchResults = makeSearchHits(SEARCH_RESULT_CAP);
+      expect(await runSeed(["add", "--search", "smith", "--pick", "99"], deps())).toBe(1);
+      expect(out[0]).toBe(`error: --pick 99 out of range 1..${SEARCH_RESULT_CAP}`);
+      expect(out[1]).toBe(
+        `note: the API caps this search at ${SEARCH_RESULT_CAP} candidates; the list may be incomplete — narrow the name`,
+      );
+      expect(countPlayers()).toBe(0);
+    });
+
     it("says nothing about truncation one candidate BELOW the cap", async () => {
       searchResults = makeSearchHits(SEARCH_RESULT_CAP - 1);
       expect(await runSeed(["add", "--search", "smith"], deps())).toBe(1);

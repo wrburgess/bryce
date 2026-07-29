@@ -44,13 +44,16 @@ describe("MLB Stats API live contract smoke", () => {
    * an offline test asserting their answer would pin their behavior and rot.
    * This is the one place the round trip can be proven end to end.
    *
-   * personId 837864 is deliberate: a DSL player is the FURTHEST rung from the
-   * API's default scope, so this fails first if the scope is dropped on our
-   * side or narrows again on theirs. Both halves are asserted because they are
-   * different failures with the same symptom — "we stopped asking correctly"
-   * versus "they stopped answering".
+   * personId 837864 is deliberate. He plays in the Dominican Summer League,
+   * which is NOT a sportId of its own — sportId 16 covers every rookie/complex
+   * league and `league_name` is the only thing separating the DSL from the
+   * domestic complexes (src/mlb/levels.ts). So the DSL is the deepest corner of
+   * the LAST rung in SPORT_IDS, and this fails first if the scope is dropped on
+   * our side or narrows again on theirs. Both halves are asserted because they
+   * are different failures with the same symptom — "we stopped asking
+   * correctly" versus "they stopped answering".
    */
-  it("scoped searchPeople resolves a Rookie-level identity by name", async (ctx) => {
+  it("scoped searchPeople resolves a DSL (sportId 16) identity by name", async (ctx) => {
     const urls: string[] = [];
     const client = new MlbClient({
       delayMs: 0,
