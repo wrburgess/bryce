@@ -173,6 +173,60 @@ that records what the selection covered — narrower and more tractable than a g
 
 ---
 
+### F004 — A mutation harness restored with `git checkout`, so it graded unmodified source
+
+- **Normalized failure class:** self-invalidating verification — a harness that proves a guard by
+  breaking it restores between runs with a command that discards **all** uncommitted work, not just the
+  mutation, so every run after the first measures the *pre-change* source. Its output still looks like
+  mutation evidence: tests go red, by name, in plausible numbers.
+- **Severity and blast radius:** **Medium** as it occurred, and it self-corrected before anything was
+  claimed. A four-mutation loop over uncommitted source used `git checkout -- src/...` to restore.
+  Mutation A ran correctly; its restore reverted the whole change, so B, C, and D each mutated source
+  that no longer contained the feature. All three reported ~7 failures — a superset of the truth,
+  including the mutation-A failure repeated in every round, which is what exposed it. The near-miss is
+  the point: those numbers were one step from a PR body, under the heading *evidence*. Blast radius is
+  a reviewer trusting mutation coverage that was never measured — worse than absent evidence, because
+  absent evidence invites the question and false evidence closes it. Graded below
+  [F003](#f003--one-decision-was-answered-by-two-reads-and-they-could-disagree-fail-open) because no
+  shipped behavior was ever wrong; only the *proof* was, and the proof was re-run.
+- **Enforcement status:** **not enforced, and not mechanically checkable in general.** The specific
+  harness was rebuilt to restore from a file-level copy taken before the first mutation, and the valid
+  run is recorded in [PR #205](https://github.com/wrburgess/bryce/pull/205). But "does this restore
+  step discard more than it mutated?" is a question about a throwaway shell loop, not a property of the
+  repository — there is no artifact to lint. The *detector* generalizes better than the rule: a
+  mutation that reddens tests **unrelated to what it mutated** means the harness, not the code, is
+  broken. That is checkable by eye in every run, and it is what caught this one.
+- **Recurrence count:** 0 (first occurrence).
+- **Surfaced by:** [PR #205](https://github.com/wrburgess/bryce/pull/205) (issue
+  [#204](https://github.com/wrburgess/bryce/issues/204)), Stage-3 self-verification — found by the AC,
+  not by a Reviewer.
+- **Date recorded:** 2026-07-28
+- **Review date:** 2026-10-26
+
+**Why outcome 3 rather than 2.** The **minting freeze** is in force until the bounded corpus review
+dispositions the 45 loop-added bullets measured in
+[#185](https://github.com/wrburgess/bryce/issues/185), so outcome 2 is unavailable regardless of merit.
+
+The nearest existing bullet is `rules/testing.md`'s *"never believe a guard you have not broken on
+purpose"* — and this sits one level **above** it. That bullet governs the guard; this governs the
+apparatus that breaks it. The bullet was followed here in full, and it is precisely *because* it was
+followed that the bad evidence existed to be believed: a repo that never mutates its guards cannot
+produce a broken mutation harness. So the honest reading is that F004 is the failure mode that arrives
+**after** a team adopts that rule, not an instance of ignoring it.
+
+**Why not outcome 4.** The tempting argument is that this was caught, cost nothing, and belongs to a
+throwaway script. But the thing that caught it was noticing a *shape* in the output — the same test
+failing in every round — and that noticing was luck adjacent to skill. An entry costs one review date;
+being wrong about "we would always catch it" costs a PR body asserting verification that never
+happened.
+
+**If it recurs:** promote toward *enforce*. The tractable form is not a lint but a harness convention —
+capture the pre-mutation bytes of exactly the files to be mutated, restore from those, and assert the
+restored tree is byte-identical to the captured one before the next mutation. That is a five-line
+discipline, and a recurrence would justify writing it down as one.
+
+---
+
 ## Archived
 
 _None yet._
