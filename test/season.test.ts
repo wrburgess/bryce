@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
 import { seasonCalendar } from "../src/db/schema.js";
 import type { CalendarEntry, WatchedLevel } from "../src/domain/season.js";
-import { hostDate, isInSeason, sleepWindow } from "../src/domain/season.js";
+import { hostDate, hostHour, isInSeason, sleepWindow } from "../src/domain/season.js";
 import type { RefreshDeps } from "../src/jobs/refresh.js";
 import { refreshNcaaCalendar } from "../src/jobs/refresh.js";
 import { MlbClient } from "../src/mlb/client.js";
@@ -64,6 +64,60 @@ describe("hostDate", () => {
     // 03:00 UTC is still the previous evening in Chicago.
     expect(hostDate(new Date("2026-07-20T03:00:00Z"), TEST_TZ)).toBe("2026-07-19");
     expect(hostDate(new Date("2026-07-20T18:00:00Z"), TEST_TZ)).toBe("2026-07-20");
+  });
+});
+
+describe("hostHour (#193)", () => {
+  /**
+   * AN UNTESTED GUARD IS NOT A GUARD (#193 self-review, MEDIUM 2). Before this
+   * case, mutating `hourCycle: "h23"` to `"h24"` left the whole suite GREEN: every
+   * test that reached `hostHour` did so at 12:00 America/Chicago, where both
+   * cycles format `12`, and the offseason cases return before `hostHour` is
+   * called at all. On a real host at 00:15 the mutant returns 24, and
+   * `digestIsDue(24, h, false)` is TRUE for every legal `digest_hour` (the column
+   * CHECKs 0-23) — so every scheduled lane would fire at midnight, every night.
+   *
+   * The whole day is walked rather than a sampled few: midnight is the mutant's
+   * only divergence, and a table that happened to omit it would read as coverage
+   * while pinning nothing.
+   */
+  it("returns 0-23 in the host timezone, across every hour of the day", () => {
+    // July: America/Chicago is CDT (UTC-5), so host hour H is 05:00Z + H.
+    for (let hour = 0; hour <= 23; hour += 1) {
+      const utcHour = (hour + 5) % 24;
+      const date = hour + 5 >= 24 ? "2026-07-20" : "2026-07-19";
+      const at = new Date(`${date}T${String(utcHour).padStart(2, "0")}:30:00Z`);
+      expect(hostHour(at, TEST_TZ)).toBe(hour);
+    }
+  });
+
+  it("never yields 24 for midnight, and never a non-number", () => {
+    // The two guards `hostHour` carries, asserted where each one bites.
+    // `hourCycle: "h23"` — the h24 cycle renders midnight as 24, out of the
+    // range `digest_hour` is CHECKed to and above every legal configured hour.
+    expect(hostHour(new Date("2026-07-19T05:00:00Z"), TEST_TZ)).toBe(0);
+    expect(hostHour(new Date("2026-07-19T05:59:59Z"), TEST_TZ)).toBe(0);
+
+    // `en-US` pins the NUMBERING SYSTEM: a locale rendering non-Latin digits
+    // (e.g. `ar-EG-u-nu-arab` yields `١٢`) makes `Number()` return NaN, and NaN
+    // compares false against every `digest_hour`, so a lane would never fire at
+    // all. Asserted as a property over the whole day so the mutant cannot hide
+    // in an hour the table skipped.
+    for (let hour = 0; hour <= 23; hour += 1) {
+      const utcHour = (hour + 5) % 24;
+      const date = hour + 5 >= 24 ? "2026-07-20" : "2026-07-19";
+      const value = hostHour(new Date(`${date}T${String(utcHour).padStart(2, "0")}:30:00Z`), TEST_TZ);
+      expect(Number.isInteger(value)).toBe(true);
+      expect(value).toBeGreaterThanOrEqual(0);
+      expect(value).toBeLessThanOrEqual(23);
+    }
+  });
+
+  it("reads the HOST timezone, not UTC", () => {
+    // The negative control: without it every case above would pass against a
+    // function that ignored `tz` entirely and formatted UTC.
+    expect(hostHour(new Date("2026-07-19T05:00:00Z"), TEST_TZ)).toBe(0);
+    expect(hostHour(new Date("2026-07-19T05:00:00Z"), "UTC")).toBe(5);
   });
 });
 

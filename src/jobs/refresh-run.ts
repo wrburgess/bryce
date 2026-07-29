@@ -1,7 +1,7 @@
-import { and, desc, eq, gt, inArray, isNull, lte, max, or } from "drizzle-orm";
+import { and, desc, eq, exists, gt, gte, inArray, isNull, like, lte, max, not, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
-import type { RefreshRunStatus } from "../db/schema.js";
-import { refreshRuns } from "../db/schema.js";
+import type { RefreshRunRow, RefreshRunStatus } from "../db/schema.js";
+import { listMembers, players, refreshRuns } from "../db/schema.js";
 import { hostDate } from "../domain/season.js";
 
 /**
@@ -32,6 +32,25 @@ import { hostDate } from "../domain/season.js";
  * sweep that began at 23:59 and finished at 00:05 straddles midnight and may have
  * fetched some players while their games were still live. Anchoring on the start
  * is the conservative, provably-correct choice.
+ *
+ * AND `started_at` IS THE SELECTION WATERMARK, NOT THE CLAIM INSTANT (PR #203
+ * Reviewer P1). Every coverage question this file answers is really "what did
+ * this run's player selection see?", and the sweep selects its players BEFORE it
+ * claims — `runRefresh` loads calendars in between, several database reads wide.
+ * Stamping the CLAIM instant onto `started_at` therefore backdates the run's
+ * knowledge: a Player enrolled into a swept lane inside that gap has a
+ * `created_at` EARLIER than the recorded start, so the membership test below
+ * reads him as covered while `activePlayers` — fixed before he existed to the
+ * query — never fetched him. That is the same forged `fresh` the membership test
+ * exists to refuse, arrived at through the run's own clock. So the caller passes
+ * the instant it took its selection snapshot (`ClaimRefreshArgs.startedAt`) and
+ * THAT is what the row records; `claimed_at` remains the claim instant, because
+ * it is the LEASE clock and a lease may only ever be measured from when it was
+ * actually taken. `started_at <= claimed_at` from here on — a DATABASE CHECK
+ * since drizzle/0014, because an ordering this much is riding on is not a
+ * guarantee while it lives only in this file (rules/backend.md) — and everything
+ * that reads `started_at` treats an earlier value conservatively: a freshness
+ * claim gets weaker, never stronger, and the tick's next sweep comes sooner.
  */
 
 /** How long a `running` claim is honored before another run may take over. */
@@ -45,7 +64,26 @@ export type ClaimRefreshResult =
   | { claimed: false; reason: "already-running" };
 
 export interface ClaimRefreshArgs {
+  /**
+   * The CLAIM instant: the lease clock (`claimed_at`), the reap cutoff, and the
+   * row's `created_at`. Never the coverage anchor — see {@link startedAt}.
+   */
   now: Date;
+  /**
+   * When this run took its PLAYER SELECTION snapshot — recorded as `started_at`,
+   * which is the anchor every coverage and freshness test keys on (see this
+   * file's header). `runRefresh` reads its clock immediately before
+   * `selectSweepPlayers` and passes THAT instant, because the sweep's knowledge
+   * of who is active and who is on a lane is frozen there, not at the claim.
+   *
+   * Optional, defaulting to {@link now}, for a caller whose selection IS its
+   * claim — a fixture claiming a bare run, and nothing in `src/`. The default is
+   * the conservative direction only for such a caller: any real gap between
+   * selection and claim MUST be declared, or the row overstates what the run
+   * knew. It is never clamped against `now`; a caller that passes a LATER
+   * instant is stating a falsehood no guard here can repair.
+   */
+  startedAt?: Date;
   /** How many active players this run intends to sweep — recorded on the row. */
   playersTotal: number;
   /**
@@ -71,14 +109,20 @@ export interface ClaimRefreshArgs {
  * The form: ids DEDUPED and sorted ASCENDING, comma-delimited, wrapped in
  * LEADING AND TRAILING SENTINEL COMMAS — `,1,3,10,`.
  *
- * WHY THE SENTINELS SURVIVE, now that nothing does containment. Until the
- * Stage-4 loop-back on #192 they were load-bearing for an `instr` test that
- * asked whether the text contained the default lane's id; that test is gone
- * (ADR 0061 decision 8), and with it the prefix trap they closed. What is left
- * is one present-tense reason, not nostalgia: the EMPTY scope must not encode to
- * the empty string. `,,` is visibly "swept zero lanes"; `""` is a value that
- * `if (!row.scopeListIds)` in TypeScript, `ifnull()` in SQL, and most CSV/JSON
- * round-trips cannot tell from `NULL` — and `NULL` here means "swept
+ * THE SENTINELS ARE LOAD-BEARING AGAIN (#193, ADR 0062 decision 2). This column
+ * was demoted to "provenance that nothing parses back" at the end of #192; #193
+ * promotes it to a QUERYABLE COVERAGE RECORD, because the question "did a run
+ * cover lane L?" is now asked twice — by the digest's per-lane freshness banner
+ * and by the tick's refresh due-ness clock — and both are answered from this one
+ * column by {@link latestCoveringRun}. The fencing commas are what make that
+ * containment test exact: `LIKE '%,1,%'` matches `,1,3,` and NOT `,11,`, whereas
+ * an unfenced `LIKE '%1%'` would read lane 11's sweep as covering lane 1 and
+ * forge a `fresh` banner over players nobody fetched. A test pins that exact pair.
+ *
+ * The empty-scope reason stands unchanged beside it: the EMPTY scope must not
+ * encode to the empty string. `,,` is visibly "swept zero lanes"; `""` is a value
+ * that `if (!row.scopeListIds)` in TypeScript, `ifnull()` in SQL, and most
+ * CSV/JSON round-trips cannot tell from `NULL` — and `NULL` here means "swept
  * EVERYTHING". That confusion is the fail-OPEN direction, so the format keeps a
  * shape in which no legal scope is falsy. Canonical ordering and dedupe stay for
  * the same reason they always applied: two runs over the same lanes store the
@@ -112,6 +156,12 @@ export const SUPERSEDED_MESSAGE = "superseded: lease expired, taken over by a ne
 export function claimRefreshRun(db: Db, args: ClaimRefreshArgs): ClaimRefreshResult {
   const leaseMs = args.leaseMs ?? REFRESH_LEASE_MS;
   const nowIso = args.now.toISOString();
+  // The coverage anchor is the caller's SELECTION instant, which is at or before
+  // the claim (see the header). Kept separate from `nowIso` on purpose: every
+  // lease decision in this function — the live-lease refusal, the reap cutoff,
+  // this row's own `claimed_at` — must read the CLAIM instant, or an earlier
+  // anchor would make a brand-new claim look expired to its own successor.
+  const startedIso = (args.startedAt ?? args.now).toISOString();
   // The lease cutoff as an ISO-8601 UTC string: `claimed_at > cutoff` is a live
   // lease; `<= cutoff` (or null) is expired. ISO-8601 UTC strings compare
   // lexicographically, so this is an indexed range scan, not a JS full-table sweep.
@@ -149,9 +199,11 @@ export function claimRefreshRun(db: Db, args: ClaimRefreshArgs): ClaimRefreshRes
       const inserted = tx
         .insert(refreshRuns)
         .values({
-          startedAt: nowIso,
+          // The SELECTION watermark (PR #203 Reviewer P1), not this instant.
+          startedAt: startedIso,
           finishedAt: null,
           status: "running",
+          // The lease, always measured from the claim itself.
           claimedAt: nowIso,
           playersRefreshed: 0,
           playersTotal: args.playersTotal,
@@ -181,12 +233,50 @@ export function claimRefreshRun(db: Db, args: ClaimRefreshArgs): ClaimRefreshRes
  * updated); false when the row is no longer `running` — a successor reaped it as
  * `failed` (see claimRefreshRun), so this run has lost ownership and must abort
  * before its next write rather than clobber the successor's newer data.
+ *
+ * THE WRITE IS CLAMPED AT `started_at` (PR #203 delta review). This function used
+ * to write a bare `now` with NO comparison against either instant on the row, so
+ * a clock that stepped BACKWARD wrote a `claimed_at` earlier than the run's own
+ * `started_at`. Nor does the WHERE below stop it: that guard rejects a claim too
+ * OLD relative to `now`, and a regressed clock moves its cutoff earlier along
+ * with the clock, so the stored claim stays above the cutoff no matter how large
+ * the backward step is. Nothing here was ever keeping the two instants ordered.
+ * Since drizzle/0014 an inverted row is a CHECK violation, so the unclamped
+ * renewal would throw and kill the sweep — and on a pre-0014 database it had
+ * already written rows that make 0014's copy, and therefore startup, fail.
+ * (`renewRefreshRun` moving `claimed_at` "strictly forward" was asserted in that
+ * migration's first revision; it was never true.)
+ *
+ * `max(now, started_at)` is the minimal clamp: it changes the written value in
+ * EXACTLY the states the CHECK refuses (`now < started_at`) and nowhere else, so
+ * under any forward-moving clock — where `started_at <= claim <= now` — it writes
+ * byte-identically to the old bare `now`. A regression is then resolved in the
+ * conservative direction: the row's lease reads OLDER, so this run is reaped
+ * SOONER and a successor may take over. Clamping to the existing `claimed_at`
+ * instead (a strictly monotonic lease) also satisfies the CHECK, but it holds the
+ * lease at its highest observed value — a PHANTOM lease that a successor sharing
+ * the same regressed clock reads as live and refuses behind, silencing Refresh
+ * for as long as the clock stays behind. A worker with a broken clock losing its
+ * lease is strictly better than one keeping it.
+ *
+ * The return value still means exactly what it says. Ownership is decided by the
+ * WHERE, evaluated on the row's PRE-clamp state, so `true` remains "this run
+ * owned its lease at the instant of this update" — the same promise it always
+ * made, and never a claim about the future: a successor could always reap
+ * immediately after any renewal. Every subsequent write re-checks ownership under
+ * one transaction (`withIngestionFence`), which is what actually protects the
+ * data.
  */
 export function renewRefreshRun(db: Db, runId: number, now: Date): boolean {
+  const nowIso = now.toISOString();
   const cutoffIso = new Date(now.getTime() - REFRESH_LEASE_MS).toISOString();
   const result = db
     .update(refreshRuns)
-    .set({ claimedAt: now.toISOString() })
+    // Two-argument `max` is SQLite's SCALAR max (the aggregate is the one-argument
+    // form), comparing the two ISO-8601 UTC strings under BINARY collation, which
+    // for this format is chronological. `started_at` is NOT NULL, so the
+    // NULL-if-any-argument-is-NULL arm cannot be reached.
+    .set({ claimedAt: sql`max(${nowIso}, ${refreshRuns.startedAt})` })
     // A lease is strictly live: exactly at expiry the worker has lost its
     // authority and may not revive itself before a successor happens to reap it.
     .where(and(eq(refreshRuns.id, runId), eq(refreshRuns.status, "running"), gt(refreshRuns.claimedAt, cutoffIso)))
@@ -347,6 +437,134 @@ export interface DigestFreshness {
 }
 
 /**
+ * THE latest ok/partial run whose sweep COVERED `laneId` (#193, ADR 0062
+ * decision 2) — the one place the coverage predicate is authored.
+ *
+ * `null` asks the WHOLE-WATCH-LIST question ("did a run sweep every active
+ * Player?") and accepts only `scope_list_ids IS NULL`. A lane id asks the
+ * narrower one ("did a run sweep this lane?") and accepts either a whole-list
+ * run — which covers every lane by definition — or a scoped run whose fenced id
+ * list contains it.
+ *
+ * TWO CALLERS, ONE PREDICATE, and that is the point rather than a tidiness
+ * preference. {@link digestFreshnessFor} asks it to decide whether a lane's
+ * digest may claim `fresh`, and the tick (`src/jobs/tick.ts`) asks it to decide
+ * whether a lane's refresh interval has elapsed. Re-authoring the `LIKE` at
+ * either call site is how the fencing quietly stops matching at one of them —
+ * `rules/scripting.md`, and the exact defect shape this repo keeps finding.
+ *
+ * NAMING A LANE IS NOT COVERING ITS MEMBERS (PR #203 Reviewer P2). A scoped run
+ * records the lane ID, never the players it selected, so the id test alone is
+ * IDENTITY one level down — the very thing this predicate exists to refuse. Add
+ * an active Player to lane L after L's sweep began and the old run still names
+ * L, while `assembleDigest` now reports a player it never fetched: a forged
+ * `fresh`. So a SCOPED run covers L only while NO current active member of L
+ * joined at or after that run's `started_at`.
+ *
+ * WHICH IS THE SELECTION WATERMARK, and that is what makes this test sound (PR
+ * #203 Reviewer P1). `started_at` is stamped from the clock read immediately
+ * before the sweep's selection query, never from the later claim — `runRefresh`
+ * loads calendars in between, so a claim-instant anchor would leave every
+ * enrollment inside that gap comparing as "before the run started" and reading
+ * as covered by a selection that never saw it. A join is `>=`, not `>`: the
+ * watermark is read just before the selection query, so a member added in that
+ * same instant may never have been in it.
+ *
+ * DELIBERATELY SCOPED TO SCOPED RUNS. A whole-list run (`scope_list_ids IS
+ * NULL`) swept every THEN-ACTIVE Player, and its claim is about players rather
+ * than lanes — moving one of those players onto a lane afterwards changes no
+ * fact about what it fetched. Widening the membership test to NULL rows would
+ * silently retighten the pre-existing #192 / ADR 0061 whole-list behavior this
+ * change has no business touching (a fresh enrollment would flip every lane
+ * banner to `stale` on a host that never scopes a sweep at all). A genuinely NEW
+ * active Player is a different matter and is already handled elsewhere: he is
+ * absent from the run's `players_total`, and the next sweep re-answers.
+ *
+ * The degradation is CONSERVATIVE BY CONSTRUCTION — it can only demote a claim,
+ * never manufacture one. When the newest scoped run stops covering, the query
+ * falls through to an older covering run or to `undefined`, so the banner reads
+ * `stale` and the tick reads the lane as due and re-sweeps it. Self-healing:
+ * that sweep starts after the join, so it covers again.
+ *
+ * `failed` runs never cover, and the anchor is `started_at`, not `finished_at`
+ * (see this file's header): a run that STARTED after the content day ended saw
+ * every one of that day's now-final games.
+ *
+ * ORDERING IS (started_at desc, id desc) OVER THE ELIGIBLE SET, never over every
+ * run. A newer INELIGIBLE run — another lane's sweep — must not be allowed to
+ * answer and hide an older covering one, which is the per-lane twin of the
+ * invariant #192 pinned for whole-list coverage.
+ *
+ * ORDERING BY THE WATERMARK STAYS RIGHT once `started_at` is the selection
+ * instant rather than the claim (PR #203 Reviewer P1): each candidate is judged
+ * on ITS OWN watermark by the correlated `EXISTS` above, so every row that
+ * survives is a claim its own selection can prove, and the latest watermark is
+ * the strongest of them. It is deliberately NOT `id` order — id is claim order,
+ * and a run that claimed later can have selected earlier.
+ */
+export function latestCoveringRun(db: Db, laneId: number | null): RefreshRunRow | undefined {
+  // A non-integer id would be interpolated into the LIKE pattern below, so it is
+  // refused here rather than allowed to build a pattern that matches nothing (or,
+  // worse, something). Every real caller passes a `player_lists.id`; this exists
+  // so the function is safe in isolation, not because a caller is suspected.
+  if (laneId !== null && !Number.isSafeInteger(laneId)) {
+    throw new Error(`latestCoveringRun: laneId must be an integer, got ${String(laneId)}`);
+  }
+  const covers =
+    laneId === null
+      ? isNull(refreshRuns.scopeListIds)
+      : or(
+          // A whole-list run covers every lane by definition, and no membership
+          // test applies to it (see the doc comment: its claim is about players,
+          // not lanes).
+          isNull(refreshRuns.scopeListIds),
+          and(
+            // The fenced containment test. `,1,` matches `,1,3,` and NOT `,11,`,
+            // which is the whole reason `encodeScopeListIds` keeps its sentinel
+            // commas. The pattern is a bound parameter, never spliced SQL.
+            like(refreshRuns.scopeListIds, `%,${laneId},%`),
+            // ...AND the lane's membership has not moved under it. A CORRELATED
+            // EXISTS on the run row's own `started_at`, never a materialized id
+            // list (rules/backend.md): it stays constant-size however many
+            // members the lane holds, and SQLite short-circuits on the first
+            // offending row. `players.active` is the master gate (ADR 0046
+            // decision 2) and the join reproduces the sweep's OWN selection
+            // predicate (`selectSweepPlayers`: active AND a member of a scoped
+            // lane), so an INACTIVE player added afterwards spoils nothing —
+            // the sweep would not have fetched him and the digest does not
+            // report him.
+            not(
+              exists(
+                db
+                  .select({ x: sql`1` })
+                  .from(listMembers)
+                  .innerJoin(players, eq(players.id, listMembers.playerId))
+                  .where(
+                    and(
+                      eq(listMembers.listId, laneId),
+                      eq(players.active, true),
+                      // Both columns are `Date#toISOString()` bytes — the app
+                      // writes them (`insertMemberships`, `claimRefreshRun`) and
+                      // so does drizzle/0012's backfill
+                      // (`strftime('%Y-%m-%dT%H:%M:%fZ')`) — so this string
+                      // comparison is a chronological one.
+                      gte(listMembers.createdAt, refreshRuns.startedAt),
+                    ),
+                  ),
+              ),
+            ),
+          ),
+        );
+  return db
+    .select()
+    .from(refreshRuns)
+    .where(and(inArray(refreshRuns.status, ["ok", "partial"]), covers))
+    .orderBy(desc(refreshRuns.startedAt), desc(refreshRuns.id))
+    .limit(1)
+    .all()[0];
+}
+
+/**
  * The freshness of the data a digest for `contentDate` would carry (ADR 0043).
  *
  * `contentDate` is the digest's content day — `assembly.window.to`, yesterday.
@@ -357,38 +575,42 @@ export interface DigestFreshness {
  * anything else (a failed qualifier, or none at all) is `stale`, dated by the
  * most recent ok/partial run's `finished_at` (or null: "never").
  *
- * A QUALIFYING RUN MUST ALSO HAVE COVERED EVERY ACTIVE PLAYER (#192, ADR 0061
- * decision 8) — `scope_list_ids IS NULL`. Scoping the sweep opened a hole the
- * whole-list sweep did not have: `sk refresh -l Prospects` settling `ok` would
- * otherwise make this banner read `fresh` over a watch list that sweep never
- * touched, a forged completeness claim.
+ * THE PREDICATE IS COVERAGE, NOT IDENTITY (#192, ADR 0061 decision 8). Scoping
+ * the sweep opened a hole the whole-list sweep did not have: `sk refresh -l
+ * Prospects` settling `ok` must not make this banner read `fresh` over players
+ * that sweep never touched. So the question asked is always "was every player I
+ * am about to report on swept?" — never "which lane was named?".
  *
- * THE PREDICATE IS COVERAGE, NOT IDENTITY, and that distinction is the whole
- * finding of the Stage-4 loop-back. This function used to take the default
- * lane's id and ask "did the run's scope contain it?" — a PROXY that holds only
- * while the default lane contains every active Player. It fails the moment
- * anyone uses the lane commands #191 shipped: point the default at a brand-new
- * empty lane and a sweep of zero players certified the whole Watch List as
- * `fresh`. The question this function actually answers is "was every player I am
- * about to report on swept?", so that is the question the column now records
- * (`runRefresh` writes `NULL` for a run whose lanes covered everyone) and this is
- * the question the filter asks. No proxy is left to drift, and the parameter
- * goes away with it.
+ * AND NOT LANE IDENTITY EITHER (PR #203 Reviewer P2). A run's lane id is a
+ * second identity, one level down: a scoped run records the lane, never its
+ * members, so a player who joined the lane AFTER that sweep began is reported by
+ * `assembleDigest` and was never fetched. {@link latestCoveringRun} therefore
+ * expires a scoped run's coverage of a lane whose active membership grew at or
+ * after its `started_at`, which lands here as an honest `stale` rather than a
+ * forged `fresh`. The `null` (whole-list) question is untouched.
+ *
+ * `laneId` IS WHICH PLAYERS THE DIGEST IS ABOUT (#193, ADR 0062). Bare `sk
+ * digest` now assembles the DEFAULT LANE's members rather than the whole Watch
+ * List, and a named-lane 1d send assembles that lane's — so demanding a
+ * whole-list sweep would leave every lane digest permanently `stale` on a host
+ * whose lanes do not happen to hold everyone. Passing the lane narrows the claim
+ * to exactly what the email claims for; `null` keeps the whole-list read for a
+ * caller reporting on every active Player. Narrowing is safe in the direction
+ * that matters: a whole-list run still covers every lane, so it still answers.
  */
-export function digestFreshnessFor(db: Db, contentDate: string, tz: string): DigestFreshness {
-  // The LATEST ELIGIBLE ok/partial by (started_at, id) is authoritative: if IT
+export function digestFreshnessFor(
+  db: Db,
+  contentDate: string,
+  tz: string,
+  laneId: number | null = null,
+): DigestFreshness {
+  // The LATEST COVERING ok/partial by (started_at, id) is authoritative: if IT
   // does not clear the content date, no OLDER success can either. One indexed,
   // LIMIT 1 read replaces the old whole-table materialize-and-scan. An
-  // INELIGIBLE newer partial-coverage run is skipped rather than allowed to
-  // answer, so a frequent lane sweep can never hide an older complete run's
-  // verdict.
-  const latest = db
-    .select()
-    .from(refreshRuns)
-    .where(and(inArray(refreshRuns.status, ["ok", "partial"]), isNull(refreshRuns.scopeListIds)))
-    .orderBy(desc(refreshRuns.startedAt), desc(refreshRuns.id))
-    .limit(1)
-    .all()[0];
+  // INELIGIBLE newer run — one that did not cover this lane — is skipped rather
+  // than allowed to answer, so another lane's frequent sweep can never hide this
+  // lane's older covering run's verdict.
+  const latest = latestCoveringRun(db, laneId);
 
   if (latest === undefined) {
     return { state: "stale", asOf: null, playersRefreshed: 0, playersTotal: 0 };
@@ -433,7 +655,7 @@ export interface RefreshHealth {
 
 /**
  * The refresh block of the health snapshot (ADR 0043), or null when no run has
- * ever been recorded. Ordering is (started_at desc, id desc):
+ * ever been recorded. Ordering is (id desc):
  *   - a LIVE `running` lease ⇒ `running`;
  *   - otherwise the latest TERMINAL run decides — `failed`→`failed`,
  *     `partial`→`partial`, `ok`→`fresh` when it started today (host) else
@@ -450,13 +672,26 @@ export interface RefreshHealth {
  * settled `failed` from the only surface that reports it, suppressing a real
  * operational signal because the failure happened to be scoped. A freshness
  * CLAIM must be narrowed to what it claims for; an operational SIGNAL must not be.
+ *
+ * "LATEST" HERE IS CLAIM ORDER (`id`), not the `started_at` watermark, and the
+ * two stopped being interchangeable when `started_at` became the SELECTION
+ * instant (PR #203 Reviewer P1). A run selects before it claims, so a run that
+ * claimed later CAN carry an earlier `started_at` — two overlapping sweeps where
+ * the second one's selection-to-claim gap outlasts the first one's entire run.
+ * Ordering by the watermark would then rank a settled predecessor above the live
+ * successor and this function would report `fresh` (with the predecessor's
+ * counts) while a sweep is in flight. `id` is the durable generation the claim
+ * transaction already serializes — the same fact `admitTargetedRefresh` fences
+ * on — so it answers "the latest run" exactly. {@link latestCoveringRun} keeps
+ * the watermark ordering, because it asks a different question: not which run is
+ * newest, but which PROVABLE coverage claim is strongest.
  */
 export function refreshHealth(db: Db, now: Date, tz: string): RefreshHealth | null {
-  const order = [desc(refreshRuns.startedAt), desc(refreshRuns.id)] as const;
+  const order = [desc(refreshRuns.id)] as const;
 
   // The overall latest run row (any status) sources lastStartedAt/lastFinishedAt
   // and the counts, and decides `running` when it is a live lease. Fencing
-  // (claimRefreshRun) guarantees a live `running` is always the newest row, so
+  // (claimRefreshRun) guarantees a live `running` is always the newest CLAIM, so
   // reading the overall latest here preserves the original derivation exactly.
   const latest = db.select().from(refreshRuns).orderBy(...order).limit(1).all()[0];
   if (latest === undefined) return null;

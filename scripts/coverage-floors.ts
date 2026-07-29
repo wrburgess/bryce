@@ -80,12 +80,19 @@ export type Summary = Record<string, SummaryEntry>;
 // sweeping a constant matrix (ADR 0060), so an under-tested branch there no longer costs a
 // few wasted calls -- it silently stops fetching a level. Measured 97.83/88.72 with the
 // probe-plan suite in place; floored at 97/88.
+//
+// #193 adds `src/cli/tick.ts`. It is the ONLY scheduled entry point (ADR 0062 decision 3), so a
+// thinly-tested branch there is not a wrong line of output -- it is a host that silently stops
+// refreshing and digesting, four times an hour, into a log nobody reads. Measured 82.51/78.94
+// and floored at 82/78. The gap to `src/cli/refresh.ts`'s 90 is `main()`: its real-process test
+// spawns a separate process, whose execution the in-process coverage provider cannot see.
 export const FLOORS: Floors = {
   "src/cli/main.ts": { statements: 42, branches: 50 },
   "src/cli/seed.ts": { statements: 54, branches: 61 },
   "src/server.ts": { statements: 56, branches: 76 },
   "src/cli/migrate.ts": { statements: 70, branches: 33 },
   "src/cli/restore.ts": { statements: 78, branches: 61 },
+  "src/cli/tick.ts": { statements: 82, branches: 78 },
   "src/cli/batch-add.ts": { statements: 85, branches: 73 },
   "src/watchlist/service.ts": { statements: 86, branches: 79 },
   "src/cli/refresh.ts": { statements: 90, branches: 87 },

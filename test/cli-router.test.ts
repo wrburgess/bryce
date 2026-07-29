@@ -39,7 +39,8 @@ const SPAWN_CONCURRENCY = Math.max(1, Math.min(4, availableParallelism()));
 const COMPAT_ENTRYPOINTS = [
   "src/cli/backup.ts", "src/cli/batch-add.ts", "src/cli/connector-smoke.ts", "src/cli/digest.ts", "src/cli/report.ts",
   "src/cli/lists.ts", "src/cli/migrate.ts", "src/cli/players-backup.ts",
-  "src/cli/players-restore.ts", "src/cli/refresh.ts", "src/cli/restore.ts", "src/cli/seed.ts", "src/server.ts",
+  "src/cli/players-restore.ts", "src/cli/refresh.ts", "src/cli/restore.ts", "src/cli/seed.ts",
+  "src/cli/tick.ts", "src/server.ts",
 ];
 
 // Worst case is one full per-spawn bound per wave, so the budget is waves x bound. Derived, never

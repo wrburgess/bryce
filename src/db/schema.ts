@@ -89,9 +89,19 @@ export const playerLists = sqliteTable(
      * not expressing "weekdays only". Inert until #192 reads it.
      */
     refreshIntervalMinutes: integer("refresh_interval_minutes"),
-    /** Host-timezone hour (0-23) this lane digests at; null = never auto-digests. Inert until #193. */
+    /**
+     * Host-timezone hour (0-23) this lane digests at; null = never
+     * auto-digests. Read by the tick (#193): a lane is due once the host hour
+     * has REACHED it and today's slot holds no `sent` row — `>=`, not `==`, so a
+     * laptop asleep at the hour still sends on wake.
+     */
     digestHour: integer("digest_hour"),
-    /** This lane's recipients; null = fall back to the DIGEST_TO env value. Inert until #193. */
+    /**
+     * This lane's recipients; null = fall back to the DIGEST_TO env value.
+     * Read by the CLAIMED digest path (#193): a lane's scheduled daily send goes
+     * here. An on-demand report keeps the host recipients — it answers the person
+     * who asked for it, not the lane's subscribers.
+     */
     digestTo: text("digest_to"),
   },
   (t) => [
@@ -178,10 +188,13 @@ export const digestDeliveries = sqliteTable(
       .references(() => playerLists.id),
   },
   (t) => [
-    // The slot key gains the lane dimension: two lanes may digest the same date,
-    // one lane may not digest it twice. Until #193 routes lane-scoped sends onto
-    // the claimed path every row carries the default lane, so this behaves
-    // exactly like the two-column key it replaces.
+    // The slot key carries the lane dimension: two lanes may digest the same
+    // date, one lane may not digest it twice. That third column is load-bearing
+    // as of #193 (ADR 0062 decision 1), which routes every tag-free 1d send —
+    // including an explicitly named lane's, on any surface — onto the claimed
+    // path. Rows genuinely differ by lane now, where before the migration every
+    // one carried the default lane and this behaved like the two-column key it
+    // replaced.
     uniqueIndex("digest_deliveries_kind_date_list_uq").on(t.kind, t.dateCovered, t.listId),
   ],
 );
@@ -274,11 +287,22 @@ export const refreshRuns = sqliteTable(
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     /**
-     * When the sweep CLAIMED its run — the freshness anchor (ADR 0043). Freshness
-     * is judged on the START, never the finish: a run that started after the
-     * content day ended captured every player under ADR 0040's forward-clock
-     * finality gate, whereas a midnight-straddling run started before is
-     * conservatively stale. Also `claimed_at`'s initial value: start == claim.
+     * When the sweep took its PLAYER SELECTION snapshot — the freshness anchor
+     * (ADR 0043). Freshness is judged on the START, never the finish: a run that
+     * started after the content day ended captured every player under ADR 0040's
+     * forward-clock finality gate, whereas a midnight-straddling run started
+     * before is conservatively stale.
+     *
+     * THE SELECTION INSTANT, NOT THE CLAIM INSTANT (PR #203 Reviewer P1). A
+     * sweep selects its players, loads calendars, and only then claims, so the
+     * two differ by several database reads. Every coverage test — most sharply
+     * `latestCoveringRun`'s "did this lane gain an active member since?" — is
+     * really asking what the SELECTION saw, and a claim-instant anchor would
+     * date an enrollment made inside that gap as older than the run and read it
+     * as covered by a selection that never saw it. So `runRefresh` stamps the
+     * instant it read its clock before selecting, and `started_at <= claimed_at`
+     * holds — ENFORCED, not merely upheld, by the CHECK below (drizzle/0014);
+     * `claimed_at` alone is the lease clock.
      */
     startedAt: text("started_at").notNull(),
     /** Null WHILE running; stamped when the run settles (CHECK below enforces the iff). */
@@ -296,6 +320,11 @@ export const refreshRuns = sqliteTable(
      * The lease clock (ADR 0034's pattern), RENEWED after each player. A healthy
      * long sweep keeps renewing and stays live; a crashed run stops and its lease
      * expires after REFRESH_LEASE_MS, so another run may claim without waiting.
+     *
+     * The CLAIM instant, and the only column a lease decision may read — its
+     * initial value is when the row was inserted, at or after `started_at` (PR
+     * #203 Reviewer P1). Measuring a lease from the selection watermark instead
+     * would let a slow-to-claim sweep be reaped by the very next claim.
      */
     claimedAt: text("claimed_at").notNull(),
     playersRefreshed: integer("players_refreshed").notNull().default(0),
@@ -328,11 +357,17 @@ export const refreshRuns = sqliteTable(
      * swept everyone; `runRefresh` decides that from the SAME claim-time read
      * that selected the sweep, so the two can never disagree.
      *
-     * Otherwise the value is PROVENANCE for a genuinely partial run: the
-     * canonical encoding of its lane ids — ascending, deduped, comma-delimited,
-     * sentinel-wrapped (`,1,3,10,`). Nothing parses it back; the only reader is
-     * `digestFreshnessFor`, and all it asks is `IS NULL`.
-     * {@link encodeScopeListIds} is the one writer.
+     * Otherwise the value is the canonical encoding of the lanes it did cover —
+     * ascending, deduped, comma-delimited, sentinel-wrapped (`,1,3,10,`).
+     *
+     * IT IS QUERIED, not merely recorded (#193, ADR 0062 decision 2 — which
+     * amends the "provenance that nothing parses back" contract #192 left here).
+     * `latestCoveringRun` is the ONE reader and asks two things of it: `IS NULL`
+     * for the whole-list question, and fenced containment (`LIKE '%,1,%'`, which
+     * is why the sentinel commas are load-bearing) for the per-lane one. A lane
+     * hit by containment is covered only while its active membership has not
+     * grown since that run's `started_at` — naming a lane is not covering its
+     * members (PR #203). {@link encodeScopeListIds} is the one writer.
      *
      * Declared HERE, not only in drizzle/0013, so a future drizzle-kit table
      * rebuild re-emits the column (`rules/backend.md`).
@@ -361,6 +396,25 @@ export const refreshRuns = sqliteTable(
     check("refresh_runs_players_total_nonneg_ck", sql`${t.playersTotal} >= 0`),
     check("refresh_runs_stat_lines_inserted_nonneg_ck", sql`${t.statLinesInserted} >= 0`),
     check("refresh_runs_stat_lines_updated_nonneg_ck", sql`${t.statLinesUpdated} >= 0`),
+    // THE SELECTION NEVER FOLLOWS THE CLAIM (PR #203 delta review). Splitting the
+    // two instants (see `startedAt` above) created an ORDERING that is load-bearing
+    // rather than incidental: coverage is judged against `started_at` and the lease
+    // against `claimed_at`, so an inverted row would let a run claim to have
+    // selected AFTER it claimed — dating enrollments made during its own
+    // selection-to-claim gap as already swept, which is the forged `fresh` the
+    // split exists to prevent. `runRefresh` reads its clock before selecting,
+    // `claimRefreshRun` stamps the claim itself, and `renewRefreshRun` clamps its
+    // lease bump to `max(now, started_at)` — that clamp was added in the same
+    // delta review, because the unclamped write inverted the row outright under a
+    // backward clock step, which is precisely why "the code upholds it" is not
+    // something to take on trust: a validation is not a guarantee
+    // (rules/backend.md), and `started_at` also arrives from a CALLER-SUPPLIED
+    // instant, which is exactly the seam a constraint has to cover. Rows written
+    // before that clamp existed are repaired by drizzle/0014's copy rather than
+    // aborting it. Equality is legal and is the common case — every
+    // pre-#193 row has it, and so does any caller that passes no separate
+    // watermark. `claimed_at` is NOT NULL, so no null arm is needed.
+    check("refresh_runs_started_before_claimed_ck", sql`${t.startedAt} <= ${t.claimedAt}`),
   ],
 );
 

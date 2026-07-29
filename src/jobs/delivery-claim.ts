@@ -1,7 +1,7 @@
-import { and, eq, lt } from "drizzle-orm";
+import { and, eq, exists, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { DeliveryKind } from "../db/schema.js";
-import { digestDeliveries } from "../db/schema.js";
+import { digestDeliveries, playerLists } from "../db/schema.js";
 
 /**
  * The durable delivery claim (ADR 0034).
@@ -88,7 +88,13 @@ export type ClaimResult =
 export type ClaimRefusal =
   | "already-sent-today"
   | "claimed-by-another-run"
-  | "heartbeat-sent-within-week";
+  | "heartbeat-sent-within-week"
+  /**
+   * The lane this slot belongs to was soft-deleted (#193). Raised by the claimed
+   * digest path's `requirement` below, so it is decided under the claim's write
+   * lock rather than by a read that a concurrent `lists delete` can land behind.
+   */
+  | "lane-deleted";
 
 export interface ClaimArgs {
   kind: DeliveryKind;
@@ -113,12 +119,30 @@ export interface ClaimArgs {
    */
   precondition?: (tx: Tx) => ClaimRefusal | null;
   /**
+   * An eligibility rule evaluated inside the claim transaction that FORCE MAY
+   * NEVER OVERRIDE (#193) — the un-forceable twin of `precondition` above.
+   *
+   * The distinction is the whole reason both exist. `precondition` states
+   * DE-DUPLICATION BOOKKEEPING (the heartbeat's rolling week), and `force` is
+   * defined as an override of exactly that: refusing there becomes a replay,
+   * which sends without disturbing the clock. `requirement` states a FACT ABOUT
+   * THE WORLD the send would be addressed to — today, that the lane still
+   * exists. Replaying past it would mail a soft-deleted cohort's digest, which
+   * is not "bookkeeping overridden", it is the refusal defeated. So this branch
+   * returns the refusal whether or not `force` was passed, and sits ABOVE the
+   * forceable one.
+   *
+   * It runs after the live-lease branch for the same reason everything does:
+   * mutual exclusion is ADR 0034's guarantee and answers first.
+   */
+  requirement?: (tx: Tx) => ClaimRefusal | null;
+  /**
    * Operator override for the de-duplication bookkeeping ONLY (testing
    * affordance). When force is what allows the run to proceed — an
    * `already-sent-today` slot, or a precondition that would have refused — the
    * result is a REPLAY that writes nothing. When the run was eligible anyway,
    * force is unused and the claim is entirely ordinary. Force never overrides a
-   * live lease.
+   * live lease, and never overrides a `requirement`.
    */
   force?: boolean;
 }
@@ -167,6 +191,15 @@ export function claimDelivery(db: Db, args: ClaimArgs): ClaimResult {
       ) {
         return { claimed: false, reason: "claimed-by-another-run" };
       }
+
+      // The UN-FORCEABLE rule (the claimed digest's lane liveness, #193) is
+      // asked next, and its refusal is final. Evaluating it HERE — inside the
+      // same BEGIN IMMEDIATE transaction that reserves the slot — is what
+      // serializes it with a concurrent `lists delete`: a caller-side liveness
+      // read taken before this transaction is a check-then-act split, and the
+      // delete lands in the gap. `force` deliberately cannot reach this branch.
+      const unmet = args.requirement?.(tx) ?? null;
+      if (unmet !== null) return { claimed: false, reason: unmet };
 
       // The extra rule (the heartbeat's rolling seven days) is always ASKED,
       // even when forced — a forced run must not take a fresh slot and settle
@@ -420,6 +453,73 @@ export function findOrphanedDigestDate(
     }
   }
   return null;
+}
+
+/**
+ * What a delivery row settled by `reapDeadLaneClaims` carries as its error, so
+ * an operator reading /health or the table sees WHY it is terminal rather than a
+ * bare `failed` that looks like a provider rejection it can retry.
+ */
+export const DEAD_LANE_MESSAGE =
+  "abandoned: the lane was deleted while this delivery was in flight; settled without sending";
+
+/**
+ * Settle every EXPIRED `sending` row belonging to a SOFT-DELETED lane, without
+ * mailing anything. Returns how many rows were settled.
+ *
+ * THE ROW THIS FIXES IS OTHERWISE PERMANENT (#193 self-review). A run that
+ * claimed a slot and then had its lane deleted under it — or crashed after
+ * claiming, with the lane deleted before it could be recovered — leaves a
+ * `sending` row that nothing can move: `claimDelivery`'s `lane-deleted`
+ * requirement is deliberately un-forceable, so no future claim (forced or not)
+ * may re-take it, and `liveLists` never offers the lane again, so nothing even
+ * tries. The per-lane health view hides it (live lanes only) while the host-wide
+ * `lastDelivery` can still surface it, so /health reports a delivery that has
+ * been in flight forever and no operation exists to end it.
+ *
+ * IT SENDS NOTHING, AND THAT IS THE POINT. The lane is gone; the cohort the mail
+ * was addressed to no longer exists. `failed` is the honest terminal state — the
+ * delivery genuinely never completed — and it is safe here in the one way it is
+ * not safe generally (`settleFailed`'s hazard is destroying the record of a
+ * delivered email): only a `sending` row is touched, so no `sent` row's
+ * `sent_at`, counts, or provider id can be reached from here.
+ *
+ * THE LEASE STILL RULES. Only an EXPIRED lease is settled, which is why this
+ * cannot live in `lists delete`: at delete time the run may hold a LIVE claim
+ * and be at the mail provider right now, and settling that row would break ADR
+ * 0034's exact-mutual-exclusion guarantee (the live run would then settle the
+ * same row again, on top of this write). Waiting out the lease needs a periodic
+ * job, so the tick calls it. A live run whose lane was deleted mid-flight is
+ * untouched here and settles itself normally.
+ *
+ * Scoped with a correlated EXISTS rather than a materialized id list
+ * (`rules/backend.md`): constant-size SQL whatever the lane count, and no rows
+ * for a host with no deleted lanes.
+ */
+export function reapDeadLaneClaims(db: Db, now: Date, leaseMs = LEASE_MS): number {
+  const cutoffIso = new Date(now.getTime() - leaseMs).toISOString();
+  const result = db
+    .update(digestDeliveries)
+    .set({ status: "failed", sentAt: null, errorMessage: DEAD_LANE_MESSAGE })
+    .where(
+      and(
+        eq(digestDeliveries.status, "sending"),
+        // The same expired-lease test `leaseIsLive` applies row-by-row, written
+        // as SQL so the sweep is one statement: an unstamped claim is stale, and
+        // `<=` is expiry (strictly-live is what `leaseIsLive` grants).
+        or(isNull(digestDeliveries.claimedAt), lte(digestDeliveries.claimedAt, cutoffIso)),
+        exists(
+          db
+            .select({ x: sql`1` })
+            .from(playerLists)
+            .where(
+              and(eq(playerLists.id, digestDeliveries.listId), isNotNull(playerLists.deletedAt)),
+            ),
+        ),
+      ),
+    )
+    .run();
+  return result.changes;
 }
 
 /**

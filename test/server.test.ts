@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
-import { digestDeliveries } from "../src/db/schema.js";
+import { eq } from "drizzle-orm";
+import { digestDeliveries, playerLists } from "../src/db/schema.js";
 import { closeFailedBind, createApp, createBoundListener, createShutdown } from "../src/server.js";
 import { vi } from "vitest";
 
@@ -64,6 +65,7 @@ import {
   insertCalendars2026,
   insertDelivery,
   insertPlayer,
+  insertLane,
   insertRefreshRun,
   insertStatLine,
   testAppDeps,
@@ -91,6 +93,20 @@ describe("GET /health", () => {
       statLines: 0,
       lastDelivery: null,
       refresh: null,
+      // The lane view is keyed on LANES, not on delivery rows (#193), so an
+      // empty database still reports the one the migration seeds — configured
+      // (digest hour 5, reproducing the retired 05:00 agent) and never
+      // delivered. That combination is the "scheduled but silent" state, and it
+      // is only visible BECAUSE the view starts from lanes.
+      lanes: [
+        {
+          listId: 1,
+          name: "Watchlist",
+          isDefault: true,
+          digestHour: 5,
+          lastDelivery: null,
+        },
+      ],
     });
   });
 
@@ -227,6 +243,197 @@ describe("GET /health", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ status: "sent", attemptCount: 1 });
     expect(rows[0]?.sentAt).not.toBeNull();
+  });
+});
+
+/**
+ * The PER-LANE delivery view (#193 / ADR 0062 decision 5) — the owed view ADR
+ * 0059 amendment 2 named, ALONGSIDE the host-wide `lastDelivery` rather than
+ * replacing it.
+ *
+ * Its whole job is to make three states distinguishable, so every case below
+ * builds all three in one fixture and asserts they read differently. The
+ * ordering rule and the all-statuses-included rule are the Reviewer's must-fix 3
+ * and are pinned individually, because either one silently inverted would turn
+ * the dead-lane signal into a green light.
+ */
+describe("GET /health lanes (#193)", () => {
+  let opened: OpenedDb;
+
+  const health = async (): Promise<Record<string, unknown>> => {
+    const app = createApp(testAppDeps(opened));
+    return (await (await app.request("/health")).json()) as Record<string, unknown>;
+  };
+  const lanes = async (): Promise<Array<Record<string, unknown>>> =>
+    (await health()).lanes as Array<Record<string, unknown>>;
+
+  beforeEach(() => { opened = testDb(); });
+  afterEach(() => { opened.close(); });
+
+  it("reports the three states distinctly in ONE fixture", async () => {
+    const player = await insertPlayer(opened.db);
+    // 1. UNSCHEDULED — healthy by configuration, not silent.
+    const unscheduled = await insertLane(opened.db, "Unscheduled", [player]);
+    // 2. SCHEDULED, NEVER DELIVERED — visible only because the view is keyed on
+    //    LANES; a view built from delivery rows structurally cannot show it.
+    const never = await insertLane(opened.db, "Never", [player]);
+    await opened.db.update(playerLists).set({ digestHour: 5 }).where(eq(playerLists.id, never.id));
+    // 3. SCHEDULED, DELIVERED — the healthy case, for contrast.
+    const delivering = await insertLane(opened.db, "Delivering", [player]);
+    await opened.db.update(playerLists).set({ digestHour: 6 }).where(eq(playerLists.id, delivering.id));
+    await insertDelivery(opened.db, {
+      kind: "digest", dateCovered: "2026-07-19", listId: delivering.id, status: "sent",
+      sentAt: "2026-07-19T11:00:00.000Z", createdAt: "2026-07-19T11:00:00.000Z",
+    });
+
+    const byName = new Map((await lanes()).map((lane) => [lane.name as string, lane]));
+    expect(byName.get("Unscheduled")).toMatchObject({ digestHour: null, lastDelivery: null });
+    expect(byName.get("Never")).toMatchObject({ digestHour: 5, lastDelivery: null });
+    expect(byName.get("Delivering")).toMatchObject({
+      digestHour: 6,
+      lastDelivery: { dateCovered: "2026-07-19", status: "sent", sentAt: "2026-07-19T11:00:00.000Z" },
+    });
+    // The seeded default lane is present too, and flagged.
+    expect((await lanes()).filter((lane) => lane.isDefault === true)).toHaveLength(1);
+    expect(unscheduled.id).toBeGreaterThan(0);
+  });
+
+  it("a newer FAILED row supersedes an older `sent` one — the dead-lane signal working", async () => {
+    // Reviewer must-fix 3. Reporting the last SUCCESS instead would hide exactly
+    // the state this view exists to surface: a lane that delivered yesterday and
+    // is broken today would read healthy.
+    const lane = await insertLane(opened.db, "L");
+    await insertDelivery(opened.db, {
+      kind: "digest", dateCovered: "2026-07-18", listId: lane.id, status: "sent",
+      sentAt: "2026-07-18T11:00:00.000Z", createdAt: "2026-07-18T11:00:00.000Z",
+    });
+    await insertDelivery(opened.db, {
+      kind: "digest", dateCovered: "2026-07-19", listId: lane.id, status: "failed",
+      sentAt: null, createdAt: "2026-07-19T11:00:00.000Z",
+    });
+
+    const found = (await lanes()).find((entry) => entry.name === "L");
+    expect(found?.lastDelivery).toEqual({
+      dateCovered: "2026-07-19",
+      status: "failed",
+      sentAt: null,
+    });
+  });
+
+  it("a live `sending` claim is shown as such, not hidden and not mislabeled", async () => {
+    const lane = await insertLane(opened.db, "L");
+    await insertDelivery(opened.db, {
+      kind: "digest", dateCovered: "2026-07-19", listId: lane.id, status: "sending",
+      claimedAt: "2026-07-19T11:00:00.000Z", createdAt: "2026-07-19T11:00:00.000Z",
+      attemptCount: 2,
+    });
+
+    expect((await lanes()).find((entry) => entry.name === "L")?.lastDelivery).toEqual({
+      dateCovered: "2026-07-19",
+      status: "sending",
+      sentAt: null,
+    });
+  });
+
+  it("orders by the SAME rule the host-wide field uses: latest activity, not row order", async () => {
+    // A retried row is updated in place — `sent_at` moves, `created_at` does not
+    // — so "latest" has to mean `coalesce(sent_at, created_at)`. Built so row
+    // ORDER and activity order disagree: the older-created row is the newer
+    // activity, and it must win.
+    const lane = await insertLane(opened.db, "L");
+    await insertDelivery(opened.db, {
+      kind: "digest", dateCovered: "2026-07-17", listId: lane.id, status: "sent",
+      sentAt: "2026-07-19T13:00:00.000Z", createdAt: "2026-07-17T11:00:00.000Z",
+    });
+    await insertDelivery(opened.db, {
+      kind: "digest", dateCovered: "2026-07-18", listId: lane.id, status: "sent",
+      sentAt: "2026-07-19T12:00:00.000Z", createdAt: "2026-07-18T11:00:00.000Z",
+    });
+
+    expect((await lanes()).find((entry) => entry.name === "L")?.lastDelivery).toMatchObject({
+      dateCovered: "2026-07-17",
+    });
+    // ...and the host-wide field agrees, which is the point of sharing the rule.
+    expect((await health()).lastDelivery).toMatchObject({ dateCovered: "2026-07-17" });
+  });
+
+  it("agrees with the host-wide field when the timestamps are IDENTICAL", async () => {
+    // THE TIEBREAK THE OTHER CASE NEVER ENGAGES (#193 self-review, MEDIUM 1).
+    // The rule was authored TWICE — the lane view carried `id DESC` and the
+    // host-wide field did not — and the comment claimed they agreed and were
+    // test-asserted. They were not: the case above uses DISTINCT `sent_at`
+    // values, so `coalesce(...)` alone decides and the tiebreak never runs.
+    //
+    // Timestamps here are whole seconds and IDENTICAL on both rows, which is not
+    // exotic: two lanes settled inside one second, or one row retried inside the
+    // second it was created, produce it. With two authorings /health reported a
+    // DIFFERENT "last" delivery on each surface for the very same rows.
+    const lane = await insertLane(opened.db, "L");
+    const same = "2026-07-19T11:00:00.000Z";
+    await insertDelivery(opened.db, {
+      kind: "digest", dateCovered: "2026-07-17", listId: lane.id, status: "sent",
+      sentAt: same, createdAt: same,
+    });
+    await insertDelivery(opened.db, {
+      kind: "digest", dateCovered: "2026-07-18", listId: lane.id, status: "sent",
+      sentAt: same, createdAt: same,
+    });
+
+    // Which row wins is `id DESC` — the later-inserted one. What MATTERS, and
+    // what is red with two authorings, is that both surfaces name the SAME row.
+    expect((await lanes()).find((entry) => entry.name === "L")?.lastDelivery).toMatchObject({
+      dateCovered: "2026-07-18",
+    });
+    expect((await health()).lastDelivery).toMatchObject({ dateCovered: "2026-07-18" });
+  });
+
+  it("EXCLUDES heartbeat rows, so the default lane cannot inherit forged liveness", async () => {
+    // A heartbeat rides the DEFAULT lane's slot purely because `list_id` is NOT
+    // NULL (ADR 0059 amendment). Counting one here would make the default lane
+    // read as delivering every week during the offseason while its DIGESTS were
+    // silent — the precise lie this view exists to prevent, and only for that
+    // one lane.
+    const lane = await insertLane(opened.db, "L");
+    await insertDelivery(opened.db, {
+      kind: "heartbeat", dateCovered: "2026-12-05", listId: lane.id, status: "sent",
+      sentAt: "2026-12-05T11:00:00.000Z", createdAt: "2026-12-05T11:00:00.000Z",
+    });
+
+    expect((await lanes()).find((entry) => entry.name === "L")?.lastDelivery).toBeNull();
+    // The heartbeat IS still visible host-wide — it is real delivery activity.
+    expect((await health()).lastDelivery).toMatchObject({ kind: "heartbeat" });
+  });
+
+  it("omits a SOFT-DELETED lane, and orders live lanes by id", async () => {
+    const a = await insertLane(opened.db, "Alpha");
+    await insertLane(opened.db, "Zulu");
+    await opened.db
+      .update(playerLists)
+      .set({ deletedAt: "2026-07-19T00:00:00.000Z" })
+      .where(eq(playerLists.id, a.id));
+
+    const names = (await lanes()).map((lane) => lane.name);
+    expect(names).not.toContain("Alpha");
+    // Creation order (id), never name order: renaming a lane must not reorder
+    // the view, because the same order decides which lane the tick attempts first.
+    expect(names).toEqual(["Watchlist", "Zulu"]);
+  });
+
+  it("leaves the host-wide lastDelivery byte-identical", async () => {
+    // The additive guarantee: the published field every existing consumer reads
+    // is untouched by the lane view sitting beside it.
+    const lane = await insertLane(opened.db, "L");
+    await insertDelivery(opened.db, {
+      kind: "digest", dateCovered: "2026-07-19", listId: lane.id, status: "sent",
+      sentAt: "2026-07-19T11:00:00.000Z", createdAt: "2026-07-19T11:00:00.000Z",
+    });
+
+    expect((await health()).lastDelivery).toEqual({
+      kind: "digest",
+      dateCovered: "2026-07-19",
+      status: "sent",
+      sentAt: "2026-07-19T11:00:00.000Z",
+    });
   });
 });
 

@@ -194,9 +194,21 @@ Run the Digest job now for a Window.
 - **Inputs:** `window` (as above, including the game-count windows `last10games`/`last30games` — #153,
   which route to the on-demand path like a cohort scope; an unsupported value is rejected and nothing is
   sent), `force`
-  (default `false`), and `list` — a named list ([#70](https://github.com/wrburgess/bryce/issues/70))
-  that scopes the send to its active members. A named-list send is **on-demand only** (it takes no
-  daily slot, whatever its window); an unknown list is rejected. `tags`
+  (default `false`), and `list` — a lane ([#70](https://github.com/wrburgess/bryce/issues/70))
+  that scopes the send to its active members. A tag-free **`1d`** send is that lane's **scheduled
+  artifact** ([#193](https://github.com/wrburgess/bryce/issues/193) /
+  [ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md) decision 1,
+  superseding ADR 0046 decision 4): it **claims that lane's own once-per-date slot**, so calling it
+  twice for one lane on one date returns `already-sent-today` (use `force` for a deliberate re-send),
+  while two **different** lanes may each send that date. Omitting `list` on such a send means **the
+  default lane**, not every active Player, and it goes to the lane's configured `digest_to` when one is
+  set. Any wider window keeps the on-demand behavior and the host recipients. An unknown or deleted
+  list is rejected; a lane deleted between resolution and the claim comes back as
+  `{ action: "skipped", reason: "lane-deleted" }` with nothing mailed, `force` included. During
+  Offseason Sleep an **unscoped** `1d` call becomes the weekly host heartbeat while a call that named a
+  lane returns `{ action: "skipped", reason: "offseason-sleep" }` for **today's** digest — Sleep does not
+  suspend orphan recovery, so such a call still claims and mails an **earlier** day the lane owes before
+  reporting that skip. `tags`
   ([#140](https://github.com/wrburgess/bryce/issues/140)) scopes the send to a **cohort** and is
   on-demand for the same reason — the delivery-slot key `(kind, date_covered)` has no tag dimension,
   so a cohort send takes no slot and records no delivery row; with `list` the two **intersect**, and a
@@ -278,9 +290,17 @@ Run a single read-only SQL query for ad-hoc analysis.
 Health snapshot, the same shape as `GET /health`.
 
 - **Inputs:** none.
-- **Success:** `{ ok, players, statLines, lastDelivery, refresh }` — active Player count, stored Stat Line
-  count, the last digest/heartbeat delivery (including an in-flight `sending` status), and Refresh
-  freshness/progress when a whole-watch-list Refresh has run. `refresh` carries `playersRefreshed`,
+- **Success:** `{ ok, players, statLines, lastDelivery, refresh, lanes }` — active Player count, stored Stat Line
+  count, the last digest/heartbeat delivery (including an in-flight `sending` status), Refresh
+  freshness/progress when a whole-watch-list Refresh has run, and the per-lane delivery view.
+  `lanes` is additive in [#193](https://github.com/wrburgess/bryce/issues/193)
+  ([ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md) decision 5): one
+  entry per **live** lane, ordered by id, each
+  `{ listId, name, isDefault, digestHour, lastDelivery: { dateCovered, status, sentAt } | null }` over
+  that lane's `digest` rows only — a lane with `digestHour: null` is *not scheduled*, a scheduled lane
+  with `lastDelivery: null` has *never delivered*, and a scheduled lane with a stale or `failed` one is
+  a *dead lane*. Heartbeat rows are excluded so the default lane cannot inherit forged liveness from
+  them. `refresh` carries `playersRefreshed`,
   **`playersSkipped`**, **`playersFailed`**, `playersTotal`, and the two stat-line counts; the two
   bolded fields are additive in #146 so the durable **Accounting** matches the CLI's live
   classification exactly ([ADR 0056](../adr/0056-refresh-emits-typed-progress-events-cli-is-the-only-presenter.md)).

@@ -15,11 +15,13 @@ import {
 } from "../src/db/schema.js";
 import { runRefresh } from "../src/jobs/refresh.js";
 import {
+  REFRESH_LEASE_MS,
   SUPERSEDED_MESSAGE,
   claimRefreshRun,
   admitTargetedRefresh,
   digestFreshnessFor,
   encodeScopeListIds,
+  latestCoveringRun,
   refreshHealth,
   renewRefreshRun,
   settleRefreshRun,
@@ -27,7 +29,7 @@ import {
   withIngestionFence,
 } from "../src/jobs/refresh-run.js";
 import { resolveDefaultList } from "../src/lists/service.js";
-import { TEST_TZ, insertList, insertRefreshRun, testDb, testFileDb } from "./factories.js";
+import { TEST_TZ, insertList, insertListMember, insertPlayer, insertRefreshRun, testDb, testFileDb } from "./factories.js";
 
 /** A base instant and two derived ones straddling the 10-minute lease. */
 const T0 = "2026-07-19T07:00:00.000Z";
@@ -163,6 +165,135 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0043)", () => {
     if (!claim.claimed) throw new Error("expected claim");
     expect(renewRefreshRun(opened.db, claim.runId, at("2026-07-19T07:10:00.000Z"))).toBe(false);
     expect(opened.db.select().from(refreshRuns).where(eq(refreshRuns.id, claim.runId)).all()[0]?.claimedAt).toBe(T0);
+  });
+
+  /**
+   * THE SELECTION WATERMARK (PR #203 Reviewer P1).
+   *
+   * `started_at` records when the sweep took its PLAYER SELECTION snapshot, not
+   * when it claimed — the two are several database reads apart in `runRefresh`,
+   * and every coverage test keys on the former. These cases pin the SPLIT at the
+   * storage layer: the row keeps both instants, and each decision reads the one
+   * it is entitled to. The watermark here is deliberately older than the whole
+   * lease, so a lease that mistakenly read it would be dead on arrival rather
+   * than merely a little early.
+   */
+  describe("the selection watermark (PR #203 Reviewer P1)", () => {
+    /** 20 minutes before the claim — twice REFRESH_LEASE_MS. */
+    const SELECTED_AT = "2026-07-19T06:40:00.000Z";
+
+    it("records the caller's selection instant as started_at, with claimed_at the claim", () => {
+      const claim = claimRefreshRun(opened.db, { now: at(T0), startedAt: at(SELECTED_AT), playersTotal: 2 });
+      expect(claim.claimed).toBe(true);
+
+      // Both instants survive, distinctly. Collapsing them is exactly the defect:
+      // a coverage test would then treat everything enrolled in the gap as swept.
+      expect(opened.db.select().from(refreshRuns).all()[0]).toMatchObject({
+        startedAt: SELECTED_AT,
+        claimedAt: T0,
+      });
+    });
+
+    it("the LEASE reads claimed_at: a watermark older than the whole lease still blocks a successor", () => {
+      // The invariant the split exists to protect. If any lease decision keyed on
+      // `started_at`, this claim would look expired the instant it was taken and
+      // the next sweep would reap a run that is actively fetching.
+      expect(at(T0).getTime() - at(SELECTED_AT).getTime()).toBeGreaterThan(REFRESH_LEASE_MS);
+
+      const owner = claimRefreshRun(opened.db, { now: at(T0), startedAt: at(SELECTED_AT), playersTotal: 2 });
+      if (!owner.claimed) throw new Error("expected claim");
+
+      expect(claimRefreshRun(opened.db, { now: at(WITHIN_LEASE), playersTotal: 2 })).toEqual({
+        claimed: false,
+        reason: "already-running",
+      });
+      // ...and the owner is untouched — not reaped to `failed` behind its own back.
+      expect(opened.db.select().from(refreshRuns).where(eq(refreshRuns.id, owner.runId)).all()[0]).toMatchObject({
+        status: "running",
+        errorMessage: null,
+      });
+      // Its renewal is judged on the lease clock too, so the sweep keeps going.
+      expect(renewRefreshRun(opened.db, owner.runId, at(WITHIN_LEASE))).toBe(true);
+    });
+
+    /**
+     * THE RENEWAL CLAMP (PR #203 delta review).
+     *
+     * `renewRefreshRun` used to write a bare `now` with no comparison against the
+     * row, so a backward clock step smaller than the lease window slipped past its
+     * live-lease WHERE and wrote `claimed_at < started_at` — the very inversion
+     * drizzle/0014 now refuses. These cases pin BOTH directions: that the clamp is
+     * invisible under a forward clock (so the fix is not a silent behavior change)
+     * and that it is load-bearing under a regressed one.
+     */
+    describe("the renewal clamp", () => {
+      /** 25 minutes before the claim: inside the lease measured from T0, but BEFORE the watermark. */
+      const REGRESSED_BELOW_WATERMARK = "2026-07-19T06:35:00.000Z";
+      /** 10 minutes before the claim: a backward step that still lands AFTER the watermark. */
+      const REGRESSED_ABOVE_WATERMARK = "2026-07-19T06:50:00.000Z";
+
+      it("writes EXACTLY `now` under a forward clock — the clamp changes nothing there", () => {
+        const owner = claimRefreshRun(opened.db, { now: at(T0), startedAt: at(SELECTED_AT), playersTotal: 2 });
+        if (!owner.claimed) throw new Error("expected claim");
+
+        expect(renewRefreshRun(opened.db, owner.runId, at(WITHIN_LEASE))).toBe(true);
+        // Byte-for-byte the string the old bare-`now` write produced. A clamp that
+        // rounded, re-serialized, or preferred the row's own value would show here,
+        // and the lease would then be measured from something other than the clock.
+        expect(opened.db.select().from(refreshRuns).where(eq(refreshRuns.id, owner.runId)).all()[0]?.claimedAt).toBe(
+          at(WITHIN_LEASE).toISOString(),
+        );
+      });
+
+      it("follows a backward step that stays at or after the watermark — the clamp is MINIMAL", () => {
+        const owner = claimRefreshRun(opened.db, { now: at(T0), startedAt: at(SELECTED_AT), playersTotal: 2 });
+        if (!owner.claimed) throw new Error("expected claim");
+
+        // 06:50 is earlier than the claim but later than the 06:40 selection, so the
+        // row stays legal without help: the clamp must NOT round it up to the claim
+        // instant, which would hand a regressed worker a lease it did not earn.
+        expect(renewRefreshRun(opened.db, owner.runId, at(REGRESSED_ABOVE_WATERMARK))).toBe(true);
+        expect(opened.db.select().from(refreshRuns).where(eq(refreshRuns.id, owner.runId)).all()[0]?.claimedAt).toBe(
+          REGRESSED_ABOVE_WATERMARK,
+        );
+      });
+
+      it("clamps a backward step BELOW the watermark instead of writing an inverted row", () => {
+        const owner = claimRefreshRun(opened.db, { now: at(T0), startedAt: at(SELECTED_AT), playersTotal: 2 });
+        if (!owner.claimed) throw new Error("expected claim");
+        // NOTHING STOPS THE OLD CODE FROM REACHING THE WRITE. The live-lease WHERE
+        // rejects a claim that is too OLD relative to `now`, and a regressed clock
+        // makes the stored claim look NEWER — the cutoff it computes moves earlier
+        // with the clock, so it stays below the stored instant no matter how large
+        // the backward step is. The guard was never the thing keeping `claimed_at`
+        // ordered; nothing was.
+        expect(at(REGRESSED_BELOW_WATERMARK).getTime() - REFRESH_LEASE_MS).toBeLessThan(at(T0).getTime());
+
+        // What the pre-fix code would have written — refused by the database, so on a
+        // post-0014 database the renewal itself throws and the sweep dies, and on a
+        // pre-0014 one it lands as the legacy row that makes 0014 unable to migrate.
+        expect(() =>
+          opened.sqlite
+            .prepare("UPDATE refresh_runs SET claimed_at = ? WHERE id = ?")
+            .run(REGRESSED_BELOW_WATERMARK, owner.runId),
+        ).toThrow(/CHECK constraint failed: refresh_runs_started_before_claimed_ck/);
+
+        // The clamped renewal instead succeeds, still reporting ownership...
+        expect(renewRefreshRun(opened.db, owner.runId, at(REGRESSED_BELOW_WATERMARK))).toBe(true);
+        const row = opened.db.select().from(refreshRuns).where(eq(refreshRuns.id, owner.runId)).all()[0];
+        // ...and lands on the floor the CHECK requires — the selection watermark,
+        // not the claim instant: the lease reads OLDER, so this run is reaped SOONER
+        // rather than holding a phantom lease a successor would refuse behind.
+        expect(row?.claimedAt).toBe(SELECTED_AT);
+        expect(row?.startedAt).toBe(SELECTED_AT);
+        expect(row!.startedAt <= row!.claimedAt).toBe(true);
+        // And the row is legal, not merely present: re-writing the stored value
+        // re-evaluates every CHECK on it.
+        expect(() =>
+          opened.sqlite.prepare("UPDATE refresh_runs SET claimed_at = claimed_at WHERE id = ?").run(owner.runId),
+        ).not.toThrow();
+      });
+    });
   });
 
   it("rejects a guarded whole-refresh mutation after the owner is reaped", () => {
@@ -421,23 +552,31 @@ describe("coverage-keyed freshness watermark, storage layer (#192)", () => {
     opened.close();
   });
 
-  /** Claim + settle one run over `scopeListIds`, so the REAL encoder writes the row. */
+  /**
+   * Claim + settle one run over `scopeListIds`, so the REAL encoder writes the row.
+   *
+   * `startedAt` is the SELECTION watermark and `claimAt` the claim instant (PR
+   * #203 Reviewer P1); they default to the same instant because most cases here
+   * care about neither gap, and the one that does states both.
+   */
   const sweep = (
     status: "ok" | "partial" | "failed",
     scopeListIds: readonly number[] | undefined,
     startedAt: string = QUALIFYING_START,
+    claimAt: string = startedAt,
   ): void => {
     const claim = claimRefreshRun(opened.db, {
-      now: at(startedAt),
+      now: at(claimAt),
+      startedAt: at(startedAt),
       playersTotal: 2,
       scopeListIds,
     });
     if (!claim.claimed) throw new Error("expected claim");
     settleRefreshRun(opened.db, {
       runId: claim.runId,
-      // Five minutes after its own start, so a second sweep in the same case
+      // Five minutes after its own claim, so a second sweep in the same case
       // claims cleanly rather than colliding with a live lease.
-      now: new Date(at(startedAt).getTime() + 5 * 60 * 1000),
+      now: new Date(at(claimAt).getTime() + 5 * 60 * 1000),
       status,
       counts: { playersRefreshed: 2, playersSkipped: 0, playersFailed: 0, playersTotal: 2, statLinesInserted: 0, statLinesUpdated: 0 },
     });
@@ -514,6 +653,386 @@ describe("coverage-keyed freshness watermark, storage layer (#192)", () => {
     expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("fresh");
   });
 
+  /**
+   * The PER-LANE half of the same predicate (#193, ADR 0062 decision 2). #192
+   * asked one question — "did a run sweep EVERYONE?" — and #193 adds a second —
+   * "did a run sweep THIS LANE?" — answered from the same column by the same
+   * exported helper, because two authorings of the fenced `LIKE` is how the
+   * fencing quietly stops matching at one of them.
+   */
+  describe("per-lane coverage (#193)", () => {
+    it("a NULL-scope run covers EVERY lane, including ones that did not exist yet", async () => {
+      sweep("ok", undefined);
+      const a = await insertList(opened.db, { name: "A" });
+      const b = await insertList(opened.db, { name: "B" });
+
+      // "Swept every active Player" is a statement about players, not about the
+      // lane table, so it answers for a lane created afterwards too.
+      expect(latestCoveringRun(opened.db, a.id)?.scopeListIds).toBeNull();
+      expect(latestCoveringRun(opened.db, b.id)?.scopeListIds).toBeNull();
+      expect(latestCoveringRun(opened.db, null)?.scopeListIds).toBeNull();
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+    });
+
+    it("a scoped run covers the lanes it names and no others", async () => {
+      const a = await insertList(opened.db, { name: "A" });
+      const b = await insertList(opened.db, { name: "B" });
+      const c = await insertList(opened.db, { name: "C" });
+      sweep("ok", [a.id, c.id]);
+
+      expect(latestCoveringRun(opened.db, a.id)).toBeDefined();
+      expect(latestCoveringRun(opened.db, c.id)).toBeDefined();
+      expect(latestCoveringRun(opened.db, b.id)).toBeUndefined();
+      // ...and the whole-list question still reads UNCOVERED, which is exactly
+      // the #192 rule this narrowing must not weaken.
+      expect(latestCoveringRun(opened.db, null)).toBeUndefined();
+
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, b.id).state).toBe("stale");
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, null).state).toBe("stale");
+    });
+
+    it("FENCING: lane 11's sweep does not cover lane 1", () => {
+      // The correctness edge the sentinel commas exist for. An unfenced
+      // `LIKE '%1%'` over `,11,` matches, so lane 1's digest would read `fresh`
+      // over players lane 11's sweep never touched — a forged completeness
+      // claim, and silent. Written against the ENCODER's own output so it fails
+      // if the encoding ever drops a sentinel.
+      expect(encodeScopeListIds([11])).toBe(",11,");
+      sweep("ok", [11]);
+
+      expect(latestCoveringRun(opened.db, 11)).toBeDefined();
+      expect(latestCoveringRun(opened.db, 1)).toBeUndefined();
+      // A THIRD case, not the mirror the comment used to claim (#193 self-review,
+      // LOW 3): an id that merely CONTAINS the swept one as a substring —
+      // `,11,` versus lane 111 — must not match either. Both directions of
+      // containment are hazards, so both are asserted; the true mirror is below,
+      // where it needs its own sweep to be a real case.
+      expect(latestCoveringRun(opened.db, 111)).toBeUndefined();
+    });
+
+    it("FENCING (the mirror): lane 1's sweep does not cover lane 11", () => {
+      // The genuine mirror, which cannot share the case above: with `,11,`
+      // already recorded, lane 11 is covered whatever a later sweep says, so a
+      // mirror assertion added there would pass for the wrong reason. Only a
+      // sweep scoped to lane 1 alone can answer "is lane 11 covered?" honestly.
+      expect(encodeScopeListIds([1])).toBe(",1,");
+      sweep("ok", [1]);
+
+      expect(latestCoveringRun(opened.db, 1)).toBeDefined();
+      expect(latestCoveringRun(opened.db, 11)).toBeUndefined();
+      // ...and the whole-list question still reads UNCOVERED — a scoped sweep
+      // never forges the #192 completeness claim.
+      expect(latestCoveringRun(opened.db, null)).toBeUndefined();
+    });
+
+    it("a newer OTHER-LANE run does not hide an older covering one", async () => {
+      // The per-lane twin of the whole-list ordering invariant above: the
+      // order-by picks the latest ELIGIBLE row, never the latest row that is
+      // then tested. Lane B sweeping every ten minutes must not make lane A read
+      // `stale` while A's own recent sweep sits one row down.
+      const a = await insertList(opened.db, { name: "A" });
+      const b = await insertList(opened.db, { name: "B" });
+      sweep("ok", [a.id], "2026-07-19T12:00:00.000Z");
+      sweep("ok", [b.id], "2026-07-19T18:00:00.000Z");
+
+      expect(opened.db.select().from(refreshRuns).all()).toHaveLength(2);
+      expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe("2026-07-19T12:00:00.000Z");
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+    });
+
+    /**
+     * THE ORDERING ITSELF — `(started_at desc, id desc)` over the ELIGIBLE set
+     * (PR #203 delta review). `refreshHealth`'s opposite claim ("latest is claim
+     * order") got its regression test when the two orderings stopped agreeing;
+     * this one, the reason they had to differ, did not.
+     *
+     * Both cases are built so a NAIVE ordering picks the WRONG row: the first
+     * inverts watermark order against id order, the second ties the watermark so
+     * only `id` can decide. Neither can pass by accident on a build that dropped
+     * a key.
+     */
+    describe("ordering: (started_at desc, id desc) over the eligible set", () => {
+      it("the strongest WATERMARK wins, not the newest claim — id order is not a proxy", async () => {
+        // Two covering sweeps of the same lane whose claim order INVERTS their
+        // selection order: the second one selected an hour earlier and claimed
+        // ten minutes later (a long selection-to-claim gap, the very split this
+        // PR introduced). This function asks which PROVABLE COVERAGE CLAIM is
+        // strongest, and that is the later SELECTION — the one whose snapshot
+        // saw the most recent state of the lane. `refreshHealth` deliberately
+        // answers the other question with the other key (see its own test), so
+        // an ordering copied from there would land here as a silent regression.
+        const a = await insertList(opened.db, { name: "A" });
+        sweep("ok", [a.id], QUALIFYING_START, QUALIFYING_START); // selected 12:00, claimed 12:00
+        sweep("ok", [a.id], "2026-07-19T11:00:00.000Z", "2026-07-19T12:10:00.000Z");
+
+        const rows = opened.db.select().from(refreshRuns).orderBy(refreshRuns.id).all();
+        const [earlierClaim, laterClaim] = rows;
+        // The inversion is REAL, not assumed: higher id, earlier watermark.
+        expect(rows).toHaveLength(2);
+        expect(laterClaim!.id).toBeGreaterThan(earlierClaim!.id);
+        expect(laterClaim!.startedAt < earlierClaim!.startedAt).toBe(true);
+
+        // Ordering by id alone would return `laterClaim` and date this lane's
+        // coverage an hour older than it is — which, since the tick's
+        // `refreshIsDue` anchors on exactly this row's `started_at`, would make
+        // the lane read as due an hour early, every tick, forever.
+        expect(latestCoveringRun(opened.db, a.id)?.id).toBe(earlierClaim!.id);
+        expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe(QUALIFYING_START);
+      });
+
+      it("a watermark TIE is broken by id: the later-claimed run wins, deterministically", async () => {
+        // Same lane, same selection instant, different claims — two sweeps that
+        // read their clock in the same millisecond. The later CLAIM is the right
+        // winner: it is the one whose selection cannot have preceded the
+        // other's, and it carries the newer data.
+        //
+        // WHAT THIS CASE CATCHES, STATED HONESTLY (rules/testing.md: never
+        // believe a guard you have not broken on purpose — this one WAS broken,
+        // three ways). It reds on a REVERSED tie-break (`asc(id)`) and on a
+        // dropped `started_at` key. It does NOT red when `desc(id)` is simply
+        // DELETED: with `refresh_runs_status_started_idx` in place, SQLite's
+        // descending scan happens to yield the highest rowid first within an
+        // equal-key group, so the naive form coincidentally agrees today. That
+        // coincidence is precisely why the key is written explicitly rather than
+        // relied upon — it makes the answer a property of the QUERY instead of
+        // of the plan the optimizer picks — and saying so here keeps this case
+        // from reading as more coverage than it is.
+        const a = await insertList(opened.db, { name: "A" });
+        sweep("ok", [a.id], QUALIFYING_START, QUALIFYING_START);
+        sweep("ok", [a.id], QUALIFYING_START, "2026-07-19T12:10:00.000Z");
+
+        const rows = opened.db.select().from(refreshRuns).orderBy(refreshRuns.id).all();
+        expect(rows).toHaveLength(2);
+        expect(rows[0]!.startedAt).toBe(rows[1]!.startedAt); // the tie is real
+        expect(rows[1]!.id).toBeGreaterThan(rows[0]!.id);
+
+        const winner = latestCoveringRun(opened.db, a.id);
+        expect(winner?.id).toBe(rows[1]!.id);
+        // Pinned through the row's own claim instant too, so the case still
+        // discriminates if ids ever stop being the insertion order.
+        expect(winner?.claimedAt).toBe("2026-07-19T12:10:00.000Z");
+      });
+
+      it("an INELIGIBLE newer run never enters the ordering — the sort is over the eligible set", async () => {
+        // The ordering and the filter compose in one direction only: filter
+        // first, then rank. A build that ranked first and tested the winner
+        // would answer `undefined` here — lane A's own covering sweep sits one
+        // row down under a newer, `failed`, other-lane run.
+        const a = await insertList(opened.db, { name: "A" });
+        const b = await insertList(opened.db, { name: "B" });
+        sweep("ok", [a.id], QUALIFYING_START, QUALIFYING_START);
+        sweep("failed", [a.id, b.id], "2026-07-19T18:00:00.000Z");
+        sweep("ok", [b.id], "2026-07-19T19:00:00.000Z");
+
+        expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe(QUALIFYING_START);
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+      });
+    });
+
+    it("a FAILED run never covers, however recent or on-lane", async () => {
+      const a = await insertList(opened.db, { name: "A" });
+      sweep("ok", [a.id], "2026-07-19T12:00:00.000Z");
+      sweep("failed", [a.id], "2026-07-19T18:00:00.000Z");
+
+      // The older `ok` still answers — a failure does not erase a success, it
+      // simply is not one.
+      expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe("2026-07-19T12:00:00.000Z");
+
+      // With ONLY a failure on the lane, nothing covers it.
+      const b = await insertList(opened.db, { name: "B" });
+      sweep("failed", [b.id], "2026-07-19T19:00:00.000Z");
+      expect(latestCoveringRun(opened.db, b.id)).toBeUndefined();
+    });
+
+    it("`partial` covers, carrying its own N/M to the banner", async () => {
+      const a = await insertList(opened.db, { name: "A" });
+      sweep("partial", [a.id]);
+
+      expect(latestCoveringRun(opened.db, a.id)?.status).toBe("partial");
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id)).toMatchObject({
+        state: "partial",
+        playersRefreshed: 2,
+        playersTotal: 2,
+      });
+    });
+
+    it("the anchor is started_at: a covering run that started BEFORE the content day ended is stale", async () => {
+      // The start-time rule (ADR 0040's forward-clock finality), restated per
+      // lane. A run that started ON the content date saw games that were still
+      // live, so it cannot certify that day whatever lane it covered.
+      const a = await insertList(opened.db, { name: "A" });
+      sweep("ok", [a.id], "2026-07-18T12:00:00.000Z"); // host date 2026-07-18
+
+      expect(latestCoveringRun(opened.db, a.id)).toBeDefined(); // it DOES cover…
+      expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("stale"); // …but too early
+    });
+
+    /**
+     * MEMBERSHIP COVERAGE (PR #203 Reviewer P2) — the second identity trap.
+     *
+     * The lane-id test above is `,<id>,` containment, which is IDENTITY one
+     * level down from the one #192 refused. A scoped run records the lane it
+     * swept, never the players it selected, so enrolling an active Player in
+     * lane L after L's sweep began leaves the run still naming L while
+     * `assembleDigest` now reports a player nobody fetched — exactly the forged
+     * completeness claim ADR 0061 decision 8 exists to prevent, one layer down.
+     *
+     * Every case here is driven through `digestFreshnessFor` as well as the
+     * helper, because the BANNER is the user-visible claim; pinning only the
+     * helper would leave the thing the reader believes untested.
+     */
+    describe("membership coverage (PR #203 Reviewer P2)", () => {
+      /** Enroll a Player in `laneId` with an EXACT join instant. */
+      const joins = async (laneId: number, createdAt: string, active = true): Promise<void> => {
+        const player = await insertPlayer(opened.db, { active });
+        await insertListMember(opened.db, { listId: laneId, playerId: player.id, createdAt });
+      };
+
+      it("a player who joins AFTER the sweep started makes that run non-covering", async () => {
+        const a = await insertList(opened.db, { name: "A" });
+        await joins(a.id, "2026-07-19T11:00:00.000Z"); // swept: he was there first
+        sweep("ok", [a.id], QUALIFYING_START);
+        expect(latestCoveringRun(opened.db, a.id)).toBeDefined();
+
+        // The enrollment the run cannot possibly have swept.
+        await joins(a.id, "2026-07-19T12:30:00.000Z");
+
+        expect(latestCoveringRun(opened.db, a.id)).toBeUndefined();
+        // And the claim the HC actually reads: the banner degrades to `stale`
+        // rather than certifying a player whose stats were never fetched.
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("stale");
+
+        // SELF-HEALING, and the reason degrading is safe: the tick reads this
+        // lane as due (never-swept), sweeps it, and the new run started after
+        // the join, so it covers.
+        sweep("ok", [a.id], "2026-07-19T13:00:00.000Z");
+        expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe("2026-07-19T13:00:00.000Z");
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+      });
+
+      it("a player who joined BEFORE the sweep started keeps it covering", async () => {
+        // The negative control. Without it, a blanket "any membership row
+        // rejects" would pass every other case here and make the banner
+        // permanently `stale` on every lane that has members at all.
+        const a = await insertList(opened.db, { name: "A" });
+        await joins(a.id, "2026-07-19T11:59:59.999Z");
+        sweep("ok", [a.id], QUALIFYING_START);
+
+        expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe(QUALIFYING_START);
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+      });
+
+      it("`>=`, not `>`: a join in the run's OWN start instant is not covered", async () => {
+        // `started_at` is the watermark the sweep read just before its selection
+        // query, so a member added in that same instant may never have been in
+        // the snapshot. Equality therefore has to fall on the REJECTING side.
+        // Two lanes, because one lane cannot hold both sides of a boundary at once.
+        const onTheInstant = await insertList(opened.db, { name: "on-the-instant" });
+        const oneMsEarlier = await insertList(opened.db, { name: "one-ms-earlier" });
+        await joins(onTheInstant.id, QUALIFYING_START);
+        await joins(oneMsEarlier.id, "2026-07-19T11:59:59.999Z");
+        sweep("ok", [onTheInstant.id, oneMsEarlier.id], QUALIFYING_START);
+
+        expect(latestCoveringRun(opened.db, onTheInstant.id)).toBeUndefined();
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, onTheInstant.id).state).toBe("stale");
+        expect(latestCoveringRun(opened.db, oneMsEarlier.id)).toBeDefined();
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, oneMsEarlier.id).state).toBe("fresh");
+      });
+
+      it("an enrollment inside the SELECTION-TO-CLAIM gap is not covered (PR #203 Reviewer P1)", async () => {
+        // THE ANCHOR CASE. The sweep selects its players, loads calendars, and
+        // only then claims — a window several database reads wide during normal
+        // operation. Anchoring coverage on the CLAIM instant dates every
+        // enrollment inside that window as older than the run, so this member
+        // reads as swept by a selection that closed before he joined: `fresh`
+        // over missing stats. Anchored on the SELECTION instant he is a gap,
+        // which is the truth.
+        const gained = await insertList(opened.db, { name: "gained-a-member" });
+        const settled = await insertList(opened.db, { name: "settled" });
+        await joins(gained.id, "2026-07-19T11:00:00.000Z"); // present at selection
+        await joins(settled.id, "2026-07-19T11:00:00.000Z");
+        // Selection 12:00:00, this enrollment 12:00:30, claim 12:01:00.
+        await joins(gained.id, "2026-07-19T12:00:30.000Z");
+
+        sweep("ok", [gained.id, settled.id], QUALIFYING_START, "2026-07-19T12:01:00.000Z");
+
+        // The row keeps both instants, so the case cannot pass by accident on a
+        // build where the two collapsed back into one.
+        expect(opened.db.select().from(refreshRuns).all()[0]).toMatchObject({
+          startedAt: QUALIFYING_START,
+          claimedAt: "2026-07-19T12:01:00.000Z",
+        });
+        expect(latestCoveringRun(opened.db, gained.id)).toBeUndefined();
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, gained.id).state).toBe("stale");
+        // The CONTROL, on the same run and the same gap: a lane whose membership
+        // did not move is still covered, so the rejection is keyed on the join,
+        // never on the mere existence of a selection-to-claim gap.
+        expect(latestCoveringRun(opened.db, settled.id)?.startedAt).toBe(QUALIFYING_START);
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, settled.id).state).toBe("fresh");
+      });
+
+      it("a WHOLE-LIST (NULL-scope) run still covers a lane that gains a member afterwards", async () => {
+        // Deliberately NOT narrowed (#192 / ADR 0061, untouched here): a
+        // whole-list run swept every THEN-ACTIVE Player, so moving one of those
+        // players onto a lane afterwards changes no fact about what it fetched.
+        // Rejecting here would retighten pre-existing behavior this fix has no
+        // business touching — and would flip every lane's banner to `stale` on a
+        // host that never scopes a sweep at all.
+        const a = await insertList(opened.db, { name: "A" });
+        sweep("ok", undefined, QUALIFYING_START);
+        await joins(a.id, "2026-07-19T12:30:00.000Z");
+
+        expect(latestCoveringRun(opened.db, a.id)?.scopeListIds).toBeNull();
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+      });
+
+      it("an INACTIVE player joining afterwards does not spoil coverage", async () => {
+        // `players.active` is the master gate (ADR 0046 decision 2), and the
+        // membership test reproduces the sweep's OWN selection predicate
+        // (`selectSweepPlayers`: active AND a member of a scoped lane). An
+        // inactive enrollee is fetched by no sweep and reported by no digest, so
+        // treating him as a coverage gap would banner `stale` forever over a
+        // player nobody claims anything about.
+        const a = await insertList(opened.db, { name: "A" });
+        sweep("ok", [a.id], QUALIFYING_START);
+        await joins(a.id, "2026-07-19T12:30:00.000Z", false);
+
+        expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe(QUALIFYING_START);
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+
+        // ...and re-activating him — the act ADR 0046 says puts a player back in
+        // scope — is what makes the same row a real gap. This is the pair that
+        // stops the case above from reading as "membership is ignored".
+        await opened.db.update(players).set({ active: true }).where(eq(players.active, false));
+        expect(latestCoveringRun(opened.db, a.id)).toBeUndefined();
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("stale");
+      });
+
+      it("another lane's fresh enrollment never spoils THIS lane's coverage", async () => {
+        // The correlated EXISTS is keyed on the lane being asked about. A
+        // membership test that dropped that key would make every lane's banner
+        // hostage to every other lane's enrollments.
+        const a = await insertList(opened.db, { name: "A" });
+        const b = await insertList(opened.db, { name: "B" });
+        sweep("ok", [a.id, b.id], QUALIFYING_START);
+        await joins(b.id, "2026-07-19T12:30:00.000Z");
+
+        expect(latestCoveringRun(opened.db, a.id)?.startedAt).toBe(QUALIFYING_START);
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, a.id).state).toBe("fresh");
+        expect(latestCoveringRun(opened.db, b.id)).toBeUndefined();
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, b.id).state).toBe("stale");
+      });
+    });
+
+    it("refuses a non-integer lane id rather than building a pattern that matches anything", () => {
+      // Safe in isolation, not because a caller is suspected: the id is
+      // interpolated into the LIKE pattern, so a non-integer is a refusal.
+      expect(() => latestCoveringRun(opened.db, 1.5)).toThrow(/must be an integer/);
+      expect(() => latestCoveringRun(opened.db, Number.NaN)).toThrow(/must be an integer/);
+    });
+  });
+
   it("a lane-scoped FAILED run DOES surface in refreshHealth — the deliberate split", async () => {
     const other = await insertList(opened.db, { name: "Prospects" });
     sweep("failed", [other.id]);
@@ -551,6 +1070,43 @@ describe("refreshHealth derivation (ADR 0043)", () => {
       playersTotal: 3,
     });
     expect(refreshHealth(opened.db, at(WITHIN_LEASE), TEST_TZ)?.state).toBe("running");
+  });
+
+  it("`latest` is the newest CLAIM, not the newest watermark (PR #203 Reviewer P1)", async () => {
+    // Once `started_at` became the SELECTION instant, watermark order and claim
+    // order stopped agreeing: a run selects before it claims, so a run that
+    // claimed LATER can carry an EARLIER watermark — two overlapping sweeps
+    // where the second one's selection-to-claim gap outlasts the first one's
+    // whole run. Ordering this function by the watermark would then rank the
+    // settled predecessor above the live successor and report `fresh`, with the
+    // predecessor's counts, while a sweep is in flight.
+    await insertRefreshRun(opened.db, {
+      status: "ok",
+      startedAt: T0,
+      claimedAt: T0,
+      finishedAt: WITHIN_LEASE,
+      playersRefreshed: 9,
+      playersTotal: 9,
+    });
+    const inFlight = await insertRefreshRun(opened.db, {
+      status: "running",
+      startedAt: "2026-07-19T06:50:00.000Z", // selected BEFORE the settled run above
+      claimedAt: WITHIN_LEASE, // ...but claimed after it, and its lease is live
+      finishedAt: null,
+      playersRefreshed: 1,
+      playersTotal: 4,
+    });
+    expect(inFlight.startedAt < T0).toBe(true); // the inversion is real, not assumed
+
+    const health = refreshHealth(opened.db, at("2026-07-19T07:06:00.000Z"), TEST_TZ);
+    expect(health).toMatchObject({
+      state: "running",
+      lastStartedAt: "2026-07-19T06:50:00.000Z",
+      playersRefreshed: 1,
+      playersTotal: 4,
+    });
+    // The settled predecessor still dates the last landing of good data.
+    expect(health?.lastSuccessAt).toBe(WITHIN_LEASE);
   });
 
   it("does NOT report `running` for a crashed run whose lease expired", async () => {

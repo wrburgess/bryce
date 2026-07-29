@@ -183,12 +183,19 @@ export async function runDigestCli(rawArgv: string[], deps: DigestCliDeps): Prom
       tagScope,
     });
   } catch (err) {
-    // The scheduled path resolves the DEFAULT lane (#190), and a database with
-    // none refuses rather than mailing an unknown cohort. Caught here so the
-    // operator gets the same greppable `error:` line and exit 1 as every other
-    // refusal, instead of an unhandled rejection — and the message names the
-    // command that fixes it.
-    if (err instanceof NoDefaultListError) {
+    // The claimed path resolves a lane before it claims (#190/#193), and BOTH
+    // of its refusals are the operator's problem rather than a crash:
+    //
+    //  - NoDefaultListError — no `--list` and no default configured. It refuses
+    //    rather than mailing an unknown cohort, and the message names the fix.
+    //  - UnknownListError — the lane resolved above was DELETED between that
+    //    lookup and the job's own re-read (#193). Rare, but reachable: `lists
+    //    delete` from the server or another terminal lands in that window.
+    //    Without this arm it would surface as an unhandled rejection with a
+    //    stack trace, where the identical error from the name lookup twenty
+    //    lines up prints a clean `error:` line — one error type, two behaviors
+    //    on one surface (`rules/backend.md`).
+    if (err instanceof NoDefaultListError || err instanceof UnknownListError) {
       writeError(`error: ${err.message}`);
       return 1;
     }

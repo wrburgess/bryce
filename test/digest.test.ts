@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Db, OpenedDb } from "../src/db/client.js";
@@ -30,7 +32,7 @@ import {
   insertCalendar,
   insertCalendars2026,
   insertDelivery,
-  insertPlayer,
+  insertLanePlayer,
   insertStatLine,
   testDb,
   testFileDb,
@@ -84,7 +86,7 @@ describe("runDigest", () => {
   });
 
   it("aggregates the window's lines, sends both parts with stat content, and stamps nothing", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameDate: "2026-07-18",
@@ -134,7 +136,7 @@ describe("runDigest", () => {
   });
 
   it("the DAILY 1d digest still claims a slot and records its counts", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     const result = await runDigest({ ...deps(), spec: "1d" });
@@ -155,7 +157,7 @@ describe("runDigest", () => {
     // The full freshness matrix lives in test/digest-freshness.test.ts; this
     // pins the DigestResult shape change on the core paths. With no refresh run
     // recorded, the daily digest reads stale (and still sends, annotated).
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     const daily = await runDigest({ ...deps(), spec: "1d" });
@@ -170,7 +172,7 @@ describe("runDigest", () => {
     // A failed slot for a prior date used to be orphaned forever: claimDelivery
     // only ever looked at today's date, and novelty (which re-reported the lines
     // for free) is gone. The next day's run must catch it up.
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-17" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
@@ -191,8 +193,12 @@ describe("runDigest", () => {
     expect(result.action).toBe("sent");
     expect(mailer.sent).toHaveLength(2);
     const subjects = mailer.sent.map((m) => m.subject);
-    expect(subjects).toContain("ScoreKeeps Baseball (Default) - Sat, July 18, 2026"); // recovered
-    expect(subjects).toContain("ScoreKeeps Baseball (Default) - Sun, July 19, 2026"); // today
+    // The scheduled digest NAMES ITS LANE since #193 — `Watchlist`, the lane
+    // drizzle/0012 seeds as the default — where it used to render the bare
+    // `Default` placeholder that stood in for "no list was named". Both the
+    // recovered day and today's carry it, because both are the same lane's slot.
+    expect(subjects).toContain("ScoreKeeps Baseball (Watchlist) - Sat, July 18, 2026"); // recovered
+    expect(subjects).toContain("ScoreKeeps Baseball (Watchlist) - Sun, July 19, 2026"); // today
 
     // The recovered slot is now settled sent, not left failed.
     const rows = await opened.db
@@ -207,7 +213,7 @@ describe("runDigest", () => {
     // A run that crashed after the provider accepted leaves a `sending` row.
     // Recovery must ASK the provider first: if it already landed, settle it
     // reconciled and send nothing, or the HC gets that day twice.
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     // An expired sending slot for Jul 19 — claimedAt well beyond the lease.
@@ -238,7 +244,7 @@ describe("runDigest", () => {
     // Today is Jul 20, so its 1d window covers Jul 19 — proof the reconciled
     // slot did not also re-send its own Jul 18 content.
     expect(lookup.sent).toHaveLength(1);
-    expect(lookup.sent[0]?.subject).toBe("ScoreKeeps Baseball (Default) - Sun, July 19, 2026");
+    expect(lookup.sent[0]?.subject).toBe("ScoreKeeps Baseball (Watchlist) - Sun, July 19, 2026");
     expect(lookup.lookups.map((l) => l.deliveryKey)).toContain(
       `bryce:digest:2026-07-19:list-${await laneId(opened.db)}`,
     );
@@ -249,7 +255,7 @@ describe("runDigest", () => {
     // every window shared it, the day's scheduled 1d report claimed the slot
     // and a later 7d request came back already-sent-today — the headline
     // feature refusing to run because the daily one had.
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     expect((await runDigest({ ...deps(), spec: "1d" })).action).toBe("sent");
@@ -264,7 +270,7 @@ describe("runDigest", () => {
     // row in the shared slot, and the next 1d run reclaimed it, sent 1d content
     // and settled that row `sent`. The 7d report never landed, and the slot
     // said it had.
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     const failing = new CapturingMailer();
@@ -286,7 +292,7 @@ describe("runDigest", () => {
     // crashed attempt already land?", and a positive answer SUPPRESSES the
     // send. If an ad-hoc report carried bryce:digest:{date}, that lookup would
     // find the report and silently skip the real digest.
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     await runDigest({ ...deps(), spec: "7d" });
@@ -302,7 +308,7 @@ describe("runDigest", () => {
     // Sleep stops the DAILY artifact mailing nothing for months. Answering an
     // explicit "give me my season to date" with a liveness heartbeat is not
     // that — it is refusing the question.
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
     clock.set(OFFSEASON);
 
@@ -317,7 +323,7 @@ describe("runDigest", () => {
     // Fail-closed has two halves. Excluding the field is the safe one; saying
     // so is the other. Without the warning an upstream field addition is
     // dropped from every future report and nobody learns the tables went stale.
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameDate: "2026-07-18",
@@ -341,7 +347,7 @@ describe("runDigest", () => {
     // unknown fielding key never reaches an aggregate — it was being dropped
     // silently, the exact staleness the warning exists to catch. The union is
     // computed from the raw splits so it sees fielding keys by their own type.
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameId: 990101,
@@ -366,7 +372,7 @@ describe("runDigest", () => {
     // MLB emits this rate alongside the catcher SB/CS counters. The Digest must
     // recompute it from those counters, not warn that a known source field is
     // unknown just because the fielding table also carries it.
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameId: 990102,
@@ -390,7 +396,7 @@ describe("runDigest", () => {
     // Recovery must run BEFORE the sleep check. A digest that failed on the
     // season's last day would otherwise never recover: the next run is already
     // asleep and returns a heartbeat before reaching the recovery pass.
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-10-30" });
 
     await insertDelivery(opened.db, {
@@ -415,7 +421,7 @@ describe("runDigest", () => {
   });
 
   it("says nothing when every field is classified", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     const warnings: string[] = [];
@@ -431,7 +437,7 @@ describe("runDigest", () => {
     //
     // This clock advances past midnight after the first three reads, which is
     // exactly where the divergence used to appear.
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     let reads = 0;
@@ -453,7 +459,7 @@ describe("runDigest", () => {
     // ...and the content it sent must describe the SAME day. A 1d window on
     // Jul 19 covers Jul 18, so the subject names Jul 18 — not Jul 19, which is
     // what an unfrozen clock produced.
-    expect(mailer.sent.at(-1)?.subject).toBe("ScoreKeeps Baseball (Default) - Sat, July 18, 2026");
+    expect(mailer.sent.at(-1)?.subject).toBe("ScoreKeeps Baseball (Watchlist) - Sat, July 18, 2026");
 
     // The direct pin: the run reads the clock ONCE, so this clock never gets a
     // second chance to advance. Before the anchor existed there were nine reads
@@ -471,7 +477,7 @@ describe("runDigest", () => {
     // The failing arm matters most: settleFailed is the path that used to be
     // able to damage delivery state, so a run that dies at the provider is
     // where a stray write would surface.
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
     const before = await opened.db.select().from(statLines);
     expect(before).not.toHaveLength(0); // a vacuous snapshot would prove nothing
@@ -487,7 +493,7 @@ describe("runDigest", () => {
   });
 
   it("re-running the same window sends the same content", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     // The point of the redesign: under novelty selection the second run
@@ -500,7 +506,7 @@ describe("runDigest", () => {
   });
 
   it("a same-day re-run does not send a second digest", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     await runDigest(deps());
     const second = await runDigest(deps());
@@ -510,7 +516,7 @@ describe("runDigest", () => {
   });
 
   it("sends the next day's digest even when the window is empty, as a zero row", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
     await runDigest(deps());
 
@@ -520,7 +526,7 @@ describe("runDigest", () => {
     expect(result.action).toBe("sent");
     expect(result.statLineCount).toBe(0);
     const mail = mailer.sent[1];
-    expect(mail?.subject).toBe("ScoreKeeps Baseball (Default) - Sun, July 19, 2026");
+    expect(mail?.subject).toBe("ScoreKeeps Baseball (Watchlist) - Sun, July 19, 2026");
     // A GP 0 row says it better than the old "no new stats" tail.
     expect(cells(mail?.text ?? "", "M Acosta")).toEqual(
       ["M", "Acosta", "AAA", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0", "0"],
@@ -529,7 +535,7 @@ describe("runDigest", () => {
   });
 
   it("reports a line by its GAME date, so a late arrival lands in the window it belongs to", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
     await runDigest(deps());
 
@@ -552,15 +558,15 @@ describe("runDigest", () => {
   });
 
   it("orders rows by the level ladder and labels each with the level the GAME was played at", async () => {
-    const mlb = await insertPlayer(opened.db, {
+    const mlb = await insertLanePlayer(opened.db, {
       fullName: "Paul Skenes",
       position: "P",
       level: "mlb",
       milbLevel: null,
       teamName: "Pittsburgh Pirates",
     });
-    const aaa = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
-    const aa = await insertPlayer(opened.db, {
+    const aaa = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
+    const aa = await insertLanePlayer(opened.db, {
       fullName: "Double Guy",
       milbLevel: "Double-A",
       teamName: "Pensacola Blue Wahoos",
@@ -594,14 +600,14 @@ describe("runDigest", () => {
   });
 
   it("places an NCAA row last on the ladder", async () => {
-    const mlb = await insertPlayer(opened.db, {
+    const mlb = await insertLanePlayer(opened.db, {
       fullName: "Paul Skenes",
       level: "mlb",
       milbLevel: null,
       teamName: "Pittsburgh Pirates",
     });
-    const aaa = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
-    const ncaa = await insertPlayer(opened.db, {
+    const aaa = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
+    const ncaa = await insertLanePlayer(opened.db, {
       externalId: null,
       ncaaPlayerSeq: 2649785,
       fullName: "College Guy",
@@ -636,8 +642,8 @@ describe("runDigest", () => {
   it("omits an out-of-season player entirely from the zero rows", async () => {
     // AAA season ended 2026-09-27; MLB runs to 10-31.
     clock.set("2026-10-01T17:00:00Z");
-    await insertPlayer(opened.db, { fullName: "Out Of Season Guy" }); // AAA, no lines
-    await insertPlayer(opened.db, {
+    await insertLanePlayer(opened.db, { fullName: "Out Of Season Guy" }); // AAA, no lines
+    await insertLanePlayer(opened.db, {
       fullName: "Still Playing",
       level: "mlb",
       milbLevel: null,
@@ -652,7 +658,7 @@ describe("runDigest", () => {
   });
 
   it("renders a doubleheader as two Gm rows in a 1d window and folds it in a 7d one", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameId: 880001,
@@ -686,7 +692,7 @@ describe("runDigest", () => {
   });
 
   it("keeps a position player's pitching line out of the pitchers table", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Two Way" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Two Way" });
     await insertStatLine(opened.db, { playerId: player.id, gameId: 880001, statType: "batting" });
     await insertStatLine(opened.db, {
       playerId: player.id,
@@ -704,7 +710,7 @@ describe("runDigest", () => {
   });
 
   it("merges a fielding row's errors into the same game's batting line, never a third line", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Error Prone" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Error Prone" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameId: 880010,
@@ -733,7 +739,7 @@ describe("runDigest", () => {
   });
 
   it("renders a fielding-only game as a zeros batting row carrying only E", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Defensive Sub" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Defensive Sub" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameId: 880020,
@@ -751,7 +757,7 @@ describe("runDigest", () => {
   });
 
   it("on send failure records a failed delivery, and the retry sends the same window", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     mailer.failWith = new Error("postmark down");
 
@@ -775,9 +781,9 @@ describe("runDigest", () => {
   });
 
   it("excludes deactivated players' lines from the digest", async () => {
-    const gone = await insertPlayer(opened.db, { fullName: "Deactivated Guy", active: false });
+    const gone = await insertLanePlayer(opened.db, { fullName: "Deactivated Guy", active: false });
     await insertStatLine(opened.db, { playerId: gone.id });
-    const active = await insertPlayer(opened.db, { fullName: "Active Guy" });
+    const active = await insertLanePlayer(opened.db, { fullName: "Active Guy" });
     await insertStatLine(opened.db, { playerId: active.id });
 
     const result = await runDigest(deps());
@@ -808,9 +814,9 @@ describe("runDigest heartbeat (Offseason Sleep, ADR 0031)", () => {
     mailer = new CapturingMailer();
     clock = fakeClock(OFFSEASON); // 2026-12-05 Chicago: after the World Series
     await insertCalendars2026(opened.db);
-    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
-    await insertPlayer(opened.db, { fullName: "Watched Two" });
-    await insertPlayer(opened.db, { fullName: "Watched Three" });
+    await insertLanePlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+    await insertLanePlayer(opened.db, { fullName: "Watched Two" });
+    await insertLanePlayer(opened.db, { fullName: "Watched Three" });
   });
 
   afterEach(() => {
@@ -916,7 +922,7 @@ describe("delivery claim under concurrency (ADR 0034)", () => {
   });
 
   it("refuses a second digest while the first holds a live claim mid-send", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     await insertStatLine(opened.db, { playerId: player.id });
 
@@ -939,7 +945,7 @@ describe("delivery claim under concurrency (ADR 0034)", () => {
   });
 
   it("lets only one of two truly interleaved invocations reach the provider", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
 
     // Both start before either can claim: real event-loop interleaving.
@@ -982,7 +988,7 @@ describe("delivery claim under concurrency (ADR 0034)", () => {
     };
     try {
       await insertCalendars2026(file.opened.db);
-      const player = await insertPlayer(file.opened.db);
+      const player = await insertLanePlayer(file.opened.db);
       await insertStatLine(file.opened.db, { playerId: player.id });
 
       const both = Promise.all([
@@ -1008,8 +1014,8 @@ describe("delivery claim under concurrency (ADR 0034)", () => {
 
   it("refuses a second heartbeat while the first holds a live claim mid-send", async () => {
     clock.set(OFFSEASON);
-    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
-    await insertPlayer(opened.db, { fullName: "Watched Two" });
+    await insertLanePlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+    await insertLanePlayer(opened.db, { fullName: "Watched Two" });
 
     const both = Promise.all([runDigest(deps()), runDigest(deps())]);
     await mailer.waitForInFlight(1);
@@ -1030,7 +1036,7 @@ describe("delivery claim under concurrency (ADR 0034)", () => {
     // collide on the unique index — only the rule evaluated INSIDE the claim
     // transaction stops the second one.
     clock.set(OFFSEASON); // 2026-12-05 Chicago
-    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+    await insertLanePlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
 
     const first = runDigest(deps());
     await mailer.waitForInFlight(1);
@@ -1048,6 +1054,103 @@ describe("delivery claim under concurrency (ADR 0034)", () => {
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0]?.dateCovered).toBe("2026-12-05");
   });
+});
+
+/**
+ * The cross-process overlap the manual ops migration relies on (#193 / ADR 0062
+ * decision 3, Reviewer should-consider 1).
+ *
+ * Until an operator unloads `com.sk.digest`, the retired fixed agent and the new
+ * tick BOTH try a lane's slot on the same date, as two OS processes. The whole
+ * argument for doing that migration by hand rather than automatically is that
+ * the durable claim makes the overlap safe — so it is proven with a REAL second
+ * process, not a second in-process connection (rules/testing.md: a same-process
+ * handle shares the runtime's locks and can pass while the real race survives).
+ */
+describe("lane slot claimed across a real second process (#193)", () => {
+  it("refuses the second process's claim on the SAME (digest, date, lane) triple", async () => {
+    const file = testFileDb();
+    const lane = await resolveDefaultList(file.opened.db);
+    const other = await createList(file.opened.db, "Other Lane", new Date(MID_SEASON));
+    // Close OUR handle before the child claims, so the spawned process is the
+    // sole participant and nothing about this process's connection can be what
+    // makes the exclusion hold.
+    const dbClientUrl = pathToFileURL(new URL("../src/db/client.ts", import.meta.url).pathname).href;
+    const claimUrl = pathToFileURL(new URL("../src/jobs/delivery-claim.ts", import.meta.url).pathname).href;
+
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
+      const { openDb } = await import(process.env.DB_CLIENT);
+      const { claimDelivery } = await import(process.env.CLAIM);
+      const opened = openDb(process.env.DB_PATH);
+      const claim = claimDelivery(opened.db, {
+        kind: "digest",
+        dateCovered: process.env.DATE,
+        listId: Number(process.env.LANE),
+        now: new Date(process.env.NOW),
+      });
+      process.stdout.write(JSON.stringify(claim) + "\\n");
+      // HOLD the claim (a live lease) until released, exactly as a real run holds
+      // it across the network call to the mail provider.
+      await new Promise((resolve) => process.stdin.once("data", resolve));
+      opened.close();
+      process.exit(0);
+    `], {
+      env: {
+        ...process.env,
+        DB_PATH: file.path,
+        DATE: "2026-07-19",
+        LANE: String(lane.id),
+        NOW: MID_SEASON,
+        DB_CLIENT: dbClientUrl,
+        CLAIM: claimUrl,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    try {
+      let stderr = "";
+      const lines: string[] = [];
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => lines.push(...chunk.trim().split("\n").filter(Boolean)));
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+      await new Promise<void>((resolve, reject) => {
+        child.once("error", reject);
+        child.stdout.once("data", () => resolve());
+        child.once("exit", (code) => reject(new Error(`child exited before claiming (${code}): ${stderr}`)));
+      });
+      expect(JSON.parse(lines[0]!)).toMatchObject({ claimed: true, replay: false });
+
+      // THIS process now attempts the same triple, while the child still holds a
+      // live lease. Refused — ADR 0034's exact mutual exclusion, across the
+      // process boundary, on a lane-keyed slot.
+      const contender = claimDelivery(file.opened.db, {
+        kind: "digest",
+        dateCovered: "2026-07-19",
+        listId: lane.id,
+        now: new Date(MID_SEASON),
+      });
+      expect(contender).toEqual({ claimed: false, reason: "claimed-by-another-run" });
+
+      // ...and a DIFFERENT lane on the same date is NOT blocked, which is what
+      // makes several lanes able to digest one date at all.
+      expect(
+        claimDelivery(file.opened.db, {
+          kind: "digest",
+          dateCovered: "2026-07-19",
+          listId: other.id,
+          now: new Date(MID_SEASON),
+        }),
+      ).toMatchObject({ claimed: true, replay: false });
+
+      // Exactly two rows: the child's and the other lane's. No duplicate slot.
+      expect(file.opened.db.select().from(digestDeliveries).all()).toHaveLength(2);
+    } finally {
+      child.stdin.write("release\n");
+      await new Promise<void>((resolve) => { child.once("exit", () => resolve()); });
+      file.cleanup();
+    }
+  }, 60_000);
 });
 
 describe("delivery recovery after a crash (ADR 0034)", () => {
@@ -1082,7 +1185,7 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
   });
 
   it("does not recover a claim eagerly: a fresh sending row blocks and sends nothing", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     // Durable aftermath of a run that claimed and died BEFORE sending.
     await insertDelivery(opened.db, {
@@ -1100,7 +1203,7 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
   });
 
   it("re-sends the duplicate when a run dies after acceptance and before the settle", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
 
     const crashed = runDigest({ ...deps(), db: faultingDb(opened.db, { failAt: "before-settle" }) });
@@ -1130,7 +1233,7 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
   });
 
   it("rolls the settle back when the process dies inside it, before COMMIT", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     await insertStatLine(opened.db, { playerId: player.id });
 
@@ -1155,7 +1258,7 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
   });
 
   it("reclaims a sending row older than the lease and bumps the attempt count", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     await insertDelivery(opened.db, {
       kind: "digest",
@@ -1181,7 +1284,7 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
     // in-flight delivery alongside a stale error — the observability this design
     // leans on would be lying. Asserted mid-flight, because settling would
     // overwrite both fields anyway and hide the bug.
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     await insertDelivery(opened.db, {
       kind: "digest",
@@ -1209,7 +1312,7 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
 
   it("heals a crashed heartbeat and restarts the seven-day clock from the NEW send", async () => {
     clock.set(OFFSEASON); // 2026-12-05T18:00:00Z
-    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+    await insertLanePlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
 
     const crashed = runDigest({ ...deps(), db: faultingDb(opened.db, { failAt: "before-settle" }) });
     await expect(crashed).rejects.toBeInstanceOf(InjectedFault);
@@ -1246,7 +1349,7 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
 
   it("never lets a stuck sending heartbeat satisfy the seven-day rule", async () => {
     clock.set(OFFSEASON); // 2026-12-05
-    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+    await insertLanePlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
     // A heartbeat claimed two days ago that never settled. If `sending` counted
     // toward the rule this would suppress today's heartbeat — silencing the
     // liveness signal for a week off the back of a crash.
@@ -1271,7 +1374,7 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
 
   it("records the provider's message id on the settled delivery", async () => {
     mailer.providerMessageId = "postmark-abc-123";
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
 
     await runDigest(deps());
@@ -1284,7 +1387,7 @@ describe("delivery recovery after a crash (ADR 0034)", () => {
   });
 
   it("releases the slot on provider rejection so the retry re-claims it", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     mailer.failWith = new Error("postmark down");
 
@@ -1359,7 +1462,7 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
   });
 
   it("suppresses the resend, marking NO stat lines, when the provider confirms acceptance", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     await crashAfterAcceptance();
     expect(mailer.sent).toHaveLength(1);
@@ -1402,7 +1505,7 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
   });
 
   it("re-sends when the provider reports the delivery key as not found", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     await crashAfterAcceptance();
 
@@ -1422,7 +1525,7 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
   });
 
   it("re-sends when the lookup is unavailable — a failed lookup never suppresses", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     await crashAfterAcceptance();
 
@@ -1440,7 +1543,7 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     // The capability is optional BY CONSTRUCTION: no method, no lookup, and the
     // documented at-least-once behaviour is preserved exactly.
     expect("findAccepted" in plain).toBe(false);
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
 
     const crashed = runDigest({
@@ -1464,7 +1567,7 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     // this case the catch-block fail-open path is unpinned: inverting it to
     // suppress the send fails no test, which is how a provider bug would
     // silently become mail loss.
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     await crashAfterAcceptance();
 
@@ -1483,7 +1586,7 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     // selection its content cannot be lost by construction — the window is a
     // date range over stored lines, so re-asking for it returns it. This pins
     // that the reconciliation path leaves no state that could hide it.
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameDate: "2026-07-18",
@@ -1511,7 +1614,7 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
     // Reconciliation is strictly a RECOVERY concern. A fresh claim has no
     // crashed attempt to ask about, and a `failed` row means the provider
     // rejected the mail — it never accepted it.
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     mailer.result = { outcome: "accepted", providerMessageId: "pm-must-not-be-used" };
 
@@ -1534,7 +1637,7 @@ describe("provider reconciliation on recovery (ADR 0034 amendment)", () => {
 
   it("reconciles a crashed heartbeat and runs the seven-day clock from that settle", async () => {
     clock.set(OFFSEASON); // 2026-12-05T18:00:00Z
-    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+    await insertLanePlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
 
     const crashed = runDigest({ ...deps(), db: faultingDb(opened.db, { failAt: "before-settle" }) });
     await expect(crashed).rejects.toBeInstanceOf(InjectedFault);
@@ -1822,7 +1925,7 @@ describe("forced delivery", () => {
   // --- Digest job ----------------------------------------------------------
 
   it("re-sends the same rendered stat lines after a same-day send", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameDate: "2026-07-18",
@@ -1845,7 +1948,7 @@ describe("forced delivery", () => {
   });
 
   it("reports reason 'forced', in preference to 'recovered-stale-claim'", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     // An expired lease: unforced, this run reports recovered-stale-claim.
     await insertDelivery(opened.db, {
@@ -1866,7 +1969,7 @@ describe("forced delivery", () => {
 
   it("leaves the delivery row exactly as the real send left it", async () => {
     mailer.providerMessageId = "postmark-first";
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
 
     await runDigest(deps());
@@ -1885,7 +1988,7 @@ describe("forced delivery", () => {
   });
 
   it("picks up a line that arrived after the real send, and consumes nothing", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, {
       playerId: player.id,
       gameDate: "2026-07-18",
@@ -1925,7 +2028,7 @@ describe("forced delivery", () => {
     // the next scheduled run would re-claim that failed row and mail an EMPTY
     // digest, because a window reports whatever falls inside it.
     mailer.providerMessageId = "postmark-first";
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     await runDigest(deps());
     const before = (await deliveries())[0];
@@ -1967,7 +2070,7 @@ describe("forced delivery", () => {
     // turns it red. That is deliberate — the test should survive a refactor that
     // drops the accidental one, and fail if the behaviour itself is lost.
     const lookupMailer = new LookupMailer();
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     await runDigest({ ...deps(), mailer: lookupMailer });
     const before = (await deliveries())[0];
@@ -2006,7 +2109,7 @@ describe("forced delivery", () => {
    * precondition, so it reaches the live-lease check under EITHER order.
    */
   const liveLeasedHeartbeatInsideWindow = async () => {
-    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+    await insertLanePlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
     // Two days ago: unforced, the rolling seven-day rule alone WOULD refuse.
     await insertDelivery(opened.db, {
       kind: "heartbeat",
@@ -2092,7 +2195,7 @@ describe("forced delivery", () => {
 
   it("sends a heartbeat when forced inside the seven-day window", async () => {
     clock.set(OFFSEASON); // 2026-12-05 Chicago
-    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+    await insertLanePlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
     await insertDelivery(opened.db, {
       kind: "heartbeat",
       dateCovered: "2026-11-29",
@@ -2111,7 +2214,7 @@ describe("forced delivery", () => {
     // it, the rolling clock would restart from today — silencing the next REAL
     // liveness signal for a week. That is invisible until the week of silence.
     clock.set(OFFSEASON);
-    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+    await insertLanePlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
     await insertDelivery(opened.db, {
       kind: "heartbeat",
       dateCovered: "2026-11-29",
@@ -2143,7 +2246,7 @@ describe("forced delivery", () => {
     // that mailed a digest in December would make test sends lie about
     // production behaviour and could mask a genuine seasonal bug.
     clock.set(OFFSEASON);
-    const player = await insertPlayer(opened.db, {
+    const player = await insertLanePlayer(opened.db, {
       fullName: "Watched One",
       level: "mlb",
       milbLevel: null,
@@ -2168,7 +2271,7 @@ describe("digest respects host-timezone dates", () => {
     // 2026-07-20T03:00Z is still 2026-07-19 in Chicago.
     const clock = fakeClock("2026-07-20T03:00:00Z");
     await insertCalendars2026(opened.db);
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     await runDigest({
       db: opened.db,
@@ -2224,7 +2327,7 @@ describe("lane-scoped delivery slot (#190)", () => {
   });
 
   it("persists the DEFAULT lane's id on a scheduled digest", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
 
     const result = await runDigest(deps());
@@ -2239,7 +2342,7 @@ describe("lane-scoped delivery slot (#190)", () => {
     clock.set(OFFSEASON); // 2026-12-05 Chicago: after the World Series
     // Offseason Sleep is judged against the WATCHED players' calendars, so the
     // heartbeat path needs one.
-    await insertPlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
+    await insertLanePlayer(opened.db, { fullName: "Watched One", level: "mlb", milbLevel: null });
     const result = await runDigest(deps());
     expect(result).toMatchObject({ kind: "heartbeat", action: "sent" });
 
@@ -2249,7 +2352,7 @@ describe("lane-scoped delivery slot (#190)", () => {
   });
 
   it("REFUSES to run the scheduled path with no default lane, rather than mailing an unknown cohort", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     await opened.db.update(playerLists).set({ isDefault: false });
 
@@ -2260,7 +2363,7 @@ describe("lane-scoped delivery slot (#190)", () => {
   });
 
   it("still runs an ON-DEMAND report with no default lane (it takes no slot)", async () => {
-    const player = await insertPlayer(opened.db);
+    const player = await insertLanePlayer(opened.db);
     await insertStatLine(opened.db, { playerId: player.id });
     await opened.db.update(playerLists).set({ isDefault: false });
 
@@ -2363,7 +2466,7 @@ describe("lane-scoped delivery slot (#190)", () => {
     });
 
     it("hands the provider the lane-suffixed key on a real scheduled send", async () => {
-      const player = await insertPlayer(opened.db);
+      const player = await insertLanePlayer(opened.db);
       await insertStatLine(opened.db, { playerId: player.id });
       await runDigest(deps());
       expect(mailer.contexts[0]).toEqual({

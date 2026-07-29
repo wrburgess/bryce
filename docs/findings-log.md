@@ -238,6 +238,55 @@ discipline, and a recurrence would justify writing it down as one.
 
 ---
 
+### F005 — A migration's safety proof rested on an environmental assumption stated as a fact about the code
+
+- **Normalized failure class:** a comment justified an invariant by asserting a property of a
+  *writer* that actually depended on a property of the *environment*, and the assumption was never
+  named as one — so the claim read as verified and was relied on by a later change.
+- **What happened.** `drizzle/0014` added `CHECK (started_at <= claimed_at)` to `refresh_runs`. Its
+  rationale header argued no existing row could violate it because "the only other writer,
+  `renewRefreshRun`, moves `claimed_at` strictly **FORWARD**." That is true of the *code* only while
+  the *clock* is monotonic. `renewRefreshRun` wrote a bare `now` with no comparison against the
+  existing value, so a backward clock step writes an inverted row — legal on a pre-0014 database,
+  fatal to 0014's copy, leaving the application unable to start. The delta Reviewer caught it; the
+  subsequent fix established the mechanism was in fact *worse* than the Reviewer's own framing (the
+  regressed write landed at **any** step size, because the live-lease cutoff is computed from the same
+  regressed clock and moves earlier with it).
+- **Severity and blast radius:** **High.** Not a wrong result but a refused start: the app could not
+  complete migration on upgrade. Blast radius is every host whose clock had ever stepped backward
+  during a live sweep. Caught before merge, so nothing shipped.
+- **Enforcement status:** **partially enforced.** The specific hole is closed on both sides — the
+  migration repairs a legacy inverted row with `max(started_at, claimed_at)` rather than aborting, and
+  `renewRefreshRun` clamps its write to `max(now, started_at)` — each with a regression test verified
+  red first. What is **not** mechanically checkable is the general class: no linter can tell that a
+  comment's "always" is contingent on an unstated environmental premise. The nearest detector is
+  social, and it is what worked here: a claim of the form "X can never happen" in a safety argument
+  deserves the question *"under what assumption?"* before it is relied on.
+- **Recurrence count:** 0 (first occurrence).
+- **Surfaced by:** [PR #203](https://github.com/wrburgess/bryce/pull/203) (issue
+  [#193](https://github.com/wrburgess/bryce/issues/193)), **Stage 5 (Deliver)** — by the independent
+  delta Reviewer, in the fourth of five review rounds, on a fold that was itself answering the third
+  round's finding. Named by stage rather than by activity, per F004.
+- **Date recorded:** 2026-07-29
+- **Review date:** 2026-10-27
+
+**Why outcome 3 rather than 2.** The **minting freeze** ([#185](https://github.com/wrburgess/bryce/issues/185))
+is still in force, so outcome 2 is unavailable regardless of merit. Independently, the **recursion
+bound** ([`PROJECT.md`](../../PROJECT.md) → *Rule-suggestion disposition*) forbids outcome 2 for a
+suggestion arising from a delta review, which this is — so two separate rules reach the same answer.
+
+The nearest existing bullet is `rules/backend.md`'s *"confirm an external source's actual fields before
+coding around an assumed absence"*, and this is its sibling one domain over: there the unverified
+premise was about a **payload**, here about the **runtime clock**. Both are factual claims owed a
+citation. Whether that generalizes into one bullet about environmental premises, or stays two concrete
+ones, is exactly the judgment the corpus review is for.
+
+**Why not outcome 4.** The tempting argument is that the Reviewer caught it, so the process worked. But
+the assumption had already propagated to **four** sites by the time it was caught — the migration
+header, the schema's CHECK comment, the tick's frozen-clock rationale, and ADR 0062's copy of that
+rationale — because each was written by trusting the last. One unexamined "always" cost a full review
+round and an upgrade-blocking defect; that is worth a review date.
+
 ## Archived
 
 _None yet._

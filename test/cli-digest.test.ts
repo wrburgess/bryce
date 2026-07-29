@@ -5,7 +5,7 @@ import { parseForce, parseTags, parseWindow, runDigestCli } from "../src/cli/dig
 // `parseList` moved to the shared CLI module when `sk refresh` became its second
 // caller (#192); these cases are unchanged and still cover digest's use of it.
 import { parseList } from "../src/cli/flags.js";
-import { playerLists } from "../src/db/schema.js";
+import { digestDeliveries, playerLists } from "../src/db/schema.js";
 import { addToList, createList } from "../src/lists/service.js";
 import { normalizeDirect, preflightDirect } from "../src/cli/router.js";
 import {
@@ -14,7 +14,9 @@ import {
   TEST_TZ,
   fakeClock,
   insertCalendars2026,
+  insertLanePlayer,
   insertPlayer,
+  onFirstReadComplete,
   insertPlayerTag,
   insertStatLine,
   testDb,
@@ -175,7 +177,7 @@ describe("digest CLI", () => {
       output = [];
       errors = [];
       await insertCalendars2026(opened.db);
-      const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+      const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
       await insertStatLine(opened.db, {
         playerId: player.id,
         gameDate: "2026-07-18",
@@ -306,10 +308,17 @@ describe("digest CLI", () => {
       await addToList(opened.db, "L", [listed.externalId!], clock.now());
 
       const subjects: string[] = [];
+      // `--force` on EVERY spelling, and it is what makes the loop constructable
+      // at all since #193: a tag-free 1d named-lane send now CLAIMS lane L's
+      // daily slot, so the second spelling would otherwise be refused
+      // `already-sent-today` and prove nothing about its scoping. Forced, the
+      // first is an ordinary claim and the other two are write-free replays —
+      // and a replay assembles exactly what an ordinary run would, which is
+      // precisely the content this case is comparing.
       for (const argv of [["--list", "L"], ["--list=L"], ["-l", "L"]]) {
         mailer = new CapturingMailer();
         output = [];
-        expect(await runDigestCli(argv, deps()), argv.join(" ")).toBe(0);
+        expect(await runDigestCli([...argv, "--force"], deps()), argv.join(" ")).toBe(0);
         expect(output[0], argv.join(" ")).toContain("players=1");
         const body = `${mailer.sent[0]?.html}\n${mailer.sent[0]?.text}`;
         expect(body, argv.join(" ")).toContain("Guy");
@@ -319,6 +328,39 @@ describe("digest CLI", () => {
       // One scope, three spellings: byte-identical subjects prove it.
       expect(new Set(subjects).size).toBe(1);
       expect(subjects[0]).toBe("ScoreKeeps Baseball (L) - Sat, July 18, 2026");
+
+      // And the three sends left ONE delivery row on lane L's slot, not three:
+      // the replays wrote nothing, which is the claimed path's own contract now
+      // that a named lane takes one.
+      const rows = await opened.db.select().from(digestDeliveries);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ kind: "digest", dateCovered: "2026-07-19", attemptCount: 1 });
+    });
+
+    it("reports a lane DELETED after resolution as a clean error line, not a stack trace (#193)", async () => {
+      // Reviewer must-fix 4, on the CLI seam. The claimed path re-reads the lane
+      // by id inside `runDigest`, so a `lists delete` landing between this
+      // command's name lookup and that read raises UnknownListError from a
+      // second place. The identical error from the name lookup already prints a
+      // clean `error:` line; without the matching arm around `runDigest` the
+      // race would surface as an unhandled rejection instead.
+      const listed = await insertPlayer(opened.db, { fullName: "Listed Guy" });
+      await insertStatLine(opened.db, { playerId: listed.id, gameDate: "2026-07-18" });
+      const clock = fakeClock(MID_SEASON);
+      await createList(opened.db, "L", clock.now());
+      await addToList(opened.db, "L", [listed.externalId!], clock.now());
+
+      // Delete the lane the instant the CLI's own name resolution completes —
+      // after it has an id in hand, before `runDigest` re-reads the row.
+      const racing = onFirstReadComplete(opened.db, () => {
+        opened.sqlite
+          .prepare("update player_lists set deleted_at = ? where name = ?")
+          .run("2026-07-19T00:00:00.000Z", "L");
+      });
+
+      expect(await runDigestCli(["--list", "L"], { ...deps(), db: racing })).toBe(1);
+      expect(errors[0]).toContain('no list named "L"');
+      expect(mailer.sent).toHaveLength(0);
     });
 
     it("--list fails closed on an unknown list: exits 1 and sends nothing (#70)", async () => {

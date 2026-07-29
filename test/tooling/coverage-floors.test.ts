@@ -33,6 +33,7 @@ const EXPECTED_FLOORS: Floors = {
   "src/server.ts": { statements: 56, branches: 76 },
   "src/cli/migrate.ts": { statements: 70, branches: 33 },
   "src/cli/restore.ts": { statements: 78, branches: 61 },
+  "src/cli/tick.ts": { statements: 82, branches: 78 },
   "src/cli/batch-add.ts": { statements: 85, branches: 73 },
   "src/watchlist/service.ts": { statements: 86, branches: 79 },
   "src/cli/refresh.ts": { statements: 90, branches: 87 },
@@ -61,10 +62,10 @@ function passingSummary(floors: Floors = FLOORS, prefix = ""): Summary {
 describe("FLOORS manifest", () => {
   // Case 1 -- the manifest is the gate. Weakening or dropping an entry fails HERE,
   // by name, instead of quietly widening what the checker will accept.
-  it("holds exactly the nine expected paths with the expected floors", () => {
+  it("holds exactly the ten expected paths with the expected floors", () => {
     expect(FLOORS).toEqual(EXPECTED_FLOORS);
     expect(Object.keys(FLOORS).sort()).toEqual(Object.keys(EXPECTED_FLOORS).sort());
-    expect(Object.keys(FLOORS)).toHaveLength(9);
+    expect(Object.keys(FLOORS)).toHaveLength(10);
   });
 
   it("declares both metrics as whole-number percentages in range for every entry", () => {

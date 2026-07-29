@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The only scheduled worker agent (#193, decision 3 of the 0062 record): it
+     replaces com.sk.refresh.plist (03:30) and com.sk.digest.plist (05:00), which
+     are retired and deliberately absent — scripts/check-operational-templates.ts
+     asserts they stay absent, so a stale copy cannot linger in the repository.
+
+     StartInterval 900 is every 15 minutes. An interval rather than a
+     StartCalendarInterval, because what is owed now lives in the database: each
+     lane carries its own refresh interval and digest hour (#191), and a fixed
+     clock time cannot express a value edited with `sk players lists configure`.
+     launchd runs a missed interval job on wake, so a sleeping laptop catches up
+     exactly as it did with the fixed agents.
+
+     `npm run tick -- --quiet`: the `--` carries the load here. Without it npm
+     swallows the flag and the scheduled job reverts to the verbose per-stage
+     stream — including the whole refresh liveness stream — 96 times a day, into
+     an unrotated log. Quiet mode is exactly one terminal line per tick.
+     scripts/check-operational-templates.ts pins this invocation. -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.sk.tick</string>
+  <key>WorkingDirectory</key><string>BRYCE_ROOT</string>
+  <key>ProgramArguments</key><array><string>/bin/zsh</string><string>-lc</string><string>mkdir -p "BRYCE_ROOT/logs" &amp;&amp; npm run tick -- --quiet &gt;&gt; "BRYCE_ROOT/logs/tick.log" 2&gt;&amp;1</string></array>
+  <key>StartInterval</key><integer>900</integer>
+</dict></plist>

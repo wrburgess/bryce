@@ -660,6 +660,123 @@ describe("lane-scoped refresh (#192)", () => {
       expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ).state).toBe("stale");
     });
 
+    /**
+     * THE SELECTION WATERMARK (PR #203 Reviewer P1) — the third route to a
+     * forged `fresh`, and the one the run's OWN CLOCK opened.
+     *
+     * `runRefresh` selects its players, loads calendars, and only then claims. So
+     * when the claim instant was stamped onto `started_at`, every enrollment made
+     * inside that gap dated as OLDER than the run — and `latestCoveringRun`'s
+     * membership test read it as a member the selection had already seen, while
+     * `activePlayers` was fixed before the enrollment existed and never fetched
+     * him. The disclosure that shipped with the membership test called this
+     * window sub-millisecond; it is not. It spans the calendar load, several
+     * database reads wide, in ordinary operation.
+     *
+     * The interleaving is DRIVEN, never hoped for: the same completion hook the
+     * PR #201 case uses fires the instant the selection read returns, and it
+     * moves the clock as well as the row, so the enrollment lands STRICTLY
+     * between the watermark and the claim rather than on either boundary (where
+     * `>=` would decide the case for the wrong reason).
+     */
+    describe("the selection watermark (PR #203 Reviewer P1)", () => {
+      /** The clock starts at MID_SEASON; these are the two instants after it. */
+      const SELECTED_AT = "2026-07-19T17:00:00.000Z";
+      const ENROLLED_AT = "2026-07-19T17:00:01.000Z";
+      const CLAIMED_AT = "2026-07-19T17:00:02.000Z";
+      /** Well before the sweep — a member every selection is guaranteed to see. */
+      const LONG_ENROLLED_AT = "2026-07-19T16:00:00.000Z";
+
+      /**
+       * The lane, its long-standing member, an off-lane active player who keeps
+       * the recorded scope from collapsing to the whole-list `NULL` (a question
+       * #192 already pins and this one is not about), and the racer.
+       */
+      const laneWithRacer = async (): Promise<{ lane: { id: number }; racer: { id: number } }> => {
+        const covered = await insertPlayer(opened.db, { externalId: MLB_PERSON_ID });
+        const racer = await insertPlayer(opened.db, { externalId: AAA_PERSON_ID }); // active
+        await insertPlayer(opened.db); // active, on no lane, never fetched
+        const lane = await insertLane(opened.db, "Prospects");
+        await insertListMember(opened.db, {
+          listId: lane.id,
+          playerId: covered.id,
+          createdAt: LONG_ENROLLED_AT,
+        });
+        return { lane, racer };
+      };
+
+      /** Enroll `playerId` in `laneId` on the same connection, synchronously. */
+      const enrollNow = (laneId: number, playerId: number, createdAt: string): void => {
+        opened.sqlite
+          .prepare("INSERT INTO list_members (list_id, player_id, created_at) VALUES (?, ?, ?)")
+          .run(laneId, playerId, createdAt);
+      };
+
+      it("an enrollment INSIDE the selection-to-claim gap leaves the lane's banner STALE", async () => {
+        const { lane, racer } = await laneWithRacer();
+
+        let enrolled = false;
+        const racingDb = enrollWhenPlayersFirstRead(opened.db, () => {
+          // Selection has returned without him; the calendar load and the claim
+          // are still ahead. Moving the clock here is what makes the gap REAL —
+          // a frozen clock would put the enrollment on the `>=` boundary and the
+          // case would pass whichever instant the row recorded.
+          clock.set(ENROLLED_AT);
+          enrollNow(lane.id, racer.id, ENROLLED_AT);
+          enrolled = true;
+          clock.set(CLAIMED_AT);
+        });
+
+        const summary = await runRefresh(deps({ db: racingDb, scope: scopeOf(lane) }));
+
+        // The injection has to have happened, or every assertion below passes for
+        // the wrong reason (rules/testing.md).
+        expect(enrolled).toBe(true);
+        // He was NOT swept — the assertion is on the CLIENT, because the ADR 0029
+        // upsert is idempotent and a doubled fetch leaves the tables identical.
+        expect(summary).toMatchObject({ skipped: false, status: "ok", playersRefreshed: 1 });
+        expect(peopleFetched()).toEqual([MLB_PERSON_ID]);
+
+        const run = (await opened.db.select().from(refreshRuns))[0];
+        // The two instants are recorded separately, and the enrollment sits
+        // STRICTLY between them: that is the window, stated as an assertion.
+        expect(run).toMatchObject({ startedAt: SELECTED_AT, claimedAt: CLAIMED_AT });
+        expect(ENROLLED_AT > SELECTED_AT && ENROLLED_AT < CLAIMED_AT).toBe(true);
+        expect(run?.scopeListIds).toBe(`,${lane.id},`);
+        // ...so the lane's own banner — what the HC reads on the email — degrades
+        // to `stale` instead of certifying a player nobody fetched.
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, lane.id).state).toBe("stale");
+      });
+
+      it("the same gap with NO enrollment in it keeps the lane FRESH", async () => {
+        // The negative control, and it isolates the join from the gap: the clock
+        // moves exactly as above, so the run records the same selection-to-claim
+        // span — only nobody joins inside it. Without this, a blanket "any gap
+        // demotes" would satisfy the case above and banner every lane `stale`.
+        const { lane, racer } = await laneWithRacer();
+        enrollNow(lane.id, racer.id, LONG_ENROLLED_AT); // on the lane BEFORE selection
+
+        let advanced = false;
+        const racingDb = enrollWhenPlayersFirstRead(opened.db, () => {
+          clock.set(ENROLLED_AT);
+          advanced = true;
+          clock.set(CLAIMED_AT);
+        });
+
+        const summary = await runRefresh(deps({ db: racingDb, scope: scopeOf(lane) }));
+
+        expect(advanced).toBe(true);
+        // Both lane members were swept this time — the racer was there to select.
+        expect(summary).toMatchObject({ skipped: false, status: "ok", playersRefreshed: 2 });
+        expect(peopleFetched()).toEqual([AAA_PERSON_ID, MLB_PERSON_ID].sort((a, b) => a - b));
+
+        const run = (await opened.db.select().from(refreshRuns))[0];
+        expect(run).toMatchObject({ startedAt: SELECTED_AT, claimedAt: CLAIMED_AT });
+        expect(run?.scopeListIds).toBe(`,${lane.id},`);
+        expect(digestFreshnessFor(opened.db, CONTENT_DATE, TEST_TZ, lane.id).state).toBe("fresh");
+      });
+    });
+
     it("a ZERO-LANE scope on a host with active players records its (empty) scope and reads STALE", async () => {
       // #193's due-lane driver ticks with an empty due set. Zero lanes cover
       // nobody, so on a host with anybody active this must never collapse to the

@@ -47,13 +47,23 @@ enrolled in the lane is not fetched.
 exit **1** with no run recorded — a typo must never widen a sweep. The MCP `refresh` tool and
 `POST /refresh` are unchanged this phase and still sweep the whole Watch List.
 
-> **One-phase asymmetry.** `sk refresh` is lane-scoped from #192, while bare `sk digest` still assembles
-> the whole Watch List until [#193](https://github.com/wrburgess/bryce/issues/193). So the digest's
-> `fresh` banner requires a run that swept **every active Player** — a lane run that left anyone out
-> leaves the banner reading `stale`, deliberately, so a narrow sweep cannot forge a completeness claim
-> over players it never touched. A lane run that *does* happen to hold everyone counts as complete,
-> whichever lane it was: the test is coverage, not which lane you named
-> ([ADR 0061](../adr/0061-lane-scoped-refresh-supersedes-whole-sweep.md) decision 8).
+> **The asymmetry is closed.** `sk refresh` is lane-scoped from #192 and bare `sk digest` is lane-scoped
+> from [#193](https://github.com/wrburgess/bryce/issues/193), so both mean the default lane. The digest's
+> `fresh` banner therefore asks a **per-lane** coverage question: a run counts if it swept the lane the
+> digest is about — a whole-list sweep (which covers every lane) or a scoped sweep whose recorded lane
+> list contains it. A sweep that left this lane out leaves the banner reading `stale`, deliberately, so a
+> narrow sweep cannot forge a completeness claim over players it never touched. The test is **coverage**,
+> not which lane you named ([ADR 0061](../adr/0061-lane-scoped-refresh-supersedes-whole-sweep.md)
+> decision 8, narrowed per lane by
+> [ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md) decision 2).
+>
+> **Adding a player to a lane makes that lane `stale` until its next sweep**, and that is the same rule
+> rather than a new one: a scoped run records the lane, not the players it fetched, so an active Player
+> who joined *after* that sweep started would otherwise be reported under a `fresh` banner over stats
+> nobody ever fetched. The tick reads the lane as due and re-sweeps it, which restores `fresh`
+> automatically. A *whole-list* sweep is unaffected — it swept every then-active player, so a later lane
+> enrollment says nothing about what it covered — and an **inactive** enrollee is never a gap, because
+> `players.active` is the master gate.
 
 > **Two `refresh done` grammars exist — grep for the right one.** This sweep prints
 > `refresh done list=<lane> status=… players=… skipped=… failed=… inserted=… updated=…`. The
@@ -115,8 +125,8 @@ refresh done list=Watchlist status=ok players=11 skipped=1 failed=0 inserted=44 
   of the real ones.
 - **`--quiet`** prints **exactly one terminal line and nothing else**, and that line is byte-identical
   to the verbose run's terminal line — plus the stderr failure summary and the three legacy notice
-  lines, which are unconditional. Scheduled runs use it — see `ops/templates/com.sk.refresh.plist`,
-  where the `--` in `npm run refresh -- --quiet` is load-bearing.
+  lines, which are unconditional. The scheduled [`tick`](#tick--run-whatever-the-lanes-owe-right-now)
+  runs the sweep in this mode.
 
 Console counts and the persisted `/health` / MCP `status` counts agree **by construction**: a
 player's `done` line is emitted only after that player's progress write has committed, so the
@@ -126,6 +136,67 @@ terminal can never show more players settled than the database knows about.
 nobody) exits 1; `ok`, `partial`, and any Skipped Sweep exit 0. A manual lane refresh started while
 another sweep holds a live lease prints `refresh skipped list=<lane> reason=already-running` and exits
 0 — the same refusal any whole sweep gets, because it is the same claim.
+
+## `tick` — run whatever the lanes owe right now
+
+```sh
+sk tick                           # per-stage lines plus the terminal summary
+sk tick --quiet                   # only the terminal line (what the scheduled agent uses)
+sk tick -q                        # short alias
+```
+
+**The one scheduled job** ([#193](https://github.com/wrburgess/bryce/issues/193) /
+[ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md) decision 3). It runs
+every 15 minutes from [`ops/templates/com.sk.tick.plist`](../../ops/templates/com.sk.tick.plist) and
+replaces the retired fixed agents `com.sk.refresh.plist` (03:30) and `com.sk.digest.plist` (05:00) —
+because a lane's cadence lives in the database (`players lists configure`, #191) and a fixed clock time
+cannot express a value the HC edits.
+
+Each tick, in order:
+
+1. **Refresh** — every live lane whose `refresh_interval_minutes` has elapsed since a sweep that
+   *covered it* started, **less a tolerance of half a tick** (7m30s). If any are due, **one** sweep runs
+   carrying the union of their ids (a Player on two due lanes is fetched once). Refresh is first so a due
+   digest reports data this tick fetched.
+2. **Digest** — during Offseason Sleep, at most one **unscoped** run to carry the weekly host
+   heartbeat, plus one run for each scheduled lane that still owes an **earlier** day (recovery only —
+   no regular offseason digest is mailed); otherwise one run per live lane whose `digest_hour` has been
+   reached and whose slot for today holds no `sent` row.
+
+```
+tick refresh lanes=Watchlist,Prospects outcome=ok players=12 skipped=0 failed=0 inserted=44 updated=3
+tick digest list=Watchlist kind=digest action=sent statLines=18 players=9
+tick done refreshed=2 digests=1 ok=true
+```
+
+- **Due-selection is advisory; the claims are the gate.** Everything above is a cheap pre-read that
+  keeps a quiet tick quiet. A digest still claims its `(digest, date, lane)` slot and a sweep still
+  claims its run, so a tick overlapping a still-loaded old agent, a manual `sk digest`, or the server's
+  MCP tool is **refused**, never duplicated. That is what makes the ops migration below safe to do by
+  hand.
+- **The hour test is `>=`, not `==`** — a laptop asleep at 05:00 wakes at 09:00 and still sends. Today's
+  `sent` row is what stops it re-sending every tick afterwards; a **`failed`** slot therefore reads as
+  due and is **retried on the next tick** rather than waiting for tomorrow.
+- **Refresh due-ness carries a half-tick tolerance so the schedule cannot drift.** `StartInterval` is
+  approximate — launchd fires late and restarts its countdown across sleep/wake — and each sweep is
+  anchored on the *previous* sweep's real start, so without the tolerance every late tick would push the
+  next sweep a full 15 minutes later, permanently. On the seeded 1440-minute / `digest_hour` 5 setup that
+  drift reaches the digest hour in about a week and every digest after it banners `stale`. A lane is
+  therefore swept **at most 7m30s early**, never twice inside one interval.
+- **Offseason Sleep suspends today's digest, never recovery.** A lane that still owes an earlier day is
+  caught up while asleep, one day per invocation — so a send that failed on the season's last day is not
+  stranded until Opening Day. A lane whose lane was **deleted** while a delivery was in flight has that
+  abandoned `sending` row settled `failed` by the tick once its 10-minute lease expires (nothing is
+  mailed) — otherwise it would show on `/health` as in flight forever.
+- **Failure is isolated per stage and per lane.** A sweep that throws still leaves every due digest
+  attempted; a lane that throws still leaves the lanes after it attempted. Exit is **1** if anything
+  errored or a send failed — *after* all due work was attempted — and **0** otherwise (a `partial`
+  sweep is not a failure, matching `sk refresh`).
+- **`--quiet` prints exactly one line** (`tick done …`) and suppresses the refresh live stream, the
+  refresh notice lines, and digest warnings. A tick with nothing due prints that one line in **either**
+  mode. At ~96 ticks a day into an unrotated `logs/tick.log`, that is the difference between a few
+  kilobytes a day and a per-player stream — which is why the `--` in `npm run tick -- --quiet` is
+  load-bearing and pinned by `scripts/check-operational-templates.ts`.
 
 ## `digest` — build and send a windowed Digest
 
@@ -141,10 +212,18 @@ sk digest --force                 # daily-slot test replay
 Builds the Digest for a **Window** and sends it through the configured mailer. Writes no stat-line
 state, so re-running a Window always sends the same content.
 
+**Bare `sk digest` means the DEFAULT lane**, not every active Player
+([#193](https://github.com/wrburgess/bryce/issues/193),
+[ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md)) — the same rule
+`sk refresh` and `sk players add` follow. On a migrated host this changes nothing: `drizzle/0012`
+enrolled every active Player in the seeded default lane. A Player on **no** lane is now neither
+refreshed nor digested — tracked as [#202](https://github.com/wrburgess/bryce/issues/202); `GET /health`
+→ `lanes` is where you see it.
+
 | Flag | Default | Accepted values |
 |---|---|---|
 | `--window <spec>` / `--window=<spec>` / `-w <spec>` | `1d` | date windows `1d`, `7d`, `14d`, `21d`, `28d`, `35d`, `60d`, `ytd`; per-player game-count windows `last10games`, `last30games` (#153) |
-| `--list <name>` / `--list=<name>` / `-l <name>` | off (all active) | any existing list name (#70) |
+| `--list <name>` / `--list=<name>` / `-l <name>` | the **default lane** on a tag-free `1d` send; all active otherwise | any existing list name (#70) |
 | `--tags <selector>` / `--tags=<selector>` | off (no cohort scope) | any valid tag selector (#140) |
 | `--force` | off (boolean) | present or absent |
 
@@ -161,7 +240,14 @@ state, so re-running a Window always sends the same content.
   [ADR 0034](../adr/0034-digest-delivery-claim-at-least-once.md).
 - The `1d` window is the scheduled daily artifact; any wider window (`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`) is an
   on-demand report that takes no slot and answers even during Offseason Sleep
-  ([ADR 0035](../adr/0035-window-selected-digest.md)).
+  ([ADR 0035](../adr/0035-window-selected-digest.md)). During Sleep, an **unscoped** `1d` run becomes
+  the weekly host heartbeat; a run that **named a lane** skips **today's**
+  digest (`action=skipped reason=offseason-sleep`) instead, because the heartbeat is one liveness signal
+  per host and not one per lane ([ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md),
+  affirmed by [ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md) decision 4).
+  Sleep does **not** suspend orphan recovery: a named lane that still owes an **earlier** day claims and
+  mails that day first and *then* reports the skip for today, so a send that failed on the season's last
+  day is not stranded until Opening Day ([ADR 0034](../adr/0034-digest-delivery-claim-at-least-once.md)).
 - The **game-count** windows `last10games` / `last30games` report each Player over his own last N
   distinct regular-season games — a per-player ordered limit, so two Players in one report cover
   different date spans, and each row carries its real games count (`GP`) and first–last date (`Span`).
@@ -172,10 +258,19 @@ state, so re-running a Window always sends the same content.
   sk digest -w last10games                             # all tracked, each over his last 10 games
   sk digest --tags level:aaa -w last30games            # AAA cohort, each over his last 30 games
   ```
-- `--list NAME` (or the short `-l NAME`) scopes the send to a named list's active members
+- `--list NAME` (or the short `-l NAME`) scopes the send to a named lane's active members
   ([#70](https://github.com/wrburgess/bryce/issues/70) / [ADR 0046](../adr/0046-named-player-lists-scoped-digests.md)).
-  A named-list send is **on-demand only** (it takes no daily slot); an unknown list **fails closed**
-  (exit `1`, `error: no list named "…"`, nothing sent). All three spellings —
+  A tag-free **`1d`** named-lane send is the lane's **scheduled artifact**, not an on-demand report
+  ([#193](https://github.com/wrburgess/bryce/issues/193) /
+  [ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md) decision 1,
+  superseding ADR 0046 decision 4): it **claims that lane's own once-per-date slot**, so a second one
+  the same day is refused `already-sent-today` (use `--force` for a deliberate re-send), a failed
+  attempt is retried, and yesterday's orphaned slot is recovered. Two **different** lanes may each send
+  on the same date. It goes to the lane's `digest_to` when one is configured, otherwise to `DIGEST_TO`.
+  Any wider window, or any `--tags` scope, stays on-demand and keeps the host recipients. An unknown
+  list **fails closed** (exit `1`, `error: no list named "…"`, nothing sent), and a lane deleted between
+  resolution and the claim is refused too (`action=skipped reason=lane-deleted`, nothing mailed — even
+  under `--force`, which overrides bookkeeping and never lane liveness). All three spellings —
   `--list NAME`, `--list=NAME`, `-l NAME` — scope identically: the router rewrites an alias and an
   `=` form to one canonical spelling before the command reads it, so a short flag can never be
   silently dropped and send an unscoped digest ([#191](https://github.com/wrburgess/bryce/issues/191)).

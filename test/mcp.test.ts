@@ -22,7 +22,10 @@ import {
   fakeClock,
   insertCalendars2026,
   insertDelivery,
+  insertLane,
+  insertLanePlayer,
   insertPlayer,
+  onFirstReadComplete,
   insertPlayerTag,
   insertRefreshRun,
   insertStatLine,
@@ -635,7 +638,9 @@ describe("MCP server over Streamable HTTP", () => {
   });
 
   it("send_digest sends, records the delivery, and stamps nothing", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    // Enrolled in the default lane: since #193 the daily 1d send assembles THAT
+    // lane's members, exactly as drizzle/0012 left a migrated host.
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     const result = await call("send_digest");
@@ -649,7 +654,7 @@ describe("MCP server over Streamable HTTP", () => {
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(1);
   });
 
-  it("send_digest carries a named list into the public title and scopes its content", async () => {
+  it("send_digest sends a named lane as that lane's CLAIMED daily artifact (#193)", async () => {
     const member = await insertPlayer(opened.db, { externalId: 821, fullName: "Trade Member" });
     await insertStatLine(opened.db, { playerId: member.id, gameDate: "2026-07-18" });
     const excluded = await insertPlayer(opened.db, { externalId: 822, fullName: "Excluded Prospect" });
@@ -663,16 +668,65 @@ describe("MCP server over Streamable HTTP", () => {
     expect(result.structuredContent).toMatchObject({ action: "sent", playerCount: 1, statLineCount: 1 });
     expect(mailer.sent).toHaveLength(1);
     expect(mailer.sent[0]?.subject).toBe("ScoreKeeps Baseball (Tradebait) - Sat, July 18, 2026");
-    expect(mailer.sent[0]?.text.split("\n")[0]).toBe(
+    expect(mailer.sent[0]?.text).toContain(
       "ScoreKeeps Baseball - Tradebait List - Sat, July 18, 2026",
     );
     expect(mailer.sent[0]?.text).toContain("Member, T");
     expect(mailer.sent[0]?.text).not.toContain("Prospect");
+
+    // THE MCP HALF OF THE CONTRACT CHANGE (#193 / ADR 0062 decision 1). This
+    // tool call is the Tradebait lane's scheduled daily artifact, so it RECORDS
+    // a delivery row on that lane's own slot where it used to record none, and
+    // it is freshness-annotated (no refresh has run here, so the body opens on
+    // the stale banner — hence `toContain` rather than line 0 for the heading).
+    const rows = await opened.db.select().from(digestDeliveries);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: "digest", dateCovered: "2026-07-19", status: "sent" });
+
+    // The slot is the point: a second call for that lane on that date is refused
+    // and mails nothing.
+    expect((await call("send_digest", { list: "Tradebait" })).structuredContent).toMatchObject({
+      action: "skipped",
+      reason: "already-sent-today",
+    });
+    expect(mailer.sent).toHaveLength(1);
+  });
+
+  it("send_digest reports a lane deleted after resolution as a KNOWN error, not a crash (#193)", async () => {
+    // Reviewer must-fix 4, on the MCP seam. The claimed path re-reads the lane
+    // by id inside `runDigest`, so a `lists delete` racing it raises
+    // UnknownListError from a second place — and it must come back as the
+    // structured `isError` result every other known refusal does, never as an
+    // unhandled throw the transport turns into an opaque 500.
+    const member = await insertPlayer(opened.db, { externalId: 931, fullName: "Racy Member" });
+    await insertStatLine(opened.db, { playerId: member.id, gameDate: "2026-07-18" });
+    expect((await call("list_create", { name: "Racy" })).isError).toBeUndefined();
+    expect(
+      (await call("list_add_players", { name: "Racy", players: [{ personId: 931 }] })).isError,
+    ).toBeUndefined();
+
+    // Rebuild the client over a db that soft-deletes the lane the instant the
+    // tool's own name resolution completes.
+    await client.close();
+    deps = {
+      ...deps,
+      db: onFirstReadComplete(opened.db, () => {
+        opened.sqlite
+          .prepare("update player_lists set deleted_at = ? where name = ?")
+          .run("2026-07-19T00:00:00.000Z", "Racy");
+      }),
+    };
+    client = await connect();
+
+    const result = await call("send_digest", { list: "Racy" });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent?.error).toBe('no list named "Racy"');
+    expect(mailer.sent).toHaveLength(0);
     expect(await opened.db.select().from(digestDeliveries)).toHaveLength(0);
   });
 
   it("send_digest accepts force, replaying without recording", async () => {
-    const player = await insertPlayer(opened.db, { fullName: "Maximo Acosta" });
+    const player = await insertLanePlayer(opened.db, { fullName: "Maximo Acosta" });
     await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-07-18" });
 
     expect((await call("send_digest")).structuredContent).toMatchObject({ action: "sent" });
@@ -979,6 +1033,38 @@ describe("MCP server over Streamable HTTP", () => {
     const app = createApp(deps);
     const health = await (await app.request("/health")).json();
     expect(result.structuredContent).toEqual(health);
+  });
+
+  it("status carries the per-lane delivery view, heartbeats excluded (#193)", async () => {
+    // The MCP half of the additive `lanes` field (ADR 0062 decision 5).
+    // rules/backend.md: a new field is threaded through EVERY surface's seam in
+    // the same change, each with its own test — and `status` is pinned equal to
+    // `/health` above, so this asserts the CONTENT rather than merely the shape.
+    const lane = await insertLane(opened.db, "Prospects");
+    await insertDelivery(opened.db, {
+      kind: "digest", dateCovered: "2026-07-19", listId: lane.id, status: "failed",
+      sentAt: null, createdAt: "2026-07-19T11:00:00.000Z",
+    });
+    await insertDelivery(opened.db, {
+      kind: "heartbeat", dateCovered: "2026-07-19", listId: lane.id, status: "sent",
+      sentAt: "2026-07-19T12:00:00.000Z", createdAt: "2026-07-19T12:00:00.000Z",
+    });
+
+    const result = await call("status");
+    const lanes = result.structuredContent?.lanes as Array<Record<string, unknown>>;
+    const found = lanes.find((entry) => entry.name === "Prospects");
+    // The newest DIGEST row is the lane's current state; the newer heartbeat is
+    // excluded, or the lane would read as delivering while its digests failed.
+    expect(found?.lastDelivery).toEqual({
+      dateCovered: "2026-07-19",
+      status: "failed",
+      sentAt: null,
+    });
+    // The seeded default lane is reported too, with its configured hour.
+    expect(lanes.find((entry) => entry.isDefault === true)).toMatchObject({
+      name: "Watchlist",
+      digestHour: 5,
+    });
   });
 
   it("status reports an in-flight `sending` delivery so a stuck claim is visible", async () => {
