@@ -1,6 +1,7 @@
 import type { HighlightlyClient, HighlightlyNcaaPlayerSearchResult } from "../highlightly/client.js";
 import { HighlightlyError } from "../highlightly/client.js";
 import type { MlbClient } from "../mlb/client.js";
+import { SEARCH_RESULT_CAP } from "../mlb/client.js";
 
 /**
  * The ONE home for the two identity-resolution rules an `add` command shares —
@@ -15,6 +16,12 @@ import type { MlbClient } from "../mlb/client.js";
  * without it and still read as locally correct. Extracted VERBATIM — the
  * output strings and exit codes here are byte-identical to the ones `seed add`
  * shipped, which is why `test/seed.test.ts` needed no edit.
+ *
+ * That verbatim claim covers the EXTRACTED lines, and still holds. #204 then
+ * added a line neither command shipped (the capped-list notice) — deliberately
+ * here rather than at one call site, which is the whole point of this file: a
+ * new shared rule is authored once and both `add` surfaces get it, instead of
+ * one of them getting it and the other silently reading as locally correct.
  *
  * Deliberately narrow deps: a `Pick<>` of the one client method each rule
  * calls plus a line sink, so a caller cannot pass a whole CLI dependency
@@ -34,10 +41,32 @@ export interface NcaaPickDeps {
 }
 
 /**
+ * The one line that tells an operator the candidate list they are reading is
+ * the API's maximum rather than the whole truth. Names NO flag, deliberately:
+ * the two callers spell the same input differently (`players add --name`,
+ * `seed add --search`), so a message naming one is wrong at the other.
+ */
+const cappedNotice = (): string =>
+  `note: the API caps this search at ${SEARCH_RESULT_CAP} candidates; the list may be incomplete — narrow the name`;
+
+/**
  * Resolve an MLB/MiLB name to exactly one `personId`, or null having already
  * written the operator-facing reason. One hit and no `--pick` resolves
  * silently; several hits print a NUMBERED candidate list and refuse, because a
  * guessed pick is a wrong player added under a right-looking summary.
+ *
+ * A result set AT `SEARCH_RESULT_CAP` is indistinguishable from a truncated one
+ * — the API returns no total and `limit` cannot raise the cap — so EVERY exit
+ * that showed or consumed a candidate list says so. Rendering a capped list as
+ * complete turns this function's own guarantee inside out: the numbered list
+ * exists to stop a guessed pick, and a pick off a silently truncated list is
+ * the same wrong player arriving by a quieter route (#204).
+ *
+ * That "every exit" is structural, not a rule three returns each remember: the
+ * `--pick` tail emits ONCE for both its exits. The first draft of this shipped
+ * a per-exit reminder, and the out-of-range return promptly forgot it — so
+ * `error: --pick 51 out of range 1..50` presented a capped range as the whole
+ * truth, which is the defect this notice exists to prevent, one branch over.
  */
 export async function pickFromSearch(
   name: string,
@@ -45,6 +74,7 @@ export async function pickFromSearch(
   deps: MlbPickDeps,
 ): Promise<number | null> {
   const results = await deps.client.searchPeople(name);
+  const capped = results.length >= SEARCH_RESULT_CAP;
   if (results.length === 0) {
     deps.write(`error: no matches for search=${name}`);
     return null;
@@ -60,15 +90,21 @@ export async function pickFromSearch(
         `[${i + 1}] personId=${p.id} name=${p.fullName} position=${p.primaryPosition?.abbreviation ?? "?"}`,
       );
     });
+    // Last, so it is the line still on screen after 50 candidates scroll past.
+    if (capped) deps.write(cappedNotice());
     return null;
   }
   const pick = Number.parseInt(pickFlag, 10);
   const chosen = Number.isInteger(pick) ? results[pick - 1] : undefined;
   if (chosen === undefined) {
     deps.write(`error: --pick ${pickFlag} out of range 1..${results.length}`);
-    return null;
   }
-  return chosen.id;
+  // ONE emission for both tail exits, so neither can drift from the other: the
+  // out-of-range refusal needs it most (its `1..N` reads as authoritative when
+  // N is a cap), and the success path needs it because a pick off a truncated
+  // list is a wrong player. Advisory in both — it never changes an exit code.
+  if (capped) deps.write(cappedNotice());
+  return chosen?.id ?? null;
 }
 
 /**

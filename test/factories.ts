@@ -478,6 +478,16 @@ export function makePerson(overrides: JsonRecord = {}): JsonRecord {
   };
 }
 
+/**
+ * `n` DISTINCT people-search hits (ids 1..n) for exercising candidate-list
+ * rendering and the `SEARCH_RESULT_CAP` truncation notice at its boundary
+ * (#204). Ids are distinct so "the second candidate" is provable from the row
+ * that gets written, not merely from the line that gets printed.
+ */
+export function makeSearchHits(n: number): JsonRecord[] {
+  return Array.from({ length: n }, (_, i) => makePerson({ id: i + 1, fullName: `Smith ${i + 1}` }));
+}
+
 export function makeTeam(overrides: JsonRecord = {}): JsonRecord {
   return {
     id: 564,
