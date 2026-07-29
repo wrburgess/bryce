@@ -180,7 +180,13 @@ that records what the selection covered — narrower and more tractable than a g
   mutation, so every run after the first measures the *pre-change* source. Its output still looks like
   mutation evidence: tests go red, by name, in plausible numbers.
 - **Severity and blast radius:** **Medium** as it occurred, and it self-corrected before anything was
-  claimed. A four-mutation loop over uncommitted source used `git checkout -- src/...` to restore.
+  claimed. Medium rather than Low despite a realized harm of zero, and the reason is the *detectability*
+  rather than the damage: F001–F003 each describe a defect that announced itself once it fired, whereas
+  this one's failure mode is **silent green** — a harness that grades nothing still prints red counts,
+  and the only signal was a pattern in which tests failed. A defect whose realized cost is zero but
+  whose detection depends on the author noticing an anomaly they were not looking for is graded on the
+  detection gap, not the outcome; Low is for things a normal reading catches. A four-mutation loop over
+  uncommitted source used `git checkout -- src/...` to restore.
   Mutation A ran correctly; its restore reverted the whole change, so B, C, and D each mutated source
   that no longer contained the feature. All three reported ~7 failures — a superset of the truth,
   including the mutation-A failure repeated in every round, which is what exposed it. The near-miss is
@@ -198,8 +204,8 @@ that records what the selection covered — narrower and more tractable than a g
   broken. That is checkable by eye in every run, and it is what caught this one.
 - **Recurrence count:** 0 (first occurrence).
 - **Surfaced by:** [PR #205](https://github.com/wrburgess/bryce/pull/205) (issue
-  [#204](https://github.com/wrburgess/bryce/issues/204)), Stage-3 self-verification — found by the AC,
-  not by a Reviewer.
+  [#204](https://github.com/wrburgess/bryce/issues/204)), Stage-3 **self-review** (`rules/self-review.md`,
+  during Implement) — found by the AC, not by a Reviewer, and before the Stage-4 `verify` skill ran.
 - **Date recorded:** 2026-07-28
 - **Review date:** 2026-10-26
 
