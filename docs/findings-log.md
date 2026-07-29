@@ -180,13 +180,13 @@ that records what the selection covered — narrower and more tractable than a g
   mutation, so every run after the first measures the *pre-change* source. Its output still looks like
   mutation evidence: tests go red, by name, in plausible numbers.
 - **Severity and blast radius:** **Medium** as it occurred, and it self-corrected before anything was
-  claimed. Medium rather than Low despite a realized harm of zero, and the reason is the *detectability*
-  rather than the damage: F001–F003 each describe a defect that announced itself once it fired, whereas
-  this one's failure mode is **silent green** — a harness that grades nothing still prints red counts,
-  and the only signal was a pattern in which tests failed. A defect whose realized cost is zero but
-  whose detection depends on the author noticing an anomaly they were not looking for is graded on the
-  detection gap, not the outcome; Low is for things a normal reading catches. A four-mutation loop over
-  uncommitted source used `git checkout -- src/...` to restore.
+  claimed. Graded against `PROJECT.md`'s *Review Severity Framework* directly: **Medium** is
+  "maintainability, clarity, or **a smaller coverage gap**", and that is exactly what this was — three
+  of four guards were left with no valid mutation evidence, so their proof had a hole while the guards
+  and the shipped code were correct throughout. **Low** is "style, naming, or optional polish", which a
+  missing proof is not. Nothing about the running system was ever wrong; the *verification of it* was,
+  and only in the run that produced it. A four-mutation loop over uncommitted source used
+  `git checkout -- src/...` to restore.
   Mutation A ran correctly; its restore reverted the whole change, so B, C, and D each mutated source
   that no longer contained the feature. All three reported ~7 failures — a superset of the truth,
   including the mutation-A failure repeated in every round, which is what exposed it. The near-miss is
@@ -204,8 +204,12 @@ that records what the selection covered — narrower and more tractable than a g
   broken. That is checkable by eye in every run, and it is what caught this one.
 - **Recurrence count:** 0 (first occurrence).
 - **Surfaced by:** [PR #205](https://github.com/wrburgess/bryce/pull/205) (issue
-  [#204](https://github.com/wrburgess/bryce/issues/204)), Stage-3 **self-review** (`rules/self-review.md`,
-  during Implement) — found by the AC, not by a Reviewer, and before the Stage-4 `verify` skill ran.
+  [#204](https://github.com/wrburgess/bryce/issues/204)), **Stage 3 (Implement)** — found by the AC
+  while running its own quality checks, before any Reviewer or any later stage saw the PR. Named by
+  stage rather than by activity on purpose: both "self-review" and "self-verification" are words the
+  Stage-4 `verify` skill uses for itself (its terminal artifact is literally headed `## Self-Review
+  Complete`), so either one would put this entry's provenance in the wrong stage for a reader who
+  knows that skill.
 - **Date recorded:** 2026-07-28
 - **Review date:** 2026-10-26
 
