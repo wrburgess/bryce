@@ -289,7 +289,10 @@ async function runRefreshStage(
       //
       // `runRefresh` RENEWS A LEASE from this clock: `renewRefreshRun(db, runId,
       // now())` before every player (ADR 0043 fencing) writes `claimed_at =
-      // now`. Handed a frozen clock it re-writes the TICK'S START every time, so
+      // max(now, started_at)`, which under any forward clock is `now` itself —
+      // the clamp only catches a clock that has stepped BACKWARD past the run's
+      // selection watermark. Handed a frozen clock it re-writes one fixed instant
+      // — the tick's start, or the run's own watermark if that is later — so
       // the stored lease clock never advances however long the sweep runs. Any
       // sweep outliving REFRESH_LEASE_MS (10 minutes) is then reaped `failed`
       // (SUPERSEDED) by the next tick's own claim and aborts mid-flight — ~4

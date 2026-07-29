@@ -215,6 +215,85 @@ describe("claimRefreshRun / settleRefreshRun (ADR 0043)", () => {
       // Its renewal is judged on the lease clock too, so the sweep keeps going.
       expect(renewRefreshRun(opened.db, owner.runId, at(WITHIN_LEASE))).toBe(true);
     });
+
+    /**
+     * THE RENEWAL CLAMP (PR #203 delta review).
+     *
+     * `renewRefreshRun` used to write a bare `now` with no comparison against the
+     * row, so a backward clock step smaller than the lease window slipped past its
+     * live-lease WHERE and wrote `claimed_at < started_at` — the very inversion
+     * drizzle/0014 now refuses. These cases pin BOTH directions: that the clamp is
+     * invisible under a forward clock (so the fix is not a silent behavior change)
+     * and that it is load-bearing under a regressed one.
+     */
+    describe("the renewal clamp", () => {
+      /** 25 minutes before the claim: inside the lease measured from T0, but BEFORE the watermark. */
+      const REGRESSED_BELOW_WATERMARK = "2026-07-19T06:35:00.000Z";
+      /** 10 minutes before the claim: a backward step that still lands AFTER the watermark. */
+      const REGRESSED_ABOVE_WATERMARK = "2026-07-19T06:50:00.000Z";
+
+      it("writes EXACTLY `now` under a forward clock — the clamp changes nothing there", () => {
+        const owner = claimRefreshRun(opened.db, { now: at(T0), startedAt: at(SELECTED_AT), playersTotal: 2 });
+        if (!owner.claimed) throw new Error("expected claim");
+
+        expect(renewRefreshRun(opened.db, owner.runId, at(WITHIN_LEASE))).toBe(true);
+        // Byte-for-byte the string the old bare-`now` write produced. A clamp that
+        // rounded, re-serialized, or preferred the row's own value would show here,
+        // and the lease would then be measured from something other than the clock.
+        expect(opened.db.select().from(refreshRuns).where(eq(refreshRuns.id, owner.runId)).all()[0]?.claimedAt).toBe(
+          at(WITHIN_LEASE).toISOString(),
+        );
+      });
+
+      it("follows a backward step that stays at or after the watermark — the clamp is MINIMAL", () => {
+        const owner = claimRefreshRun(opened.db, { now: at(T0), startedAt: at(SELECTED_AT), playersTotal: 2 });
+        if (!owner.claimed) throw new Error("expected claim");
+
+        // 06:50 is earlier than the claim but later than the 06:40 selection, so the
+        // row stays legal without help: the clamp must NOT round it up to the claim
+        // instant, which would hand a regressed worker a lease it did not earn.
+        expect(renewRefreshRun(opened.db, owner.runId, at(REGRESSED_ABOVE_WATERMARK))).toBe(true);
+        expect(opened.db.select().from(refreshRuns).where(eq(refreshRuns.id, owner.runId)).all()[0]?.claimedAt).toBe(
+          REGRESSED_ABOVE_WATERMARK,
+        );
+      });
+
+      it("clamps a backward step BELOW the watermark instead of writing an inverted row", () => {
+        const owner = claimRefreshRun(opened.db, { now: at(T0), startedAt: at(SELECTED_AT), playersTotal: 2 });
+        if (!owner.claimed) throw new Error("expected claim");
+        // NOTHING STOPS THE OLD CODE FROM REACHING THE WRITE. The live-lease WHERE
+        // rejects a claim that is too OLD relative to `now`, and a regressed clock
+        // makes the stored claim look NEWER — the cutoff it computes moves earlier
+        // with the clock, so it stays below the stored instant no matter how large
+        // the backward step is. The guard was never the thing keeping `claimed_at`
+        // ordered; nothing was.
+        expect(at(REGRESSED_BELOW_WATERMARK).getTime() - REFRESH_LEASE_MS).toBeLessThan(at(T0).getTime());
+
+        // What the pre-fix code would have written — refused by the database, so on a
+        // post-0014 database the renewal itself throws and the sweep dies, and on a
+        // pre-0014 one it lands as the legacy row that makes 0014 unable to migrate.
+        expect(() =>
+          opened.sqlite
+            .prepare("UPDATE refresh_runs SET claimed_at = ? WHERE id = ?")
+            .run(REGRESSED_BELOW_WATERMARK, owner.runId),
+        ).toThrow(/CHECK constraint failed: refresh_runs_started_before_claimed_ck/);
+
+        // The clamped renewal instead succeeds, still reporting ownership...
+        expect(renewRefreshRun(opened.db, owner.runId, at(REGRESSED_BELOW_WATERMARK))).toBe(true);
+        const row = opened.db.select().from(refreshRuns).where(eq(refreshRuns.id, owner.runId)).all()[0];
+        // ...and lands on the floor the CHECK requires — the selection watermark,
+        // not the claim instant: the lease reads OLDER, so this run is reaped SOONER
+        // rather than holding a phantom lease a successor would refuse behind.
+        expect(row?.claimedAt).toBe(SELECTED_AT);
+        expect(row?.startedAt).toBe(SELECTED_AT);
+        expect(row!.startedAt <= row!.claimedAt).toBe(true);
+        // And the row is legal, not merely present: re-writing the stored value
+        // re-evaluates every CHECK on it.
+        expect(() =>
+          opened.sqlite.prepare("UPDATE refresh_runs SET claimed_at = claimed_at WHERE id = ?").run(owner.runId),
+        ).not.toThrow();
+      });
+    });
   });
 
   it("rejects a guarded whole-refresh mutation after the owner is reaped", () => {

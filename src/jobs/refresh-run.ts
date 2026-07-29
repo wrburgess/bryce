@@ -233,12 +233,50 @@ export function claimRefreshRun(db: Db, args: ClaimRefreshArgs): ClaimRefreshRes
  * updated); false when the row is no longer `running` — a successor reaped it as
  * `failed` (see claimRefreshRun), so this run has lost ownership and must abort
  * before its next write rather than clobber the successor's newer data.
+ *
+ * THE WRITE IS CLAMPED AT `started_at` (PR #203 delta review). This function used
+ * to write a bare `now` with NO comparison against either instant on the row, so
+ * a clock that stepped BACKWARD wrote a `claimed_at` earlier than the run's own
+ * `started_at`. Nor does the WHERE below stop it: that guard rejects a claim too
+ * OLD relative to `now`, and a regressed clock moves its cutoff earlier along
+ * with the clock, so the stored claim stays above the cutoff no matter how large
+ * the backward step is. Nothing here was ever keeping the two instants ordered.
+ * Since drizzle/0014 an inverted row is a CHECK violation, so the unclamped
+ * renewal would throw and kill the sweep — and on a pre-0014 database it had
+ * already written rows that make 0014's copy, and therefore startup, fail.
+ * (`renewRefreshRun` moving `claimed_at` "strictly forward" was asserted in that
+ * migration's first revision; it was never true.)
+ *
+ * `max(now, started_at)` is the minimal clamp: it changes the written value in
+ * EXACTLY the states the CHECK refuses (`now < started_at`) and nowhere else, so
+ * under any forward-moving clock — where `started_at <= claim <= now` — it writes
+ * byte-identically to the old bare `now`. A regression is then resolved in the
+ * conservative direction: the row's lease reads OLDER, so this run is reaped
+ * SOONER and a successor may take over. Clamping to the existing `claimed_at`
+ * instead (a strictly monotonic lease) also satisfies the CHECK, but it holds the
+ * lease at its highest observed value — a PHANTOM lease that a successor sharing
+ * the same regressed clock reads as live and refuses behind, silencing Refresh
+ * for as long as the clock stays behind. A worker with a broken clock losing its
+ * lease is strictly better than one keeping it.
+ *
+ * The return value still means exactly what it says. Ownership is decided by the
+ * WHERE, evaluated on the row's PRE-clamp state, so `true` remains "this run
+ * owned its lease at the instant of this update" — the same promise it always
+ * made, and never a claim about the future: a successor could always reap
+ * immediately after any renewal. Every subsequent write re-checks ownership under
+ * one transaction (`withIngestionFence`), which is what actually protects the
+ * data.
  */
 export function renewRefreshRun(db: Db, runId: number, now: Date): boolean {
+  const nowIso = now.toISOString();
   const cutoffIso = new Date(now.getTime() - REFRESH_LEASE_MS).toISOString();
   const result = db
     .update(refreshRuns)
-    .set({ claimedAt: now.toISOString() })
+    // Two-argument `max` is SQLite's SCALAR max (the aggregate is the one-argument
+    // form), comparing the two ISO-8601 UTC strings under BINARY collation, which
+    // for this format is chronological. `started_at` is NOT NULL, so the
+    // NULL-if-any-argument-is-NULL arm cannot be reached.
+    .set({ claimedAt: sql`max(${nowIso}, ${refreshRuns.startedAt})` })
     // A lease is strictly live: exactly at expiry the worker has lost its
     // authority and may not revive itself before a successor happens to reap it.
     .where(and(eq(refreshRuns.id, runId), eq(refreshRuns.status, "running"), gt(refreshRuns.claimedAt, cutoffIso)))

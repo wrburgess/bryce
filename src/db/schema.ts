@@ -402,11 +402,16 @@ export const refreshRuns = sqliteTable(
     // against `claimed_at`, so an inverted row would let a run claim to have
     // selected AFTER it claimed — dating enrollments made during its own
     // selection-to-claim gap as already swept, which is the forged `fresh` the
-    // split exists to prevent. `runRefresh` reads its clock before selecting and
-    // `claimRefreshRun` stamps the claim itself, so the code upholds it; a
-    // validation is not a guarantee (rules/backend.md), and `started_at` also
-    // arrives from a CALLER-SUPPLIED instant, which is exactly the seam a
-    // constraint has to cover. Equality is legal and is the common case — every
+    // split exists to prevent. `runRefresh` reads its clock before selecting,
+    // `claimRefreshRun` stamps the claim itself, and `renewRefreshRun` clamps its
+    // lease bump to `max(now, started_at)` — that clamp was added in the same
+    // delta review, because the unclamped write inverted the row outright under a
+    // backward clock step, which is precisely why "the code upholds it" is not
+    // something to take on trust: a validation is not a guarantee
+    // (rules/backend.md), and `started_at` also arrives from a CALLER-SUPPLIED
+    // instant, which is exactly the seam a constraint has to cover. Rows written
+    // before that clamp existed are repaired by drizzle/0014's copy rather than
+    // aborting it. Equality is legal and is the common case — every
     // pre-#193 row has it, and so does any caller that passes no separate
     // watermark. `claimed_at` is NOT NULL, so no null arm is needed.
     check("refresh_runs_started_before_claimed_ck", sql`${t.startedAt} <= ${t.claimedAt}`),

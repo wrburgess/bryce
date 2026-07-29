@@ -170,8 +170,10 @@ describe("drizzle/0014 refresh_runs watermark ordering (#193, PR #203 delta revi
     });
     const scopedId = seedRun(pre.sqlite, {
       startedAt: "2026-07-19T07:00:00.000Z",
-      // A renewed lease: `renewRefreshRun` moves claimed_at strictly FORWARD, so
-      // a long sweep's row already satisfies the new CHECK by a wide margin.
+      // A renewed lease on a forward clock: `claimed_at` ran ahead of the claim,
+      // so this row already satisfies the new CHECK by a wide margin and the
+      // copy's `max()` must return it UNCHANGED (the negative control for the
+      // legacy-inversion repair below).
       claimedAt: "2026-07-19T07:40:00.000Z",
       scopeListIds: ",1,3,",
     });
@@ -214,6 +216,107 @@ describe("drizzle/0014 refresh_runs watermark ordering (#193, PR #203 delta revi
       id: number;
     };
     expect(nextId.id).toBeGreaterThan(survivorId);
+  });
+
+  /**
+   * THE LEGACY INVERTED ROW (PR #203 delta review).
+   *
+   * A pre-0014 database can hold `started_at > claimed_at`, and the first draft of
+   * this migration asserted it could not. `renewRefreshRun` wrote a bare `now`
+   * with no comparison against the row's instants, and its WHERE only required a
+   * LIVE lease — so any backward clock step smaller than REFRESH_LEASE_MS wrote a
+   * regressed `claimed_at`. That row is legal before 0014; copied verbatim it
+   * fails the new CHECK, and drizzle runs each migration in a transaction, so the
+   * failure is a rolled-back `openDb()` — the application cannot start at all.
+   * These cases are the upgrade path for such a database.
+   */
+  describe("a legacy inverted row (pre-0014, written by an unclamped renewal)", () => {
+    /** The original claim — pre-#193 this string was written to BOTH columns. */
+    const CLAIMED_AT_ORIGINALLY = "2026-07-19T07:00:00.000Z";
+    /** What a renewal under a 5-minute backward clock step then overwrote it with. */
+    const REGRESSED_RENEWAL = "2026-07-19T06:55:00.000Z";
+
+    it("MIGRATES rather than bricking startup, and repairs the row to its original claim instant", () => {
+      const invertedId = seedRun(pre.sqlite, {
+        startedAt: CLAIMED_AT_ORIGINALLY,
+        claimedAt: REGRESSED_RENEWAL,
+        scopeListIds: ",2,",
+      });
+      const before = pre.sqlite
+        .prepare("SELECT * FROM refresh_runs WHERE id = ?")
+        .get(invertedId) as Record<string, unknown>;
+      // The seeded row really is the shape the new CHECK refuses — otherwise this
+      // case would pass against a migration that repaired nothing.
+      expect(String(before.started_at) > String(before.claimed_at)).toBe(true);
+
+      // Without the copy's normalization this call throws
+      // `CHECK constraint failed: refresh_runs_started_before_claimed_ck` out of
+      // the migrator and no database is opened at all.
+      const opened = pre.applyOrderMigration();
+
+      const after = opened.sqlite
+        .prepare("SELECT * FROM refresh_runs WHERE id = ?")
+        .get(invertedId) as Record<string, unknown>;
+      // REPAIRED, not invented: pre-#193 `claimRefreshRun` wrote one `nowIso`
+      // string to both columns, so `started_at` on a legacy row IS the instant it
+      // claimed at, and restoring `claimed_at` to it returns the row to a lease it
+      // once actually held rather than extending anything.
+      expect(after.claimed_at).toBe(CLAIMED_AT_ORIGINALLY);
+      expect(after.started_at).toBe(CLAIMED_AT_ORIGINALLY);
+
+      // EVERY OTHER COLUMN IS UNTOUCHED — `created_at` in particular still carries
+      // the regressed instant it was seeded with, because the repair is scoped to
+      // the one column the invariant is about and does not tidy the row's history.
+      for (const [column, value] of Object.entries(before)) {
+        if (column === "claimed_at") continue;
+        expect({ column, value: after[column] }).toEqual({ column, value });
+      }
+      expect(after.created_at).toBe(REGRESSED_RENEWAL);
+      expect(after.scope_list_ids).toBe(",2,");
+
+      // And the repaired row is LEGAL under the constraint, not merely present:
+      // re-writing the stored value re-evaluates the CHECK against it.
+      expect(() =>
+        opened.sqlite.prepare("UPDATE refresh_runs SET claimed_at = claimed_at WHERE id = ?").run(invertedId),
+      ).not.toThrow();
+    });
+
+    it("leaves an ALREADY-ORDERED row byte-identical — the repair touches only the inverted one", () => {
+      // Both legal shapes beside the inverted one, in one database: the migration
+      // must repair exactly one row and pass the others through untouched.
+      const equalId = seedRun(pre.sqlite, {
+        startedAt: CLAIMED_AT_ORIGINALLY,
+        claimedAt: CLAIMED_AT_ORIGINALLY,
+      });
+      const gapId = seedRun(pre.sqlite, {
+        startedAt: "2026-07-19T08:00:00.000Z",
+        claimedAt: "2026-07-19T08:40:00.000Z",
+      });
+      const invertedId = seedRun(pre.sqlite, {
+        startedAt: CLAIMED_AT_ORIGINALLY,
+        claimedAt: REGRESSED_RENEWAL,
+      });
+      const before = pre.sqlite
+        .prepare("SELECT * FROM refresh_runs ORDER BY id")
+        .all() as Array<Record<string, unknown>>;
+
+      const opened = pre.applyOrderMigration();
+
+      const after = opened.sqlite
+        .prepare("SELECT * FROM refresh_runs ORDER BY id")
+        .all() as Array<Record<string, unknown>>;
+      expect(after.map((r) => r.id)).toEqual([equalId, gapId, invertedId]);
+      // Field for field against what was actually seeded, so the control cannot
+      // drift from the pre-migration rows.
+      before
+        .filter((row) => row.id !== invertedId)
+        .forEach((row, i) => {
+          for (const [column, value] of Object.entries(row)) {
+            expect({ id: row.id, column, value: after[i]?.[column] }).toEqual({ id: row.id, column, value });
+          }
+        });
+      expect(after.find((r) => r.id === invertedId)?.claimed_at).toBe(CLAIMED_AT_ORIGINALLY);
+    });
   });
 
   it("carries 0011's eight CHECKs and 0011's index through the rebuild", () => {

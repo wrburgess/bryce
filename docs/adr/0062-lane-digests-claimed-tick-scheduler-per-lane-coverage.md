@@ -124,9 +124,27 @@ So the alternative to doing all three was doing none of them.
    requires such an invariant in the **database, declared in the ORM schema**, so it joins the eight CHECKs
    `refresh_runs` already carries in `src/db/schema.ts`. SQLite has no `ALTER TABLE ... ADD CONSTRAINT`, so
    applying it to an existing database is a table rebuild — **`drizzle/0014`**, the same shape `drizzle/0011`
-   used on this table, and the migration this decision previously said was unnecessary. It is still not a
-   *data* migration: every existing row was written with the two columns equal, which `<=` admits, and
-   `renewRefreshRun` only ever moves `claimed_at` forward, so nothing is rewritten and no row is at risk.
+   used on this table, and the migration this decision previously said was unnecessary.
+
+   **And it IS a data migration after all** (added in the next delta round of the same review, superseding
+   the previous sentence, which said it was not). That sentence argued no existing row could violate the
+   new CHECK because every row was written with the two columns equal and "`renewRefreshRun` only ever
+   moves `claimed_at` forward". The second half was an assumption stated as a fact and is false: that
+   function wrote a bare `now` with no comparison against the row, and its live-lease `WHERE` does not
+   substitute for one — that test refuses a claim too *old* relative to `now`, so a clock stepping
+   **backward** only moves its cutoff earlier and the write always lands. A pre-0014 database can
+   therefore hold `started_at > claimed_at`, and copying such a row verbatim fails the new CHECK inside
+   the migration's transaction: `openDb()` rolls back and **the application cannot start**. So the copy
+   **normalizes** — `claimed_at` is written as `max(started_at, claimed_at)`. On a legacy row `started_at`
+   *is* the original claim instant (one `nowIso` string, both columns), so this restores the row to a lease
+   it actually held rather than inventing one, and it is a no-op on every already-ordered row. Lowering
+   `started_at` to `claimed_at` was rejected: directionally safe for freshness, but it would discard the
+   real selection instant and enshrine the clock-error value as the coverage anchor. Going forward the
+   writer holds the line itself — `renewRefreshRun` clamps to `max(now, started_at)`, byte-identical to the
+   old write under any forward clock and, under a regressed one, leaving the lease *older* so the run is
+   reaped sooner. Clamping to the existing `claimed_at` instead was rejected: a strictly monotonic lease
+   keeps its highest observed value, which a successor sharing the same regressed clock reads as live and
+   refuses behind, silencing Refresh until the clock catches up.
 
    One reader did have to move with it: `refreshHealth` ranks runs to find "the latest", and watermark
    order and claim order stopped agreeing the moment a run could select before it claims. It now orders
@@ -177,7 +195,9 @@ So the alternative to doing all three was doing none of them.
    decide a lane is due against one hour and claim its slot against another. `runRefresh` is handed
    `deps.now` unfrozen, because it renews a *lease* per player (`renewRefreshRun`,
    [ADR 0043](0043-persist-refresh-freshness-and-gate-digest.md) fencing): a frozen clock re-writes the tick's start
-   as `claimed_at` forever, so any sweep outliving the 10-minute lease is reaped `failed` (superseded) by
+   as `claimed_at` forever (the renewal clamps to `max(now, started_at)`, which on any forward clock is
+   `now`, so freezing the clock freezes the stored lease with it), and any sweep outliving the 10-minute
+   lease is reaped `failed` (superseded) by
    the next tick and aborts mid-flight — ~4 times an hour, permanently, with no covering run ever recorded.
    `runDigest` re-freezes its own anchor internally, so it is safe with either and is given the frozen one
    for slot/date agreement.
