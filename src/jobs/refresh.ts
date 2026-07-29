@@ -512,6 +512,20 @@ async function selectSweepPlayers(db: Db, listIds?: readonly number[]): Promise<
  */
 export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   const { db, now, tz } = deps;
+  // THE SELECTION WATERMARK — read BEFORE the selection query, and recorded as
+  // this run's `started_at` (PR #203 Reviewer P1).
+  //
+  // The claim happens several database reads later (the calendar load below), so
+  // stamping the CLAIM instant onto `started_at` would backdate what this run
+  // knew: a Player enrolled into a swept lane inside that gap looks, to
+  // `latestCoveringRun`'s membership test, like a member the selection below
+  // already saw — while `activePlayers` is fixed HERE and never refreshed, so he
+  // is never fetched. The gap is ordinary operation, not a theoretical instant.
+  //
+  // Before the read, not after: the query's own snapshot is taken somewhere
+  // inside it, and only a watermark taken before it is provably not later than
+  // the snapshot. That is also why the membership test rejects on `>=`.
+  const selectedAt = now();
   // SELECTION SITE 1 (#192), which ALSO answers this run's coverage question in
   // the same read (see `selectSweepPlayers`). `deps.scope` is undefined for the
   // whole Watch List and carries the lanes otherwise; the SAME expression feeds
@@ -564,7 +578,12 @@ export async function runRefresh(deps: RefreshDeps): Promise<RefreshSummary> {
   // count was the whole Watch List, so a lane run's N-of-M can never be read as
   // a whole-list claim (#192).
   const claim = claimRefreshRun(db, {
+    // A LIVE read for the lease clock — the claim really is happening now — and
+    // the SELECTION watermark for `started_at`, which is what every coverage
+    // test keys on. The two are deliberately different instants (PR #203
+    // Reviewer P1); collapsing them back into one re-forges the `fresh` banner.
     now: now(),
+    startedAt: selectedAt,
     playersTotal: activePlayers.length,
     scopeListIds,
   });

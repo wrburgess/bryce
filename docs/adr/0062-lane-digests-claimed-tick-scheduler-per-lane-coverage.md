@@ -92,9 +92,35 @@ So the alternative to doing all three was doing none of them.
    names L, while `assembleDigest` now reports a player whose stats were never fetched: a forged `fresh`,
    arrived at by a different route. So a **scoped** run covers L only while **no current active member of
    L joined at or after that run's `started_at`** — a correlated `EXISTS` over `list_members` in the same
-   predicate, `>=` because the sweep's selection snapshot is taken at (in fact just before) the claim.
-   `players.active` stays the master gate (ADR 0046 decision 2) and the test reproduces the sweep's own
-   selection predicate, so an *inactive* enrollee is not a gap — re-activating him is.
+   predicate. `players.active` stays the master gate (ADR 0046 decision 2) and the test reproduces the
+   sweep's own selection predicate, so an *inactive* enrollee is not a gap — re-activating him is.
+
+   **`started_at` is the SELECTION watermark, not the claim instant** (added in the delta review of PR
+   #203, superseding this decision's first disclosure). That disclosure said the selection snapshot is
+   taken "at (in fact just before) the claim", treating the difference as an instant. It is not an
+   instant: `runRefresh` selects its players, **loads the calendars**, and only then claims — several
+   database reads. Anchoring coverage on the claim dates every enrollment made inside that gap as *older*
+   than the run, so the membership test reads it as a member the selection already saw while
+   `activePlayers` — fixed before the selection returned and never refreshed — never fetched him. The
+   forged `fresh` this decision exists to prevent, re-entered through the run's own clock. So `runRefresh`
+   reads its clock **immediately before the selection query** and passes that instant to
+   `claimRefreshRun`, which records it as `started_at`; `claimed_at` remains the claim instant and is the
+   only column any lease decision may read. `started_at <= claimed_at` from here on, and `>=` in the
+   membership test is still the rejecting side, now because the watermark is read just before the query
+   whose snapshot it stands for.
+
+   No migration: the column's *meaning* is narrowed, not its type, and moving a run's recorded start
+   **earlier** is conservative in every reader. `digestFreshnessFor` requires the start's host date to be
+   strictly after the content date, so an earlier start can only weaken a freshness claim; the tick's
+   `refreshIsDue` anchors on it, so an earlier anchor makes the next sweep due *sooner*. Historical rows,
+   whose `started_at` is a claim instant, keep reading exactly as they did.
+
+   One reader did have to move with it: `refreshHealth` ranks runs to find "the latest", and watermark
+   order and claim order stopped agreeing the moment a run could select before it claims. It now orders
+   by `id` — the durable generation the claim transaction already serializes, and what
+   `admitTargetedRefresh` fences on — so a live sweep can never be ranked below a settled predecessor that
+   happened to select later. `latestCoveringRun` keeps the `(started_at, id)` ordering, because it asks a
+   different question: not which run is newest, but which provable coverage claim is strongest.
 
    The membership test is deliberately **scoped to scoped runs**. A whole-list run (`scope_list_ids IS
    NULL`) swept every *then-active* Player, and its claim is about players rather than lanes: moving one

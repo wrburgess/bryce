@@ -287,11 +287,21 @@ export const refreshRuns = sqliteTable(
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     /**
-     * When the sweep CLAIMED its run — the freshness anchor (ADR 0043). Freshness
-     * is judged on the START, never the finish: a run that started after the
-     * content day ended captured every player under ADR 0040's forward-clock
-     * finality gate, whereas a midnight-straddling run started before is
-     * conservatively stale. Also `claimed_at`'s initial value: start == claim.
+     * When the sweep took its PLAYER SELECTION snapshot — the freshness anchor
+     * (ADR 0043). Freshness is judged on the START, never the finish: a run that
+     * started after the content day ended captured every player under ADR 0040's
+     * forward-clock finality gate, whereas a midnight-straddling run started
+     * before is conservatively stale.
+     *
+     * THE SELECTION INSTANT, NOT THE CLAIM INSTANT (PR #203 Reviewer P1). A
+     * sweep selects its players, loads calendars, and only then claims, so the
+     * two differ by several database reads. Every coverage test — most sharply
+     * `latestCoveringRun`'s "did this lane gain an active member since?" — is
+     * really asking what the SELECTION saw, and a claim-instant anchor would
+     * date an enrollment made inside that gap as older than the run and read it
+     * as covered by a selection that never saw it. So `runRefresh` stamps the
+     * instant it read its clock before selecting, and `started_at <= claimed_at`
+     * holds; `claimed_at` alone is the lease clock.
      */
     startedAt: text("started_at").notNull(),
     /** Null WHILE running; stamped when the run settles (CHECK below enforces the iff). */
@@ -309,6 +319,11 @@ export const refreshRuns = sqliteTable(
      * The lease clock (ADR 0034's pattern), RENEWED after each player. A healthy
      * long sweep keeps renewing and stays live; a crashed run stops and its lease
      * expires after REFRESH_LEASE_MS, so another run may claim without waiting.
+     *
+     * The CLAIM instant, and the only column a lease decision may read — its
+     * initial value is when the row was inserted, at or after `started_at` (PR
+     * #203 Reviewer P1). Measuring a lease from the selection watermark instead
+     * would let a slow-to-claim sweep be reaped by the very next claim.
      */
     claimedAt: text("claimed_at").notNull(),
     playersRefreshed: integer("players_refreshed").notNull().default(0),
