@@ -1,3 +1,4 @@
+import type { SQL } from "drizzle-orm";
 import { count, desc, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { DeliveryKind, DeliveryStatus } from "../db/schema.js";
@@ -82,13 +83,42 @@ export interface LaneHealth {
   } | null;
 }
 
+/**
+ * THE delivery-recency ordering — "latest activity first" — authored ONCE and
+ * spread into every `orderBy` that needs it (#193 self-review).
+ *
+ * A retried delivery is updated in place (`sent_at` moves, `created_at` does
+ * not), so "last" cannot mean `created_at`: it means `coalesce(sent_at,
+ * created_at)`, then `created_at` to separate two rows whose coalesced value is
+ * a tie, then `id` so rows identical in BOTH still order deterministically
+ * rather than by insertion luck.
+ *
+ * It is a shared helper for the reason `latestCoveringRun` is one for the
+ * coverage predicate (src/jobs/refresh-run.ts): the host-wide `lastDelivery` and
+ * the per-lane view answer the same question about the same table, and two
+ * authorings of one rule is how they quietly stop agreeing. They had already
+ * drifted — the lane view carried the `id` tiebreak and the host-wide field did
+ * not — so two rows stamped in the same whole second made /health report a
+ * DIFFERENT "last" delivery on each surface for one set of rows, while the
+ * comment claimed they agreed and a test with distinct timestamps never engaged
+ * the tiebreak.
+ */
+export function deliveryRecencyOrder(): SQL[] {
+  return [
+    desc(sql`coalesce(${digestDeliveries.sentAt}, ${digestDeliveries.createdAt})`),
+    desc(digestDeliveries.createdAt),
+    desc(digestDeliveries.id),
+  ];
+}
+
 export async function healthSnapshot(db: Db, now: Date, tz: string): Promise<HealthSnapshot> {
   const playerCount = (
     await db.select({ n: count() }).from(players).where(eq(players.active, true))
   )[0];
   const statLineCount = (await db.select({ n: count() }).from(statLines))[0];
-  // A retried delivery is updated in place (sentAt moves, createdAt does not),
-  // so "last" means latest activity: sentAt when sent, createdAt for failed rows.
+  // Ordered by the ONE recency rule (`deliveryRecencyOrder`), which is also what
+  // the per-lane view below reads — the two surfaces cannot disagree about which
+  // row is "last" because there is only one authoring of the rule.
   //
   // DELIBERATELY HOST-WIDE, not lane-scoped (ADR 0059 → *Amendment (#191)*).
   // This field answers "is the host delivering at all?", and narrowing it would
@@ -100,10 +130,7 @@ export async function healthSnapshot(db: Db, now: Date, tz: string): Promise<Hea
     await db
       .select()
       .from(digestDeliveries)
-      .orderBy(
-        desc(sql`coalesce(${digestDeliveries.sentAt}, ${digestDeliveries.createdAt})`),
-        desc(digestDeliveries.createdAt),
-      )
+      .orderBy(...deliveryRecencyOrder())
       .limit(1)
   )[0];
   return {
@@ -135,12 +162,12 @@ export async function healthSnapshot(db: Db, now: Date, tz: string): Promise<Hea
  * dressed up as one statement.
  *
  * The reduction keeps the FIRST row it sees per lane, which is authoritative
- * because the read is already ordered by the host-wide rule —
- * `coalesce(sent_at, created_at) DESC, created_at DESC, id DESC` — restated here
- * ONLY in the sense that both call sites must agree; they are asserted to agree
- * by a test that builds the ambiguous cases (a retried row, a fresh failure, a
- * live claim). `id DESC` is the final tiebreak so two rows with identical
- * timestamps still order deterministically rather than by insertion luck.
+ * because the read is ordered by `deliveryRecencyOrder()` — the SAME helper the
+ * host-wide field spreads, not a restatement of it. The agreement is structural
+ * now rather than asserted: there is one authoring of the rule, so the tests
+ * that build the ambiguous cases (a retried row, a fresh failure, a live claim,
+ * two rows stamped in the same whole second) pin behavior instead of policing a
+ * duplicate.
  */
 async function laneHealth(db: Db): Promise<LaneHealth[]> {
   const lanes = await db
@@ -154,11 +181,7 @@ async function laneHealth(db: Db): Promise<LaneHealth[]> {
     .select()
     .from(digestDeliveries)
     .where(eq(digestDeliveries.kind, "digest"))
-    .orderBy(
-      desc(sql`coalesce(${digestDeliveries.sentAt}, ${digestDeliveries.createdAt})`),
-      desc(digestDeliveries.createdAt),
-      desc(digestDeliveries.id),
-    );
+    .orderBy(...deliveryRecencyOrder());
   const latestByLane = new Map<number, (typeof rows)[number]>();
   for (const row of rows) if (!latestByLane.has(row.listId)) latestByLane.set(row.listId, row);
 

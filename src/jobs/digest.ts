@@ -243,9 +243,18 @@ export async function runDigest(input: DigestDeps): Promise<DigestResult> {
     // decision 4). The heartbeat proves the HOST is alive — one signal per host,
     // ADR 0059's amendment — so letting each scheduled lane substitute one would
     // multiply offseason mail by the lane count and say nothing extra. A lane
-    // that was asked for BY NAME during Sleep therefore skips outright, taking no
-    // claim, and the tick's own unscoped invocation is what keeps the heartbeat
-    // running.
+    // that was asked for BY NAME during Sleep therefore skips TODAY's digest,
+    // and the tick's own unscoped invocation is what keeps the heartbeat running.
+    //
+    // "SKIPS TODAY'S" IS EXACT, and it is NOT "takes no claim" (#193
+    // self-review, correcting this comment's earlier wording). Orphan recovery
+    // sits ABOVE this branch, deliberately, so a scoped invocation whose lane
+    // still owes a PRIOR day has already claimed that day's slot and mailed it
+    // before reaching here. That is the design, not a leak: ADR 0034's recovery
+    // guarantee must not lapse for the length of an offseason, and a digest that
+    // failed on the season's LAST day is recoverable only while asleep. The
+    // `skipped` result below therefore describes today's run alone — the
+    // recovery it may have just performed is a completed send with its own row.
     if (deps.listId !== undefined) {
       return {
         kind: "digest",

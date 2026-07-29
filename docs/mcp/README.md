@@ -206,7 +206,9 @@ Run the Digest job now for a Window.
   list is rejected; a lane deleted between resolution and the claim comes back as
   `{ action: "skipped", reason: "lane-deleted" }` with nothing mailed, `force` included. During
   Offseason Sleep an **unscoped** `1d` call becomes the weekly host heartbeat while a call that named a
-  lane is `{ action: "skipped", reason: "offseason-sleep" }`. `tags`
+  lane returns `{ action: "skipped", reason: "offseason-sleep" }` for **today's** digest — Sleep does not
+  suspend orphan recovery, so such a call still claims and mails an **earlier** day the lane owes before
+  reporting that skip. `tags`
   ([#140](https://github.com/wrburgess/bryce/issues/140)) scopes the send to a **cohort** and is
   on-demand for the same reason — the delivery-slot key `(kind, date_covered)` has no tag dimension,
   so a cohort send takes no slot and records no delivery row; with `list` the two **intersect**, and a

@@ -505,10 +505,17 @@ describe("scoped digest (#70)", () => {
       expect(mailer.sent[0]?.subject).not.toContain("Old Name");
     });
 
-    it("SLEEP: a scoped lane skips and claims nothing; the unscoped run still heartbeats", async () => {
+    it("SLEEP: a scoped lane with NOTHING OWED claims nothing; the unscoped run still heartbeats", async () => {
       // ADR 0062 decision 4, affirming ADR 0059's amendment. One liveness signal
       // per host: letting every scheduled lane substitute a heartbeat would
       // multiply offseason mail by the lane count for no added signal.
+      //
+      // "NOTHING OWED" IS LOAD-BEARING, and this case's `toHaveLength(0)` used
+      // to be vacuous about it (#193 self-review, LOW 1): the fixture has no
+      // orphan, so the empty delivery table said nothing about whether a scoped
+      // Sleep invocation "takes no claim" — the contract prose's old wording.
+      // It does not: recovery runs above the sleep branch, and the very next
+      // case drives it. What Sleep suppresses is TODAY's digest, and only that.
       clock.set(OFFSEASON);
       const lane = await createList(opened.db, "L", clock.now());
       const player = await insertPlayer(opened.db, {
@@ -528,6 +535,48 @@ describe("scoped digest (#70)", () => {
       const unscoped = await runDigest({ ...laneDeps(mailer, lane), listId: undefined, listName: undefined });
       expect(unscoped).toMatchObject({ kind: "heartbeat", action: "sent" });
       expect(mailer.sent).toHaveLength(1);
+    });
+
+    it("SLEEP: a scoped lane that OWES A PRIOR DAY does claim and mail it, then skips today", async () => {
+      // The with-orphan half the case above cannot show (#193 self-review, LOW
+      // 1). `runDigest` catches up ONE orphaned prior day BEFORE it reads the
+      // sleep state, deliberately: ADR 0034's recovery guarantee must not lapse
+      // for the length of an offseason, and a digest that failed on the season's
+      // LAST day is only ever recoverable while asleep. So "a scoped Sleep
+      // invocation takes no claim" was simply false, and the prose said it in
+      // four places.
+      clock.set(OFFSEASON);
+      const lane = await createList(opened.db, "L", clock.now());
+      const player = await insertPlayer(opened.db, {
+        fullName: "Offseason Guy",
+        level: "mlb",
+        milbLevel: null,
+      });
+      // The orphaned slot covers 2026-10-01; its 1d window is the day before.
+      await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-09-30" });
+      await addToList(opened.db, "L", [player.externalId!], clock.now());
+      await insertDelivery(opened.db, {
+        dateCovered: "2026-10-01",
+        listId: lane.id,
+        status: "failed",
+        sentAt: null,
+        createdAt: "2026-10-01T10:00:00.000Z",
+      });
+
+      const mailer = new CapturingMailer();
+      const scoped = await runDigest(laneDeps(mailer, lane));
+
+      // TODAY is still skipped — Sleep suppresses the regular daily artifact...
+      expect(scoped).toMatchObject({ kind: "digest", action: "skipped", reason: "offseason-sleep" });
+      // ...and the ORPHAN was claimed, mailed, and settled on its own date.
+      expect(mailer.sent).toHaveLength(1);
+      const rows = await opened.db.select().from(digestDeliveries);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        dateCovered: "2026-10-01",
+        listId: lane.id,
+        status: "sent",
+      });
     });
 
     it("ORPHAN RECOVERY runs on the INVOKED lane, and uses that lane's recipients", async () => {

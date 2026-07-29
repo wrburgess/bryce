@@ -565,8 +565,27 @@ describe("coverage-keyed freshness watermark, storage layer (#192)", () => {
 
       expect(latestCoveringRun(opened.db, 11)).toBeDefined();
       expect(latestCoveringRun(opened.db, 1)).toBeUndefined();
-      // The mirror case: lane 1's sweep must not cover lane 11 either.
+      // A THIRD case, not the mirror the comment used to claim (#193 self-review,
+      // LOW 3): an id that merely CONTAINS the swept one as a substring —
+      // `,11,` versus lane 111 — must not match either. Both directions of
+      // containment are hazards, so both are asserted; the true mirror is below,
+      // where it needs its own sweep to be a real case.
       expect(latestCoveringRun(opened.db, 111)).toBeUndefined();
+    });
+
+    it("FENCING (the mirror): lane 1's sweep does not cover lane 11", () => {
+      // The genuine mirror, which cannot share the case above: with `,11,`
+      // already recorded, lane 11 is covered whatever a later sweep says, so a
+      // mirror assertion added there would pass for the wrong reason. Only a
+      // sweep scoped to lane 1 alone can answer "is lane 11 covered?" honestly.
+      expect(encodeScopeListIds([1])).toBe(",1,");
+      sweep("ok", [1]);
+
+      expect(latestCoveringRun(opened.db, 1)).toBeDefined();
+      expect(latestCoveringRun(opened.db, 11)).toBeUndefined();
+      // ...and the whole-list question still reads UNCOVERED — a scoped sweep
+      // never forges the #192 completeness claim.
+      expect(latestCoveringRun(opened.db, null)).toBeUndefined();
     });
 
     it("a newer OTHER-LANE run does not hide an older covering one", async () => {

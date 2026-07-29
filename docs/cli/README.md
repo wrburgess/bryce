@@ -147,11 +147,13 @@ cannot express a value the HC edits.
 Each tick, in order:
 
 1. **Refresh** — every live lane whose `refresh_interval_minutes` has elapsed since a sweep that
-   *covered it* started. If any are due, **one** sweep runs carrying the union of their ids (a Player
-   on two due lanes is fetched once). Refresh is first so a due digest reports data this tick fetched.
+   *covered it* started, **less a tolerance of half a tick** (7m30s). If any are due, **one** sweep runs
+   carrying the union of their ids (a Player on two due lanes is fetched once). Refresh is first so a due
+   digest reports data this tick fetched.
 2. **Digest** — during Offseason Sleep, at most one **unscoped** run to carry the weekly host
-   heartbeat; otherwise one run per live lane whose `digest_hour` has been reached and whose slot for
-   today holds no `sent` row.
+   heartbeat, plus one run for each scheduled lane that still owes an **earlier** day (recovery only —
+   no regular offseason digest is mailed); otherwise one run per live lane whose `digest_hour` has been
+   reached and whose slot for today holds no `sent` row.
 
 ```
 tick refresh lanes=Watchlist,Prospects outcome=ok players=12 skipped=0 failed=0 inserted=44 updated=3
@@ -167,6 +169,17 @@ tick done refreshed=2 digests=1 ok=true
 - **The hour test is `>=`, not `==`** — a laptop asleep at 05:00 wakes at 09:00 and still sends. Today's
   `sent` row is what stops it re-sending every tick afterwards; a **`failed`** slot therefore reads as
   due and is **retried on the next tick** rather than waiting for tomorrow.
+- **Refresh due-ness carries a half-tick tolerance so the schedule cannot drift.** `StartInterval` is
+  approximate — launchd fires late and restarts its countdown across sleep/wake — and each sweep is
+  anchored on the *previous* sweep's real start, so without the tolerance every late tick would push the
+  next sweep a full 15 minutes later, permanently. On the seeded 1440-minute / `digest_hour` 5 setup that
+  drift reaches the digest hour in about a week and every digest after it banners `stale`. A lane is
+  therefore swept **at most 7m30s early**, never twice inside one interval.
+- **Offseason Sleep suspends today's digest, never recovery.** A lane that still owes an earlier day is
+  caught up while asleep, one day per invocation — so a send that failed on the season's last day is not
+  stranded until Opening Day. A lane whose lane was **deleted** while a delivery was in flight has that
+  abandoned `sending` row settled `failed` by the tick once its 10-minute lease expires (nothing is
+  mailed) — otherwise it would show on `/health` as in flight forever.
 - **Failure is isolated per stage and per lane.** A sweep that throws still leaves every due digest
   attempted; a lane that throws still leaves the lanes after it attempted. Exit is **1** if anything
   errored or a send failed — *after* all due work was attempted — and **0** otherwise (a `partial`
@@ -220,10 +233,13 @@ refreshed nor digested — tracked as [#202](https://github.com/wrburgess/bryce/
 - The `1d` window is the scheduled daily artifact; any wider window (`7d`/`14d`/`21d`/`28d`/`35d`/`60d`/`ytd`) is an
   on-demand report that takes no slot and answers even during Offseason Sleep
   ([ADR 0035](../adr/0035-window-selected-digest.md)). During Sleep, an **unscoped** `1d` run becomes
-  the weekly host heartbeat; a run that **named a lane** is skipped
-  (`action=skipped reason=offseason-sleep`) instead, because the heartbeat is one liveness signal per
-  host and not one per lane ([ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md),
+  the weekly host heartbeat; a run that **named a lane** skips **today's**
+  digest (`action=skipped reason=offseason-sleep`) instead, because the heartbeat is one liveness signal
+  per host and not one per lane ([ADR 0059](../adr/0059-explicit-default-lane-supersedes-implicit-default.md),
   affirmed by [ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md) decision 4).
+  Sleep does **not** suspend orphan recovery: a named lane that still owes an **earlier** day claims and
+  mails that day first and *then* reports the skip for today, so a send that failed on the season's last
+  day is not stranded until Opening Day ([ADR 0034](../adr/0034-digest-delivery-claim-at-least-once.md)).
 - The **game-count** windows `last10games` / `last30games` report each Player over his own last N
   distinct regular-season games — a per-player ordered limit, so two Players in one report cover
   different date spans, and each row carries its real games count (`GP`) and first–last date (`Span`).

@@ -7,6 +7,7 @@ import type { HighlightlyClient } from "../highlightly/client.js";
 import { liveLists } from "../lists/service.js";
 import type { Mailer } from "../mailer/types.js";
 import type { MlbClient } from "../mlb/client.js";
+import { findOrphanedDigestDate, reapDeadLaneClaims } from "./delivery-claim.js";
 import type { DigestResult } from "./digest.js";
 import { runDigest } from "./digest.js";
 import type { RefreshProgressSink } from "./refresh-progress.js";
@@ -130,15 +131,55 @@ export interface TickResult {
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
+ * The tick's NOMINAL period — `StartInterval 900` in
+ * `ops/templates/com.sk.tick.plist`, the one place the schedule is authored.
+ * Nominal is the operative word: launchd treats it as approximate, fires late
+ * under load, and restarts the countdown across sleep/wake. Nothing here may
+ * assume a tick lands on a grid; this value exists only to SIZE the tolerance
+ * below in terms of the cadence it has to survive.
+ */
+export const TICK_PERIOD_MS = 15 * 60_000;
+
+/**
+ * How early a lane's refresh may be judged due — HALF A TICK PERIOD (#193).
+ *
+ * Without it the schedule drifts monotonically and never recovers. See
+ * `refreshIsDue` for the failure and for why half a period is the size chosen.
+ */
+export const REFRESH_DUE_TOLERANCE_MS = TICK_PERIOD_MS / 2;
+
+/**
  * Has `intervalMinutes` elapsed since a covering sweep STARTED (#193)?
  *
  * Pure and exported so the boundary is table-tested directly rather than only
  * through the orchestration — the same treatment `deriveRefreshStatus` gets.
  *
- * `>=` PINS THE EXACT BOUNDARY: elapsed exactly equal to the interval is DUE. A
- * strict `>` would make a lane configured for 15 minutes, ticked every 15
- * minutes, land one tick late forever — the interval is a floor on the gap, not
- * a value the clock must exceed.
+ * `>=` PINS THE BOUNDARY: elapsed exactly equal to the interval (less the
+ * tolerance) is DUE. A strict `>` would make a lane configured for 15 minutes,
+ * ticked every 15 minutes, land one tick late forever — the interval is a floor
+ * on the gap, not a value the clock must exceed.
+ *
+ * A TOLERANCE, not an exact boundary, and it is load-bearing. The anchor is the
+ * previous sweep's ACTUAL `started_at`, so every sweep records the tick's own
+ * lateness; with an exact boundary that lateness is permanent AND cumulative. A
+ * 1440-minute lane whose sweep started at 03:32 is not due at the next day's
+ * 03:30 tick — it is two minutes short — so it slides to 03:45, and the day
+ * after to 04:00, one tick per jittered day. With the seeded configuration
+ * (`drizzle/0012`, and what the runbook tells operators to set: 1440 minutes,
+ * `digest_hour` 5) the 03:30 sweep has ~90 minutes of headroom, so after roughly
+ * six jittered days the sweep lands AFTER the digest and every digest from then
+ * on banners `stale` over day-old data. Nothing self-corrects: the drift only
+ * ever moves later.
+ *
+ * HALF A PERIOD is the largest tolerance that cannot compress the SCHEDULED
+ * cadence: a lane may be swept at most half a tick early, which is still the
+ * same tick that would otherwise have swept it, so two scheduled sweeps can
+ * never land inside one interval. (Anchoring on the previous DUE BOUNDARY rather
+ * than the actual start would remove the drift too, and was not chosen: nothing
+ * stores a boundary — `refresh_runs.started_at` records when a sweep ran, never
+ * which boundary it was aiming at — so the boundary would have to be
+ * back-computed from a configuration value the HC may have changed since.)
+ * Recorded as ADR 0062 decision 3.
  *
  * A never-swept lane (`null`) is due, and so is one whose recorded start time is
  * unparseable: both fail toward REFRESHING, which costs one extra sweep, rather
@@ -148,11 +189,12 @@ export function refreshIsDue(
   lastCoveringStartedAt: string | null,
   intervalMinutes: number,
   nowMs: number,
+  toleranceMs: number = REFRESH_DUE_TOLERANCE_MS,
 ): boolean {
   if (lastCoveringStartedAt === null) return true;
   const startedMs = Date.parse(lastCoveringStartedAt);
   if (!Number.isFinite(startedMs)) return true;
-  return nowMs - startedMs >= intervalMinutes * 60_000;
+  return nowMs - startedMs >= intervalMinutes * 60_000 - toleranceMs;
 }
 
 /**
@@ -175,15 +217,24 @@ export function digestIsDue(hour: number, digestHour: number, sentToday: boolean
 }
 
 export async function runTick(deps: TickDeps): Promise<TickResult> {
-  // ONE clock read for the whole tick, for the reason `runDigest` freezes one:
-  // due-ness, the slot date, and the sweep's own timestamps must all describe
-  // the same instant, or a tick that straddles an hour boundary can decide a
-  // lane is due against one hour and claim its slot against another.
+  // ONE frozen instant for the DECISIONS THAT MUST AGREE WITH EACH OTHER, and
+  // for nothing else: due-selection, the host hour, and the slot date. A tick
+  // that straddles an hour boundary would otherwise decide a lane is due against
+  // one hour and claim its slot against another.
+  //
+  // THE SWEEP IS DELIBERATELY NOT GIVEN IT (see `runRefreshStage`). A frozen
+  // clock is right for a decision and fatal for a LEASE, and `runRefresh` renews
+  // one per player.
+  //
+  // `runDigest` re-freezes its own anchor from whatever clock it is handed
+  // (src/jobs/digest.ts: `const runAt = input.now()`), so passing this one adds
+  // no constraint the job did not already impose on itself — it only makes that
+  // anchor the same instant the due-selection above judged.
   const runAt = deps.now();
   const now = (): Date => runAt;
   const lanes = await liveLists(deps.db);
 
-  const refresh = await runRefreshStage(deps, lanes, now, runAt);
+  const refresh = await runRefreshStage(deps, lanes, runAt);
   const { digestError, digests } = await runDigestStage(deps, lanes, now, runAt);
 
   const refreshFailed =
@@ -206,7 +257,6 @@ export async function runTick(deps: TickDeps): Promise<TickResult> {
 async function runRefreshStage(
   deps: TickDeps,
   lanes: PlayerListRow[],
-  now: () => Date,
   runAt: Date,
 ): Promise<TickRefresh | null> {
   const nowMs = runAt.getTime();
@@ -226,7 +276,22 @@ async function runRefreshStage(
       db: deps.db,
       client: deps.client,
       highlightlyClient: deps.highlightlyClient,
-      now,
+      // THE LIVE CLOCK, deliberately — never the tick's frozen instant, and the
+      // one place in this file that reads `deps.now` after the anchor is taken.
+      //
+      // `runRefresh` RENEWS A LEASE from this clock: `renewRefreshRun(db, runId,
+      // now())` before every player (ADR 0043 fencing) writes `claimed_at =
+      // now`. Handed a frozen clock it re-writes the TICK'S START every time, so
+      // the stored lease clock never advances however long the sweep runs. Any
+      // sweep outliving REFRESH_LEASE_MS (10 minutes) is then reaped `failed`
+      // (SUPERSEDED) by the next tick's own claim and aborts mid-flight — ~4
+      // times an hour, forever, with no covering run ever recorded, so every
+      // lane reads due on every tick and every digest banners `stale`. The
+      // due-selection above is frozen because it is a DECISION; the work below
+      // is timed live because it is WORK. Every other production caller
+      // (src/cli/refresh.ts, src/server.ts) already passes a live clock; the
+      // tick is now the only scheduled entry point, so it must too.
+      now: deps.now,
       tz: deps.tz,
       onProgress: deps.onRefreshProgress,
       writeLegacyNotice: deps.writeLegacyNotice,
@@ -243,7 +308,9 @@ async function runRefreshStage(
 
 /**
  * The digest half: during Offseason Sleep, at most one UNSCOPED invocation to
- * carry the host heartbeat; otherwise one invocation per due lane.
+ * carry the host heartbeat, plus one scoped invocation for each scheduled lane
+ * that still owes a PRIOR day (recovery, never a regular offseason digest);
+ * otherwise one invocation per due lane.
  */
 async function runDigestStage(
   deps: TickDeps,
@@ -254,6 +321,21 @@ async function runDigestStage(
   const { db, tz } = deps;
   const digests: TickDigest[] = [];
   try {
+    // The dead-lane sweep-up (#193 self-review), before anything else this stage
+    // does. A row left `sending` when its lane is soft-deleted is otherwise
+    // UNSETTLEABLE FOREVER: the claim's un-forceable `lane-deleted` requirement
+    // refuses every future claim, `liveLists` never offers the lane again so
+    // nothing invokes a digest for it, and the row is excluded from the per-lane
+    // health view (live lanes only) while still being eligible to be the
+    // HOST-WIDE `lastDelivery` — an eternally in-flight delivery on /health. It
+    // is settled here rather than at `lists delete` because at delete time the
+    // lease may still be LIVE, and a live claim must never be settled out from
+    // under the run that holds it (ADR 0034's exact-mutual-exclusion guarantee).
+    // A periodic job is the only place that can wait for the lease to expire,
+    // and this is the periodic job.
+    reapDeadLaneClaims(db, runAt);
+
+    const today = hostDate(runAt, tz);
     // Sleep is judged ONCE for the host, against every active Player — the same
     // question `runDigest` asks when invoked unscoped. Judging it per lane would
     // let a lane of NCAA-only players fall asleep while the host is awake, which
@@ -270,15 +352,37 @@ async function runDigestStage(
     if (sleep.sleeping) {
       // The claim's rolling-week rule is the real gate; this pre-read only keeps
       // ~96 sleeping ticks a day from each opening a claim transaction and being
-      // refused `heartbeat-sent-within-week`. Scheduled lanes are NOT invoked
-      // while sleeping: a scoped invocation would skip anyway (ADR 0062 #4), so
-      // calling it would be noise.
+      // refused `heartbeat-sent-within-week`.
       if (heartbeatOwed(db, runAt.getTime())) digests.push(await invokeDigest(deps, null, now));
+
+      // ORPHAN RECOVERY IS NOT SUSPENDED BY SLEEP (#193 self-review). A lane's
+      // scoped invocation skips TODAY's digest during Sleep (ADR 0062 #4) — but
+      // `runDigest` catches up one orphaned PRIOR day BEFORE it reads the sleep
+      // state (src/jobs/digest.ts), and that recovery is ADR 0034's guarantee,
+      // which nothing here may quietly suspend for the length of an offseason.
+      // Left to the unscoped heartbeat invocation alone it would be: that
+      // invocation resolves the DEFAULT lane, so the default lane's drain rate
+      // would fall from daily to weekly and every other scheduled lane would get
+      // ZERO recovery until Opening Day — a lane whose 2026-09-30 send failed
+      // would sit `failed` on /health for five months and then recover.
+      //
+      // The pre-read is the same shape as `heartbeatOwed` above and for the same
+      // reason: `findOrphanedDigestDate` is the job's OWN query (not a proxy for
+      // it), so ~96 sleeping ticks a day cost one indexed read per scheduled
+      // lane instead of one claim transaction. It selects nothing new — the
+      // recovery it enables is exactly the one the in-season path already
+      // performs — and the bound is unchanged: `runDigest` catches up ONE day
+      // per invocation, so a backlog still drains a day at a time and no regular
+      // offseason digest is ever mailed.
+      for (const lane of lanes) {
+        if (lane.digestHour === null) continue;
+        if (findOrphanedDigestDate(db, lane.id, today, runAt.getTime()) === null) continue;
+        digests.push(await invokeDigest(deps, lane, now));
+      }
       return { digestError: null, digests };
     }
 
     const hour = hostHour(runAt, tz);
-    const today = hostDate(runAt, tz);
     for (const lane of lanes) {
       const digestHour = lane.digestHour;
       if (digestHour === null) continue;

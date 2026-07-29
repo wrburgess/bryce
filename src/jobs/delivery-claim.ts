@@ -1,7 +1,7 @@
-import { and, eq, lt } from "drizzle-orm";
+import { and, eq, exists, isNotNull, isNull, lt, lte, or, sql } from "drizzle-orm";
 import type { Db } from "../db/client.js";
 import type { DeliveryKind } from "../db/schema.js";
-import { digestDeliveries } from "../db/schema.js";
+import { digestDeliveries, playerLists } from "../db/schema.js";
 
 /**
  * The durable delivery claim (ADR 0034).
@@ -453,6 +453,73 @@ export function findOrphanedDigestDate(
     }
   }
   return null;
+}
+
+/**
+ * What a delivery row settled by `reapDeadLaneClaims` carries as its error, so
+ * an operator reading /health or the table sees WHY it is terminal rather than a
+ * bare `failed` that looks like a provider rejection it can retry.
+ */
+export const DEAD_LANE_MESSAGE =
+  "abandoned: the lane was deleted while this delivery was in flight; settled without sending";
+
+/**
+ * Settle every EXPIRED `sending` row belonging to a SOFT-DELETED lane, without
+ * mailing anything. Returns how many rows were settled.
+ *
+ * THE ROW THIS FIXES IS OTHERWISE PERMANENT (#193 self-review). A run that
+ * claimed a slot and then had its lane deleted under it — or crashed after
+ * claiming, with the lane deleted before it could be recovered — leaves a
+ * `sending` row that nothing can move: `claimDelivery`'s `lane-deleted`
+ * requirement is deliberately un-forceable, so no future claim (forced or not)
+ * may re-take it, and `liveLists` never offers the lane again, so nothing even
+ * tries. The per-lane health view hides it (live lanes only) while the host-wide
+ * `lastDelivery` can still surface it, so /health reports a delivery that has
+ * been in flight forever and no operation exists to end it.
+ *
+ * IT SENDS NOTHING, AND THAT IS THE POINT. The lane is gone; the cohort the mail
+ * was addressed to no longer exists. `failed` is the honest terminal state — the
+ * delivery genuinely never completed — and it is safe here in the one way it is
+ * not safe generally (`settleFailed`'s hazard is destroying the record of a
+ * delivered email): only a `sending` row is touched, so no `sent` row's
+ * `sent_at`, counts, or provider id can be reached from here.
+ *
+ * THE LEASE STILL RULES. Only an EXPIRED lease is settled, which is why this
+ * cannot live in `lists delete`: at delete time the run may hold a LIVE claim
+ * and be at the mail provider right now, and settling that row would break ADR
+ * 0034's exact-mutual-exclusion guarantee (the live run would then settle the
+ * same row again, on top of this write). Waiting out the lease needs a periodic
+ * job, so the tick calls it. A live run whose lane was deleted mid-flight is
+ * untouched here and settles itself normally.
+ *
+ * Scoped with a correlated EXISTS rather than a materialized id list
+ * (`rules/backend.md`): constant-size SQL whatever the lane count, and no rows
+ * for a host with no deleted lanes.
+ */
+export function reapDeadLaneClaims(db: Db, now: Date, leaseMs = LEASE_MS): number {
+  const cutoffIso = new Date(now.getTime() - leaseMs).toISOString();
+  const result = db
+    .update(digestDeliveries)
+    .set({ status: "failed", sentAt: null, errorMessage: DEAD_LANE_MESSAGE })
+    .where(
+      and(
+        eq(digestDeliveries.status, "sending"),
+        // The same expired-lease test `leaseIsLive` applies row-by-row, written
+        // as SQL so the sweep is one statement: an unstamped claim is stale, and
+        // `<=` is expiry (strictly-live is what `leaseIsLive` grants).
+        or(isNull(digestDeliveries.claimedAt), lte(digestDeliveries.claimedAt, cutoffIso)),
+        exists(
+          db
+            .select({ x: sql`1` })
+            .from(playerLists)
+            .where(
+              and(eq(playerLists.id, digestDeliveries.listId), isNotNull(playerLists.deletedAt)),
+            ),
+        ),
+      ),
+    )
+    .run();
+  return result.changes;
 }
 
 /**

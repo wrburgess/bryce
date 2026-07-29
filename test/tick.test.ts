@@ -4,8 +4,15 @@ import type { Db, OpenedDb } from "../src/db/client.js";
 import type { PlayerListRow } from "../src/db/schema.js";
 import { digestDeliveries, playerLists, refreshRuns, seasonCalendar } from "../src/db/schema.js";
 import type { TickDeps } from "../src/jobs/tick.js";
-import { digestIsDue, refreshIsDue, runTick } from "../src/jobs/tick.js";
-import { claimRefreshRun, settleRefreshRun } from "../src/jobs/refresh-run.js";
+import {
+  REFRESH_DUE_TOLERANCE_MS,
+  TICK_PERIOD_MS,
+  digestIsDue,
+  refreshIsDue,
+  runTick,
+} from "../src/jobs/tick.js";
+import { DEAD_LANE_MESSAGE } from "../src/jobs/delivery-claim.js";
+import { SUPERSEDED_MESSAGE, claimRefreshRun, settleRefreshRun } from "../src/jobs/refresh-run.js";
 import { configureList, resolveDefaultList } from "../src/lists/service.js";
 import { MlbClient } from "../src/mlb/client.js";
 import {
@@ -121,20 +128,91 @@ describe("runTick", () => {
       expect(refreshIsDue(null, 30, NOW)).toBe(true);
     });
 
-    it("pins the EXACT boundary: elapsed === interval is due", () => {
+    it("pins the EXACT boundary: elapsed === interval MINUS the tolerance is due", () => {
       // `>=`, never `>`. A lane configured for 15 minutes and ticked every 15
       // would otherwise land one tick late forever — the interval is a floor on
       // the gap, not a value the clock must exceed.
       expect(refreshIsDue(minutesAgo(30), 30, NOW)).toBe(true);
       expect(refreshIsDue(minutesAgo(31), 30, NOW)).toBe(true);
-      // One millisecond short is NOT due, which is what makes the equality above
-      // a real boundary rather than a rounding artifact.
-      expect(refreshIsDue(new Date(NOW - 30 * 60_000 + 1).toISOString(), 30, NOW)).toBe(false);
-      expect(refreshIsDue(minutesAgo(29), 30, NOW)).toBe(false);
+
+      // The boundary MOVED with the drift fix (#193 self-review): it is now the
+      // interval less REFRESH_DUE_TOLERANCE_MS, and it is still exact.
+      const boundary = 30 * 60_000 - REFRESH_DUE_TOLERANCE_MS;
+      expect(refreshIsDue(new Date(NOW - boundary).toISOString(), 30, NOW)).toBe(true);
+      // One millisecond short of THAT is not due, which is what makes the
+      // equality above a real boundary rather than a rounding artifact.
+      expect(refreshIsDue(new Date(NOW - boundary + 1).toISOString(), 30, NOW)).toBe(false);
+      expect(refreshIsDue(minutesAgo(22), 30, NOW)).toBe(false);
+      // And the tolerance is HALF the tick period, not a number picked to make a
+      // case pass — a full period would let two scheduled sweeps of a 15-minute
+      // lane land inside one interval.
+      expect(REFRESH_DUE_TOLERANCE_MS).toBe(TICK_PERIOD_MS / 2);
     });
 
     it("treats an unparseable recorded start as due", () => {
       expect(refreshIsDue("not-a-date", 30, NOW)).toBe(true);
+    });
+
+    it("does not DRIFT past the digest hour as launchd jitter accumulates", () => {
+      // THE MONOTONIC DRIFT (#193 self-review, MEDIUM 4). The anchor is the
+      // previous sweep's ACTUAL `started_at`, and `StartInterval` is approximate
+      // — launchd fires late under load and restarts its countdown across
+      // sleep/wake — so each sweep records the tick's own lateness. With an
+      // exact boundary that lateness is permanent AND cumulative: a sweep two
+      // minutes late is not due at the next day's same tick, so it slides a full
+      // 15 minutes, every jittered day, in one direction only.
+      //
+      // Seeded configuration (drizzle/0012, and what the runbook tells operators
+      // to set): refresh every 1440 minutes, digest at hour 5. The 03:30 sweep
+      // has ~90 minutes of headroom, so ~6 jittered days is all it takes for the
+      // sweep to land AFTER the digest and every digest thereafter to banner
+      // `stale` over day-old data.
+      const INTERVAL_MIN = 1440;
+      const DAY_MS = 24 * 60 * 60_000;
+      // Day 0's sweep starts at 03:30 host time, on the grid.
+      const FIRST_START = new Date("2026-07-19T08:30:00.000Z"); // 03:30 America/Chicago
+      const DIGEST_HOUR_MS = FIRST_START.getTime() + 90 * 60_000; // 05:00, the deadline
+
+      /**
+       * Fourteen days of ticks on the nominal grid, each fire delayed by its own
+       * small jitter. The jitter SHRINKS day over day, which is the adversarial
+       * case: every day the tick fires slightly earlier relative to the grid than
+       * the previous sweep's recorded start, so an exact boundary is always a
+       * few seconds short and always defers a full tick.
+       */
+      const sweepTimes = (toleranceMs: number): number[] => {
+        const starts: number[] = [FIRST_START.getTime()];
+        let last = FIRST_START.getTime();
+        for (let day = 1; day <= 14; day += 1) {
+          // Candidate fires: the grid for this day, every TICK_PERIOD_MS.
+          const jitterMs = Math.max(0, 300 - day * 20) * 1000;
+          let fire = FIRST_START.getTime() + day * DAY_MS + jitterMs;
+          // Walk forward one tick at a time until this lane reads due — which is
+          // exactly what the real scheduler does.
+          while (!refreshIsDue(new Date(last).toISOString(), INTERVAL_MIN, fire, toleranceMs)) {
+            fire += TICK_PERIOD_MS;
+          }
+          starts.push(fire);
+          last = fire;
+        }
+        return starts;
+      };
+
+      // WITHOUT tolerance the drift is real and unbounded — the negative control
+      // that proves the case is not vacuous. It crosses 05:00 and never returns.
+      const undefended = sweepTimes(0);
+      expect(undefended[14]! - undefended[0]! - 14 * DAY_MS).toBeGreaterThan(60 * 60_000);
+      expect(undefended.some((t, day) => t - day * DAY_MS >= DIGEST_HOUR_MS)).toBe(true);
+
+      // WITH the shipped tolerance every sweep stays inside its 03:30 slot: the
+      // drift never exceeds one jitter, let alone one tick.
+      const defended = sweepTimes(REFRESH_DUE_TOLERANCE_MS);
+      for (const [day, at] of defended.entries()) {
+        const sameDayOffset = at - day * DAY_MS;
+        expect(sameDayOffset).toBeGreaterThanOrEqual(FIRST_START.getTime());
+        expect(sameDayOffset).toBeLessThan(FIRST_START.getTime() + TICK_PERIOD_MS);
+        expect(sameDayOffset).toBeLessThan(DIGEST_HOUR_MS);
+      }
     });
   });
 
@@ -218,6 +296,67 @@ describe("runTick", () => {
       await opened.db.delete(refreshRuns);
       recordSweep("2026-07-19T16:50:00.000Z", undefined);
       expect((await runTick(deps())).refresh).toBeNull();
+    });
+
+    it("hands the sweep a LIVE clock, so a long sweep's lease keeps advancing", async () => {
+      // THE FROZEN-CLOCK LEASE BUG (#193 self-review, CRITICAL). `runTick` takes
+      // one clock read for its DECISIONS; handing that frozen instant to
+      // `runRefresh` as well made every `renewRefreshRun` re-write the tick's
+      // START as `claimed_at`, so the stored lease clock never advanced however
+      // long the sweep ran. A sweep outliving REFRESH_LEASE_MS was then reaped
+      // `failed`/SUPERSEDED by the next tick's own claim and aborted mid-flight
+      // — four times an hour, forever, with no covering run ever recorded.
+      //
+      // Every other tick case in this file uses a sweep that completes in one
+      // frozen instant, which is exactly why 1890 green tests missed it: the bug
+      // is only observable when the clock MOVES DURING the sweep.
+      const players = [
+        await insertPlayer(opened.db, { fullName: "Player One" }),
+        await insertPlayer(opened.db, { fullName: "Player Two" }),
+        await insertPlayer(opened.db, { fullName: "Player Three" }),
+      ];
+      await insertLane(opened.db, "A", players);
+      await configureList(opened.db, "A", { refreshIntervalMinutes: 30 }, clock.now());
+      const startedMs = clock.now().getTime();
+
+      // SIX MINUTES PER PLAYER — under the ten-minute lease individually, over it
+      // cumulatively, which is the only shape that separates the two clocks.
+      // `player-started` is emitted immediately after that player's renew, so
+      // advancing here moves the clock strictly between renewals, the way a slow
+      // provider does.
+      let started = 0;
+      let successor: ReturnType<typeof claimRefreshRun> | null = null;
+      const onRefreshProgress = (event: { kind: string }): void => {
+        if (event.kind !== "player-started") return;
+        started += 1;
+        clock.set(new Date(startedMs + started * 6 * 60_000).toISOString());
+        // On the SECOND player the clock stands twelve minutes past the tick's
+        // start: the next 15-minute tick is now overdue, so it fires its own
+        // `claimRefreshRun`. That claim is the reaper — it settles every
+        // expired-lease `running` row `failed` before inserting its own.
+        if (started === 2) {
+          successor = claimRefreshRun(opened.db, { now: clock.now(), playersTotal: 1 });
+        }
+      };
+
+      const result = await runTick(deps({ onRefreshProgress }));
+
+      // The successor found a LIVE lease and was refused. Under the frozen clock
+      // it would have found `claimed_at` still pinned at the tick's start —
+      // twelve minutes stale against a ten-minute lease — claimed, and reaped
+      // the running sweep out from under itself.
+      expect(successor).toEqual({ claimed: false, reason: "already-running" });
+
+      const runs = await opened.db.select().from(refreshRuns);
+      expect(runs).toHaveLength(1);
+      // The lease clock ADVANCED: the last renewal stamped the third player's
+      // instant, not the tick's start. This is the assertion that is red under
+      // the bug even without a successor at all.
+      expect(Date.parse(runs[0]!.claimedAt!)).toBeGreaterThan(startedMs);
+      expect(runs[0]?.errorMessage).not.toBe(SUPERSEDED_MESSAGE);
+      // ...and the sweep ran to its own terminal state rather than aborting.
+      expect(result.refresh?.summary?.reason).not.toBe("superseded");
+      expect(runs[0]?.status).not.toBe("running");
     });
 
     it("a refused refresh claim does not stop the digests", async () => {
@@ -353,6 +492,84 @@ describe("runTick", () => {
       // claim transaction to be told so.
       const result = await runTick(deps());
       expect(result.digests).toHaveLength(0);
+      expect(mailer.sent).toHaveLength(0);
+    });
+
+    it("still RECOVERS a NON-DEFAULT lane's orphaned day while asleep", async () => {
+      // ORPHAN RECOVERY IS NOT SUSPENDED BY SLEEP (#193 self-review, MEDIUM 3).
+      // Recovery lives INSIDE `runDigest`, above its sleep branch — so a tick
+      // that invokes only the unscoped heartbeat during Sleep silently drops the
+      // ADR 0034 recovery guarantee this very PR republishes: the DEFAULT lane's
+      // drain rate falls from daily to weekly (one heartbeat a week), and a
+      // NON-DEFAULT scheduled lane gets ZERO recovery for the whole offseason.
+      // A lane whose 2026-09-30 send failed would sit `failed` on /health from
+      // October to Opening Day.
+      clock.set(OFFSEASON);
+      const player = await insertPlayer(opened.db, {
+        fullName: "Offseason Guy", level: "mlb", milbLevel: null,
+      });
+      // The orphaned slot covers 2026-10-01, whose 1d window is the day before —
+      // hence the line on 09-30, so the recovered email carries real content.
+      await insertStatLine(opened.db, { playerId: player.id, gameDate: "2026-09-30" });
+      const lane = await insertLane(opened.db, "Prospects", [player]);
+      await configureList(opened.db, "Prospects", { digestHour: 5 }, clock.now());
+      await insertDelivery(opened.db, {
+        kind: "digest", dateCovered: "2026-10-01", listId: lane.id, status: "failed",
+        sentAt: null, createdAt: "2026-10-01T10:00:00.000Z",
+      });
+      // A heartbeat already went out this week, so the ONLY invocation this tick
+      // can make is the recovery one — nothing else can account for the email.
+      await insertDelivery(opened.db, {
+        kind: "heartbeat", dateCovered: "2026-12-02", listId: (await defaultLane()).id,
+        status: "sent", sentAt: "2026-12-02T18:00:00.000Z", createdAt: "2026-12-02T18:00:00.000Z",
+      });
+
+      const result = await runTick(deps());
+
+      // The lane WAS invoked, scoped, and its orphaned day was claimed and mailed.
+      expect(result.digests.map((d) => d.lane?.id)).toEqual([lane.id]);
+      expect(mailer.sent).toHaveLength(1);
+      const orphan = (await opened.db.select().from(digestDeliveries)).find(
+        (row) => row.dateCovered === "2026-10-01",
+      );
+      expect(orphan).toMatchObject({ status: "sent", listId: lane.id });
+      // ...and TODAY's offseason digest was still NOT sent: the invocation's own
+      // result is the skip, so Sleep still suppresses the regular daily artifact.
+      expect(result.digests[0]?.result).toMatchObject({
+        action: "skipped", reason: "offseason-sleep",
+      });
+      expect(
+        (await opened.db.select().from(digestDeliveries)).some(
+          (row) => row.kind === "digest" && row.dateCovered === "2026-12-05",
+        ),
+      ).toBe(false);
+    });
+
+    it("invokes NO scheduled lane while asleep when nothing is owed", async () => {
+      // The negative control for the case above, and the bound on it: recovery
+      // is an opportunity, not a reason to invoke every lane on all ~96 sleeping
+      // ticks a day. With no orphan the sleeping tick stays as quiet as before.
+      clock.set(OFFSEASON);
+      const player = await insertPlayer(opened.db, {
+        fullName: "Offseason Guy", level: "mlb", milbLevel: null,
+      });
+      const lane = await insertLane(opened.db, "Prospects", [player]);
+      await configureList(opened.db, "Prospects", { digestHour: 5 }, clock.now());
+      await insertDelivery(opened.db, {
+        kind: "heartbeat", dateCovered: "2026-12-02", listId: (await defaultLane()).id,
+        status: "sent", sentAt: "2026-12-02T18:00:00.000Z", createdAt: "2026-12-02T18:00:00.000Z",
+      });
+
+      const result = await runTick(deps());
+      expect(result.digests).toHaveLength(0);
+      expect(mailer.sent).toHaveLength(0);
+      // A lane with a LIVE `sending` row is not an orphan either — another run
+      // holds it, and stealing it is what the lease exists to prevent.
+      await insertDelivery(opened.db, {
+        kind: "digest", dateCovered: "2026-10-01", listId: lane.id, status: "sending",
+        sentAt: null, claimedAt: clock.now().toISOString(), createdAt: "2026-10-01T10:00:00.000Z",
+      });
+      expect((await runTick(deps())).digests).toHaveLength(0);
       expect(mailer.sent).toHaveLength(0);
     });
 
@@ -564,6 +781,61 @@ describe("runTick", () => {
       // Lane A's slot is `failed` and re-claimable, so the next tick retries it.
       const rows = await opened.db.select().from(digestDeliveries);
       expect(rows.find((r) => r.listId === a.id)?.status).toBe("failed");
+    });
+
+    it("settles a DELETED lane's abandoned `sending` row, and only that one", async () => {
+      // THE PERMANENTLY IN-FLIGHT DELIVERY (#193 self-review, LOW 2). A row left
+      // `sending` when its lane is soft-deleted can never settle: the claim's
+      // `lane-deleted` requirement is un-forceable so no future claim may re-take
+      // it, and `liveLists` never offers the lane again so nothing tries. It is
+      // hidden from the per-lane view (live lanes only) yet can still be the
+      // HOST-WIDE `lastDelivery` — /health reporting a delivery in flight forever.
+      const player = await insertPlayer(opened.db);
+      const dead = await insertLane(opened.db, "Dead", [player]);
+      const live = await insertLane(opened.db, "Live", [player]);
+
+      // Expired lease (30 minutes ago, against a 10-minute lease) on each lane.
+      const expired = new Date(clock.now().getTime() - 30 * 60_000).toISOString();
+      await insertDelivery(opened.db, {
+        kind: "digest", dateCovered: "2026-07-18", listId: dead.id, status: "sending",
+        sentAt: null, claimedAt: expired, createdAt: expired,
+      });
+      await insertDelivery(opened.db, {
+        kind: "digest", dateCovered: "2026-07-18", listId: live.id, status: "sending",
+        sentAt: null, claimedAt: expired, createdAt: expired,
+      });
+      // ...and a LIVE lease on the dead lane, for a different date: the run
+      // holding it may be at the mail provider right now, and settling it would
+      // break ADR 0034's exact-mutual-exclusion guarantee.
+      await insertDelivery(opened.db, {
+        kind: "digest", dateCovered: "2026-07-17", listId: dead.id, status: "sending",
+        sentAt: null, claimedAt: clock.now().toISOString(), createdAt: expired,
+      });
+      await opened.db
+        .update(playerLists)
+        .set({ deletedAt: "2026-07-19T00:00:00.000Z" })
+        .where(eq(playerLists.id, dead.id));
+
+      const result = await runTick(deps());
+
+      const rows = await opened.db.select().from(digestDeliveries);
+      const settled = rows.find((r) => r.listId === dead.id && r.dateCovered === "2026-07-18");
+      expect(settled?.status).toBe("failed");
+      expect(settled?.sentAt).toBeNull();
+      // The error says WHY it is terminal, so an operator does not read it as a
+      // provider rejection he can retry.
+      expect(settled?.errorMessage).toBe(DEAD_LANE_MESSAGE);
+
+      // The dead lane's LIVE claim is untouched — the lease still rules.
+      expect(rows.find((r) => r.listId === dead.id && r.dateCovered === "2026-07-17")?.status)
+        .toBe("sending");
+      // A LIVE lane's expired row is untouched too: that one is recoverable by
+      // the ordinary orphan path, and settling it here would steal its retry.
+      expect(rows.find((r) => r.listId === live.id)?.status).toBe("sending");
+
+      // Nothing was mailed to the deleted cohort, and the tick is still clean.
+      expect(mailer.sent).toHaveLength(0);
+      expect(result.digestError).toBeNull();
     });
 
     it("a tick with NOTHING due is a clean no-op: no claims, no mail, ok", async () => {

@@ -353,8 +353,38 @@ describe("GET /health lanes (#193)", () => {
     expect((await lanes()).find((entry) => entry.name === "L")?.lastDelivery).toMatchObject({
       dateCovered: "2026-07-17",
     });
-    // ...and the host-wide field agrees, which is the point of restating the rule.
+    // ...and the host-wide field agrees, which is the point of sharing the rule.
     expect((await health()).lastDelivery).toMatchObject({ dateCovered: "2026-07-17" });
+  });
+
+  it("agrees with the host-wide field when the timestamps are IDENTICAL", async () => {
+    // THE TIEBREAK THE OTHER CASE NEVER ENGAGES (#193 self-review, MEDIUM 1).
+    // The rule was authored TWICE — the lane view carried `id DESC` and the
+    // host-wide field did not — and the comment claimed they agreed and were
+    // test-asserted. They were not: the case above uses DISTINCT `sent_at`
+    // values, so `coalesce(...)` alone decides and the tiebreak never runs.
+    //
+    // Timestamps here are whole seconds and IDENTICAL on both rows, which is not
+    // exotic: two lanes settled inside one second, or one row retried inside the
+    // second it was created, produce it. With two authorings /health reported a
+    // DIFFERENT "last" delivery on each surface for the very same rows.
+    const lane = await insertLane(opened.db, "L");
+    const same = "2026-07-19T11:00:00.000Z";
+    await insertDelivery(opened.db, {
+      kind: "digest", dateCovered: "2026-07-17", listId: lane.id, status: "sent",
+      sentAt: same, createdAt: same,
+    });
+    await insertDelivery(opened.db, {
+      kind: "digest", dateCovered: "2026-07-18", listId: lane.id, status: "sent",
+      sentAt: same, createdAt: same,
+    });
+
+    // Which row wins is `id DESC` — the later-inserted one. What MATTERS, and
+    // what is red with two authorings, is that both surfaces name the SAME row.
+    expect((await lanes()).find((entry) => entry.name === "L")?.lastDelivery).toMatchObject({
+      dateCovered: "2026-07-18",
+    });
+    expect((await health()).lastDelivery).toMatchObject({ dateCovered: "2026-07-18" });
   });
 
   it("EXCLUDES heartbeat rows, so the default lane cannot inherit forged liveness", async () => {

@@ -108,13 +108,45 @@ So the alternative to doing all three was doing none of them.
    remaining work on the first fault would turn one broken lane into a silent host-wide outage, ~96 times
    a day. Exit is 1 if anything errored — *after* all due work was attempted.
 
+   **The tick freezes a clock for its DECISIONS and passes a LIVE one to the sweep.** Due-selection, the
+   host hour, and the slot date read one frozen instant, so a tick straddling an hour boundary cannot
+   decide a lane is due against one hour and claim its slot against another. `runRefresh` is handed
+   `deps.now` unfrozen, because it renews a *lease* per player (`renewRefreshRun`,
+   [ADR 0043](0043-persist-refresh-freshness-and-gate-digest.md) fencing): a frozen clock re-writes the tick's start
+   as `claimed_at` forever, so any sweep outliving the 10-minute lease is reaped `failed` (superseded) by
+   the next tick and aborts mid-flight — ~4 times an hour, permanently, with no covering run ever recorded.
+   `runDigest` re-freezes its own anchor internally, so it is safe with either and is given the frozen one
+   for slot/date agreement.
+
+   **Due-ness carries a tolerance of HALF A TICK PERIOD**, and the anchor stays the previous sweep's actual
+   `started_at`. `StartInterval` is approximate — launchd fires late and restarts its countdown across
+   sleep/wake — so each sweep records the tick's own lateness; with an exact boundary that lateness is
+   permanent *and* cumulative, sliding the sweep a full tick per jittered day in one direction only. Under
+   the seeded configuration (1440 minutes, `digest_hour` 5) the 03:30 sweep has ~90 minutes of headroom, so
+   ~6 jittered days puts it *after* the digest and every digest from then on banners `stale` over day-old
+   data. Half a period is the largest tolerance that cannot compress the scheduled cadence: a lane may be
+   swept at most half a tick early, which is still the tick that would have swept it. Anchoring on the
+   previous *due boundary* instead was rejected — nothing stores a boundary, so it would have to be
+   back-computed from a configuration value the HC may have changed since.
+
 4. **The heartbeat stays host-level, and only the UNSCOPED invocation substitutes it.** This affirms
    [ADR 0059](0059-explicit-default-lane-supersedes-implicit-default.md)'s *Amendment (#191)*. A heartbeat
    proves the **host** is alive; letting each scheduled lane substitute one would multiply offseason mail
-   by the lane count and add no signal. So a lane invoked **by name** during Offseason Sleep is skipped
-   (`reason: offseason-sleep`, no claim), and the tick's own unscoped invocation carries the signal. The
-   row it writes still rides the default lane's slot, still because `list_id` is `NOT NULL` — the same
-   recorded wart, unchanged.
+   by the lane count and add no signal. So a lane invoked **by name** during Offseason Sleep skips
+   **today's** digest (`reason: offseason-sleep`), and the tick's own unscoped invocation carries the
+   signal. The row it writes still rides the default lane's slot, still because `list_id` is `NOT NULL` —
+   the same recorded wart, unchanged.
+
+   **Sleep suspends today's digest, never RECOVERY.** "Skipped, no claim" would be false and was: orphan
+   recovery runs *above* the sleep branch inside `runDigest`, so a scoped invocation whose lane still owes
+   an earlier day claims and mails that day first. That is deliberate —
+   [ADR 0034](0034-digest-delivery-claim-at-least-once.md)'s recovery guarantee must not lapse for the
+   length of an offseason, and a digest that failed on the season's *last* day is only ever recoverable
+   while asleep. The tick therefore gives each **scheduled** lane its recovery opportunity while sleeping,
+   gated on the job's own `findOrphanedDigestDate` pre-read so a quiet tick stays quiet, and bounded by the
+   same one-catch-up-per-invocation rule. Left to the unscoped heartbeat alone, the default lane's drain
+   rate would fall from daily to weekly and every other scheduled lane would get *zero* recovery until
+   Opening Day.
 
 5. **An ADDITIVE per-lane delivery view, keyed on LANES rather than on delivery rows.** This delivers
    ADR 0059 amendment 2's owed view. The host-wide `lastDelivery` field is untouched and stays
@@ -127,8 +159,12 @@ So the alternative to doing all three was doing none of them.
    configuration); scheduled with no delivery is *never delivered*; scheduled with a stale one is the
    *dead lane*.
 
-   Its ordering is the **same rule the host-wide field uses** — `coalesce(sent_at, created_at)`, then
-   `created_at`, then `id`, all descending — and **all statuses are included deliberately**: a newest
+   Its ordering is the **same rule the host-wide field uses**, and now literally the same code: one
+   exported `deliveryRecencyOrder()` helper spread into both `orderBy` calls — `coalesce(sent_at,
+   created_at)`, then `created_at`, then `id`, all descending. Two authorings had already drifted (the
+   host-wide field lacked the `id` tiebreak), so rows stamped in the same whole second made /health name a
+   different "last" delivery on each surface; the fix is the same shape `latestCoveringRun` uses for the
+   coverage predicate. **All statuses are included deliberately**: a newest
    `failed` or in-flight `sending` row *is* the lane's current state and supersedes an older `sent` one.
    Reporting the last *success* instead would hide exactly the signal. `kind = 'digest'` only: a
    heartbeat would forge weekly liveness for the default lane and for no other.
@@ -166,3 +202,10 @@ So the alternative to doing all three was doing none of them.
 - **Deleted-lane liveness is enforced inside the claim**, via a new un-forceable `requirement` hook
   beside the existing `precondition`. The distinction is load-bearing: `force` overrides de-duplication
   bookkeeping and must never override a fact about the world the mail would be addressed to.
+- **A deleted lane's abandoned claim is settled by the tick, never mailed.** The un-forceable requirement
+  has a corollary: a row left `sending` when its lane is soft-deleted can never be re-claimed, and nothing
+  invokes a digest for a lane `liveLists` no longer returns — so it would sit in flight forever and could
+  still surface as the host-wide `lastDelivery`. `reapDeadLaneClaims` settles such a row `failed` with a
+  stated reason, touching only `sending` rows whose lease has EXPIRED. It cannot live in `lists delete`:
+  at delete time the run may hold a live claim and be at the provider right now, and only a periodic job
+  can wait a lease out.

@@ -95,8 +95,10 @@ and Digest (05:00) agents ([#193](https://github.com/wrburgess/bryce/issues/193)
 [ADR 0062](../adr/0062-lane-digests-claimed-tick-scheduler-per-lane-coverage.md)): each lane now carries
 its own refresh interval and digest hour in the database (`sk players lists configure`, #191), and a
 fixed clock time in a plist cannot express a value the HC edits. Each tick asks what is owed — sweeping
-the lanes whose interval has elapsed, then digesting the lanes whose hour has arrived — and a tick with
-nothing due writes one line and exits. Refresh is idempotent
+the lanes whose interval has elapsed (less a half-tick tolerance, so launchd's approximate firing cannot
+drift the schedule later day after day), then digesting the lanes whose hour has arrived — and a tick with
+nothing due writes one line and exits. During Offseason Sleep the tick still catches up any lane that owes
+an **earlier** day; only *today's* digest is replaced by the weekly heartbeat. Refresh is idempotent
 ([ADR 0030](../adr/0030-full-season-refresh-report-once-digest.md)), so re-running it is free. Each
 Player's game logs are fetched at the levels his history and current team actually call for rather than
 at all six ([ADR 0060](../adr/0060-probe-plan-prunes-refresh-fanout.md)); every level fetched is still
