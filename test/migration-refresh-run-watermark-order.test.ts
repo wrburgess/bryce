@@ -370,6 +370,15 @@ describe("drizzle/0014 refresh_runs watermark ordering (#193, PR #203 delta revi
     // So this compares the two sources directly, in BOTH directions: a CHECK
     // declared in the ORM but absent from the chain is an unapplied constraint,
     // and one in the chain but undeclared is the drop-on-next-rebuild trap.
+    //
+    // GENERALIZED, NOT SUPERSEDED. `test/schema-migration-parity.test.ts` now
+    // runs this comparison over EVERY table and over indexes, columns, and
+    // foreign keys as well. This case is deliberately kept beside it: it is the
+    // only one anchored to THIS migration — it runs against a database this
+    // file's fixture built by applying 0000-0013 and then 0014 (not the whole
+    // chain from empty), and it pins the count and the name 0014 added, so a
+    // rebuild that dropped a sibling CHECK fails HERE, next to the migration
+    // that would have caused it, rather than only in a general sweep.
     const opened = pre.applyOrderMigration();
     const ddl = (
       opened.sqlite
