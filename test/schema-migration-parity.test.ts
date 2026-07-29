@@ -1,10 +1,13 @@
-import type Database from "better-sqlite3";
-import { Column, SQL, is } from "drizzle-orm";
+import Database from "better-sqlite3";
+import { Column, SQL, is, sql } from "drizzle-orm";
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
 import {
   SQLiteSyncDialect,
   SQLiteTable as SQLiteTableClass,
   getTableConfig,
+  integer,
+  sqliteTable,
+  text,
 } from "drizzle-orm/sqlite-core";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { OpenedDb } from "../src/db/client.js";
@@ -47,7 +50,9 @@ import * as schema from "../src/db/schema.js";
  * WHAT IS COMPARED, per table: CHECK constraints by NAME; indexes by name,
  * uniqueness, ordered key columns, and partial `WHERE` predicate; columns by
  * name, type affinity, NOT NULL, primary-key membership, and DEFAULT; foreign
- * keys by columns, referenced table/columns, and actions.
+ * keys by columns, referenced table/columns, and actions. A DEFAULT is compared
+ * in the currency its FORM dictates — literals as evaluated values, SQL
+ * expressions as normalized text (`classifyDdlDefault`).
  *
  * WHAT IS DELIBERATELY NOT COMPARED — stated here as the contract, and argued
  * at each site: (1) CHECK EXPRESSIONS — names only, so a same-named but weaker
@@ -117,6 +122,102 @@ function normalizeSql(text: string): string {
   return text.replace(/[`"]/g, "").replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Remove parentheses that wrap the WHOLE expression, repeatedly.
+ *
+ * SQLite requires a non-constant `DEFAULT` to be parenthesized (`DEFAULT
+ * (unixepoch())`) and then reports it in `PRAGMA table_info` with exactly ONE
+ * layer stripped — `((unixepoch()))` comes back as `(unixepoch())`. The ORM side
+ * renders whatever the author wrote in `sql\`...\``, parens included. So the two
+ * sides of the same default differ by a paren layer for purely grammatical
+ * reasons; peeling every wrapping layer on BOTH sides is what makes the
+ * comparison about the expression rather than about SQLite's echo rules.
+ *
+ * Only a layer that spans the whole string is peeled: `(a) + (b)` is left alone,
+ * because its first `(` does not close at the end. The scan skips single-quoted
+ * spans so a paren inside a string literal cannot fake a depth change.
+ */
+function stripOuterParens(text: string): string {
+  let out = text.trim();
+  while (out.startsWith("(") && out.endsWith(")")) {
+    let depth = 0;
+    let inString = false;
+    let wrapsWhole = true;
+    for (let i = 0; i < out.length; i += 1) {
+      const ch = out[i];
+      if (inString) {
+        // A doubled '' reads as close-then-open here, which lands in the same
+        // state as treating it as an escape — so it needs no special case.
+        if (ch === "'") inString = false;
+        continue;
+      }
+      if (ch === "'") {
+        inString = true;
+      } else if (ch === "(") {
+        depth += 1;
+      } else if (ch === ")") {
+        depth -= 1;
+        if (depth === 0 && i < out.length - 1) {
+          wrapsWhole = false;
+          break;
+        }
+      }
+    }
+    if (!wrapsWhole || depth !== 0 || inString) break;
+    out = out.slice(1, -1).trim();
+  }
+  return out;
+}
+
+/**
+ * A DDL default that is a LITERAL by FORM: a signed number (including exponent
+ * and blob-hex spellings), a quoted string, or one of SQLite's literal keywords.
+ * Keyword case is folded because SQLite's keywords are case-insensitive — this
+ * decides which CURRENCY the two sides are compared in, and is not itself the
+ * comparison, so it cannot swallow a divergence (see `classifyDdlDefault`).
+ */
+const LITERAL_DEFAULT_FORM =
+  /^(?:[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?|'(?:[^']|'')*'|x'(?:[0-9a-f][0-9a-f])*'|NULL|TRUE|FALSE)$/i;
+
+/**
+ * Classify a DDL default TEXT — from either side — by its FORM.
+ *
+ * WHY FORM AND NOT EVALUATION (the bug this replaced). The first version of this
+ * file asked SQLite to evaluate the stored default and called anything that
+ * threw an "expression". That is a classifier only for defaults SQLite REFUSES
+ * to evaluate — and it evaluates nearly everything: `SELECT unixepoch()` and
+ * `SELECT CURRENT_TIMESTAMP` both succeed. So the database side of a legitimate
+ * `.default(sql\`(unixepoch())\`)` came back `{ kind: "value" }` while the ORM
+ * side came back `{ kind: "expression" }`, and the table failed parity for
+ * agreeing with itself. No column in `src/db/schema.ts` uses such a default
+ * today, which is precisely why it had to be fixed before one does: the author
+ * who adds the first one would meet a red guard on correct code, and the
+ * tempting repair is to loosen the guard that exists to catch real drift.
+ *
+ * BOTH SIDES RUN THROUGH THIS ONE FUNCTION, so the classification cannot drift
+ * between them — a literal is a literal by the same rule wherever it came from.
+ * Literals still meet as EVALUATED VALUES (`DEFAULT true` and `DEFAULT 1` are
+ * the same default, and neither a false divergence nor a hiding place);
+ * expressions meet as normalized TEXT, because evaluating `unixepoch()` twice
+ * yields two different answers and would compare nothing.
+ *
+ * A literal-by-form that SQLite then refuses to evaluate means this regex and
+ * SQLite's grammar have diverged — a harness bug, which throws rather than
+ * silently degrading back to a text comparison.
+ */
+function classifyDdlDefault(sqlite: Database.Database, defaultText: string): ColumnFact["default"] {
+  const normalized = stripOuterParens(normalizeSql(defaultText));
+  if (!LITERAL_DEFAULT_FORM.test(normalized)) return { kind: "expression", sql: normalized };
+  try {
+    const row = sqlite.prepare(`SELECT ${normalized} AS v`).get() as { v: unknown };
+    return { kind: "value", value: row.v };
+  } catch (error) {
+    throw new Error(
+      `classified DEFAULT ${defaultText} as a literal but SQLite could not evaluate it: ${String(error)}`,
+    );
+  }
+}
+
 interface IndexFact {
   name: string;
   unique: boolean;
@@ -133,9 +234,11 @@ interface ColumnFact {
   notNull: boolean;
   primaryKey: boolean;
   /**
-   * `{ kind: "none" }`, an EVALUATED literal default, or the text of an SQL
-   * expression default. See `ormColumnDefault` for why the two are compared
-   * differently.
+   * `{ kind: "none" }`, an EVALUATED literal default, or the normalized text of
+   * an SQL expression default. Which of the two a default is depends on its
+   * FORM, decided identically on both sides — see `classifyDdlDefault` for why
+   * they are compared in different currencies and why form, not evaluability,
+   * is what chooses.
    */
   default: { kind: "none" } | { kind: "value"; value: unknown } | { kind: "expression"; sql: string };
 }
@@ -186,35 +289,42 @@ function ormIndexes(table: SQLiteTable): IndexFact[] {
 /**
  * What the ORM says this column's DDL default is, in the DATABASE's terms.
  *
- * A literal default is mapped through the column's OWN `mapToDriverValue` —
+ * A JS-VALUE default is mapped through the column's OWN `mapToDriverValue` —
  * drizzle's real JS-to-storage conversion, so a `mode: "boolean"` `true` becomes
  * `1` exactly as it does on a write, rather than through a second conversion
  * table written here that could disagree with it. The database side evaluates
- * its stored default expression through SQLite (`SELECT true` → `1`), so the two
- * meet as VALUES and a purely textual difference (`DEFAULT true` vs `DEFAULT 1`)
- * neither passes as a divergence nor hides one.
+ * its stored literal through SQLite (`SELECT true` → `1`), so the two meet as
+ * VALUES and a purely textual difference (`DEFAULT true` vs `DEFAULT 1`) neither
+ * passes as a divergence nor hides one.
  *
- * An SQL-expression default cannot be compared that way — evaluating, say,
- * `unixepoch()` yields a different answer on each side — so those compare as
- * normalized TEXT. This schema currently has none; the branch exists so adding
- * one is covered rather than spuriously red.
+ * An `sql\`...\`` default has no JS value to map, so it goes through the very
+ * same `classifyDdlDefault` the database side uses — the SQL text it will emit,
+ * classified by form. That symmetry is the point: `.default(sql\`(unixepoch())\`)`
+ * is an expression on both sides and compares as text, while the degenerate
+ * `.default(sql\`0\`)` is a literal on both sides and compares as a value. A rule
+ * of "SQL object ⇒ expression" would have reproduced, on this side, exactly the
+ * kind mismatch `classifyDdlDefault` documents.
+ *
+ * `sqlite` is only ever the EVALUATOR for a literal — the same one the database
+ * side uses, which is what keeps a literal's value from being computed two
+ * different ways.
  */
-function ormColumnDefault(column: Column): ColumnFact["default"] {
+function ormColumnDefault(sqlite: Database.Database, column: Column): ColumnFact["default"] {
   if (column.default === undefined) return { kind: "none" };
   if (is(column.default, SQL)) {
-    return { kind: "expression", sql: normalizeSql(dialect.sqlToQuery(column.default).sql) };
+    return classifyDdlDefault(sqlite, dialect.sqlToQuery(column.default).sql);
   }
   return { kind: "value", value: column.mapToDriverValue(column.default) };
 }
 
-function ormColumns(table: SQLiteTable): ColumnFact[] {
+function ormColumns(sqlite: Database.Database, table: SQLiteTable): ColumnFact[] {
   return getTableConfig(table)
     .columns.map((col) => ({
       name: col.name,
       type: col.getSQLType().toUpperCase(),
       notNull: col.notNull,
       primaryKey: col.primary,
-      default: ormColumnDefault(col),
+      default: ormColumnDefault(sqlite, col),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -368,26 +478,15 @@ function dbColumns(sqlite: Database.Database, table: string): ColumnFact[] {
       type: row.type.toUpperCase(),
       notNull: row.notnull === 1,
       primaryKey: row.pk > 0,
+      // The stored default text, classified by FORM through the same function
+      // the ORM side uses — never by asking SQLite whether it can evaluate it
+      // (see `classifyDdlDefault` for the false positive that produced).
       default:
         row.dflt_value === null
           ? ({ kind: "none" } as const)
-          : dbEvaluatedDefault(sqlite, row.dflt_value),
+          : classifyDdlDefault(sqlite, row.dflt_value),
     }))
     .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-/**
- * Evaluate a stored DDL default through SQLite so it meets the ORM's mapped
- * value as a VALUE. A non-literal (function-call) default cannot be compared
- * that way and is kept as text — the mirror of `ormColumnDefault`'s branch.
- */
-function dbEvaluatedDefault(sqlite: Database.Database, expression: string): ColumnFact["default"] {
-  try {
-    const row = sqlite.prepare(`SELECT ${expression} AS v`).get() as { v: unknown };
-    return { kind: "value", value: row.v };
-  } catch {
-    return { kind: "expression", sql: normalizeSql(expression) };
-  }
 }
 
 function dbForeignKeys(sqlite: Database.Database, table: string): ForeignKeyFact[] {
@@ -587,7 +686,7 @@ describe("src/db/schema.ts declares what drizzle/*.sql actually built (rules/bac
       // ADR 0034's durable claim without touching the index at all.
       expect({ table: exportName, columns: dbColumns(opened.sqlite, name) }).toEqual({
         table: exportName,
-        columns: ormColumns(table),
+        columns: ormColumns(opened.sqlite, table),
       });
     });
 
@@ -597,5 +696,137 @@ describe("src/db/schema.ts declares what drizzle/*.sql actually built (rules/bac
         foreignKeys: ormForeignKeys(table),
       });
     });
+  });
+});
+
+/**
+ * DEFAULT CLASSIFICATION — exercised on SYNTHETIC tables, because no table in
+ * `src/db/schema.ts` has an SQL-expression default yet.
+ *
+ * WHY SYNTHETIC AND NOT A REAL TABLE. The defect being pinned here is a FALSE
+ * POSITIVE that fires only on a shape the schema does not yet contain: a guard
+ * that classified a default by whether SQLite could EVALUATE it called the
+ * database side of `.default(sql\`(unixepoch())\`)` a value and the ORM side an
+ * expression, and failed the table for agreeing with itself. Asserting that
+ * today's tables still pass would prove nothing about it — the suite was green
+ * with the bug in place. So the case is CONSTRUCTED: a drizzle table declared
+ * here, a hand-written `CREATE TABLE` standing in for the migration, and the
+ * two run through the same `ormColumns`/`dbColumns` the real cases use.
+ *
+ * These tables are declared HERE and never exported from `src/db/schema.ts`, so
+ * `DECLARED_TABLES` cannot see them: a probe must not become a table the app
+ * ships, nor add a row to the guard above.
+ *
+ * The negative controls are the load-bearing half. Classifying by form makes a
+ * whole class of comparison move from VALUES to TEXT, and a classification that
+ * agreed about everything would be a comparison about nothing — so each case
+ * that must still redden is asserted to redden, and for the stated reason.
+ */
+describe("compares a column DEFAULT in the currency its FORM dictates", () => {
+  let scratch: Database.Database;
+
+  beforeAll(() => {
+    scratch = new Database(":memory:");
+  });
+
+  afterAll(() => {
+    scratch.close();
+  });
+
+  /** Build a table the way a migration would, then read back what SQLite stored. */
+  function migrated(name: string, columnsDdl: string): ColumnFact[] {
+    scratch.exec(`CREATE TABLE ${name} (${columnsDdl})`);
+    return dbColumns(scratch, name);
+  }
+
+  it("agrees when an ORM expression default and the migration's DDL say the same thing", () => {
+    const declared = sqliteTable("probe_agreeing", {
+      // The exact shape the old evaluation-based classifier got wrong: SQLite
+      // evaluates both of these happily, so both came back as VALUES from the
+      // database and as EXPRESSIONS from the ORM.
+      createdAt: integer("created_at").notNull().default(sql`(unixepoch())`),
+      seenAt: text("seen_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+      // A wrapping paren layer is grammar, not meaning — SQLite echoes the
+      // default with one layer removed while the ORM renders what the author
+      // wrote — but an INNER layer is neither, and a paren-stripper that could
+      // not tell the two apart would mangle this into `unixepoch()) + (0`.
+      nested: integer("nested").notNull().default(sql`((unixepoch()) + (0))`),
+      // Literals keep meeting as evaluated VALUES, including the degenerate
+      // `sql` literal, whose ORM side must classify by form like any other.
+      active: integer("active", { mode: "boolean" }).notNull().default(true),
+      source: text("source").notNull().default("mlb_stats_api"),
+      literalExpression: integer("literal_expression").notNull().default(sql`0`),
+    });
+    const fromMigration = migrated(
+      "probe_agreeing",
+      "`created_at` integer DEFAULT (unixepoch()) NOT NULL," +
+        " `seen_at` text DEFAULT CURRENT_TIMESTAMP NOT NULL," +
+        " `nested` integer DEFAULT ((unixepoch()) + (0)) NOT NULL," +
+        " `active` integer DEFAULT true NOT NULL," +
+        " `source` text DEFAULT 'mlb_stats_api' NOT NULL," +
+        " `literal_expression` integer DEFAULT 0 NOT NULL",
+    );
+
+    expect(fromMigration).toEqual(ormColumns(scratch, declared));
+    // …and in the right currency on each side, so the agreement above is not
+    // two sides that merely happen to have collapsed into the same shape.
+    const byName = new Map(fromMigration.map((c) => [c.name, c.default]));
+    expect(byName.get("created_at")).toEqual({ kind: "expression", sql: "unixepoch()" });
+    expect(byName.get("seen_at")).toEqual({ kind: "expression", sql: "CURRENT_TIMESTAMP" });
+    expect(byName.get("nested")).toEqual({ kind: "expression", sql: "(unixepoch()) + (0)" });
+    expect(byName.get("active")).toEqual({ kind: "value", value: 1 });
+    expect(byName.get("literal_expression")).toEqual({ kind: "value", value: 0 });
+  });
+
+  it("still reddens when the two sides' expression defaults genuinely DIFFER", () => {
+    const declared = sqliteTable("probe_divergent_expression", {
+      createdAt: integer("created_at").notNull().default(sql`(unixepoch())`),
+    });
+    const fromMigration = migrated(
+      "probe_divergent_expression",
+      "`created_at` integer DEFAULT (unixepoch() + 86400) NOT NULL",
+    );
+
+    // Both sides classify as EXPRESSION — the divergence is the text, which is
+    // what makes this a failure of the comparison and not of the classifier.
+    expect(fromMigration[0]!.default).toEqual({ kind: "expression", sql: "unixepoch() + 86400" });
+    expect(ormColumns(scratch, declared)[0]!.default).toEqual({ kind: "expression", sql: "unixepoch()" });
+    expect(fromMigration).not.toEqual(ormColumns(scratch, declared));
+  });
+
+  it("still reddens when a literal default differs, and still agrees across its spellings", () => {
+    const declared = sqliteTable("probe_literal", {
+      active: integer("active", { mode: "boolean" }).notNull().default(true),
+    });
+    const ormSide = ormColumns(scratch, declared);
+
+    // `DEFAULT true` and `DEFAULT 1` are the SAME default; a text comparison
+    // would report a divergence that does not exist.
+    expect(migrated("probe_literal_keyword", "`active` integer DEFAULT true NOT NULL")).toEqual(ormSide);
+    expect(migrated("probe_literal_number", "`active` integer DEFAULT 1 NOT NULL")).toEqual(ormSide);
+    // …and a genuinely different literal is still a divergence.
+    const wrong = migrated("probe_literal_wrong", "`active` integer DEFAULT 0 NOT NULL");
+    expect(wrong[0]!.default).toEqual({ kind: "value", value: 0 });
+    expect(wrong).not.toEqual(ormSide);
+  });
+
+  it("never mistakes an expression default for a literal one, in either direction", () => {
+    // The failure the classification must NOT introduce: a migration that
+    // computes its default while the ORM declares a constant (or the reverse)
+    // is a real divergence, and comparing "in the right currency" must not
+    // become a way for the two currencies to pass as equal.
+    const constant = sqliteTable("probe_kind_constant", {
+      createdAt: integer("created_at").notNull().default(0),
+    });
+    const computed = migrated("probe_kind_constant", "`created_at` integer DEFAULT (unixepoch()) NOT NULL");
+    expect(computed[0]!.default).toEqual({ kind: "expression", sql: "unixepoch()" });
+    expect(ormColumns(scratch, constant)[0]!.default).toEqual({ kind: "value", value: 0 });
+    expect(computed).not.toEqual(ormColumns(scratch, constant));
+
+    const declaredComputed = sqliteTable("probe_kind_computed", {
+      createdAt: integer("created_at").notNull().default(sql`(unixepoch())`),
+    });
+    const literal = migrated("probe_kind_computed", "`created_at` integer DEFAULT 0 NOT NULL");
+    expect(literal).not.toEqual(ormColumns(scratch, declaredComputed));
   });
 });
