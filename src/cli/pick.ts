@@ -17,6 +17,12 @@ import { SEARCH_RESULT_CAP } from "../mlb/client.js";
  * output strings and exit codes here are byte-identical to the ones `seed add`
  * shipped, which is why `test/seed.test.ts` needed no edit.
  *
+ * That verbatim claim covers the EXTRACTED lines, and still holds. #204 then
+ * added a line neither command shipped (the capped-list notice) — deliberately
+ * here rather than at one call site, which is the whole point of this file: a
+ * new shared rule is authored once and both `add` surfaces get it, instead of
+ * one of them getting it and the other silently reading as locally correct.
+ *
  * Deliberately narrow deps: a `Pick<>` of the one client method each rule
  * calls plus a line sink, so a caller cannot pass a whole CLI dependency
  * bundle and quietly grow a coupling.

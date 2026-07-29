@@ -231,7 +231,10 @@ describe("players add CLI", () => {
     searchResults = makeSearchHits(SEARCH_RESULT_CAP - 1);
 
     expect(await runPlayersAdd(["--name", "smith"], deps())).toBe(1);
-    expect(err).toHaveLength(SEARCH_RESULT_CAP);
+    // Header + every candidate and nothing more. Spelled as the sum rather than
+    // the cap constant, which it coincidentally equals at this size.
+    expect(err).toHaveLength(1 + (SEARCH_RESULT_CAP - 1));
+    expect(err.at(-1)).toContain(`[${SEARCH_RESULT_CAP - 1}] personId=${SEARCH_RESULT_CAP - 1}`);
     expect(err.some((line) => line.includes("caps this search"))).toBe(false);
   });
 
