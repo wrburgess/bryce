@@ -206,10 +206,11 @@ that records what the selection covered — narrower and more tractable than a g
 - **Surfaced by:** [PR #205](https://github.com/wrburgess/bryce/pull/205) (issue
   [#204](https://github.com/wrburgess/bryce/issues/204)), **Stage 3 (Implement)** — found by the AC
   while running its own quality checks, before any Reviewer or any later stage saw the PR. Named by
-  stage rather than by activity on purpose: both "self-review" and "self-verification" are words the
-  Stage-4 `verify` skill uses for itself (its terminal artifact is literally headed `## Self-Review
-  Complete`), so either one would put this entry's provenance in the wrong stage for a reader who
-  knows that skill.
+  stage rather than by activity on purpose. Two earlier drafts of this line named the activity and both
+  misfired: "self-verification" (this entry's own coinage — the term appears nowhere else in the
+  repository) reads as the stage named **Verify**, and "self-review" is what the Stage-4 `verify` skill
+  calls *itself*, its terminal artifact being headed `## Self-Review Complete`. The stage number is the
+  only spelling that cannot be misread into Stage 4.
 - **Date recorded:** 2026-07-28
 - **Review date:** 2026-10-26
 
