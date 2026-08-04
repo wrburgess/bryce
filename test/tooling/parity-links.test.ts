@@ -311,6 +311,7 @@ describe("parity check - the checked file set", () => {
     }
     expect(files).toContain("docs/rules/README.md");
     expect(files).toContain("CONTEXT.md");
+    expect(files).toContain("ARCHITECTURE.md");
   });
 
   it("contains no duplicate entries", () => {
@@ -328,6 +329,7 @@ describe("parity check - the checked file set", () => {
     ["the deep-doc README", "docs/rules/README.md"],
     ["a Tier-2 deep doc", "docs/rules/testing-postmortems.md"],
     ["the glossary", "CONTEXT.md"],
+    ["the architecture map", "ARCHITECTURE.md"],
     ["an ADR", "docs/adr/0011-ascii-safe-stdout-stays-doc-only.md"],
   ])("resolves links in %s", (_label, rel) => {
     withMarkdownFile(rel, `# probe\n\n[gone](${ABSENT})\n`, (errors) => {

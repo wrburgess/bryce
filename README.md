@@ -9,6 +9,8 @@ mobile, or CLI) is the front end.
   production ops in [`docs/guides/running-bryce.md`](docs/guides/running-bryce.md)
 - **Interface reference:** [CLI](docs/cli/README.md) · [REST API](docs/api/README.md) ·
   [MCP tools](docs/mcp/README.md) — the three canonical, per-audience references for driving Bryce
+- **Architecture map:** [`ARCHITECTURE.md`](ARCHITECTURE.md) — where code lives, the four front
+  doors, the daily-digest walkthrough, and which module owns each table
 - **Product spec / handoff:** [`docs/product/daily-baseball-digest-handoff.md`](docs/product/daily-baseball-digest-handoff.md)
   (see its 2026-07-19 architecture revision)
 - **Domain glossary & decisions:** [`CONTEXT.md`](CONTEXT.md) + [`docs/adr/`](docs/adr/)
