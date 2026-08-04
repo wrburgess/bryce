@@ -27,7 +27,7 @@ This table is the authoritative inventory: 21 directories plus 3 root files.
 |---|---|---|
 | `src/api` | Controller | The Hono route table and its Zod request schemas (`schemas.ts`); one `onError` maps every typed domain error to a status. |
 | `src/backup` | Model (persistence ops) | Snapshot create/validate/prune/restore and the versioned Player List Backup envelope ([ADR 0042](docs/adr/0042-snapshot-and-player-backup-complement-litestream.md)). |
-| `src/cli` | Controller | The `sk` router, its pure preflight, and one presenter per command — command presentation and exit codes live here and nowhere else ([ADR 0056](docs/adr/0056-refresh-emits-typed-progress-events-cli-is-the-only-presenter.md)); the terminal-output rule and its two sanctioned exceptions are review question 8. |
+| `src/cli` | Controller | The `sk` router, its pure preflight, and one presenter per command, each owning its command's text and exit code ([ADR 0056](docs/adr/0056-refresh-emits-typed-progress-events-cli-is-the-only-presenter.md)). The long-running `sk server` hands off to `src/server.ts`, which owns its own readiness/error lines and exit status; the job-layer terminal-output rule is review question 8. |
 | `src/db` | Model (schema + storage lifecycle) | Only `schema.ts` is Model in the strict sense; `client/startup/pending/lock/readonly` are storage lifecycle — migration seam, advisory presence registry, read-only handle. |
 | `src/digest` | Model **+** View | `assemble.ts`, `game-window.ts`, `rows.ts`, `rates.ts` select and roll up; `render.ts` alone turns an assembly into HTML/text/Markdown. |
 | `src/domain` | Model (pure rules) | No database and no clock of its own: NFC name canonicalization ([ADR 0041](docs/adr/0041-normalize-player-names-nfc-at-ingestion.md)), Offseason Sleep math ([ADR 0031](docs/adr/0031-offseason-sleep-world-series-to-opening-day.md)), Window resolution. |
@@ -224,10 +224,13 @@ often hides behind.
 8. **Does any job write to the terminal?** Refresh emits typed progress events and the CLI is
    their only presenter
    ([ADR 0056](docs/adr/0056-refresh-emits-typed-progress-events-cli-is-the-only-presenter.md)).
-   Exactly two non-CLI terminal writes are sanctioned, both deliberate: a job's *diagnostic* sink —
-   `warn` in the digest run, the legacy notice channel in refresh — defaults to `stderr` when the
-   caller injects none; and the dev `console` mailer provider "delivers" the rendered mail to
-   `stdout` by design (`src/mailer/console.ts`). Rendering itself is legitimate job behavior — the
+   In the job layer, exactly two non-CLI terminal writes are sanctioned, both deliberate: a job's
+   *diagnostic* sink — `warn` in the digest run, the legacy notice channel in refresh — defaults to
+   `stderr` when the caller injects none; and the dev `console` mailer provider "delivers" the
+   rendered mail to `stdout` by design (`src/mailer/console.ts`). (Outside the job layer, the
+   composition root `src/server.ts` owns its readiness/error lines, and `loadConfig()` warns on
+   `stderr` by default — boundary behavior of those modules, not job output.) Rendering itself is
+   legitimate job behavior — the
    digest job renders and emails through the Mailer, and REST/MCP return rendered bodies. Ask of
    any new job output: does it reach the terminal directly, instead of through a typed event, an
    injected sink a test can capture, a View, or the configured Mailer?
