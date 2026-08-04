@@ -18,7 +18,7 @@ incomplete change — not a documentation debt to file later.
 Bryce has no web UI at all ([ADR 0027](docs/adr/0027-mcp-first-interface-no-web-ui.md)), so it is
 not an MVC framework — but the three roles still name what each directory is *for*. **Controllers**
 validate and orchestrate; **Models** hold rules and state; **Views** turn a finished result into
-bytes a human or a spreadsheet reads. Three directories genuinely carry two roles and say so here
+bytes a human or a spreadsheet reads. Two directories genuinely carry two roles and say so here
 rather than being forced into one, and one is honestly cross-cutting.
 
 This table is the authoritative inventory: 21 directories plus 3 root files.
