@@ -1,0 +1,32 @@
+name: "TASK — one branch, one PR"
+description: "Feature or improvement work sized to a single PR"
+title: "TASK: "
+labels: ["type:task", "status:ready"]
+body:
+  - type: markdown
+    attributes:
+      value: "Title rule: plain-language imperative a human understands with zero context. Add exactly one area: label after creating."
+  - type: textarea
+    id: summary
+    attributes:
+      label: "Summary (HC)"
+      description: "Non-technical, bulleted, no jargon: what's wanted, why it matters, what done looks like"
+    validations: {required: true}
+  - type: textarea
+    id: technical
+    attributes:
+      label: "Technical detail (HC+AC)"
+      description: "Optional. As deep as the work needs; still bulleted."
+    validations: {required: false}
+  - type: textarea
+    id: done_when
+    attributes:
+      label: "Done when"
+      description: "The observable state that closes this issue"
+    validations: {required: true}
+  - type: input
+    id: part_of
+    attributes:
+      label: "Part of"
+      description: "Parent epic, as 'Part of #N' — never a closing keyword"
+    validations: {required: false}
