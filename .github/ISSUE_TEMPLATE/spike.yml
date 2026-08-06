@@ -1,0 +1,44 @@
+name: "SPIKE — research feeding a decision"
+description: "Research whose terminal artifact is a Readout; it may produce no code"
+title: "SPIKE: "
+labels: ["type:spike", "status:ready"]
+body:
+  - type: markdown
+    attributes:
+      value: "Title rule: plain-language imperative a human understands with zero context. Add exactly one area: label after creating."
+  - type: textarea
+    id: summary
+    attributes:
+      label: "Summary (HC)"
+      description: "Non-technical, bulleted, no jargon: what's unknown, why it matters, what done looks like"
+    validations: {required: true}
+  - type: textarea
+    id: technical
+    attributes:
+      label: "Technical detail (HC+AC)"
+      description: "Optional. As deep as the work needs; still bulleted."
+    validations: {required: false}
+  - type: textarea
+    id: question
+    attributes:
+      label: "Question"
+      description: "The one question this research answers, stated narrowly enough that an answer settles it"
+    validations: {required: true}
+  - type: textarea
+    id: decision_fed
+    attributes:
+      label: "Decision this feeds"
+      description: "What gets decided once the question is answered, and who decides it"
+    validations: {required: true}
+  - type: input
+    id: readout_destination
+    attributes:
+      label: "Readout destination"
+      description: "Optional. Where the Readout lands — an issue comment, a chapter draft, a decision record"
+    validations: {required: false}
+  - type: input
+    id: part_of
+    attributes:
+      label: "Part of"
+      description: "Parent epic, as 'Part of #N' — never a closing keyword"
+    validations: {required: false}

@@ -1,0 +1,75 @@
+name: "EPIC — umbrella over child issues"
+description: "An umbrella carrying the eight-field brief; closes when its last child merges"
+title: "EPIC: "
+labels: ["type:epic", "status:ready"]
+body:
+  - type: markdown
+    attributes:
+      value: "Title rule: plain-language imperative a human understands with zero context. Add exactly one area: label after creating. The eight fields below are transcribed from sds/00-identity-and-governance.md — that table is their only home."
+  - type: textarea
+    id: summary
+    attributes:
+      label: "Summary (HC)"
+      description: "Non-technical, bulleted, no jargon: what's wanted, why it matters, what done looks like"
+    validations: {required: true}
+  - type: textarea
+    id: technical
+    attributes:
+      label: "Technical detail (HC+AC)"
+      description: "Optional. As deep as the work needs; still bulleted."
+    validations: {required: false}
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Problem"
+      description: "What is wrong or missing, stated before any solution is named"
+    validations: {required: true}
+  - type: textarea
+    id: target_solution
+    attributes:
+      label: "Target solution"
+      description: "The intended end state, in enough shape to plan against"
+    validations: {required: true}
+  - type: textarea
+    id: goals
+    attributes:
+      label: "Goals"
+      description: "What the work must achieve to count as done"
+    validations: {required: true}
+  - type: textarea
+    id: constraints
+    attributes:
+      label: "Constraints"
+      description: "What the work may not do, spend, or break"
+    validations: {required: false}
+  - type: textarea
+    id: expectations
+    attributes:
+      label: "Expectations"
+      description: "What the HC expects to be true once it ships"
+    validations: {required: false}
+  - type: textarea
+    id: risks
+    attributes:
+      label: "Risks"
+      description: "What could go wrong, and what it would cost if it did"
+    validations: {required: false}
+  - type: textarea
+    id: edge_cases
+    attributes:
+      label: "Edge cases"
+      description: "The cases an obvious approach would miss"
+    validations: {required: false}
+  - type: textarea
+    id: punted_paths
+    attributes:
+      label: "Punted paths"
+      description: "What was considered and deliberately not taken, so it is not re-proposed. A punted path that also clears the ADR bar is recorded as an ADR, and this entry cites it."
+    validations: {required: false}
+  - type: checkboxes
+    id: exit_test
+    attributes:
+      label: "Exit test"
+      options:
+        - label: "An AC with no history could start planning from this brief alone."
+          required: true

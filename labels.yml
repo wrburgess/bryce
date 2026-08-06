@@ -1,0 +1,23 @@
+# Source of truth for deuce's labels. Synced by hand until config-lint (Ch 3) automates it.
+# Discipline: every issue carries exactly one label per axis.
+axes:
+  type:
+    - {name: "type:epic",  color: "5319E7", description: "Umbrella with children; eight-field brief; closes when last child merges"}
+    - {name: "type:task",  color: "0E8A16", description: "One branch, one PR of feature/improvement work"}
+    - {name: "type:bug",   color: "D93F0B", description: "Defect with a reproduction; fix ships with the test that failed first"}
+    - {name: "type:spike", color: "1D76DB", description: "Research feeding a decision; terminal artifact is a readout"}
+    - {name: "type:chore", color: "FBCA04", description: "Mechanical maintenance; minimal ceremony"}
+  status:
+    - {name: "status:ready",              color: "C2E0C6", description: "Unblocked; may be picked up"}
+    - {name: "status:in-progress",        color: "FEF2C0", description: "Actively being worked"}
+    - {name: "status:blocked",            color: "E99695", description: "Waiting on something named in the issue"}
+    - {name: "status:review",             color: "BFDADC", description: "PR open; in review"}
+    - {name: "status:done-pending-merge", color: "BFD4F2", description: "Work complete; awaiting merge/close"}
+  area:
+    - {name: "area:identity",     color: "006B75", description: "Ch 0 — identity & governance"}
+    - {name: "area:lifecycle",    color: "0052CC", description: "Ch 1 — lifecycle & skills"}
+    - {name: "area:review",       color: "8250DF", description: "Ch 2 — Review System + Findings System"}
+    - {name: "area:tooling",      color: "76428A", description: "Ch 3 — quality gate & TypeScript tooling"}
+    - {name: "area:learning",     color: "2E7D32", description: "Ch 4 — Learning System"}
+    - {name: "area:distribution", color: "B60205", description: "Ch 5 — distribution & fleet cutover"}
+    - {name: "area:factory",      color: "555555", description: "Ch 6 — factory automation"}

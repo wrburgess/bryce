@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# .githooks/guard-protected-branch — block direct commits/pushes on main.
+# Installed as pre-commit and pre-push via bin/setup (core.hooksPath).
+set -euo pipefail
+branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo detached)"
+if [ "$branch" = "main" ]; then
+  echo "deuce: '$branch' is protected — create a feature branch (sds/00 § Governance)." >&2
+  exit 1
+fi

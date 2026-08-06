@@ -1,0 +1,44 @@
+name: "BUG — a defect with a reproduction"
+description: "A defect; the fix ships with the test that failed before it"
+title: "BUG: "
+labels: ["type:bug", "status:ready"]
+body:
+  - type: markdown
+    attributes:
+      value: "Title rule: plain-language imperative a human understands with zero context. Add exactly one area: label after creating."
+  - type: textarea
+    id: summary
+    attributes:
+      label: "Summary (HC)"
+      description: "Non-technical, bulleted, no jargon: what's wrong, why it matters, what done looks like"
+    validations: {required: true}
+  - type: textarea
+    id: technical
+    attributes:
+      label: "Technical detail (HC+AC)"
+      description: "Optional. As deep as the work needs; still bulleted."
+    validations: {required: false}
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: "Reproduction"
+      description: "The exact steps, input, or command that produces the defect"
+    validations: {required: true}
+  - type: textarea
+    id: expected
+    attributes:
+      label: "Expected"
+      description: "What should happen instead"
+    validations: {required: true}
+  - type: textarea
+    id: actual
+    attributes:
+      label: "Actual"
+      description: "What happens now, quoted rather than paraphrased where possible"
+    validations: {required: true}
+  - type: input
+    id: part_of
+    attributes:
+      label: "Part of"
+      description: "Parent epic, as 'Part of #N' — never a closing keyword"
+    validations: {required: false}

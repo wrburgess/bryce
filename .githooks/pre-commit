@@ -1,7 +1,1 @@
-#!/usr/bin/env bash
-
-set -euo pipefail
-
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-
-"${REPO_ROOT}/bin/guard-protected-branch" "commit"
+guard-protected-branch
