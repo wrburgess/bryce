@@ -59,7 +59,8 @@ const RENDER_SCANNED = [
 
 // The AUTHORED seed of the dead-link scope; `linkCheckedFiles()` derives the rest. Every render-scanned
 // file is also link-checked (the containment runs one way only, which is why this is derived rather
-// than a second hand-kept copy), plus the one prose-heavy document that has no other home.
+// than a second hand-kept copy), plus the two prose-heavy root documents that have no other home --
+// the glossary and the architecture map.
 //
 // `docs/rules/README.md` used to sit here for that same "no other home" reason. Issue #179 gave it one:
 // its whole directory is now derived below, so keeping the entry would be a second authored source for
@@ -69,6 +70,7 @@ const RENDER_SCANNED = [
 const LINK_CHECKED = [
   ...RENDER_SCANNED,
   "CONTEXT.md",
+  "ARCHITECTURE.md",
 ];
 
 const GUIDES_DIR = "docs/guides";
